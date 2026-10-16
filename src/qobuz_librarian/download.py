@@ -1294,16 +1294,6 @@ def run_album_download(
                         "Present tracks could not be backed up safely; "
                         "the download was not started."
                     )
-                if not backup_result.complete:
-                    log.info(
-                        fmt(
-                            C.RED,
-                            "  ✗  Only part of the pre-download backup completed. "
-                            "The download was not started; retained originals are "
-                            f"at {backup_result.path}.",
-                        )
-                    )
-                    raise OSError("Partial pre-download backup; refusing to download.")
             elif required_backup_kind == "gap-fill":
                 raise OSError(
                     "Present tracks could not be bound to an exact backup; "

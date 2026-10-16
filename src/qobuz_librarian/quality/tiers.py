@@ -29,6 +29,16 @@ def streamrip_quality_cap(tier=None):
     return _STREAMRIP_QUALITY_CAPS.get(tier, _STREAMRIP_QUALITY_CAPS[4])
 
 
+def tier_for(bits, rate):
+    """The lowest tier that delivers ``bits``/``rate`` (Hz), the top one for
+    anything above it, or None when either is unknown."""
+    if not bits or not rate:
+        return None
+    return next((tier for tier, (cap_bits, cap_rate)
+                 in sorted(_STREAMRIP_QUALITY_CAPS.items())
+                 if bits <= cap_bits and rate <= cap_rate), 4)
+
+
 def downsample_target_rate(sr_hz):
     """Sample rate (Hz) a file ends up at after the downsample hook runs.
 

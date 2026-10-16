@@ -93,6 +93,27 @@ def _forget_upgraded_album(album, album_dir):
         )
 
 
+def reseal_saved_reviews(fresh_seal):
+    """Give each saved Upgrade and Downsample row the seal ``fresh_seal``
+    returns for it, if any. A view whose saved results can't be rewritten
+    is marked for a refresh, so it neither refuses an album for files the
+    app put back nor leaves it out."""
+    for surface, state in (("upgrade", upgrade_state),
+                           ("downsample", downsample_state)):
+        if (not state.reseal(fresh_seal)
+                and generation_state.output_is_current(surface)):
+            generation_state.mark_output_status(
+                surface, "stale",
+                reason="The app changed an album's files, and these saved "
+                       "results could not be updated.")
+
+
+def reseal_put_back_album(backup_receipt):
+    """Seal again the saved rows over an album a put-back restored byte for
+    byte, so the new inodes of a copy don't make the next run refuse it."""
+    reseal_saved_reviews(candidate_premise.sealer_after_put_back(backup_receipt))
+
+
 def _refresh_saved_state_after_upgrade(album, result, token, args):
     authority = generation_state.load()
     if (

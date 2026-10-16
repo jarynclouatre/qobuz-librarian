@@ -36,6 +36,7 @@ from qobuz_librarian.library.scanner import (
     list_library_artists,
     read_album_dir,
 )
+from qobuz_librarian.quality.tiers import tier_for
 from qobuz_librarian.queue.builder import _build_queue_item
 from qobuz_librarian.queue.executor import (
     _execute_download_queue,
@@ -553,6 +554,15 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         present_synth = [{} for _ in range(max(
             0, len(qobuz_tracks_full) - len(missing_tracks)))]
 
+        # The refills are asked for at the album's own quality rather than
+        # the download setting, so the album does not end up mixed. Qobuz
+        # sends the best it has up to that. An album that can't be read
+        # uses the setting.
+        held = read_album_dir(album_dir, walk_errors=[])
+        quality = tier_for(max((t.get("bits") or 0 for t in held), default=0),
+                           max((t.get("sample_rate") or 0 for t in held),
+                               default=0))
+
         # force_track_by_track: repair must replace exactly the truncated
         # tracks, never re-rip the whole album URL. The flag makes this
         # un-bypassable regardless of the executor's missing/total ratio.
@@ -564,6 +574,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             present=present_synth,
             upgrade_only=False,
             auto_upgrade=False,
+            quality=quality,
             force_track_by_track=True,
         )
         qi["_capture_import_ownership"] = True
@@ -600,58 +611,6 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "  ✗  Backup could not start, aborting repair without "
                 "changing the selected files."))
             return {"n_ok": 0, "n_fail": len(verified_truncated), "backup": None}
-        if getattr(backup_path, "complete", False) is not True:
-            checkpoint_recovery(
-                backup_path,
-                "backup",
-                "The backup stopped partway through; Repair is attempting "
-                "to restore every moved original.",
-            )
-            restored = 0
-            if (getattr(backup_path, "backed_up", 0) > 0
-                    and _album_identity(album_dir) == album_identity):
-                try:
-                    restored = restore_gap_fill_backup(backup_path, album_dir)
-                except BaseException as exc:
-                    recovery, _ = checkpoint_recovery(
-                        backup_path,
-                        "restore",
-                        "The backup stopped partway through and automatic "
-                        "restoration was interrupted.",
-                    )
-                    raise RepairRecoveryRequired(recovery, exc) from exc
-            if (restored == getattr(backup_path, "backed_up", 0)
-                    and restored > 0 and not backup_path.exists()):
-                resolve_recovery(
-                    backup_path,
-                    "Every moved original was restored before Repair stopped.",
-                )
-                log.info(fmt(C.YELLOW,
-                    "  ⚠  Backup stopped partway through; every moved original "
-                    "was restored, so Repair was safely aborted."))
-                return {
-                    "n_ok": 0,
-                    "n_fail": len(verified_truncated),
-                    "imported": False,
-                    "backup": None,
-                }
-            checkpoint_recovery(
-                backup_path,
-                "backup",
-                "The backup stopped partway through and could not be fully "
-                "restored.",
-            )
-            log.info(fmt(C.RED,
-                "  ✗  Backup stopped partway through, Repair was aborted. "
-                f"Restored {plural(restored, 'moved file')}; remaining recovery files "
-                f"are at:\n     {backup_path}"))
-            return {
-                "n_ok": 0,
-                "n_fail": len(verified_truncated),
-                "imported": False,
-                "backup": recovery_result(),
-            }
-
         _initial_recovery, recovery_saved = checkpoint_recovery(
             backup_path,
             "backup",

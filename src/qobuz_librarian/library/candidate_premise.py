@@ -122,29 +122,30 @@ def capture(kind: str, path) -> dict | None:
     }
 
 
-def _normalised_generation_evidence(receipt: dict):
-    """Make namespace-local mount numbers comparable across restarts.
+def _durable_identity(identity, mount_labels):
+    """A folder's generation as a saved review compares it.
 
     Linux mount IDs identify boundaries within one mount namespace, but Docker
-    assigns new numbers when it recreates a container.  Persisted review
-    receipts therefore compare the *shape* of those boundaries while retaining
-    every filesystem and directory-incarnation field.  A nested mount that
-    appears, disappears, or moves still changes this evidence and fails closed.
+    assigns new numbers when it recreates a container, so each becomes the
+    order its mount first appears in ``mount_labels``. A nested mount that
+    appears, disappears, or moves still changes this evidence and fails
+    closed. The folder's permissions are left out: changing them changes no
+    file in it, and a folder the app can no longer write is refused by the
+    backup, which names it.
     """
+    mount_labels.setdefault(identity[6], len(mount_labels))
+    return [*identity[:3], *identity[4:6], mount_labels[identity[6]]]
+
+
+def _normalised_generation_evidence(receipt: dict):
     mount_labels = {}
-
-    def normalise(identity):
-        mount_id = identity[6]
-        if mount_id not in mount_labels:
-            mount_labels[mount_id] = len(mount_labels)
-        return [*identity[:6], mount_labels[mount_id]]
-
     path_generations = [
-        normalise(identity)
+        _durable_identity(identity, mount_labels)
         for identity in receipt["path_generations"]
     ]
     directory_generations = {
-        relative: normalise(receipt["directory_generations"][relative])
+        relative: _durable_identity(
+            receipt["directory_generations"][relative], mount_labels)
         for relative in sorted(receipt["directory_generations"])
     }
     return path_generations, directory_generations
@@ -185,13 +186,8 @@ def _durable_generations_match(saved, current) -> bool:
     """Compare path generations while preserving mount boundaries."""
     def normalise(generations):
         mount_labels = {}
-        result = []
-        for identity in generations:
-            mount_id = identity[6]
-            if mount_id not in mount_labels:
-                mount_labels[mount_id] = len(mount_labels)
-            result.append([*identity[:6], mount_labels[mount_id]])
-        return result
+        return [_durable_identity(identity, mount_labels)
+                for identity in generations]
 
     try:
         return normalise(saved) == normalise(current)
@@ -486,8 +482,9 @@ def changed_on_disk(candidate: dict, missing_premises=None) -> bool:
     Nor is a row with no artist folder: its seal is only the music folder's
     identity, which a library that is not mounted yet fails too. Nor is a
     folder whose files keep their names, sizes and mtimes, as an album put
-    back from a copy on another filesystem does; its row keeps its seal, so
-    Start still asks for a refresh.
+    back from a copy on another filesystem does, or that holds only some of
+    them, as one a stop left part deleted for the start-up to fill in does;
+    its row keeps its seal, so Start still asks for a refresh.
     """
     if _canonical_absent(candidate) is not None:
         return False
@@ -503,8 +500,8 @@ def changed_on_disk(candidate: dict, missing_premises=None) -> bool:
         current = ((missing_premises or {}).get(premise["path"])
                    or capture(premise["kind"], premise["path"]))
         return (current is None
-                or _names_sizes_times(current["receipt"]["tree"])
-                != _names_sizes_times(premise["receipt"]["tree"]))
+                or not _names_sizes_times(current["receipt"]["tree"]).items()
+                <= _names_sizes_times(premise["receipt"]["tree"]).items())
     return False
 
 
@@ -549,6 +546,12 @@ def resealed_after_put_back(value, backup_receipt, captures):
             != _names_sizes_times(source["tree"])):
         return None
     return fresh
+
+
+def sealer_after_put_back(backup_receipt):
+    """``resealed_after_put_back`` for one put-back, sharing captures."""
+    captures = {}
+    return lambda value: resealed_after_put_back(value, backup_receipt, captures)
 
 
 def resealed_after_own_imports(value, fresh, folders):

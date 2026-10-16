@@ -570,6 +570,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
         if refusal:
             return refusal
         carried = backup_mod.removal_candidate(target)
+        consolidated = backup_mod.consolidated_into(target)
         lyrics = []
         if carried is None or carried.receipt is None:
             note = _unreadable_record_notice(request, target)
@@ -585,8 +586,9 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
             (identical := backup_mod.discard_redundant_backup(target))
             or _discard_replaced(carried, lyrics)
         ):
-            dest = html.escape(storage._resolve_host_path(
-                str(carried.receipt.get("origin", "")))[0])
+            dest = html.escape(storage._resolve_host_path(str(
+                consolidated[0] if consolidated
+                else carried.receipt.get("origin", "")))[0])
             kept = (
                 f" The lyrics of {html.escape(backup_mod.some_names(lyrics))} were "
                 f"copied onto the album's {'track' if len(lyrics) == 1 else 'tracks'} first."
@@ -641,6 +643,7 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
         if refusal:
             return refusal
         carried = backup_mod.removal_candidate(target)
+        lyrics = []
         if carried is None or carried.receipt is None:
             note = _unreadable_record_notice(request, target)
         elif (
@@ -651,13 +654,17 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
                 "error", "The saved recovery records could not be checked, "
                 "so these originals were left untouched. Check that the data "
                 "volume is writable, then try again.")
-        elif backup_mod.release_undo_copy(target):
+        elif backup_mod.release_undo_copy(target, lyrics):
             album = html.escape(
                 diagnostics._album_name_from_path(carried.receipt.get("origin", "")))
+            kept = (
+                f" The lyrics of {html.escape(backup_mod.some_names(lyrics))} were "
+                f"copied onto the album's {'track' if len(lyrics) == 1 else 'tracks'} first."
+                if lyrics else "")
             if job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _diagnostics_result_notice(
                     "success", f"Deleted the hi-res originals of {album}. "
-                    "That downsample can no longer be undone.")
+                    f"That downsample can no longer be undone.{kept}")
             else:
                 note = _diagnostics_result_notice(
                     "error", "The hi-res originals were deleted, but their "

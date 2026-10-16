@@ -1,4 +1,5 @@
 """Tests for backup/restore safety and consolidation helpers."""
+import errno
 import os
 import shutil
 import time
@@ -42,16 +43,16 @@ def _seal_test_backup(bk, path, origin, *, kind="gap-fill", complete=True,
     try:
         if bk._named_entry_missing(descriptor, bk._ORIGIN_SIDECAR):
             assert bk._write_backup_origin_durable(descriptor, origin)
-        manifest = bk._tree_manifest(descriptor)
-        assert manifest is not None
+        files = [item for item in Path(path).rglob("*")
+                 if item.is_file() and item.name not in bk._SIDECARS]
         result = bk._seal_backup_result(
             path,
             descriptor,
             origin,
             kind=kind,
             complete=complete,
-            requested=len(manifest),
-            backed_up=len(manifest),
+            requested=len(files),
+            backed_up=len(files),
             owner=owner,
         )
         assert result.receipt is not None
@@ -63,9 +64,9 @@ def _seal_test_backup(bk, path, origin, *, kind="gap-fill", complete=True,
 def test_backup_refuses_anything_it_cannot_protect_and_leaves_the_album(
         tmp_path, monkeypatch):
     """A cross-filesystem copy corrupted at the same size or left unflushed, a
-    symlinked folder, a reserved sidecar name inside the album and an origin
-    that cannot be recorded each refuse the backup and leave the album as it
-    was."""
+    symlinked folder, a reserved sidecar name inside the album, an origin
+    that cannot be recorded and a folder the app can't write to each refuse
+    the backup and leave the album as it was; the last copies nothing."""
     import qobuz_librarian.library.backup as bk
 
     def use(root, music=None):
@@ -142,6 +143,21 @@ def test_backup_refuses_anything_it_cannot_protect_and_leaves_the_album(
         before = g1.read_bytes()
         assert bk.backup_gap_fill_files([str(g1)], album) is None
         assert g1.exists() and g1.read_bytes() == before
+
+    if os.geteuid() != 0:
+        root = use(tmp_path / "read-only")
+        album = root / "music" / "Album"
+        (album / "Disc 2").mkdir(parents=True)
+        (album / "Disc 2" / "01.flac").write_bytes(b"audio")
+        (album / "Disc 2").chmod(0o555)
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(bk, "_same_filesystem", lambda a, b: False)
+                assert bk.backup_album_dir(album) is None
+        finally:
+            (album / "Disc 2").chmod(0o755)
+        assert (album / "Disc 2" / "01.flac").read_bytes() == b"audio"
+        assert not any((root / "backups").iterdir())
 
 
 def test_whole_album_backup_breaks_hardlinks_and_reads_each_file_once(
@@ -604,12 +620,12 @@ def test_retire_verified_repair_backup_needs_superseding_tracks(tmp_path, monkey
     assert (album / "01.flac").read_bytes() == quiet.read_bytes()
 
 
-def test_gap_fill_backup_refuses_a_changed_source_and_returns_a_partial_one(
+def test_gap_fill_backup_refuses_a_changed_source_and_puts_back_the_rest(
         tmp_path, monkeypatch):
     """A repair source edited in place after the scan sealed its receipt, or
     retagged with its mtime kept just before its removal, is left where it
-    is. A backup cut short by a track replaced mid-move still returns its
-    recovery path."""
+    is. A track replaced while the others are removed stops the backup: the
+    tracks already removed go back, and the backup keeps the original."""
     import qobuz_librarian.library.backup as bkmod
 
     root = tmp_path / "edited"
@@ -634,20 +650,18 @@ def test_gap_fill_backup_refuses_a_changed_source_and_returns_a_partial_one(
         [source], album, expected_receipts=expected) is None
     assert source.read_bytes() == b"Damaged audio bytes"
 
-    real_reserve = bkmod._reserve_backup_quarantine
+    real_delete = bkmod.delete_verified
 
-    def quiet_retag(parent_fd, prefix, **kwargs):
-        if prefix == "ql-gap-remove":
-            kept = source.stat()
-            with source.open("r+b") as tagger:
-                tagger.write(b"d")
-            os.utime(source, ns=(kept.st_atime_ns, kept.st_mtime_ns))
-        return real_reserve(parent_fd, prefix, **kwargs)
+    def quiet_retag(path, expected, **kwargs):
+        kept = source.stat()
+        with source.open("r+b") as tagger:
+            tagger.write(b"d")
+        os.utime(source, ns=(kept.st_atime_ns, kept.st_mtime_ns))
+        return real_delete(path, expected, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(bkmod, "_same_filesystem", lambda a, b: False)
-        patch.setattr(bkmod, "_reserve_backup_quarantine", quiet_retag)
-        bkmod.backup_gap_fill_files([source], album)
+        patch.setattr(bkmod, "delete_verified", quiet_retag)
+        assert bkmod.backup_gap_fill_files([source], album) is None
     assert source.read_bytes() == b"damaged audio bytes"
 
     root = tmp_path / "partial"
@@ -662,33 +676,23 @@ def test_gap_fill_backup_refuses_a_changed_source_and_returns_a_partial_one(
     displaced = root / "displaced-second.flac"
     monkeypatch.setattr(bkmod.cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(bkmod.cfg, "UPGRADE_BACKUP_DIR", backups)
-    rename_noreplace = bkmod._rename_noreplace_at
-    replaced = False
 
-    def replace_second(source_fd, source_name, destination_fd,
-                       destination_name):
-        nonlocal replaced
-        if source_name == "02.flac" and not replaced:
-            replaced = True
+    def replace_second(path, expected, **kwargs):
+        if path == second and not displaced.exists():
             second.rename(displaced)
             second.write_bytes(b"second replacement")
-        return rename_noreplace(
-            source_fd, source_name, destination_fd, destination_name)
+        return real_delete(path, expected, **kwargs)
 
-    monkeypatch.setattr(bkmod, "_rename_noreplace_at", replace_second)
+    monkeypatch.setattr(bkmod, "delete_verified", replace_second)
 
-    result = bkmod.backup_gap_fill_files([first, second], album)
-
-    assert result is not None
-    assert result.complete is False
-    assert result.path.exists()
-    assert not first.exists()
+    assert bkmod.backup_gap_fill_files([first, second], album) is None
+    assert first.read_bytes() == b"first original"
     assert second.read_bytes() == b"second replacement"
     assert displaced.read_bytes() == b"second original"
-    assert any(
-        path.read_bytes() == b"first original"
-        for path in result.path.rglob("01.flac")
-    )
+    [kept] = backups.iterdir()
+    assert (kept / "01.flac").read_bytes() == b"first original"
+    assert (kept / "02.flac").read_bytes() == b"second original"
+    assert (kept / bkmod._PARTIAL_RESTORE_SENTINEL).is_file()
 
 
 def _render_backup_diagnostics(rows):
@@ -705,7 +709,9 @@ def _render_backup_diagnostics(rows):
 def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeypatch):
     """A backup whose companion file differs from the library's is listed as
     retained and never removed; a removable one is checked again before
-    Remove deletes it, and one past the read budget shows as unverified."""
+    Remove deletes it, and one past the read budget shows as unverified
+    unless the album lacks one of its tracks. A consolidation's backup is
+    checked against the album it kept."""
     from mutagen.flac import FLAC
 
     import qobuz_librarian.library.backup as bk
@@ -765,6 +771,10 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
     assert result.reason == "budget"
     rendered = _render_backup_diagnostics([(path, album, result)])
     assert 'data-backup-status="unverified"' in rendered
+    moved = (origin / "01.flac").rename(tmp_path / "01.flac")
+    monkeypatch.setattr(bk, "_only_copy_cache", None)
+    assert bk.list_retained_backups()[0][2].reason == "missing"
+    moved.rename(origin / "01.flac")
     assert bk.discard_redundant_backup(backup) is True
     assert not backup.exists()
     assert (origin / "booklet.pdf").read_bytes() == b"original booklet"
@@ -772,7 +782,8 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
     # An upgrade's backup goes once the album's new track verifies, a
     # gap-fill backup only once the album's copy has the same audio. A
     # truncated copy, or other audio for a gap-fill, keeps it. Lyrics only
-    # the backup's copy has are copied onto the album's first.
+    # the backup's copy has keep it from the age sweep, and Remove copies
+    # them onto the album's first.
     monkeypatch.setattr(bk, "_BACKUP_LISTING_READ_BYTES", 1 << 30)
     for kind in ("gap-fill", "upgrade"):
         backup, origin, _candidate = stage(kind, b"original booklet", kind=kind)
@@ -797,9 +808,30 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
         assert result.status != "retained"
         assert 'hx-post="/backups/discard"' in _render_backup_diagnostics([(path, album, result)])
         assert bk.discard_redundant_backup(backup) is False
+        assert bk._dispose_retention_candidate(_candidate) is False
         assert bk.discard_replaced_backup(backup) is True
         assert not backup.exists()
         assert FLAC(origin / "01.flac")["lyrics"] == ["[00:01.00] only here"]
+
+    # A consolidation's backup is proved in the album it kept, under the
+    # names it recorded, once the folder its tracks came from is gone.
+    backup, origin, candidate = stage("consolidation", b"original booklet")
+    primary = origin.parent / "Primary"
+    primary.mkdir()
+    shutil.copyfile(origin / "booklet.pdf", primary / "booklet.pdf")
+    shutil.copyfile(origin / "01.flac", primary / "01 - Song.flac")
+    retagged = FLAC(primary / "01 - Song.flac")
+    del retagged["lyrics"]
+    retagged.save()
+    shutil.rmtree(origin)
+    assert bk.mark_consolidated(
+        candidate, primary, {"01.flac": "01 - Song.flac",
+                             "booklet.pdf": "booklet.pdf"})
+    [(path, album, result)] = bk.list_retained_backups()
+    assert (result.status, result.reason) == ("removable", "lyrics")
+    assert bk.discard_replaced_backup(backup) is True
+    assert not backup.exists()
+    assert FLAC(primary / "01 - Song.flac")["lyrics"] == ["[00:01.00] only here"]
 
 
 def test_gap_fill_restore_keeps_the_backup_whenever_it_cannot_finish(
@@ -853,13 +885,13 @@ def test_gap_fill_restore_keeps_the_backup_whenever_it_cannot_finish(
     with monkeypatch.context() as patch:
         patch.setattr(
             bkmod,
-            "_copy_file_noreplace_at",
-            lambda *args: (_ for _ in ()).throw(KeyboardInterrupt),
+            "copy_file",
+            lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
         )
         with pytest.raises(KeyboardInterrupt):
             restore_gap_fill_backup(bp, album3)
     assert bp.exists() and len(list(bp.rglob("*.flac"))) == 1
-    assert not list(album3.rglob("*.restore_tmp"))
+    assert not list(album3.glob(".ql-*"))
 
     monkeypatch.setattr(bkmod.cfg, "UPGRADE_BACKUP_DIR", tmp_path)
     album = tmp_path / "Album"
@@ -868,8 +900,12 @@ def test_gap_fill_restore_keeps_the_backup_whenever_it_cannot_finish(
     bk.mkdir()
     (bk / "01 - Track.flac").write_bytes(b"the-only-copy")
     backup_result = _seal_test_backup(bkmod, bk, album)
-    monkeypatch.setattr(bkmod, "_fsync",
-                        lambda p: not Path(p).is_dir())
+    def flush(path, *, strict=False):
+        if strict:
+            raise OSError(errno.EIO, "flush failed")
+        return False
+
+    monkeypatch.setattr(bkmod, "fsync_dir", flush)
     n = bkmod.restore_gap_fill_backup(
         backup_result, album, keep_larger_dst=False)
     assert n == 0

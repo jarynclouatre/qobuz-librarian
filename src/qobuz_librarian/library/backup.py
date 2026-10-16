@@ -949,33 +949,6 @@ def _normalise_gap_fill_expected_receipts(receipts, *, allow_identity=False):
     return normalised
 
 
-def _restore_exact_entry_move(source_parent_fd, source_name,
-                              destination_parent_fd, destination_name,
-                              expected_fd) -> bool:
-    if (
-        not _named_entry_missing(destination_parent_fd, destination_name)
-        or not _named_entry_matches(source_parent_fd, source_name, expected_fd)
-    ):
-        return False
-    try:
-        _rename_exact_noreplace_at(
-            source_parent_fd,
-            source_name,
-            destination_parent_fd,
-            destination_name,
-            expected_fd,
-        )
-    except BaseException:
-        return False
-    return (
-        _named_entry_missing(source_parent_fd, source_name)
-        and _named_entry_matches(
-            destination_parent_fd, destination_name, expected_fd)
-        and _fsync_directory_fds(
-            source_parent_fd, destination_parent_fd)
-    )
-
-
 def _serializable_tree_fidelity(snapshot):
     if snapshot is None:
         return None
@@ -1676,28 +1649,6 @@ def _open_tree_file(root_fd, relative):
         _close_descriptors(parent_descriptors)
         raise
     return parent_descriptors, parent_fd, file_fd
-
-
-def _tree_manifest(root_fd):
-    paths = _scan_backup_tree(root_fd)
-    if paths is None:
-        return None
-    manifest = {}
-    try:
-        for relative in paths:
-            parents, _parent_fd, file_fd = _open_tree_file(root_fd, relative)
-            try:
-                value = os.fstat(file_fd)
-                manifest[relative] = (
-                    int(value.st_size),
-                    _file_digest_fd(file_fd),
-                )
-            finally:
-                os.close(file_fd)
-                _close_descriptors(parents)
-    except OSError:
-        return None
-    return manifest
 
 
 def _snapshot_file(directory_fd, name):
@@ -4322,13 +4273,27 @@ def backup_keep_markers_present(bp) -> bool:
     return False
 
 
-def _backup_safe_to_reap(bp: Path) -> bool:
-    """True ONLY when the backup is provably redundant."""
+def _backup_safe_to_reap(bp: Path, refused=None) -> bool:
+    """True ONLY when the backup is provably redundant. The check is added
+    to ``refused``."""
     if backup_keep_markers_present(bp):
         return False
     origin = _read_backup_origin(bp)
-    return origin is not None and _classify_backup_contents(
-        origin, bp, audio_replacement=True).removable
+    if origin is None:
+        return False
+    result = _classify_backup_contents(origin, bp, audio_replacement=True)
+    if refused is not None:
+        refused.append(result)
+    return result.removable and result.reason != "lyrics"
+
+
+def _kept_for_lyrics(refused):
+    """Why the age sweep keeps a backup whose tracks alone have their lyrics,
+    from the checks in ``refused``, or None."""
+    if not refused or refused[-1].reason != "lyrics":
+        return None
+    return (f"the lyrics of {refused[-1].file} are only in it, and removing "
+            "it in Diagnostics copies them onto the album first")
 
 
 def release_backup_owner(backup: BackupResult, *, expected_owner) -> bool:
@@ -4477,15 +4442,10 @@ def awaiting_retention(path: Path) -> bool:
         return False
     if made < time.time() - cfg.UPGRADE_BACKUP_RETENTION_DAYS * 86400:
         return False
-    marker = path / _CONSOLIDATED_SENTINEL
-    if marker.is_file():
-        try:
-            named = _consolidation_kept(
-                json.loads(marker.read_text(encoding="utf-8"))["note"])
-            return named is not None and all(
-                (named[0] / track).is_file() for track in named[1].values())
-        except (OSError, TypeError, ValueError, KeyError):
-            return False
+    if (path / _CONSOLIDATED_SENTINEL).is_file():
+        named = consolidated_into(path)
+        return named is not None and all(
+            (named[0] / track).is_file() for track in named[1].values())
     origin = _read_backup_origin(path)
     entries = _list_tree(path)
     if origin is None or entries is None:
@@ -4872,6 +4832,15 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
         log.info(fmt(C.RED, f"  ✗  Couldn't prepare backup path: {exc}."))
         return None
     try:
+        folder = _unwritable_folder(public)
+        if folder is None and not os.access(bp.parent, os.W_OK | os.X_OK):
+            folder = bp.parent
+        if folder is not None:
+            log.info(fmt(
+                C.RED,
+                f"  ✗  Couldn't back up {public}: the app can't write to "
+                f"{folder}. It was left in place."))
+            return None
         intent = None
         if owner is not None:
             on_intent({
@@ -5088,14 +5057,19 @@ def _copy_album_to_backup(public, bp, snapshot, source_receipt, *, owner,
 def backup_gap_fill_files(file_paths, album_dir: Path, *,
                           expected_receipts=None, owner=None,
                           on_intent=None, kind="gapfill"):
-    """Back up selected files, refusing any that change on the way.
+    """Set the album's files ``file_paths`` aside in a backup sealed by its
+    receipt, before a refill replaces them.
 
-    A verified source stays held and checked from receipt validation until a
-    durable backup receipt exists.  Same-filesystem, single-link files
-    move atomically; multiply-linked and cross-filesystem files become distinct
-    fidelity-checked copies before the exact source link is removed.  An
-    interruption after any forward step is reconciled into a durable partial
-    receipt before cancellation is propagated.
+    Each file is copied into a hidden folder in the backup folder and
+    checked. The receipt is written, the folder renamed to the backup's
+    name, and then each track is deleted from the album while it is the
+    file copied. A track that changed by then stops it: what was deleted is
+    put back, and the album is left as it was.
+
+    Returns a complete ``BackupResult``, or ``None`` when the tracks were
+    left in the album or put back there; one that could not be put back
+    stays in the backup, which is then kept. ``expected_receipts`` must
+    match each file exactly.
     """
     owner = normalise_recovery_owner(owner)
     if (owner is None) != (on_intent is None):
@@ -5105,7 +5079,6 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
 
     what = "" if kind == "repair" else "gap-fill "
     file_paths = list(file_paths)
-    requested_count = len(file_paths)
     if not file_paths:
         return None
     expected = None
@@ -5119,549 +5092,187 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
                 f"  ✗  Refusing malformed {what}source receipts "
                 f"({exc}); leaving every source file in place."))
             return None
-
-    opened = _open_backup_source(Path(album_dir))
-    if opened is None:
+    public = _library_path(album_dir)
+    try:
+        real_folder = public is not None and stat.S_ISDIR(
+            os.lstat(public).st_mode)
+    except OSError:
+        real_folder = False
+    if not real_folder:
         log.info(fmt(
             C.RED,
             f"  ✗  Refusing to back up files outside the real, no-follow "
             f"music tree: {album_dir}."))
         return None
-    public, music_root, album_parts, album_fds = opened
-    album_fd = album_fds[-1]
-    backup_root_fd = None
-    backup_fd = None
-    bp = None
-    records = []
-    completed = []
 
-    def _source_intact(record):
-        try:
-            return (
-                record["source_lease"].intact()
-                and _named_entry_matches(
-                    record["source_parent_fd"],
-                    record["parts"][-1],
-                    record["source_fd"],
-                )
-                and _gap_fill_file_receipt(
-                    record["source_fd"]
-                ) == record["receipt"]
-                and _relative_directories_are_named(
-                    album_fd,
-                    record["parts"][:-1],
-                    record["source_parents"],
-                )
-                and _backup_source_is_public(
-                    music_root, album_parts, album_fds)
-            )
-        except (OSError, TypeError, ValueError):
-            return False
-
-    def _backup_intact(record):
-        try:
-            return (
-                record.get("backup_fd") is not None
-                and record.get("backup_lease") is not None
-                and record["backup_lease"].intact()
-                and _named_entry_matches(
-                    record["backup_parent_fd"],
-                    record["parts"][-1],
-                    record["backup_fd"],
-                )
-                and _file_digest_fd(record["backup_fd"])
-                    == record["digest"]
-                and _relative_directories_are_named(
-                    backup_fd,
-                    record["parts"][:-1],
-                    record["backup_parents"],
-                )
-                and _named_directory_matches(
-                    backup_root_fd, bp.name, backup_fd)
-                and _backup_root_is_public(
-                    backup_root, backup_root_fd)
-            )
-        except (OSError, TypeError, ValueError):
-            return False
-
-    def _refresh_remaining_hardlink_receipts(removed_record):
-        """Account only for the ctime change caused by our own link removal."""
-        expected_identity = (
-            removed_record["receipt"]["type"],
-            removed_record["receipt"]["device"],
-            removed_record["receipt"]["inode"],
-        )
-        try:
-            for other in records:
-                if other is removed_record or other in completed:
-                    continue
-                prior = other["receipt"]
-                identity = (
-                    prior["type"], prior["device"], prior["inode"])
-                if identity != expected_identity:
-                    continue
-                current = _gap_fill_file_receipt(other["source_fd"])
-                if {
-                    key: value for key, value in current.items()
-                    if key != "ctime_ns"
-                } != {
-                    key: value for key, value in prior.items()
-                    if key != "ctime_ns"
-                }:
-                    return False
-                other["receipt"] = current
-            return True
-        except (OSError, TypeError, ValueError):
-            return False
-
-    def _seal_retained(*, complete):
-        manifest = _tree_manifest(backup_fd)
-        backed_up = len(manifest) if manifest is not None else 0
-        if backed_up == 0:
+    sources = {}
+    for raw_path in file_paths:
+        rooted = _rooted_path_parts(public, Path(raw_path))
+        if (
+            rooted is None
+            or rooted[2][-1] in _SIDECARS
+            or _library_path(rooted[0]) is None
+        ):
+            log.info(fmt(
+                C.RED,
+                f"  ✗  Refusing unsafe {what}source {raw_path}; "
+                "leaving every source file in place."))
             return None
-        result = None
+        path, _album, parts = rooted
+        relative = "/".join(parts)
+        if relative in sources:
+            log.info(fmt(
+                C.RED,
+                f"  ✗  A {what}source path is duplicated; leaving "
+                "every source file in place."))
+            return None
         try:
-            result = _seal_backup_result(
-                bp,
-                backup_fd,
-                public,
-                kind="gap-fill",
-                complete=complete,
-                requested=requested_count,
-                backed_up=backed_up,
-                owner=owner,
-            )
-        except BaseException:
-            receipt = _read_backup_receipt(backup_fd)
-            if receipt is not None:
-                result = BackupResult(
-                    bp,
-                    complete=receipt["complete"],
-                    receipt=receipt,
-                    requested=receipt["requested"],
-                    backed_up=receipt["backed_up"],
-                )
-            else:
-                try:
-                    result = _seal_backup_result(
-                        bp,
-                        backup_fd,
-                        public,
-                        kind="gap-fill",
-                        complete=False,
-                        requested=requested_count,
-                        backed_up=backed_up,
-                        owner=owner,
-                    )
-                except BaseException:
-                    result = None
-            raise
-        return result
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW
+                                 | os.O_NONBLOCK | os.O_CLOEXEC)
+            try:
+                value = os.fstat(descriptor)
+                receipt = _gap_fill_file_receipt(descriptor)
+            finally:
+                os.close(descriptor)
+            if expected is not None and (
+                relative not in expected
+                or expected[relative] != {
+                    field: receipt[field] for field in expected[relative]}
+            ):
+                raise OSError("verified source receipt changed")
+            if stat_identity(os.lstat(path)) != stat_identity(value):
+                raise OSError("it changed while it was read")
+        except FileNotFoundError:
+            log.info(fmt(
+                C.RED,
+                f"  ✗  {parts[-1]} disappeared after it was checked; "
+                "leaving every source file in place."))
+            return None
+        except OSError as exc:
+            log.info(fmt(
+                C.RED,
+                f"  ✗  Couldn't bind {parts[-1]} for an exact backup "
+                f"({exc}); leaving every source file in place."))
+            return None
+        sources[relative] = (path, value, receipt)
+    if expected is not None and set(sources) != set(expected):
+        log.info(fmt(
+            C.RED,
+            f"  ✗  The {what}receipts do not cover exactly the requested "
+            "files; leaving every source file in place."))
+        return None
+    folder = next((path.parent for path, _value, _receipt in sources.values()
+                   if not os.access(path.parent, os.W_OK | os.X_OK)), None)
+    if folder is not None:
+        log.info(fmt(
+            C.RED,
+            f"  ✗  Couldn't set aside the {what}tracks of {public}: the app "
+            f"can't write to {folder}. Every track was left in place."))
+        return None
 
     try:
-        seen = set()
-        for raw_path in file_paths:
-            rooted = _rooted_path_parts(public, Path(raw_path))
-            if rooted is None or rooted[2][-1] in _SIDECARS:
-                log.info(fmt(
-                    C.RED,
-                    f"  ✗  Refusing unsafe {what}source {raw_path}; "
-                    "leaving every source file in place."))
-                return None
-            _source_path, _album_root, parts = rooted
-            relative_text = "/".join(parts)
-            if relative_text in seen:
-                log.info(fmt(
-                    C.RED,
-                    f"  ✗  A {what}source path is duplicated; leaving "
-                    "every source file in place."))
-                return None
-            seen.add(relative_text)
-
-            source_parents = []
-            source_fd = None
-            source_lease = None
-            try:
-                source_parents = _open_relative_directories(
-                    album_fd, parts[:-1], create=False)
-                source_parent_fd = (
-                    source_parents[-1] if source_parents else album_fd)
-                source_fd = _open_regular_file_at(
-                    source_parent_fd, parts[-1])
-                source_lease = acquire_inode_write_exclusion(source_fd)
-                if source_lease is None:
-                    raise OSError("source is not a regular file")
-                digest = _file_digest_fd(source_fd)
-                receipt = _gap_fill_file_receipt(source_fd, digest)
-                if expected is not None and (
-                    relative_text not in expected
-                    or expected[relative_text] != {
-                        field: receipt[field]
-                        for field in expected[relative_text]
-                    }
-                ):
-                    raise OSError("verified source receipt changed")
-                records.append({
-                    "parts": parts,
-                    "relative": relative_text,
-                    "source_parents": source_parents,
-                    "source_parent_fd": source_parent_fd,
-                    "source_fd": source_fd,
-                    "source_lease": source_lease,
-                    "digest": digest,
-                    "receipt": receipt,
-                    "backup_parents": [],
-                    "backup_parent_fd": None,
-                    "backup_fd": None,
-                    "backup_lease": None,
-                    "backup_publication": None,
-                })
-                source_parents = []
-                source_fd = None
-                source_lease = None
-            except FileNotFoundError:
-                if expected is not None:
-                    log.info(fmt(
-                        C.RED,
-                        f"  ✗  {parts[-1]} disappeared after verification; "
-                        "leaving every remaining source in place."))
-                    return None
-            except OSError as exc:
-                log.info(fmt(
-                    C.RED,
-                    f"  ✗  Couldn't bind {parts[-1]} for an exact backup "
-                    f"({exc}); leaving every source file in place."))
-                return None
-            finally:
-                if source_lease is not None:
-                    source_lease.close()
-                if source_fd is not None:
-                    os.close(source_fd)
-                _close_descriptors(source_parents)
-
-        if expected is not None and seen != set(expected):
-            log.info(fmt(
-                C.RED,
-                f"  ✗  The {what}receipts do not cover exactly the requested "
-                "files; leaving every source file in place."))
-            return None
-        if not records or not all(_source_intact(record) for record in records):
-            log.info(fmt(
-                C.RED,
-                f"  ✗  A {what}source changed while it was being checked; "
-                "leaving the public tree untouched."))
-            return None
-
+        cfg.UPGRADE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        backup_root = Path(os.path.abspath(os.fspath(cfg.UPGRADE_BACKUP_DIR)))
+        if not stat.S_ISDIR(os.lstat(backup_root).st_mode):
+            raise OSError(errno.ENOTDIR, "not a folder")
+    except OSError as exc:
+        log.info(fmt(
+            C.YELLOW,
+            f"  ⚠  Couldn't prepare a protected {what}backup "
+            f"({exc}); leaving every source file in place."))
+        return None
+    bp = backup_root / _backup_dir_name(public, kind=kind)
+    partial = backup_root / (_PARTIAL_COPY_PREFIX + bp.name)
+    if os.path.lexists(partial):
+        log.info(fmt(C.RED, f"  ✗  {partial} is in the way; leaving every "
+                     "source file in place."))
+        return None
+    if owner is not None:
+        on_intent({
+            "version": 1,
+            "kind": "gap-fill",
+            "owner": dict(owner),
+            "path": os.fspath(bp),
+            "origin": os.fspath(public),
+            "source_receipts": {
+                relative: dict(receipt)
+                for relative, (_path, _value, receipt) in sources.items()
+            },
+        })
+    payload = {
+        relative: (receipt["size"], receipt["sha256"])
+        for relative, (_path, _value, receipt) in sources.items()
+    }
+    published = False
+    try:
+        os.mkdir(partial, 0o700)
+        # Written first, so the next start finds the album of a copy a stop
+        # cut short.
+        if not _write_backup_origin(partial, public):
+            raise OSError(errno.EIO, "its origin could not be recorded")
+        for relative, (path, _value, receipt) in sorted(sources.items()):
+            target = partial / relative
+            os.makedirs(target.parent, exist_ok=True)
+            copy_file(path, target, sha256=receipt["sha256"])
+        folder_fd = _open_backup_directory(partial)
         try:
-            cfg.UPGRADE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-            backup_root = Path(os.path.abspath(
-                os.fspath(cfg.UPGRADE_BACKUP_DIR)))
-            backup_root_fd = _open_backup_directory(backup_root)
-            if not _backup_root_is_public(backup_root, backup_root_fd):
-                raise OSError("backup directory changed while it was opened")
-            bp = backup_root / _backup_dir_name(public, kind=kind)
-        except (OSError, shutil.Error) as exc:
+            result = _seal_backup_result(
+                bp, folder_fd, public, kind="gap-fill", complete=True,
+                requested=len(sources), backed_up=len(sources), owner=owner)
+        finally:
+            os.close(folder_fd)
+        if result.receipt is None:
+            raise OSError(errno.EIO, "its backup record could not be written")
+        if _payload(result.receipt) != payload:
+            raise OSError(errno.EAGAIN, "a track changed while it was copied")
+        for relative, (path, value, _receipt) in sources.items():
+            if stat_identity(os.lstat(path)) != stat_identity(value):
+                raise OSError(errno.EAGAIN,
+                              f"{PurePosixPath(relative).name} changed "
+                              "while it was copied")
+        _rename_noreplace_at(AT_FDCWD, partial, AT_FDCWD, bp)
+        published = True
+        fsync_dir(backup_root, strict=True)
+    except BaseException as exc:
+        left = []
+        if not published and os.path.lexists(partial):
+            left = delete_tree_verified(partial, snapshot_tree(partial) or {})
+        where = (f"; what is left of its copy is at {partial}" if left
+                 else f", and its copy is at {bp}" if published else "")
+        if not isinstance(exc, OSError):
             log.info(fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't prepare a protected {what}backup "
-                f"({exc}); leaving every source file in place."))
-            return None
+                f"\n  ⚠  {(what + 'backup').capitalize()} interrupted. The album's "
+                f"tracks were left in place{where}."))
+            raise
+        log.info(fmt(
+            C.RED,
+            f"  ✗  Couldn't back up the {what}tracks of {public}: "
+            f"{exc.strerror or exc}. Every track was left in place{where}."))
+        return None
 
-        if owner is not None:
-            on_intent({
-                "version": 1,
-                "kind": "gap-fill",
-                "owner": dict(owner),
-                "path": os.fspath(bp),
-                "origin": os.fspath(public),
-                "source_receipts": {
-                    record["relative"]: dict(record["receipt"])
-                    for record in records
-                },
-            })
-
-        try:
-            os.mkdir(bp.name, dir_fd=backup_root_fd)
-            backup_fd = _open_backup_directory(
-                bp.name, dir_fd=backup_root_fd)
-            if (
-                not _named_directory_matches(
-                    backup_root_fd, bp.name, backup_fd)
-                or not _fsync_directory_fds(backup_root_fd)
-            ):
-                raise OSError("gap-fill backup directory could not be committed")
-            if not _write_backup_origin_durable(backup_fd, public):
-                raise OSError("backup origin could not be committed")
-        except (OSError, shutil.Error) as exc:
-            log.info(fmt(
-                C.YELLOW,
-                f"  ⚠  Couldn't create a protected {what}backup "
-                f"({exc}); leaving every source file in place."))
-            if (
-                backup_fd is not None
-                and _scan_backup_tree(backup_fd) == []
-            ):
-                _remove_exact_tree_at(
-                    backup_root_fd,
-                    bp.name,
-                    backup_fd,
-                    prefix="ql-gap-empty",
-                )
-            return None
-
-        pending_exception = None
-        fatal_change = False
-        for record in records:
-            destination_parents = []
-            publication = None
-            destination_parent_fd = None
-            try:
-                if not _source_intact(record):
-                    raise OSError("source changed before backup")
-                parts = record["parts"]
-                destination_parents = _open_relative_directories(
-                    backup_fd, parts[:-1], create=True)
-                destination_parent_fd = (
-                    destination_parents[-1]
-                    if destination_parents else backup_fd)
-
-                moved = False
-                move_exception = None
-                if (
-                    _same_filesystem(public, backup_root)
-                    and os.fstat(record["source_fd"]).st_nlink == 1
-                ):
-                    try:
-                        move_exception = _rename_exact_noreplace_at(
-                            record["source_parent_fd"],
-                            parts[-1],
-                            destination_parent_fd,
-                            parts[-1],
-                            record["source_fd"],
-                        )
-                    except OSError as exc:
-                        if exc.errno != errno.EXDEV:
-                            raise
-                    else:
-                        moved = True
-
-                if moved:
-                    record.update({
-                        "backup_parents": destination_parents,
-                        "backup_parent_fd": destination_parent_fd,
-                        "backup_fd": record["source_fd"],
-                        "backup_lease": record["source_lease"],
-                    })
-                    destination_parents = []
-                    if not (
-                        _named_entry_missing(
-                            record["source_parent_fd"], parts[-1])
-                        and _named_entry_matches(
-                            destination_parent_fd, parts[-1],
-                            record["source_fd"],
-                        )
-                        and _backup_intact(record)
-                        and _fsync_directory_fds(
-                            record["source_parent_fd"], destination_parent_fd,
-                        )
-                    ):
-                        raise OSError("moved backup could not be verified")
-                    completed.append(record)
-                    if move_exception is not None:
-                        pending_exception = move_exception
-                        fatal_change = True
-                        break
-                    continue
-
-                publication = _CopyPublication(
-                    destination_parent_fd, parts[-1])
-                copied_digest = _copy_file_noreplace_at(
-                    record["source_fd"], publication)
-                destination_fd = publication.descriptor
-                destination_lease = publication.lease
-                if (
-                    not destination_lease.intact()
-                    or copied_digest != record["digest"]
-                    or not _source_intact(record)
-                ):
-                    raise OSError("copied backup did not match its source")
-                record.update({
-                    "backup_parents": destination_parents,
-                    "backup_parent_fd": destination_parent_fd,
-                    "backup_fd": destination_fd,
-                    "backup_lease": destination_lease,
-                    "backup_publication": publication,
-                })
-                destination_parents = []
-                publication = None
-                if not _backup_intact(record):
-                    raise OSError("copied backup changed before source removal")
-
-                removed = _remove_exact_file_at(
-                    record["source_parent_fd"],
-                    parts[-1],
-                    record["source_fd"],
-                    prefix="ql-gap-remove",
-                    # The move itself changes ctime, so a retag that kept
-                    # the size and mtime is caught only before it.
-                    before_move=lambda: (
-                        os.fstat(record["source_fd"]).st_ctime_ns
-                        == record["receipt"]["ctime_ns"]
-                    ),
-                    commit_guard=lambda: (
-                        record["source_lease"].intact()
-                        and _backup_intact(record)
-                    ),
-                )
-                if not removed:
-                    if _source_intact(record):
-                        if _remove_exact_file_at(
-                            record["backup_parent_fd"],
-                            parts[-1],
-                            record["backup_fd"],
-                            prefix="ql-gap-discard",
-                        ):
-                            _release_copy_publication(
-                                record["backup_publication"])
-                            _close_descriptors(record["backup_parents"])
-                            record.update({
-                                "backup_parents": [],
-                                "backup_parent_fd": None,
-                                "backup_fd": None,
-                                "backup_lease": None,
-                                "backup_publication": None,
-                            })
-                            if expected is None:
-                                continue
-                    raise OSError("exact source removal could not be reconciled")
-                if not _refresh_remaining_hardlink_receipts(record):
-                    raise OSError(
-                        "a remaining hardlink changed after source removal")
-                completed.append(record)
-            except BaseException as exc:
-                if (
-                    publication is not None
-                    and destination_parent_fd is not None
-                    and publication.matches(
-                        destination_parent_fd, record["parts"][-1])
-                ):
-                    record.update({
-                        "backup_parents": destination_parents,
-                        "backup_parent_fd": destination_parent_fd,
-                        "backup_fd": publication.descriptor,
-                        "backup_lease": publication.lease,
-                        "backup_publication": publication,
-                    })
-                    destination_parents = []
-                    publication = None
-                fatal_change = True
-                pending_exception = exc
-                log.info(fmt(
-                    C.RED,
-                    f"  ✗  {record['parts'][-1]} could not be backed up "
-                    f"exactly; what was copied is kept at {bp}."))
-                break
-            finally:
-                if publication is not None:
-                    _release_copy_publication(publication)
-                _close_descriptors(destination_parents)
-
-        manifest = _tree_manifest(backup_fd)
-        backed_up = len(manifest) if manifest is not None else 0
-        all_backups_intact = all(_backup_intact(record) for record in completed)
-        complete = (
-            not fatal_change
-            and pending_exception is None
-            and len(completed) == requested_count
-            and backed_up == requested_count
-            and all_backups_intact
-        )
-        result = _seal_retained(complete=complete) if backed_up else None
-        if not backed_up:
-            if _scan_backup_tree(backup_fd) == []:
-                _remove_exact_tree_at(
-                    backup_root_fd,
-                    bp.name,
-                    backup_fd,
-                    prefix="ql-gap-empty",
-                )
-            if pending_exception is not None and not isinstance(
-                    pending_exception,
-                    (OSError, TypeError, ValueError, shutil.Error)):
-                raise pending_exception
-            return None
-        if pending_exception is not None:
-            if not isinstance(
-                    pending_exception,
-                    (OSError, TypeError, ValueError, shutil.Error)):
-                raise pending_exception
-        if not complete:
-            log.info(fmt(
-                C.RED,
-                f"  ✗  The {what}backup did not complete. Any exact moved "
-                f"copies are retained at {bp}; no replacement work may "
-                "continue."))
-            return result or BackupResult(
-                bp,
-                complete=False,
-                receipt=None,
-                requested=requested_count,
-                backed_up=backed_up,
-            )
-        if not completed or result is None:
-            return None
-        return result
+    try:
+        refused = next((
+            relative for relative, (path, value, _receipt) in sources.items()
+            if not delete_verified(path, stat_identity(value))), None)
     except BaseException:
-        if backup_fd is not None and bp is not None:
-            manifest = _tree_manifest(backup_fd)
-            if manifest:
-                try:
-                    _seal_retained(complete=False)
-                except BaseException:
-                    pass
-            elif _scan_backup_tree(backup_fd) == []:
-                try:
-                    _remove_exact_tree_at(
-                        backup_root_fd,
-                        bp.name,
-                        backup_fd,
-                        prefix="ql-gap-empty",
-                    )
-                except BaseException:
-                    pass
+        log.info(fmt(
+            C.YELLOW,
+            f"\n  ⚠  {(what + 'backup').capitalize()} interrupted. The tracks are "
+            f"safe in the backup at {bp}; Restore in Diagnostics puts back "
+            "any the album is missing."))
         raise
-    finally:
-        for record in reversed(records):
-            backup_publication = record.get("backup_publication")
-            backup_lease = record.get("backup_lease")
-            if backup_publication is not None:
-                _release_copy_publication(backup_publication)
-            elif (
-                backup_lease is not None
-                and backup_lease is not record.get("source_lease")
-            ):
-                backup_lease.close()
-            backup_descriptor = record.get("backup_fd")
-            if (
-                backup_publication is None
-                and
-                backup_descriptor is not None
-                and backup_descriptor != record.get("source_fd")
-            ):
-                os.close(backup_descriptor)
-            _close_descriptors(record.get("backup_parents", ()))
-            source_lease = record.get("source_lease")
-            if source_lease is not None:
-                source_lease.close()
-            source_descriptor = record.get("source_fd")
-            if source_descriptor is not None:
-                os.close(source_descriptor)
-            _close_descriptors(record.get("source_parents", ()))
-        if backup_fd is not None:
-            os.close(backup_fd)
-        if backup_root_fd is not None:
-            os.close(backup_root_fd)
-        _close_descriptors(album_fds)
+    if refused is None:
+        return result
+    log.info(fmt(
+        C.RED,
+        f"  ✗  {PurePosixPath(refused).name} changed, or could not be "
+        "removed, after it was copied to the backup; putting back the "
+        f"{what}tracks already removed."))
+    restore_gap_fill_backup(
+        result, public, keep_larger_dst=False, replace_dst=False,
+        expected_owner=owner)
+    return None
 
 
 def list_undo_copies():
@@ -5703,13 +5314,6 @@ def _flac_streaminfo(path: Path):
     return head[8:42].hex()
 
 
-def _downsample_kept_files(receipt):
-    return [
-        relative for relative in receipt["tree"]["files"]
-        if PurePosixPath(relative).name not in _SIDECARS
-    ]
-
-
 def record_downsample_outputs(backup) -> bool:
     """Note, beside the kept originals, what the album holds after the
     rewrite, for ``downsample_outputs_in_place`` to compare against."""
@@ -5717,7 +5321,7 @@ def record_downsample_outputs(backup) -> bool:
         return False
     origin = Path(backup.receipt["origin"])
     outputs = {}
-    for relative in _downsample_kept_files(backup.receipt):
+    for relative in _payload(backup.receipt):
         streaminfo = _flac_streaminfo(origin / relative)
         if streaminfo is None:
             return False
@@ -5729,9 +5333,10 @@ def record_downsample_outputs(backup) -> bool:
 
 def downsample_outputs_in_place(backup) -> bool:
     """Whether the album still holds exactly the audio Downsample left it
-    with. A later Upgrade, Repair or Gap Fill replaces those files, and the
-    kept originals must not be put back over them. Tag edits keep the
-    STREAMINFO, so lyrics and retagging don't count as a change."""
+    with, or the kept original a stopped put-back already returned. A later
+    Upgrade, Repair or Gap Fill replaces those files, and the kept originals
+    must not be put back over them. Tag edits keep the STREAMINFO, so
+    lyrics and retagging don't count as a change."""
     opened = _validated_backup_result(backup, kinds={"downsample"})
     if opened is None:
         return False
@@ -5747,10 +5352,11 @@ def downsample_outputs_in_place(backup) -> bool:
     if not isinstance(outputs, dict):
         return False
     origin = Path(backup.receipt["origin"])
-    kept = _downsample_kept_files(backup.receipt)
+    kept = _payload(backup.receipt)
     return bool(kept) and all(
         outputs.get(relative) is not None
-        and _flac_streaminfo(origin / relative) == outputs[relative]
+        and (_flac_streaminfo(origin / relative) == outputs[relative]
+             or _matches(origin / relative, *kept[relative]))
         for relative in kept
     )
 
@@ -5760,798 +5366,249 @@ def stash_downsample_originals(files, album_dir):
     timestamped backup, so the downsample can be undone until the retention
     sweep clears it. Returns
     ``(backup_result_or_None, set_of_files_copied, receipts)``, where
-    ``receipts`` maps each copied source path to the exact regular-file
-    identity, size, modification and change times, and digest verified
-    across its durable copy. The caller can bind that receipt immediately
-    before rewriting and refuse a replaced or subsequently changed source.
+    ``receipts`` maps each copied source path to the regular-file identity,
+    size, modification and change times, and digest its copy was checked
+    against. The caller can bind that receipt immediately before rewriting
+    and refuse a replaced or subsequently changed source.
 
     Copies, never moves - the originals stay put for the rewrite itself. The
     caller must leave any file NOT in the returned set untouched: the whole
     point of keep-originals is that nothing is rewritten without its copy, so
     a failed copy downgrades that file to "skipped", never to "unprotected".
     Each copy is content-verified (sha256) before it counts, because the undo
-    path later trusts these bytes with an overwrite."""
+    path later trusts these bytes with an overwrite. A stop part way deletes
+    the copies made so far."""
     files = [Path(f) for f in files]
     if not files:
         return None, set(), {}
-    opened = _open_backup_source(Path(album_dir))
-    if opened is None:
+    public = _library_path(album_dir)
+    try:
+        real_folder = public is not None and stat.S_ISDIR(
+            os.lstat(public).st_mode)
+    except OSError:
+        real_folder = False
+    if not real_folder:
         log.info(fmt(
             C.YELLOW,
             "  ⚠  Couldn't bind the album's real no-follow path; leaving "
             "every file untouched."))
         return None, set(), {}
-    public, music_root, album_parts, album_fds = opened
-    album_fd = album_fds[-1]
-    backup_root_fd = None
-    backup_fd = None
+    bp = None
+    try:
+        cfg.UPGRADE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        bp = Path(os.path.abspath(os.fspath(cfg.UPGRADE_BACKUP_DIR))) / (
+            _backup_dir_name(public, kind="downsample"))
+        os.mkdir(bp)
+        fsync_dir(bp.parent, strict=True)
+        if not _write_backup_origin(bp, public):
+            raise OSError("its origin could not be recorded")
+    except OSError as exc:
+        log.info(fmt(
+            C.YELLOW,
+            f"  ⚠  Couldn't create the keep-originals dir ({exc}); "
+            "leaving every file untouched."))
+        if bp is not None and os.path.lexists(bp):
+            delete_tree_verified(bp, snapshot_tree(bp) or {})
+        return None, set(), {}
+
     copied = set()
     receipts = {}
-    retained_unbound_copy = False
-    held_copies = []
-
-    def _held_copies_match_receipt(result):
-        if result is None or result.receipt is None:
-            return False
-        try:
-            expected_files = result.receipt["tree"]["files"]
-            for item in held_copies:
-                relative_text = "/".join(item["relative"])
-                expected = expected_files.get(relative_text)
-                if (
-                    expected is None
-                    or not item["lease"].intact()
-                    or not _relative_directories_are_named(
-                        backup_fd,
-                        item["relative"][:-1],
-                        item["parents"],
-                    )
-                    or not _named_entry_matches(
-                        item["parent_fd"],
-                        item["relative"][-1],
-                        item["descriptor"],
-                    )
-                    or _snapshot_file(
-                        item["parent_fd"], item["relative"][-1]
-                    ) != expected
-                ):
-                    return False
-            return _read_backup_receipt(backup_fd) == result.receipt
-        except (OSError, TypeError, ValueError):
-            return False
-
+    payload = {}
     try:
-        try:
-            cfg.UPGRADE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-            backup_root = Path(os.path.abspath(
-                os.fspath(cfg.UPGRADE_BACKUP_DIR)))
-            backup_root_fd = _open_backup_directory(backup_root)
-            if not _backup_root_is_public(backup_root, backup_root_fd):
-                raise OSError("backup directory changed while it was opened")
-            bp = backup_root / _backup_dir_name(public, kind="downsample")
-            os.mkdir(bp.name, dir_fd=backup_root_fd)
-            backup_fd = _open_backup_directory(
-                bp.name, dir_fd=backup_root_fd)
-            if (
-                not _named_directory_matches(
-                    backup_root_fd, bp.name, backup_fd)
-                or not _fsync_directory_fds(backup_root_fd)
-                or not _write_backup_origin_durable(backup_fd, public)
-            ):
-                raise OSError("keep-originals directory could not be committed")
-        except OSError as exc:
-            log.info(fmt(
-                C.YELLOW,
-                f"  ⚠  Couldn't create the keep-originals dir ({exc}); "
-                "leaving every file untouched."))
-            if (
-                backup_fd is not None
-                and _scan_backup_tree(backup_fd) == []
-            ):
-                _remove_exact_tree_at(
-                    backup_root_fd,
-                    bp.name,
-                    backup_fd,
-                    prefix="ql-downsample-empty",
-                )
-            return None, set(), {}
-
         for source_path in files:
             rooted = _rooted_path_parts(public, source_path)
-            if rooted is None or rooted[2][-1] in _SIDECARS:
+            if (
+                rooted is None
+                or rooted[2][-1] in _SIDECARS
+                or _library_path(rooted[0]) is None
+            ):
                 log.info(fmt(
                     C.YELLOW,
                     f"  ⚠  Couldn't safely bind {source_path.name}; it "
                     "will be left untouched."))
                 continue
-            relative = rooted[2]
-            source_parents = []
-            destination_parents = []
-            source_fd = None
-            publication = None
-            destination_parent_fd = None
+            source = rooted[0]
+            target = bp.joinpath(*rooted[2])
             try:
-                source_parents = _open_relative_directories(
-                    album_fd, relative[:-1], create=False)
-                source_parent_fd = (
-                    source_parents[-1] if source_parents else album_fd)
-                source_fd = _open_regular_file_at(
-                    source_parent_fd, relative[-1])
-                source_digest = _file_digest_fd(source_fd)
-                source_receipt = _regular_file_receipt(
-                    source_fd, source_digest)
-
-                destination_parents = _open_relative_directories(
-                    backup_fd, relative[:-1], create=True)
-                destination_parent_fd = (
-                    destination_parents[-1]
-                    if destination_parents else backup_fd)
-                publication = _CopyPublication(
-                    destination_parent_fd, relative[-1])
-                copied_digest = _copy_file_noreplace_at(
-                    source_fd, publication)
-                destination_fd = publication.descriptor
-                destination_lease = publication.lease
-                exact_source = (
-                    destination_lease.intact()
-                    and copied_digest == source_digest
-                    and _regular_file_receipt(
-                        source_fd, _file_digest_fd(source_fd))
-                    == source_receipt
-                    and _named_entry_matches(
-                        source_parent_fd, relative[-1], source_fd)
-                    and _backup_source_is_public(
-                        music_root, album_parts, album_fds)
-                    and _relative_directories_are_named(
-                        album_fd, relative[:-1], source_parents)
-                    and _named_directory_matches(
-                        backup_root_fd, bp.name, backup_fd)
-                    and _relative_directories_are_named(
-                        backup_fd, relative[:-1], destination_parents)
-                    and _named_entry_matches(
-                        destination_parent_fd,
-                        relative[-1],
-                        destination_fd,
-                    )
-                    and _file_digest_fd(destination_fd) == source_digest
-                    and _fsync(_held_directory_path(destination_fd))
-                    and _backup_root_is_public(
-                        backup_root, backup_root_fd)
-                )
-                if not exact_source:
-                    source_still_named = _named_entry_matches(
-                        source_parent_fd, relative[-1], source_fd)
-                    removed_copy = False
-                    if source_still_named and destination_lease.intact():
-                        removed_copy = _remove_exact_file_at(
-                            destination_parent_fd,
-                            relative[-1],
-                            destination_fd,
-                            prefix="ql-downsample-discard",
-                        )
-                    if (
-                        not removed_copy
-                        and _named_entry_matches(
-                            destination_parent_fd,
-                            relative[-1],
-                            destination_fd,
-                        )
-                    ):
-                        retained_unbound_copy = True
+                descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW
+                                     | os.O_NONBLOCK | os.O_CLOEXEC)
+                try:
+                    value = os.fstat(descriptor)
+                    receipt = _regular_file_receipt(
+                        descriptor, _file_digest_fd(descriptor))
+                finally:
+                    os.close(descriptor)
+                os.makedirs(target.parent, exist_ok=True)
+                copy_file(source, target, sha256=receipt["sha256"])
+                if stat_identity(os.lstat(source)) != stat_identity(value):
+                    delete_verified(target, stat_identity(os.lstat(target)))
                     raise OSError("source changed while its copy was made")
-                copied.add(source_path)
-                receipts[source_path] = source_receipt
-                held_copies.append({
-                    "relative": relative,
-                    "parents": destination_parents,
-                    "parent_fd": destination_parent_fd,
-                    "descriptor": destination_fd,
-                    "lease": destination_lease,
-                    "publication": publication,
-                })
-                destination_parents = []
-                publication = None
-            except BaseException as exc:
-                if (
-                    publication is not None
-                    and destination_parent_fd is not None
-                    and publication.matches(
-                        destination_parent_fd, relative[-1])
-                ):
-                    held_copies.append({
-                        "relative": relative,
-                        "parents": destination_parents,
-                        "parent_fd": destination_parent_fd,
-                        "descriptor": publication.descriptor,
-                        "lease": publication.lease,
-                        "publication": publication,
-                    })
-                    destination_parents = []
-                    publication = None
-                    retained_unbound_copy = True
-                elif publication is not None:
-                    try:
-                        reconciled_private = (
-                            publication.reconcile_private_cleanup())
-                    except BaseException:
-                        reconciled_private = False
-                    if not reconciled_private:
-                        retained_unbound_copy = True
-                if (
-                    destination_parent_fd is not None
-                    and not _named_entry_missing(
-                        destination_parent_fd, relative[-1])
-                ):
-                    retained_unbound_copy = True
-                if not isinstance(exc, (OSError, shutil.Error)):
-                    raise
+            except OSError as exc:
                 log.info(fmt(
                     C.YELLOW,
                     f"  ⚠  Couldn't keep a copy of {source_path.name} "
                     f"({exc}); it will be left untouched."))
-            finally:
-                if publication is not None:
-                    _release_copy_publication(publication)
-                if source_fd is not None:
-                    os.close(source_fd)
-                _close_descriptors(destination_parents)
-                _close_descriptors(source_parents)
-
-        if not copied and not retained_unbound_copy:
-            if _scan_backup_tree(backup_fd) == []:
-                _remove_exact_tree_at(
-                    backup_root_fd,
-                    bp.name,
-                    backup_fd,
-                    prefix="ql-downsample-empty",
-                )
+                continue
+            copied.add(source_path)
+            receipts[source_path] = receipt
+            payload["/".join(rooted[2])] = (receipt["size"], receipt["sha256"])
+        if not copied:
+            delete_tree_verified(bp, snapshot_tree(bp) or {})
             return None, set(), {}
-        if (
-            not retained_unbound_copy
-            and _named_entry_missing(
-                backup_fd, _REAP_AFTER_RETENTION_SENTINEL)
-        ):
-            marked = _write_text_noreplace_at(
-                backup_fd,
+        folder_fd = _open_backup_directory(bp)
+        try:
+            if not _write_text_noreplace_at(
+                folder_fd,
                 _REAP_AFTER_RETENTION_SENTINEL,
                 "downsample originals - an undo copy; the age sweep clears it "
                 "after the retention window",
-            )
-            if not marked:
+            ):
                 # Without the marker this safely degrades to always-keep.
                 vlog("couldn't mark the undo copy age-reapable")
-        retained_manifest = _tree_manifest(backup_fd)
-        if retained_unbound_copy:
-            retained_count = len(retained_manifest or ())
             result = _seal_backup_result(
-                bp,
-                backup_fd,
-                public,
-                kind="downsample",
-                complete=False,
-                requested=len(files),
-                backed_up=min(len(files), retained_count),
-            )
-            log.info(fmt(
-                C.YELLOW,
-                "  ⚠  A source changed while its kept copy was made. "
-                f"The recovery copy remains at {bp}; no source will be "
-                "rewritten or age-reaped automatically."))
-            return result, set(), {}
-        result = _seal_backup_result(
-            bp,
-            backup_fd,
-            public,
-            kind="downsample",
-            complete=True,
-            requested=len(copied),
-            backed_up=len(copied),
-        )
-        if not result.complete:
-            log.info(fmt(
-                C.YELLOW,
-                "  ⚠  The kept originals could not be verified. They remain "
-                f"at {bp}, and no original will be rewritten."))
-            return result, set(), {}
-        if not _held_copies_match_receipt(result):
-            log.info(fmt(
-                C.YELLOW,
-                "  ⚠  A kept-original copy changed before its exact receipt "
-                f"was bound. Recovery data remains at {bp}, but no source "
-                "will be rewritten."))
-            return result, set(), {}
-        return result, copied, receipts
+                bp, folder_fd, public, kind="downsample", complete=True,
+                requested=len(copied), backed_up=len(copied))
+        finally:
+            os.close(folder_fd)
     except BaseException:
-        # Cancellation after a copy publication must not leave an unreceipted
-        # recovery directory.  Seal whatever exact tree remains as incomplete;
-        # the original exception is still propagated after this best effort.
-        if backup_fd is not None:
-            try:
-                retained_manifest = _tree_manifest(backup_fd)
-                if retained_manifest:
-                    _seal_backup_result(
-                        bp,
-                        backup_fd,
-                        public,
-                        kind="downsample",
-                        complete=False,
-                        requested=len(files),
-                        backed_up=min(len(files), len(retained_manifest)),
-                    )
-            except BaseException:
-                pass
+        # Only copies were made, and no original has been rewritten yet.
+        delete_tree_verified(bp, snapshot_tree(bp) or {})
         raise
-    finally:
-        for item in reversed(held_copies):
-            _release_copy_publication(item["publication"])
-            _close_descriptors(item["parents"])
-        if backup_fd is not None:
-            os.close(backup_fd)
-        if backup_root_fd is not None:
-            os.close(backup_root_fd)
-        _close_descriptors(album_fds)
+    if not result.complete:
+        log.info(fmt(
+            C.YELLOW,
+            "  ⚠  The kept originals could not be verified. They remain "
+            f"at {bp}, and no original will be rewritten."))
+        return result, set(), {}
+    if _payload(result.receipt) != payload:
+        log.info(fmt(
+            C.YELLOW,
+            "  ⚠  A kept-original copy changed before its exact receipt "
+            f"was bound. Recovery data remains at {bp}, but no source "
+            "will be rewritten."))
+        return result, set(), {}
+    return result, copied, receipts
 
 
 def restore_gap_fill_backup(backup, album_dir: Path,
                             *, keep_larger_dst: bool = True,
                             replace_dst: bool = True,
                             expected_owner=None) -> int:
-    """Move every file in a carried gap-fill or downsample ``BackupResult``
-    back under album_dir, preserving relative structure. Returns the number of
-    files restored. Removes the exact backup dir on completion. Invalid,
-    missing or raw-path backup arguments safely return 0.
+    """Put every file of a gap-fill, repair or downsample backup back under
+    album_dir at its own relative path, and return how many are there.
 
-    keep_larger_dst (default True, the repair caller): when a file already at
-    the destination is >= the backup copy in bytes, keep it and discard the
-    backup - valid for repair, where the backup is the truncated original and
-    a larger dst is the good refill. Gap-fill callers pass False: there the
-    backup IS the good original, so a larger-but-corrupt partial re-rip at dst
-    must NOT win - always restore the backup.
+    A file the album already holds with the backup's bytes counts as put
+    back. keep_larger_dst (default True, the repair caller): a file at the
+    destination at least as large as the backup's and decoding cleanly is
+    the good refill, so it stays and counts as put back. Gap-fill callers
+    pass False: there the backup is the good original, so a larger but
+    corrupt re-rip must not win. replace_dst=False never replaces a file
+    already at the destination: any other file there fails that track.
 
-    replace_dst=False never replaces a file already at the destination: one
-    holding the backup's exact bytes counts as restored, and any other file
-    fails that track and keeps the backup.
-
-    Crash-safe across filesystems: each file is copied into a private random
-    workspace on the destination filesystem, then published without overwrite
-    after any exact existing destination is held aside. The backup is removed
-    only after the published inode and both no-follow directory chains still
-    match. Public workspace-name collisions and replacements are left alone."""
-    if not _backup_owner_authorized(backup, expected_owner):
+    Each file is copied under a temporary name beside its destination and
+    checked against the receipt's sha256, then renamed to its name, over
+    the file there only with replace_dst. The backup is deleted once every
+    file is on disk and still the one put back; otherwise it stays, marked
+    as a partial restore. Invalid backups return 0."""
+    source = _restorable(backup, album_dir, expected_owner=expected_owner,
+                         kinds={"gap-fill", "downsample"})
+    if source is None:
         return 0
-    backup_opened = _validated_backup_result(
-        backup,
-        origin=album_dir,
-        kinds={"gap-fill", "downsample"},
-    )
-    if backup_opened is None:
+    backup_snapshot = snapshot_tree(source)
+    if backup_snapshot is None:
+        log.info(fmt(C.RED + C.BOLD,
+            f"  ✗  Couldn't fully read the backup to restore it. "
+            f"Originals are PRESERVED at:\n     {source}"))
         return 0
-    backup_public, backup_root, backup_parts, backup_fds = backup_opened
-    backup_fd = backup_fds[-1]
-    album_opened = _open_rooted_directory(
-        cfg.MUSIC_ROOT, Path(album_dir), create=True)
-    if album_opened is None:
-        _close_descriptors(backup_fds)
+    album = _library_path(album_dir, create_parents=True)
+    try:
+        if album is not None and not os.path.lexists(album):
+            os.mkdir(album)
+            fsync_dir(album.parent)
+        if album is None or not stat.S_ISDIR(os.lstat(album).st_mode):
+            raise OSError
+    except OSError:
         log.info(fmt(C.RED,
             f"  ✗  Couldn't bind the real album path for restore.\n"
-            f"     Backed-up tracks remain at: {backup_public}"))
+            f"     Backed-up tracks remain at: {source}"))
         return 0
-    album_public, music_root, album_parts, album_fds = album_opened
-    album_fd = album_fds[-1]
-    n_restored = 0
-    n_failed = 0
-    held_backup = None
-    held_destinations = []
-
-    def _destinations_intact():
+    payload = _payload(backup.receipt)
+    found = {}
+    for relative, (size, digest) in sorted(payload.items()):
+        target = album / relative
         try:
-            if not _backup_source_is_public(
-                    music_root, album_parts, album_fds):
-                return False
-            for item in held_destinations:
-                if (
-                    not item["lease"].intact()
-                    or not _relative_directories_are_named(
-                        album_fd, item["relative"][:-1], item["parents"])
-                    or not _named_entry_matches(
-                        item["parent_fd"],
-                        item["relative"][-1],
-                        item["descriptor"],
-                    )
-                    or os.fstat(item["descriptor"]).st_size
-                        < item["minimum_size"]
-                    or item["digest"] is not None
-                    and _file_digest_fd(item["descriptor"])
-                        != item["digest"]
-                ):
-                    return False
-            return True
-        except (OSError, TypeError, ValueError):
-            return False
-
+            if _library_path(target, create_parents=True) is None:
+                raise OSError("its folder is not a real folder in the album")
+            if not _matches(target, size, digest):
+                _restore_file(source / relative, target, size, digest,
+                              keep_larger_dst=keep_larger_dst,
+                              replace_dst=replace_dst)
+            elif not _fsync(target):
+                raise OSError("it could not be flushed to disk")
+            fsync_dir(target.parent, strict=True)
+            found[relative] = stat_identity(os.lstat(target))
+        except OSError as exc:
+            log.info(fmt(
+                C.YELLOW,
+                f"  ⚠  Couldn't restore {PurePosixPath(relative).name}: "
+                f"{exc.strerror or exc}."))
     try:
-        backup_snapshot = _receipt_disposal_snapshot(
-            backup_fd, backup.receipt)
-        if (
-            backup_snapshot is None
-            or _exact_tree_snapshot(backup_fd) != backup_snapshot
-        ):
-            log.info(fmt(C.RED + C.BOLD,
-                f"  ✗  Couldn't fully read the backup to restore it. "
-                f"Originals are PRESERVED at:\n     {backup_public}"))
-            return 0
-        held_backup = {}
-        _hold_snapshot_files(backup_fd, backup_snapshot, held_backup)
-        manifest = {
-            tuple(PurePosixPath(relative).parts): (
-                expected["size"], expected["sha256"])
-            for relative, expected in backup.receipt["tree"]["files"].items()
-            if PurePosixPath(relative).name not in _SIDECARS
-        }
+        intact = all(stat_identity(os.lstat(album / relative)) == identity
+                     for relative, identity in found.items())
+    except OSError:
+        intact = False
+    if len(found) != len(payload) or not intact:
+        _write_receipt_marker(
+            backup,
+            _PARTIAL_RESTORE_SENTINEL,
+            "partial restore - un-restored originals are the only copy",
+        )
+        log.info(fmt(C.RED + C.BOLD,
+            f"  ✗  Some tracks could NOT be restored. Originals are "
+            f"PRESERVED at:\n     {source}"))
+        return len(found)
+    if not _delete_backup_folder(
+            source, backup_snapshot, _hidden_name(source.name)):
+        log.info(fmt(
+            C.YELLOW,
+            "  ⚠  Restored files are safe, but their exact backup "
+            f"remains at {source}."))
+    return len(found)
 
-        for relative, (source_size, source_digest) in manifest.items():
-            source_parents = []
-            destination_parents = []
-            source_fd = None
-            existing_fd = None
-            restored_fd = None
-            workspace_fd = None
-            workspace_name = None
-            previous_moved = False
-            published = False
-            publication_verified = False
-            publication = None
-            existing_lease = None
-            try:
-                source_parents, source_parent_fd, source_fd = _open_tree_file(
-                    backup_fd, relative)
-                if (
-                    os.fstat(source_fd).st_size != source_size
-                    or _file_digest_fd(source_fd) != source_digest
-                ):
-                    raise OSError("backup file changed before restore")
-                destination_parents = _open_relative_directories(
-                    album_fd, relative[:-1], create=True)
-                destination_parent_fd = (
-                    destination_parents[-1]
-                    if destination_parents else album_fd)
-                try:
-                    existing_fd = _open_regular_file_at(
-                        destination_parent_fd, relative[-1])
-                except FileNotFoundError:
-                    existing_fd = None
 
-                if existing_fd is not None and not replace_dst:
-                    existing_lease = acquire_inode_write_exclusion(
-                        existing_fd)
-                    if (
-                        existing_lease is None
-                        or not existing_lease.intact()
-                        or os.fstat(existing_fd).st_size != source_size
-                        or _file_digest_fd(existing_fd) != source_digest
-                    ):
-                        raise OSError(
-                            "a different file is already at the destination")
-                    if not (
-                        _fsync(_held_directory_path(existing_fd))
-                        and _fsync(_held_directory_path(
-                            destination_parent_fd))
-                        and _fsync_directory_fds(destination_parent_fd)
-                    ):
-                        raise OSError("kept destination could not be flushed")
-                    held_destinations.append({
-                        "relative": relative,
-                        "parents": destination_parents,
-                        "parent_fd": destination_parent_fd,
-                        "descriptor": existing_fd,
-                        "lease": existing_lease,
-                        "minimum_size": source_size,
-                        "digest": source_digest,
-                    })
-                    destination_parents = []
-                    existing_fd = None
-                    existing_lease = None
-                    n_restored += 1
-                    continue
-
-                if (
-                    keep_larger_dst
-                    and existing_fd is not None
-                    and os.fstat(existing_fd).st_size >= source_size
-                ):
-                    existing_lease = acquire_inode_write_exclusion(
-                        existing_fd)
-                    if (
-                        existing_lease is None
-                        or not existing_lease.intact()
-                    ):
-                        raise OSError(
-                            "kept destination changed since it was checked")
-                    if flac_audio_ok(
-                            _held_directory_path(existing_fd)) is True:
-                        if not (
-                            _fsync(_held_directory_path(existing_fd))
-                            and _fsync(_held_directory_path(
-                                destination_parent_fd))
-                            and _fsync_directory_fds(destination_parent_fd)
-                        ):
-                            raise OSError(
-                                "kept destination could not be flushed")
-                        held_destinations.append({
-                            "relative": relative,
-                            "parents": destination_parents,
-                            "parent_fd": destination_parent_fd,
-                            "descriptor": existing_fd,
-                            "lease": existing_lease,
-                            "minimum_size": source_size,
-                            "digest": None,
-                        })
-                        destination_parents = []
-                        existing_fd = None
-                        existing_lease = None
-                        n_restored += 1
-                        continue
-
-                workspace_name, workspace_fd = _reserve_backup_quarantine(
-                    destination_parent_fd, "ql-restore-file")
-                publication = _CopyPublication(workspace_fd, "restored")
-                copied_digest = _copy_file_noreplace_at(
-                    source_fd, publication)
-                restored_fd = publication.descriptor
-                destination_lease = publication.lease
-                if copied_digest != source_digest:
-                    raise OSError("restore copy did not match backup")
-                if not destination_lease.intact():
-                    raise OSError("restored copy changed since it was checked")
-
-                if existing_fd is not None:
-                    hold_exception = _rename_exact_noreplace_at(
-                        destination_parent_fd,
-                        relative[-1],
-                        workspace_fd,
-                        "previous",
-                        existing_fd,
-                    )
-                    previous_moved = True
-                    if hold_exception is not None:
-                        if _restore_exact_entry_move(
-                                workspace_fd,
-                                "previous",
-                                destination_parent_fd,
-                                relative[-1],
-                                existing_fd):
-                            previous_moved = False
-                        raise hold_exception
-                    if (
-                        not _named_entry_missing(
-                            destination_parent_fd, relative[-1])
-                        or not _named_entry_matches(
-                            workspace_fd, "previous", existing_fd)
-                        or not _fsync_directory_fds(
-                            destination_parent_fd, workspace_fd)
-                    ):
-                        raise OSError("existing destination changed during restore")
-                elif not _named_entry_missing(
-                        destination_parent_fd, relative[-1]):
-                    raise OSError("destination appeared during restore")
-
-                publication.add_location(
-                    destination_parent_fd, relative[-1])
-                publish_exception = _rename_exact_noreplace_at(
-                    workspace_fd,
-                    "restored",
-                    destination_parent_fd,
-                    relative[-1],
-                    restored_fd,
-                )
-                published = True
-                if publish_exception is not None:
-                    if _restore_exact_entry_move(
-                            destination_parent_fd,
-                            relative[-1],
-                            workspace_fd,
-                            "restored",
-                            restored_fd):
-                        published = False
-                    if not published and previous_moved:
-                        if _restore_exact_entry_move(
-                                workspace_fd,
-                                "previous",
-                                destination_parent_fd,
-                                relative[-1],
-                                existing_fd):
-                            previous_moved = False
-                    raise publish_exception
-                if not (
-                    _named_entry_matches(
-                        destination_parent_fd, relative[-1], restored_fd)
-                    and _file_digest_fd(restored_fd) == source_digest
-                    and destination_lease.intact()
-                    and _named_entry_matches(
-                        source_parent_fd, relative[-1], source_fd)
-                    and _file_digest_fd(source_fd) == source_digest
-                    and _backup_source_is_public(
-                        music_root, album_parts, album_fds)
-                    and _relative_directories_are_named(
-                        album_fd, relative[:-1], destination_parents)
-                    and _backup_source_is_public(
-                        backup_root, backup_parts, backup_fds)
-                    and _relative_directories_are_named(
-                        backup_fd, relative[:-1], source_parents)
-                    and _fsync_directory_fds(
-                        destination_parent_fd, workspace_fd)
-                    and _fsync(_held_directory_path(
-                        destination_parent_fd))
-                ):
-                    raise OSError("restored destination could not be verified")
-                publication_verified = True
-                held_destinations.append({
-                    "relative": relative,
-                    "parents": destination_parents,
-                    "parent_fd": destination_parent_fd,
-                    "descriptor": restored_fd,
-                    "lease": destination_lease,
-                    "minimum_size": source_size,
-                    "digest": source_digest,
-                    "publication": publication,
-                })
-                destination_parents = []
-                restored_fd = None
-                publication = None
-                n_restored += 1
-
-                if (
-                    previous_moved
-                    and _named_entry_matches(
-                        workspace_fd, "previous", existing_fd)
-                ):
-                    try:
-                        unlink_exception = _unlink_exact_at(
-                            workspace_fd, "previous", existing_fd)
-                        previous_moved = False
-                        if unlink_exception is not None:
-                            raise unlink_exception
-                    except OSError as exc:
-                        log.info(fmt(
-                            C.YELLOW,
-                            "  ⚠  Restored the backup, but couldn't "
-                            f"remove its private rollback copy: {exc}."))
-            except BaseException as exc:
-                if publication is not None:
-                    restored_fd = publication.descriptor
-                    destination_lease = publication.lease
-                    if publication.matches(
-                            destination_parent_fd, relative[-1]):
-                        published = True
-                    elif publication.matches(workspace_fd, "restored"):
-                        published = False
-                if (
-                    published
-                    and not publication_verified
-                    and restored_fd is not None
-                    and _named_entry_matches(
-                        destination_parent_fd, relative[-1], restored_fd)
-                    and _restore_exact_entry_move(
-                        destination_parent_fd,
-                        relative[-1],
-                        workspace_fd,
-                        "restored",
-                        restored_fd,
-                    )
-                ):
-                    published = False
-                if not publication_verified and not published and previous_moved:
-                    if _restore_exact_entry_move(
-                            workspace_fd,
-                            "previous",
-                            destination_parent_fd,
-                            relative[-1],
-                            existing_fd):
-                        previous_moved = False
-                if not isinstance(exc, (OSError, shutil.Error)):
-                    raise
-                n_failed += 1
-                log.info(fmt(
-                    C.YELLOW,
-                    f"  ⚠  Couldn't restore {relative[-1]}: {exc}."))
-            finally:
-                if existing_lease is not None:
-                    existing_lease.close()
-                if (
-                    publication is not None
-                    and workspace_fd is not None
-                    and publication.matches(workspace_fd, "restored")
-                ):
-                    try:
-                        _remove_exact_file_at(
-                            workspace_fd,
-                            "restored",
-                            publication.descriptor,
-                            prefix="ql-restore-copy-cleanup",
-                        )
-                    except BaseException:
-                        pass
-                if publication is not None:
-                    _release_copy_publication(publication)
-                if existing_fd is not None:
-                    os.close(existing_fd)
-                if source_fd is not None:
-                    os.close(source_fd)
-                if workspace_fd is not None:
-                    try:
-                        with os.scandir(workspace_fd) as iterator:
-                            empty = next(iterator, None) is None
-                        if (
-                            empty
-                            and _named_directory_matches(
-                                destination_parent_fd,
-                                workspace_name,
-                                workspace_fd,
-                            )
-                        ):
-                            _rmdir_exact_at(
-                                destination_parent_fd,
-                                workspace_name,
-                                workspace_fd,
-                            )
-                    except BaseException:
-                        pass
-                    os.close(workspace_fd)
-                _close_descriptors(destination_parents)
-                _close_descriptors(source_parents)
-
-        if (
-            n_failed
-            or n_restored != len(manifest)
-            or not _destinations_intact()
-            or not _held_snapshot_files_intact(
-                backup_fd, backup_snapshot, held_backup)
-        ):
-            _write_receipt_marker(
-                backup,
-                _PARTIAL_RESTORE_SENTINEL,
-                "partial restore - un-restored originals are the only copy",
-            )
-            log.info(fmt(C.RED + C.BOLD,
-                f"  ✗  Some tracks could NOT be restored. Originals are "
-                f"PRESERVED at:\n     {backup_public}"))
-        else:
-            removed = _remove_exact_tree_at(
-                backup_fds[-2],
-                backup_parts[-1],
-                backup_fd,
-                prefix="ql-restored-backup",
-                expected_snapshot=backup_snapshot,
-                held_files=held_backup,
-                commit_guard=lambda: (
-                    _destinations_intact()
-                    and _backup_source_is_public(
-                        backup_root,
-                        backup_parts,
-                        backup_fds,
-                        include_album=False,
-                    )
-                ),
-            )
-            if not removed:
-                log.info(fmt(
-                    C.YELLOW,
-                    "  ⚠  Restored files are safe, but their exact backup "
-                    f"remains at {backup_public}."))
-        return n_restored
-    finally:
-        for item in reversed(held_destinations):
-            publication = item.get("publication")
-            if publication is not None:
-                _release_copy_publication(publication)
-            else:
-                item["lease"].close()
-                os.close(item["descriptor"])
-            _close_descriptors(item["parents"])
-        if held_backup is not None:
-            _release_held_snapshot_files(held_backup)
-        _close_descriptors(album_fds)
-        _close_descriptors(backup_fds)
+def _restore_file(source: Path, target: Path, size, digest, *,
+                  keep_larger_dst, replace_dst) -> None:
+    """Copy one backed-up file to ``target``, as restore_gap_fill_backup
+    describes; return when the file at ``target`` is the one to keep."""
+    try:
+        existing = os.lstat(target)
+    except FileNotFoundError:
+        copy_file(source, target, sha256=digest)
+        return
+    if not stat.S_ISREG(existing.st_mode) or not replace_dst:
+        raise OSError("a different file is already at the destination")
+    if (
+        keep_larger_dst
+        and existing.st_size >= size
+        and flac_audio_ok(target) is True
+    ):
+        if stat_identity(os.lstat(target)) != stat_identity(existing):
+            raise OSError("the album's file changed while it was checked")
+        if not _fsync(target):
+            raise OSError("the kept file could not be flushed to disk")
+        return
+    temporary = target.parent / f".ql-copy-{secrets.token_hex(16)}"
+    copy_file(source, temporary, sha256=digest)
+    try:
+        if stat_identity(os.lstat(target)) != stat_identity(existing):
+            raise OSError("the album's file changed during the restore")
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def restore_incomplete_upgrade_backup(
@@ -6739,8 +5796,8 @@ def _remove_partial_copies(folder: Path) -> None:
             delete_verified(folder / relative, value)
 
 
-# Set by the web app: given the receipt of each backup a restore put back
-# with every file proven against it.
+# Set by the web app and the terminal: given the receipt of each backup a
+# restore put back with every file proven against it.
 on_restored = None
 
 
@@ -6915,19 +5972,20 @@ def _copy_folder_metadata(source: Path, destination: Path) -> None:
         pass
 
 
-def _restorable(backup, original_path, *, expected_owner, complete):
-    """The folder of a whole-album upgrade backup whose files and receipt
+def _restorable(backup, original_path, *, expected_owner, complete=None,
+                kinds=("upgrade",)):
+    """The folder of a backup of one of ``kinds`` whose files and receipt
     check out for a restore to ``original_path``, else None."""
     if not _backup_owner_authorized(backup, expected_owner):
         return None
     opened = _validated_backup_result(
-        backup, origin=original_path, kinds={"upgrade"},
+        backup, origin=original_path, kinds=set(kinds),
         require_complete=complete)
     if opened is None:
         return None
     try:
         if (
-            backup.complete is not complete
+            complete is not None and backup.complete is not complete
             or _receipt_disposal_snapshot(
                 opened[-1][-1], backup.receipt) is None
         ):
@@ -7126,9 +6184,12 @@ def settle_interrupted_restores() -> None:
     aside goes back while its place is still empty, as it would had the
     restore failed, unless the put-back that follows takes that backup,
     which then replaces the folder as the restore meant to. Its copy of the
-    backup is deleted while every file in it is the backup's own. Anything
-    else stays, and Diagnostics lists it."""
+    backup is deleted while every file in it is the backup's own, and so is
+    a partial file a stop left in the album under the temporary name every
+    copy takes. Anything else stays, and Diagnostics lists it."""
     for path, origin in _backups_and_origins():
+        if _library_path(origin) is not None:
+            _remove_partial_copies(origin)
         stage, aside = _restore_folders(path, origin)
         if (
             os.path.lexists(aside)
@@ -7374,6 +6435,14 @@ def _intended_origin(path):
     return None if intent is None else Path(intent[1]["origin"])
 
 
+def unfinished_copy_album(path):
+    """The album folder the unfinished backup copy at ``path`` was made of,
+    or None when it can't be told."""
+    path = Path(path)
+    return _read_backup_origin(path) or _intended_origin(
+        path.with_name(path.name.removeprefix(_PARTIAL_COPY_PREFIX)))
+
+
 def _incarnations(generations):
     """Directory generations as inode and birth time, which survive the
     renumbered device and mount a restart can bring."""
@@ -7443,7 +6512,9 @@ def put_back_interrupted_backups():
     Restore does for it, and the album's folder goes back in place. An album put back from a copy is passed to
     ``on_restored``. An album a restore had renamed home loses the backup's
     own files that a hard stop left inside it, and an unfinished backup of an
-    album that is whole and untouched in its place is removed.
+    album that is whole and untouched in its place is removed, as is an
+    unfinished copy of tracks a Gap Fill or Repair was setting aside while
+    its album still holds them.
     """
     put_back = []
     try:
@@ -7464,7 +6535,50 @@ def put_back_interrupted_backups():
     finally:
         os.close(root_fd)
     _clear_unfinished_backups_of_whole_albums()
+    _clear_unfinished_track_copies()
     return put_back
+
+
+def _clear_unfinished_track_copies():
+    """Delete the unfinished copy a stop left of tracks being set aside for
+    a Gap Fill, a Repair or a consolidation while every track in it is
+    still in its album with the same bytes. No track leaves its album
+    before its copy is finished, so such a copy holds only duplicates. One
+    whose album no longer holds them all stays, and Diagnostics lists it."""
+    try:
+        names = sorted(os.listdir(cfg.UPGRADE_BACKUP_DIR))
+    except OSError:
+        return
+    for name in names:
+        if not re.match(re.escape(_PARTIAL_COPY_PREFIX)
+                        + r"\d{8}_\d{6}_\d{6}_(?:gapfill|repair)_", name):
+            continue
+        partial = cfg.UPGRADE_BACKUP_DIR / name
+        copied = _plain_tree(partial)
+        if copied is None:
+            continue
+        tracks = {
+            relative: value[3] for relative, value in copied.items()
+            if stat.S_ISREG(value[2])
+            and relative not in (_ORIGIN_SIDECAR, _RECEIPT_SIDECAR)
+            and not _COPY_TEMP.fullmatch(os.path.basename(relative))
+        }
+        origin = _read_backup_origin(partial)
+        try:
+            duplicates = not tracks or (
+                origin is not None
+                and _library_path(origin) is not None
+                and all(_matches(origin / relative, size,
+                                 _file_digest(partial / relative))
+                        for relative, size in tracks.items()))
+        except OSError:
+            duplicates = False
+        if duplicates:
+            delete_tree_verified(partial, copied)
+        else:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  Kept the unfinished backup copy at {partial}: its "
+                "album no longer holds every track in it."))
 
 
 def _clear_unfinished_backups_of_whole_albums():
@@ -7948,11 +7062,15 @@ def _classify_backup_contents(
 
 
 def _classify_retained_backup(path, origin, budget, *, compare_audio=False):
-    if origin is None:
+    # A consolidation's tracks stand in at the album it kept, under the names
+    # it recorded; the folder they came from is gone or holds the rest.
+    named = consolidated_into(path)
+    album = named[0] if named else origin
+    if album is None:
         return BackupClassification("retained", "origin")
-    if not os.path.lexists(origin):
+    if not os.path.lexists(album):
         return BackupClassification("retained", "origin_missing")
-    opened = _open_backup_source(origin)
+    opened = _open_backup_source(album)
     if opened is None:
         return BackupClassification("retained", "origin")
     try:
@@ -7962,7 +7080,8 @@ def _classify_retained_backup(path, origin, budget, *, compare_audio=False):
             return BackupClassification("retained", "album_metadata")
     finally:
         _close_descriptors(opened[-1])
-    result = _classify_backup_contents(origin, path, budget=budget)
+    result = _classify_backup_contents(
+        album, path, budget=budget, renamed=named[1] if named else None)
     # An album track whose bytes differ, or that is filed under another name,
     # may be the replacement Remove accepts. Which proof applies is in the
     # receipt.
@@ -7979,23 +7098,36 @@ def _classify_retained_backup(path, origin, budget, *, compare_audio=False):
         stats = [f.stat() for f in entries]
         size = sum(info.st_size for info in stats if stat.S_ISREG(info.st_mode))
         if not budget.reserve(size):
+            # A track the album lacks by name and by ISRC is missing under
+            # every proof, which names and tags show without that read.
+            if replaced:
+                lacking = _classify_backup_contents(
+                    album, path, audio_replacement=True,
+                    match_recordings=True, carry_lyrics=True,
+                    renamed=named[1] if named else None,
+                    budget=_BackupReadBudget(0))
+                if lacking.reason == "missing":
+                    return lacking
             return BackupClassification("unverified", "budget")
         candidate = removal_candidate(path)
         if candidate is None or candidate.receipt["origin"] != os.fspath(origin):
             return BackupClassification("retained", "record")
         if not candidate.complete:
             return BackupClassification("retained", "incomplete")
+        if named and _sealed_consolidation(candidate) != named:
+            return BackupClassification("retained", "record")
         leftover = _leftover_top(path) is not None
         if leftover and (stray := _unrecorded_file(candidate)) is not None:
             return BackupClassification("retained", "unrecorded", stray)
         if not leftover and not _backup_owner_authorized(candidate, None):
             return BackupClassification("retained", "owner")
         if replaced:
-            proof = _replacement_proof(candidate)
-            if proof is None:
+            target = _replacement_proof(candidate)
+            if target is None:
                 return result
+            album, proof = target
             result = _classify_backup_contents(
-                origin, path, audio_replacement=True, budget=budget,
+                album, path, audio_replacement=True, budget=budget,
                 carry_lyrics=True,
                 **{**proof, "same_audio": compare_audio and proof.get("same_audio", False)})
             if not result.removable:
@@ -8024,23 +7156,30 @@ def _classify_retained_backup(path, origin, budget, *, compare_audio=False):
 def _retention_view_is_redundant(
         replacement_view: Path, backup_view: Path, *, allow_smaller_audio=False,
         match_recordings=False, same_audio=False, carry_lyrics=False,
+        renamed=None, refused=None,
 ) -> bool:
     result = _classify_backup_contents(
         replacement_view, backup_view, audio_replacement=True,
         allow_smaller_audio=allow_smaller_audio,
         match_recordings=match_recordings,
+        renamed=renamed,
         same_audio=same_audio,
         carry_lyrics=carry_lyrics,
     )
-    return result.removable and not (carry_lyrics and result.reason == "lyrics")
+    if refused is not None:
+        refused.append(result)
+    # Lyrics only the backup's track has go onto the album's first, which
+    # Remove does; until then the backup is their only copy.
+    return result.removable and result.reason != "lyrics"
 
 
 def _dispose_retention_candidate(
-        candidate, *, allow_smaller_audio=False, match_recordings=False,
-        same_audio=False, carry_lyrics=False):
+        candidate, *, replacement=None, renamed=None, allow_smaller_audio=False,
+        match_recordings=False, same_audio=False, carry_lyrics=False,
+        refused=None):
     if not isinstance(candidate, BackupResult) or candidate.receipt is None:
         return False
-    replacement = Path(candidate.receipt["origin"])
+    replacement = Path(replacement or candidate.receipt["origin"])
     replacement_receipt = capture_album_source_receipt(replacement)
     if replacement_receipt is None:
         return False
@@ -8061,6 +7200,8 @@ def _dispose_retention_candidate(
                 match_recordings=match_recordings,
                 same_audio=same_audio,
                 carry_lyrics=carry_lyrics,
+                renamed=renamed,
+                refused=refused,
             )
         ),
     )
@@ -8088,6 +7229,32 @@ def _consolidation_kept(note):
     return album, kept
 
 
+def consolidated_into(path):
+    """(album, {backed-up file: album track}) for the backup at ``path`` of
+    a consolidation, from its marker, or None for any other backup."""
+    try:
+        note = json.loads((Path(path) / _CONSOLIDATED_SENTINEL).read_text(
+            encoding="utf-8"))["note"]
+    except (OSError, TypeError, ValueError, KeyError):
+        return None
+    return _consolidation_kept(note)
+
+
+def _sealed_consolidation(candidate):
+    """consolidated_into for a backup whose marker its receipt seals."""
+    opened = _open_rooted_directory(cfg.UPGRADE_BACKUP_DIR, candidate.path)
+    if opened is None:
+        return None
+    try:
+        note = _receipt_marker_note(
+            opened[-1][-1], _CONSOLIDATED_SENTINEL, candidate.receipt)
+    except OSError:
+        return None
+    finally:
+        _close_descriptors(opened[-1])
+    return _consolidation_kept(note)
+
+
 def mark_consolidated(backup, album, kept) -> bool:
     """Name the album a consolidation kept and, for each file in its backup,
     the track there that stands in for it, so the age sweep can clear it."""
@@ -8098,49 +7265,24 @@ def mark_consolidated(backup, album, kept) -> bool:
     )
 
 
-def _dispose_consolidation_backup(candidate) -> bool:
+def _dispose_consolidation_backup(candidate, refused=None) -> bool:
     """Dispose a consolidation's backup once the album it kept still holds,
     for every file, a decode-clean track standing in for it at least as long.
     """
-    opened = _open_rooted_directory(cfg.UPGRADE_BACKUP_DIR, candidate.path)
-    if opened is None:
-        return False
-    try:
-        note = _receipt_marker_note(
-            opened[-1][-1], _CONSOLIDATED_SENTINEL, candidate.receipt)
-    except OSError:
-        return False
-    finally:
-        _close_descriptors(opened[-1])
-    named = _consolidation_kept(note)
-    if named is None:
-        return False
-    album, kept = named
-    album_receipt = capture_album_source_receipt(album)
-    if album_receipt is None:
-        return False
-    return dispose_backup(
-        candidate,
-        replacement_path=album,
-        expected_replacement_receipt=album_receipt,
-        replacement_validator=lambda album_view, backup_view: (
-            _classify_backup_contents(
-                album_view,
-                backup_view,
-                audio_replacement=True,
-                allow_smaller_audio=True,
-                renamed=kept,
-            ).removable
-        ),
-    )
+    named = _sealed_consolidation(candidate)
+    return named is not None and _dispose_retention_candidate(
+        candidate, replacement=named[0], renamed=named[1],
+        allow_smaller_audio=True, refused=refused)
 
 
-def release_undo_copy(path) -> bool:
+def release_undo_copy(path, carried=None) -> bool:
     """Drop a downsample's kept originals now, because the user asked.
 
     Retention has two conditions: the album must still hold every file the
     copies do, and enough days must have passed. This applies the first one,
-    exactly as the sweep does, and lets the user waive the second. It refuses
+    exactly as the sweep does, and lets the user waive the second. Lyrics
+    only the originals have are copied onto the album's tracks first, as
+    Remove does, and those tracks are added to ``carried``. It refuses
     anything that is not one of those deliberate undo copies, so it can never
     stand in for the proof a real backup has to pass.
     """
@@ -8149,7 +7291,9 @@ def release_undo_copy(path) -> bool:
             or not candidate.receipt.get("origin")
             or not (candidate.path / _REAP_AFTER_RETENTION_SENTINEL).is_file()):
         return False
-    return _dispose_retention_candidate(candidate, allow_smaller_audio=True)
+    return _carry_lyrics_and_dispose(
+        candidate, Path(candidate.receipt["origin"]),
+        {"allow_smaller_audio": True}, [] if carried is None else carried)
 
 
 def retire_verified_repair_backup(backup) -> bool:
@@ -8196,29 +7340,37 @@ def discard_redundant_backup(path) -> bool:
 
 
 def _replacement_proof(candidate):
-    """How the album may stand in for this backup's audio, as arguments for
-    the retention proof, or None where only identical files will do.
+    """The album that may stand in for this backup's audio and how, as
+    arguments for the retention proof, or None where only identical files
+    will do.
 
-    An upgrade's tracks sit at the same paths. Gap Fill and Repair download
-    the track again, which Beets may file under another name, so its ISRC
-    finds it too. Repair kept damaged copies, so the proof Repair applies to
+    A consolidation's tracks stand in at the album it kept, under the names
+    it recorded, at any size, as the age sweep proves them. An upgrade's
+    tracks sit at the same paths. Gap Fill and Repair download the track
+    again, which Beets may file under another name, so its ISRC finds it
+    too. Repair kept damaged copies, so the proof Repair applies to
     its own backup holds, whatever their size. Gap Fill kept the user's own
     tracks, which go only when the album's copy decodes to the same samples.
     """
+    named = _sealed_consolidation(candidate)
+    if named is not None:
+        return named[0], {"renamed": named[1], "allow_smaller_audio": True}
+    origin = Path(candidate.receipt["origin"])
     kind = candidate.receipt.get("kind")
     if kind == "upgrade":
-        return {}
+        return origin, {}
     if kind != "gap-fill":
         return None
     if re.match(r"^\d{8}_\d{6}_\d{6}_repair_", backup_name(candidate.path)):
-        return {"match_recordings": True, "allow_smaller_audio": True}
-    return {"match_recordings": True, "allow_smaller_audio": True,
-            "same_audio": True}
+        return origin, {"match_recordings": True, "allow_smaller_audio": True}
+    return origin, {"match_recordings": True, "allow_smaller_audio": True,
+                    "same_audio": True}
 
 
 def discard_replaced_backup(path, carried=None) -> bool:
-    """Dispose one upgrade, gap-fill or repair backup whose album holds a
-    verified replacement for every file it kept, because the user asked.
+    """Dispose one upgrade, gap-fill, repair or consolidation backup whose
+    album holds a verified replacement for every file it kept, because the
+    user asked.
 
     The new download's bytes differ, so the byte-identical proof can never
     pass. Each kept track needs a decode-clean track standing in for it in
@@ -8230,20 +7382,29 @@ def discard_replaced_backup(path, carried=None) -> bool:
     candidate = removal_candidate(path)
     if candidate is None or not isinstance(candidate.receipt, dict):
         return False
-    proof = _replacement_proof(candidate)
-    if proof is None:
+    target = _replacement_proof(candidate)
+    if target is None:
         return False
+    album, proof = target
+    return _carry_lyrics_and_dispose(
+        candidate, album, proof, [] if carried is None else carried)
+
+
+def _carry_lyrics_and_dispose(candidate, album, proof, carried) -> bool:
+    """Copy the lyrics only the backup's tracks have onto those in
+    ``album`` that stand in for them by ``proof``, adding each to
+    ``carried``, then dispose the backup once it holds nothing else the
+    album lacks."""
     pairs = []
     if not _classify_backup_contents(
-            Path(candidate.receipt["origin"]), candidate.path,
-            audio_replacement=True, carry_lyrics=True, pairs=pairs,
-            **proof).removable:
+            album, candidate.path, audio_replacement=True, carry_lyrics=True,
+            pairs=pairs, **proof).removable:
         return False
-    carried = [] if carried is None else carried
     if not all(_carry_lyrics(source, destination, carried)
                for source, destination in pairs):
         return False
-    return _dispose_retention_candidate(candidate, carry_lyrics=True, **proof)
+    return _dispose_retention_candidate(
+        candidate, replacement=album, carry_lyrics=True, **proof)
 
 
 def removal_refusal(path):
@@ -8624,33 +7785,37 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
                 # rewrite ON PURPOSE - the redundancy proof below can never
                 # pass for it, and age alone is its whole contract.
                 candidate = load_backup_result(entry)
+                refused = []
                 if candidate is None:
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  Keeping undo backup {entry.name!r}: its "
                         "app-owned recovery record was unavailable."))
                 elif _dispose_retention_candidate(
-                        candidate, allow_smaller_audio=True):
+                        candidate, allow_smaller_audio=True, refused=refused):
                     n_removed += 1
                 else:
                     log.info(fmt(C.YELLOW,
-                        f"  ⚠  Keeping undo backup {entry.name!r}: safe "
-                        "disposal could not be completed."))
+                        f"  ⚠  Keeping undo backup {entry.name!r}: "
+                        + (_kept_for_lyrics(refused)
+                           or "safe disposal could not be completed") + "."))
                 continue
             if (
                 (entry / _CONSOLIDATED_SENTINEL).is_file()
                 and not backup_keep_markers_present(entry)
             ):
                 candidate = load_backup_result(entry)
+                refused = []
                 if (
                     candidate is not None
-                    and _dispose_consolidation_backup(candidate)
+                    and _dispose_consolidation_backup(candidate, refused)
                 ):
                     n_removed += 1
                 else:
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  Keeping consolidation backup {entry.name!r}: "
-                        "the album it kept could not be shown to hold a "
-                        "track for each of its files."))
+                        + (_kept_for_lyrics(refused)
+                           or "the album it kept could not be shown to hold "
+                           "a track for each of its files") + "."))
                 continue
             candidate = load_backup_result(entry)
             if candidate is None:
@@ -8658,10 +7823,13 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
                     f"  ⚠  Keeping backup {entry.name!r}: its "
                     "app-owned recovery record was unavailable."))
                 continue
-            if not _backup_safe_to_reap(entry):
+            refused = []
+            if not _backup_safe_to_reap(entry, refused):
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Keeping backup {entry.name!r} past retention: "
-                    "it is pinned or its replacement could not be verified."))
+                    + (_kept_for_lyrics(refused)
+                       or "it is pinned or its replacement could not be "
+                       "verified") + "."))
                 continue
             if _dispose_retention_candidate(candidate):
                 n_removed += 1

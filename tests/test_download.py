@@ -350,33 +350,6 @@ def test_full_album_backs_up_present_tracks_before_rip(monkeypatch, tmp_path):
     )
 
 
-def test_full_album_does_not_rip_after_a_partial_present_track_backup(
-        monkeypatch, tmp_path):
-    from qobuz_librarian.library.backup import BackupResult
-
-    tracks = [{"id": i, "title": f"T{i}"} for i in range(1, 6)]
-    owned = tmp_path / "01.flac"
-    owned.write_bytes(b"owned")
-    retained = tmp_path / "partial-backup"
-    retained.mkdir()
-    partial = BackupResult(retained, False, None, 2, 1)
-    rip_calls = []
-    monkeypatch.setattr(dl, "backup_gap_fill_files", lambda *_a: partial)
-    monkeypatch.setattr(dl, "find_extras_in_existing", lambda *_a: [])
-    monkeypatch.setattr(dl, "rip_url", lambda *_a, **_k: rip_calls.append(1))
-    result = {}
-
-    with pytest.raises(OSError):
-        dl.run_album_download(
-            album=_album(tracks), missing=tracks, present=[tracks[0]],
-            album_dir=tmp_path, snapshot=set(),
-            existing=[{"path": str(owned)}], result=result,
-        )
-
-    assert not rip_calls
-    assert result["gap_fill_backup_path"] is partial
-
-
 def test_gap_fill_preserves_owned_tracks_when_most_are_missing(
         monkeypatch, tmp_path, tagged_flac):
     from mutagen.flac import FLAC

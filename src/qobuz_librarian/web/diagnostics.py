@@ -411,11 +411,17 @@ def _diagnostics():
     note = (f" · {plural(len(waiting), 'old copy', 'old copies')}, cleared "
             f"after {plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}"
             if waiting else "")
+    skip = {item[0].name for item in retained or ()
+            if backup_mod.is_disposal_leftover(item[0])}
+    try:
+        # An unfinished copy is listed under Unfinished upgrade backups.
+        skip |= {name for name in os.listdir(cfg.UPGRADE_BACKUP_DIR)
+                 if name.startswith(backup_mod._PARTIAL_COPY_PREFIX)}
+    except OSError:
+        pass
     _dir_check("Upgrade backups", cfg.UPGRADE_BACKUP_DIR, want_writable=True,
                show_size=True, unit=("kept backup", "kept backups"),
-               dirs_only=True, note=note,
-               skip_names={item[0].name for item in retained or ()
-                           if backup_mod.is_disposal_leftover(item[0])})
+               dirs_only=True, note=note, skip_names=skip)
 
     beets_db = Path(cfg.BEETS_DB_PATH)
     beets_db_display, _is_host = storage._resolve_host_path(str(beets_db))
@@ -459,7 +465,8 @@ def _diagnostics():
             for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
                 if entry.is_dir() and entry.name == ".restore_trash":
                     stranded.append(entry)
-                elif entry.is_dir() and entry.name.startswith(".ql-backup-copy-"):
+                elif entry.is_dir() and entry.name.startswith(
+                        backup_mod._PARTIAL_COPY_PREFIX):
                     copies.append(entry)
             left_in_backups = backup_mod.albums_left_in_backups()
             restores = backup_mod.unfinished_restores()
@@ -485,10 +492,18 @@ def _diagnostics():
             found.append(f"{len(stranded)} found in "
                          f"{cfg.UPGRADE_BACKUP_DIR}; manual cleanup needed")
         if copies:
+            named = "; ".join(
+                f"{copy.name}, of "
+                + (storage._resolve_host_path(str(album))[0] if album
+                   else "an album the app can't name")
+                for copy, album in zip(
+                    copies, map(backup_mod.unfinished_copy_album, copies)))
             found.append(
                 f"{plural(len(copies), 'unfinished album copy', 'unfinished album copies')} "
-                f"in {cfg.UPGRADE_BACKUP_DIR}, left when a backup stopped "
-                "while copying; compare each with its album before removing it")
+                f"in {storage._resolve_host_path(str(cfg.UPGRADE_BACKUP_DIR))[0]}, "
+                f"left when a backup stopped while copying: {named}. "
+                f"Compare {'it' if len(copies) == 1 else 'each'} with its "
+                "album before removing it")
         if restores:
             found.append(
                 f"{plural(len(restores), 'folder')} left beside "
@@ -499,7 +514,7 @@ def _diagnostics():
                 + ". Compare each with its album and backup before "
                 "removing it")
         checks.append({"label": "Unfinished upgrade backups", "ok": False,
-                       "detail": ". ".join(found)})
+                       "detail": ". ".join(found) + "."})
     else:
         checks.append({"label": "Unfinished upgrade backups", "ok": True,
                        "detail": "none"})
@@ -740,6 +755,14 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 "what it holds.")
         # Remove proves every file back first, so it can only succeed where
         # the listing could not finish its own check or found it removable.
+        # A consolidation's tracks are proved in the album it kept.
+        consolidated = backup_mod.consolidated_into(path)
+        checked = html.escape(storage._resolve_host_path(
+            str(consolidated[0]))[0]) if consolidated else where
+        if consolidated:
+            reason = f"These tracks were merged into {checked}. {reason}"
+        if by_file and not consolidated and classification.reason == "missing":
+            reason += " Restore puts it back."
         lyrics = (
             f" The lyrics of its {html.escape(classification.file)} are "
             "copied onto the same track in the album first, so they are kept."
@@ -754,7 +777,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'<input type="hidden" name="backup" value="{name}">'
             f'<button type="submit" class="ql-btn ql-btn-sm" '
             f'data-confirm="Remove this backup? It is deleted only after '
-            f'the app checks that {where} holds every file in it, or a '
+            f'the app checks that {checked} holds every file in it, or a '
             f'verified copy of each track.{lyrics}" '
             f'data-confirm-action="Remove" data-irreversible>Remove</button>'
             f'</form>'

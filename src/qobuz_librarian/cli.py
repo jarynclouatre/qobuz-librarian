@@ -1314,6 +1314,13 @@ def main():
         if recovery_choice is None:
             raise SystemExit(EXIT_GENERAL)
 
+    # An album put back from a copy has new inodes; its saved rows are
+    # sealed again so they are not refused for them.
+    from qobuz_librarian.library import backup as backup_mod
+    from qobuz_librarian.modes import upgrade as upgrade_mode
+    if backup_mod.on_restored is None:
+        backup_mod.on_restored = upgrade_mode.reseal_put_back_album
+
     # Housekeeping deletes expired backups and rewrites state files, so a
     # dry run skips it. A queue that stopped part way holds all other work
     # until it is resumed, so this waits for it too.
@@ -1321,7 +1328,6 @@ def main():
         from qobuz_librarian import beets_db
         from qobuz_librarian.integrations import beets as beets_mod
         from qobuz_librarian.integrations import staging as staging_mod
-        from qobuz_librarian.library import backup as backup_mod
         from qobuz_librarian.modes import process as process_mode
         try:
             beets_db.remove_old_copies()

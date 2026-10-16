@@ -387,6 +387,9 @@ class Job:
     _unchecked_artists: int = field(default=0, repr=False)
     _preserve_persisted_single: bool = field(default=False, repr=False)
     _single_undo_unavailable: bool = field(default=False, repr=False)
+    # Set on a run this start found cut short, so only it hears which of its
+    # albums the start-up puts back.
+    _cut_short_this_start: bool = field(default=False, repr=False)
     # Set only by a successful jobs.db admission or restart restore. Tests and
     # diagnostics also create intentionally in-memory Jobs directly.
     _durability_required: bool = field(default=False, repr=False)
@@ -2457,6 +2460,7 @@ def restore_jobs(
                 job.error = (restart + "The original files were kept; check "
                              "them before retrying.")
             job.finished_at = job.finished_at or time.time()
+            job._cut_short_this_start = True
             interrupted += 1
             _persist_restored_transition(job, previous_status)
         elif status == JobStatus.AWAITING_REVIEW or pending_review:

@@ -166,7 +166,9 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
     Upgrade review after the restart, where it could only be refused, and so
     did one put back from a backup on another filesystem, whose copied files
     have new inodes, at start-up or during the run. A put-back by the
-    terminal before the app started left its pick out altogether. Picks
+    terminal before the app started left its pick out altogether, and one
+    the app was deleting when it was killed, which the start-up fills in
+    again, left the review and the saved results. Picks
     whose files still match return ticked, the ones the app put back sealed
     again; the changed one leaves the review and the saved results. A
     restart numbers the mounts afresh, so a refresh after it seals the same
@@ -175,6 +177,7 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
     back unticked once a refresh seals it again."""
     import copy
 
+    from qobuz_librarian import safefile
     from qobuz_librarian.library import backup as backup_mod
     from qobuz_librarian.library import candidate_premise, generation_state
     from qobuz_librarian.quality import upgrade_state
@@ -194,10 +197,11 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
 
     specs = []
     for title in ("Upgraded", "Not started", "Put back during the run",
-                  "Put back by the terminal"):
+                  "Put back by the terminal", "Killed while deleting"):
         album = cfg.MUSIC_ROOT / "Artist" / title
         album.mkdir(parents=True)
         (album / "01.flac").write_bytes(b"16-bit")
+        (album / "02.flac").write_bytes(b"16-bit too")
         specs.append({"title": title, "artist": "Artist", "detail": "",
                       "payload": {"album_id": title, "album_dir": str(album),
                                   "_premise": candidate_premise.capture(
@@ -232,6 +236,22 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
         patch.setattr(backup_mod, "on_restored", None)
         assert backup_mod.restore_upgrade_backup(
             backup_mod.backup_album_dir(terminal), terminal)
+    killed = cfg.MUSIC_ROOT / "Artist" / "Killed while deleting"
+
+    class Killed(BaseException):
+        pass
+
+    delete_verified = safefile.delete_verified
+
+    def killed_after_one(path, expected, **kwargs):
+        delete_verified(path, expected, **kwargs)
+        raise Killed
+
+    with monkeypatch.context() as patch:
+        patch.setattr(safefile, "delete_verified", killed_after_one)
+        with pytest.raises(Killed):
+            backup_mod.backup_album_dir(killed)
+    assert len(list(killed.iterdir())) == 1
 
     monkeypatch.setattr(jm, "registry", jm.JobRegistry())
     hooks = []
@@ -246,11 +266,12 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
     review, = jm.registry.awaiting_review()
     assert [(c["title"], c["selected"]) for c in review.candidates] == [
         ("Not started", True), ("Put back during the run", True),
-        ("Put back by the terminal", True)]
-    for c in review.candidates[:2]:
+        ("Put back by the terminal", True), ("Killed while deleting", True)]
+    for c in (*review.candidates[:2], review.candidates[3]):
         candidate_premise.validate(c)
     assert [c["title"] for c in upgrade_state.load()["candidates"]] == [
-        "Not started", "Put back during the run", "Put back by the terminal"]
+        "Not started", "Put back during the run", "Put back by the terminal",
+        "Killed while deleting"]
     assert jm.registry.get(run.id).status is JobStatus.FAILED
     assert review.review_verb == "Upgrade"
 
@@ -266,14 +287,15 @@ def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
     reopened = saved_reviews._review_job_from_current_saved_state("upgrade")
     assert reopened is review
     assert all(c["selected"] for c in review.candidates)
-    for c in review.candidates[:2]:
+    for c in (*review.candidates[:2], review.candidates[3]):
         candidate_premise.validate(c)
 
     (cfg.MUSIC_ROOT / "Artist" / "Not started" / "01.flac").write_bytes(b"edited")
     assert upgrade_state.reseal(
         lambda premise: candidate_premise.capture("upgrade", premise["path"]))
     assert saved_reviews._review_job_from_current_saved_state("upgrade") is review
-    assert [c["selected"] for c in review.candidates] == [False, True, False]
+    assert [c["selected"] for c in review.candidates] == [
+        False, True, False, True]
 
 
 def test_a_library_run_cut_short_returns_missing_albums_its_downloads_touched(

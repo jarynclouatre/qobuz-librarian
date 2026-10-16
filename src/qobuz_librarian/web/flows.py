@@ -72,6 +72,7 @@ from qobuz_librarian.library.scanner import (
 from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.modes import process as process_mode
 from qobuz_librarian.modes import repair
+from qobuz_librarian.modes import upgrade as upgrade_mode
 from qobuz_librarian.modes.repair import RepairRecovery, RepairRecoveryRequired
 from qobuz_librarian.modes.upgrade import BENIGN_UPGRADE_RESULTS
 from qobuz_librarian.quality import decision as quality_decision
@@ -1212,18 +1213,32 @@ def return_interrupted_picks(job):
     job_persistence.persist(job)
 
 
+def note_upgrades_put_back(origins):
+    """Say on the page of each Upgrade run this start found cut short which
+    of its albums the start-up put back as they were."""
+    folders = {os.fspath(origin) for origin in origins}
+    for job in job_mgr.registry.all():
+        if (job.execute_kind != "upgrade" or job.recoveries
+                or not job._cut_short_this_start):
+            continue
+        with job._lock:
+            albums = [c for c in job.candidates if c.get("selected")
+                      and (c.get("payload") or {}).get("album_dir") in folders]
+            if not albums:
+                continue
+            note = (f"{named_albums(albums)} "
+                    + ("was put back as it was." if len(albums) == 1
+                       else "were put back as they were."))
+            job.summary = f"{job.summary} {note}" if job.summary else note
+        job_persistence.persist(job)
+
+
 def reseal_put_back_album(backup_receipt):
     """Seal again the rows and saved results over an album a restore put back
     byte for byte, so the new inodes of a copy do not make Start refuse it,
     including the pick of a run still going that will return it for retry.
     Reads file details only."""
-    captures = {}
-
-    def fresh_seal(value):
-        return candidate_premise.resealed_after_put_back(
-            value, backup_receipt, captures)
-
-    _reseal_reviews(fresh_seal)
+    _reseal_reviews(candidate_premise.sealer_after_put_back(backup_receipt))
 
 
 def reseal_after_own_writes(writes):
@@ -1274,8 +1289,7 @@ def _reseal_reviews(fresh_seal, admits=None):
                 candidate_premise.gap_fill_receipts(fresh))
         return {**c, "payload": payload}
 
-    upgrade_state.reseal(fresh_seal)
-    downsample_state.reseal(fresh_seal)
+    upgrade_mode.reseal_saved_reviews(fresh_seal)
     for job in job_mgr.registry.pending_and_running():
         with job._lock:
             rows = list(job.candidates)

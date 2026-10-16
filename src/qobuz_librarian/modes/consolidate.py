@@ -855,8 +855,8 @@ class _BeetsItemSeal:
             if not _no_database() or not before_matches():
                 return False, None, "the reviewed files or database changed"
             result = mutate()
-            if result is None or not result.complete:
-                return False, result, "the protected backup was incomplete"
+            if result is None:
+                return False, None, "the protected backup could not be made"
             if not _no_database() or not after_matches():
                 return False, result, "the reviewed filesystem state changed"
             return True, result, None
@@ -869,9 +869,9 @@ class _BeetsItemSeal:
                 # The recoverable copy must exist before database rows are
                 # removed.
                 result = mutate()
-                if result is None or not result.complete:
+                if result is None:
                     connection.rollback()
-                    return False, result, "the protected backup was incomplete"
+                    return False, None, "the protected backup could not be made"
                 if not self._matches(connection, after_matches):
                     raise OSError("the reviewed state changed during backup")
                 self._delete_rows(connection)

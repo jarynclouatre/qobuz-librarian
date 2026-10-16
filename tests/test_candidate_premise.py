@@ -35,6 +35,13 @@ def test_album_candidate_receipt_accepts_unchanged_and_rejects_changed_bytes(
     }
 
     assert validate(candidate) == premise
+    # New permissions on its folders change none of the album's files.
+    for folder in (album.parent, album):
+        folder.chmod(0o555)
+        try:
+            validate(candidate)
+        finally:
+            folder.chmod(0o755)
 
     # A new cover outdates the receipt, so it must also bring the artist back
     # into the next refresh, which is what rebuilds the receipt.

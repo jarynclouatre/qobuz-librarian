@@ -261,7 +261,7 @@ def _restore_jobs_once() -> bool:
                 return False
             rendering._retire_gone_recoveries(
                 job_persistence.recovery_history(strict=True))
-            finished = _settle_interrupted_upgrades()
+            finished, put_back = _settle_interrupted_upgrades()
             job_mgr.restore_jobs(
                 job_runs._RESUME_EXECUTE,
                 durable_recovery_clear=(
@@ -278,15 +278,17 @@ def _restore_jobs_once() -> bool:
                 exc,
             )
             return False
+        flows.note_upgrades_put_back(put_back)
         runtime._JOBS_RESTORED = True
         return True
 
 
-def _settle_interrupted_upgrades() -> list:
+def _settle_interrupted_upgrades() -> tuple[list, list]:
     """Finish or undo the upgrades a hard stop cut short, before the saved
-    jobs say what their runs did. Returns the album folders upgraded."""
+    jobs say what their runs did. Returns the album folders upgraded, and
+    those put back."""
     if storage._unwritable_volumes():
-        return []
+        return [], []
     try:
         if beets_db.remove_old_copies():
             _log.info("Removed the beets database copies an earlier version left.")
@@ -294,9 +296,16 @@ def _settle_interrupted_upgrades() -> list:
         finished, put_back = process_mode.finish_interrupted_upgrades()
     except Exception:
         _log.exception("couldn't settle the upgrades a hard stop cut short")
-        return []
+        return [], []
     runtime.note_restored_albums(put_back)
-    return [str(path) for path in finished]
+    return [str(path) for path in finished], put_back
+
+
+def _note_put_back(origins) -> None:
+    """Tell the dashboard and the Upgrade runs a restart cut short about
+    the albums the start-up put back."""
+    runtime.note_restored_albums(origins)
+    flows.note_upgrades_put_back(origins)
 
 
 def _watch_stop_signal(loop) -> None:
@@ -587,7 +596,7 @@ def _put_back_albums() -> None:
             if plan is None or not backup_mod.restore_upgrade_backup(
                     backup, origin, replace_partial=False):
                 continue
-            runtime.note_restored_albums([origin])
+            _note_put_back([origin])
             _log.warning(
                 "Put back %s, which an interrupted upgrade or repair had "
                 "moved to %s.", origin, path)
@@ -596,7 +605,7 @@ def _put_back_albums() -> None:
                     "The saved recovery status of %s could not be "
                     "updated.", origin)
         for origin in backup_mod.put_back_interrupted_backups():
-            runtime.note_restored_albums([origin])
+            _note_put_back([origin])
             _log.warning(
                 "Put back %s, which a hard stop had left part way into its "
                 "backup.", origin)
