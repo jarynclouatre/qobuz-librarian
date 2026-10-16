@@ -4,7 +4,6 @@ import errno
 import filecmp
 import functools
 import hashlib
-import io
 import json
 import os
 import re
@@ -20,9 +19,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.rip import flac_audio_ok
-from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library import scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
 from qobuz_librarian.recovery import (
@@ -189,144 +186,6 @@ _named_directory_matches = functools.partial(
     _named_entry_matches, directory=True)
 
 
-def _open_entry_at(parent_fd, name):
-    """Hold any exact directory entry, including a symlink, without following."""
-    descriptor = os.open(
-        os.fspath(name),
-        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
-        dir_fd=parent_fd,
-    )
-    try:
-        if not _named_entry_matches(parent_fd, name, descriptor):
-            raise OSError("entry changed while it was opened")
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
-def _rename_exact_noreplace_at(source_fd, source_name, destination_fd,
-                               destination_name, expected_fd):
-    """Move one held inode and reconcile even a post-success BaseException.
-
-    Returns an exception raised *after* the kernel completed the rename, so
-    the caller can record its forward state before rolling back or propagating
-    cancellation.  Exceptions raised before the move are re-raised directly.
-    """
-    if (
-        not _named_entry_matches(source_fd, source_name, expected_fd)
-        or not _named_entry_missing(destination_fd, destination_name)
-    ):
-        raise OSError("exact no-replace rename precondition changed")
-    deferred = None
-    try:
-        _rename_noreplace_at(
-            source_fd, source_name, destination_fd, destination_name)
-    except BaseException as exc:
-        deferred = exc
-    forward = (
-        _named_entry_missing(source_fd, source_name)
-        and _named_entry_matches(
-            destination_fd, destination_name, expected_fd)
-    )
-    if forward:
-        commit_exception = None
-        try:
-            if not _fsync_directory_fds(source_fd, destination_fd):
-                raise OSError("exact rename could not be committed")
-        except BaseException as exc:
-            commit_exception = exc
-        return deferred or commit_exception
-    # The public source may have been replaced between the precondition check
-    # and renameat2.  In that case renameat2 moved the replacement, not our
-    # held inode.  Put that exact unexpected entry back without overwrite;
-    # never absorb it into an app-owned backup.
-    if _named_entry_missing(source_fd, source_name):
-        unexpected_fd = None
-        try:
-            unexpected_fd = _open_entry_at(
-                destination_fd, destination_name)
-            rollback_exception = None
-            try:
-                _rename_noreplace_at(
-                    destination_fd,
-                    destination_name,
-                    source_fd,
-                    source_name,
-                )
-            except BaseException as exc:
-                rollback_exception = exc
-            if (
-                _named_entry_missing(
-                    destination_fd, destination_name)
-                and _named_entry_matches(
-                    source_fd, source_name, unexpected_fd)
-            ):
-                _fsync_directory_fds(source_fd, destination_fd)
-                raise OSError(
-                    "source was replaced during exact rename; the "
-                    "replacement was restored") from (
-                        deferred or rollback_exception)
-        except FileNotFoundError:
-            pass
-        finally:
-            if unexpected_fd is not None:
-                os.close(unexpected_fd)
-    unchanged = (
-        _named_entry_matches(source_fd, source_name, expected_fd)
-        and _named_entry_missing(destination_fd, destination_name)
-    )
-    if deferred is not None and unchanged:
-        raise deferred
-    raise OSError("exact rename outcome could not be reconciled") from deferred
-
-
-def _unlink_exact_at(parent_fd, name, expected_fd):
-    """Unlink one exact held regular file; return a post-success exception."""
-    if not _named_entry_matches(parent_fd, name, expected_fd):
-        raise OSError("exact unlink precondition changed")
-    deferred = None
-    try:
-        os.unlink(name, dir_fd=parent_fd)
-    except BaseException as exc:
-        deferred = exc
-    if _named_entry_missing(parent_fd, name):
-        commit_exception = None
-        try:
-            if not _fsync_directory_fds(parent_fd):
-                raise OSError("exact unlink could not be committed")
-        except BaseException as exc:
-            commit_exception = exc
-        return deferred or commit_exception
-    if deferred is not None and _named_entry_matches(
-            parent_fd, name, expected_fd):
-        raise deferred
-    raise OSError("exact unlink outcome could not be reconciled") from deferred
-
-
-def _rmdir_exact_at(parent_fd, name, expected_fd):
-    """Remove one exact empty held directory; return a post-success exception."""
-    if not _named_directory_matches(parent_fd, name, expected_fd):
-        raise OSError("exact rmdir precondition changed")
-    deferred = None
-    try:
-        os.rmdir(name, dir_fd=parent_fd)
-    except BaseException as exc:
-        deferred = exc
-    if _named_entry_missing(parent_fd, name):
-        commit_exception = None
-        try:
-            if not _fsync_directory_fds(parent_fd):
-                raise OSError("exact rmdir could not be committed")
-        except BaseException as exc:
-            commit_exception = exc
-        return deferred or commit_exception
-    if deferred is not None and _named_directory_matches(
-            parent_fd, name, expected_fd):
-        raise deferred
-    raise OSError("exact rmdir outcome could not be reconciled") from deferred
-
-
 def _open_backup_source(album_dir: Path):
     try:
         root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
@@ -398,154 +257,6 @@ def _fsync_directory_fds(*descriptors) -> bool:
     except OSError:
         return False
     return True
-
-
-def _reserve_backup_quarantine(parent_fd, prefix):
-    for _attempt in range(16):
-        name = f".{prefix}-{secrets.token_hex(16)}"
-        try:
-            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
-        except FileExistsError:
-            continue
-        quarantine_fd = None
-        try:
-            quarantine_fd = _open_backup_directory(name, dir_fd=parent_fd)
-            if not _named_directory_matches(parent_fd, name, quarantine_fd):
-                raise OSError("backup quarantine changed while it was opened")
-            if not _fsync_directory_fds(parent_fd):
-                raise OSError("backup quarantine could not be committed")
-            return name, quarantine_fd
-        except BaseException:
-            if (
-                quarantine_fd is not None
-                and _named_directory_matches(parent_fd, name, quarantine_fd)
-            ):
-                try:
-                    _rmdir_exact_at(parent_fd, name, quarantine_fd)
-                except BaseException:
-                    pass
-            if quarantine_fd is not None:
-                os.close(quarantine_fd)
-            raise
-    raise OSError("could not reserve a private backup quarantine")
-
-
-def _restore_quarantined_entry(quarantine_fd, parent_fd, name,
-                               expected_fd) -> bool:
-    if not _named_entry_missing(parent_fd, name):
-        return False
-    try:
-        # A cancellation delivered after the kernel move is reconciled as a
-        # successful rollback.  The caller will still propagate its original
-        # cancellation once the exact public entry is safe again.
-        _rename_exact_noreplace_at(
-            quarantine_fd, "held", parent_fd, name, expected_fd)
-    except BaseException:
-        return False
-    return (
-        _named_entry_matches(parent_fd, name, expected_fd)
-        and _named_entry_missing(quarantine_fd, "held")
-        and _fsync_directory_fds(quarantine_fd, parent_fd)
-    )
-
-
-def _remove_exact_tree_at(parent_fd, name, expected_fd, *, prefix,
-                          commit_guard=None, expected_snapshot=None,
-                          held_files=None) -> bool:
-    """Remove exactly one held tree, never a replacement at the same path."""
-    if not _named_directory_matches(parent_fd, name, expected_fd):
-        return False
-    snapshot = expected_snapshot or _exact_tree_snapshot(expected_fd)
-    if (
-        snapshot is None
-        or _exact_tree_snapshot(expected_fd) != snapshot
-        or held_files is not None
-        and not _held_snapshot_files_intact(
-            expected_fd, snapshot, held_files)
-    ):
-        return False
-    reserved_quarantine_name = None
-    quarantine_fd = None
-    moved = False
-    try:
-        reserved_quarantine_name, quarantine_fd = _reserve_backup_quarantine(
-            parent_fd, prefix)
-        move_exception = _rename_exact_noreplace_at(
-            parent_fd, name, quarantine_fd, "held", expected_fd)
-        moved = True
-        if move_exception is not None:
-            if _restore_quarantined_entry(
-                    quarantine_fd, parent_fd, name, expected_fd):
-                moved = False
-            raise move_exception
-        if _exact_tree_snapshot(expected_fd) != snapshot:
-            if _restore_quarantined_entry(
-                    quarantine_fd, parent_fd, name, expected_fd):
-                moved = False
-            return False
-        if commit_guard is not None:
-            try:
-                guarded = commit_guard()
-            except BaseException:
-                if _restore_quarantined_entry(
-                        quarantine_fd, parent_fd, name, expected_fd):
-                    moved = False
-                raise
-            if not guarded:
-                if _restore_quarantined_entry(
-                        quarantine_fd, parent_fd, name, expected_fd):
-                    moved = False
-                return False
-
-        deferred = _delete_exact_tree_contents(
-            expected_fd,
-            snapshot,
-            held=held_files,
-            commit_guard=commit_guard,
-        )
-        root_exception = _rmdir_exact_at(
-            quarantine_fd, "held", expected_fd)
-        moved = False
-        if not _named_directory_matches(
-                parent_fd, reserved_quarantine_name, quarantine_fd):
-            return False
-        quarantine_exception = _rmdir_exact_at(
-            parent_fd, reserved_quarantine_name, quarantine_fd)
-        reserved_quarantine_name = None
-        deferred = deferred or root_exception or quarantine_exception
-        if deferred is not None:
-            raise deferred
-        return True
-    except BaseException as exc:
-        if (
-            moved
-            and quarantine_fd is not None
-            and _restore_quarantined_entry(
-                quarantine_fd, parent_fd, name, expected_fd)
-        ):
-            moved = False
-        if isinstance(exc, (OSError, TypeError, ValueError, shutil.Error)):
-            return False
-        log.info(fmt(
-            C.YELLOW,
-            "\n  ⚠  Stopped while removing a folder."))
-        raise
-    finally:
-        if (
-            quarantine_fd is not None
-            and reserved_quarantine_name is not None
-            and not moved
-        ):
-            try:
-                _rmdir_exact_at(
-                    parent_fd, reserved_quarantine_name, quarantine_fd)
-            except BaseException:
-                pass
-        if quarantine_fd is not None:
-            try:
-                os.close(quarantine_fd)
-            except OSError:
-                pass
 
 
 def _backup_root_is_public(backup_root: Path, backup_root_fd) -> bool:
@@ -714,17 +425,6 @@ def _open_relative_directories(base_fd, parts, *, create=False):
         raise
 
 
-def _relative_directories_are_named(base_fd, parts, descriptors) -> bool:
-    if len(parts) != len(descriptors):
-        return False
-    parent_fd = base_fd
-    for part, descriptor in zip(parts, descriptors):
-        if not _named_directory_matches(parent_fd, part, descriptor):
-            return False
-        parent_fd = descriptor
-    return True
-
-
 def _open_regular_file_at(parent_fd, name):
     flags = (os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
              | os.O_NONBLOCK)
@@ -790,28 +490,11 @@ def _fidelity_fd(descriptor, *, include_times=True):
     return result
 
 
-def _copy_fidelity_fd(source_fd, destination_fd) -> None:
-    """Copy and verify ownership, permissions, times, xattrs and ACL xattrs."""
-    source = _fidelity_fd(source_fd)
-    destination = os.fstat(destination_fd)
-    if _copy_owner(destination) != (source["uid"], source["gid"]):
-        os.fchown(destination_fd, source["uid"], source["gid"])
-    os.fchmod(destination_fd, source["mode"])
-    existing = _xattrs_fd(destination_fd)
-    for name in existing.keys() - source["xattrs"].keys():
-        os.removexattr(destination_fd, name)
-    for name, value in source["xattrs"].items():
-        os.setxattr(destination_fd, name, value)
-    os.utime(
-        destination_fd,
-        ns=(source["atime_ns"], source["mtime_ns"]),
-    )
-    if _fidelity_fd(destination_fd) != source:
-        raise OSError("copied file metadata did not match its held source")
+def _tree_fidelity_snapshot(root_fd, tree):
+    """Fidelity receipt for an open folder's tree, without following links.
 
-
-def _tree_fidelity_snapshot(root_fd):
-    """Fidelity receipt for a held regular-file tree, without following links."""
+    Each file's sha256 comes from its entry in ``tree``, an
+    ``_exact_tree_snapshot``; a file that no longer matches it gives None."""
     snapshot = {"directories": {}, "files": {}}
 
     def _walk(directory_fd, prefix):
@@ -838,14 +521,19 @@ def _tree_fidelity_snapshot(root_fd):
                 finally:
                     os.close(child_fd)
             elif stat.S_ISREG(value.st_mode):
+                known = tree["files"].get(key)
                 file_fd = _open_regular_file_at(directory_fd, name)
                 try:
                     current = _fidelity_fd(file_fd, include_times=False)
+                    now = os.fstat(file_fd)
+                    if (known is None or _file_identity(now)
+                            != _fidelity_without(known, "sha256")):
+                        return False
                     current.update({
-                        "size": int(os.fstat(file_fd).st_size),
-                        "mtime_ns": int(os.fstat(file_fd).st_mtime_ns),
-                        "sha256": _file_digest_fd(file_fd),
-                        "links": int(os.fstat(file_fd).st_nlink),
+                        "size": int(now.st_size),
+                        "mtime_ns": int(now.st_mtime_ns),
+                        "sha256": known["sha256"],
+                        "links": int(now.st_nlink),
                     })
                     snapshot["files"][key] = current
                 finally:
@@ -991,26 +679,22 @@ def _path_directory_generations(descriptors):
 
 def _album_source_receipt_from_opened(public, music_root, parts, descriptors):
     album_fd = descriptors[-1]
-    identity = _exact_tree_snapshot(album_fd, digests=False)
-    if identity is None:
-        return None
-    held = None
     try:
-        held = {}
-        _hold_snapshot_files(album_fd, identity, held)
         snapshot = _exact_tree_snapshot(album_fd)
-        fidelity = _tree_fidelity_snapshot(album_fd)
-        if snapshot is None or fidelity is None:
+        if snapshot is None:
+            return None
+        fidelity = _tree_fidelity_snapshot(album_fd, snapshot)
+        if fidelity is None:
             return None
         generations = _tree_directory_generations(album_fd, snapshot)
         path_generations = _path_directory_generations(descriptors)
         if (
             not _backup_source_is_public(music_root, parts, descriptors)
-            or _exact_tree_snapshot(album_fd) != snapshot
-            or _tree_fidelity_snapshot(album_fd) != fidelity
+            or _exact_tree_snapshot(album_fd, digests=False)
+                != _tree_identity(snapshot)
+            or _tree_fidelity_snapshot(album_fd, snapshot) != fidelity
             or _tree_directory_generations(album_fd, snapshot) != generations
             or _path_directory_generations(descriptors) != path_generations
-            or not _held_snapshot_files_intact(album_fd, snapshot, held)
         ):
             return None
         return {
@@ -1023,9 +707,6 @@ def _album_source_receipt_from_opened(public, music_root, parts, descriptors):
         }
     except (OSError, TypeError, ValueError):
         return None
-    finally:
-        if held is not None:
-            _release_held_snapshot_files(held)
 
 
 def capture_album_tree_identity(album_dir):
@@ -1063,7 +744,7 @@ def capture_album_tree_identity(album_dir):
         _close_descriptors(descriptors)
 
 
-def _album_tree_identity(receipt):
+def album_tree_identity(receipt):
     """The part of an exact source receipt that capture_album_tree_identity seals."""
     return {
         "version": receipt["version"],
@@ -1072,6 +753,20 @@ def _album_tree_identity(receipt):
         "directory_generations": receipt["directory_generations"],
         "path_generations": receipt["path_generations"],
     }
+
+
+def capture_folder_generations(path):
+    """The folder at ``path`` made absolute, with the generation of each
+    folder from MUSIC_ROOT down to it, opened without following links; None
+    when it is not such a folder."""
+    opened = _open_backup_source(Path(path))
+    if opened is None:
+        return None
+    public, _music_root, _parts, descriptors = opened
+    try:
+        return public, _path_directory_generations(descriptors)
+    finally:
+        _close_descriptors(descriptors)
 
 
 def capture_music_root_identity():
@@ -1111,481 +806,6 @@ def capture_album_source_receipt(album_dir):
             public, music_root, parts, descriptors)
     finally:
         _close_descriptors(descriptors)
-
-
-def _remove_exact_file_at(parent_fd, name, expected_fd, *, prefix,
-                          commit_guard=None, before_move=None) -> bool:
-    """Unlink one held regular file through a private exact quarantine."""
-    try:
-        held = os.fstat(expected_fd)
-    except OSError:
-        return False
-    if (
-        not stat.S_ISREG(held.st_mode)
-        or not _named_entry_matches(parent_fd, name, expected_fd)
-    ):
-        return False
-    quarantine_name = None
-    quarantine_fd = None
-    moved = False
-    deferred = None
-    try:
-        quarantine_name, quarantine_fd = _reserve_backup_quarantine(
-            parent_fd, prefix)
-        if before_move is not None and not before_move():
-            return False
-        move_exception = _rename_exact_noreplace_at(
-            parent_fd, name, quarantine_fd, "held", expected_fd)
-        moved = True
-        if move_exception is not None:
-            if _restore_quarantined_entry(
-                    quarantine_fd, parent_fd, name, expected_fd):
-                moved = False
-            raise move_exception
-        if (
-            not _named_entry_missing(parent_fd, name)
-            or not _named_entry_matches(quarantine_fd, "held", expected_fd)
-        ):
-            if _restore_quarantined_entry(
-                    quarantine_fd, parent_fd, name, expected_fd):
-                moved = False
-            return False
-        if not _fsync_directory_fds(parent_fd, quarantine_fd):
-            if _restore_quarantined_entry(
-                    quarantine_fd, parent_fd, name, expected_fd):
-                moved = False
-            return False
-        if commit_guard is not None:
-            try:
-                guarded = commit_guard()
-            except Exception:
-                guarded = False
-            if not guarded:
-                if _restore_quarantined_entry(
-                        quarantine_fd, parent_fd, name, expected_fd):
-                    moved = False
-                return False
-        deferred = _unlink_exact_at(quarantine_fd, "held", expected_fd)
-        moved = False
-        if not _named_directory_matches(
-                parent_fd, quarantine_name, quarantine_fd):
-            return False
-        rmdir_exception = _rmdir_exact_at(
-            parent_fd, quarantine_name, quarantine_fd)
-        quarantine_name = None
-        if deferred is None:
-            deferred = rmdir_exception
-        if deferred is not None:
-            raise deferred
-        return True
-    except BaseException as exc:
-        if (
-            moved
-            and quarantine_fd is not None
-            and _restore_quarantined_entry(
-                quarantine_fd, parent_fd, name, expected_fd)
-        ):
-            moved = False
-        if isinstance(exc, (OSError, TypeError, ValueError, shutil.Error)):
-            return False
-        raise
-    finally:
-        if (
-            quarantine_fd is not None
-            and quarantine_name is not None
-            and not moved
-        ):
-            try:
-                _rmdir_exact_at(parent_fd, quarantine_name, quarantine_fd)
-            except BaseException:
-                pass
-        if quarantine_fd is not None:
-            try:
-                os.close(quarantine_fd)
-            except OSError:
-                pass
-
-
-class _CopyPublication:
-    """Caller-owned resources for one no-replace copy publication.
-
-    The caller creates this object before invoking the copy helper.  The
-    helper installs the held inode here before its first namespace
-    publication, so an asynchronous exception at the helper return boundary
-    cannot orphan an unowned descriptor, lease, or published name.
-    """
-
-    def __init__(self, destination_parent_fd, destination_name):
-        self.destination_parent_fd = destination_parent_fd
-        self.destination_name = destination_name
-        self.temporary_name = None
-        self._file = None
-        self._lease = None
-        self._locations = [
-            (destination_parent_fd, destination_name),
-        ]
-        self.committed = False
-        self.cleanup_exception = None
-        self._digest = None
-
-    @property
-    def descriptor(self):
-        if self._file is None or self._file.closed:
-            return None
-        return self._file.fileno()
-
-    @property
-    def lease(self):
-        return self._lease
-
-    def reserve_temporary(self, temporary_name) -> None:
-        self.temporary_name = temporary_name
-        self.add_location(self.destination_parent_fd, temporary_name)
-
-    def clear_temporary_reservation(self, temporary_name) -> None:
-        if self._file is not None or self.temporary_name != temporary_name:
-            return
-        self.temporary_name = None
-        try:
-            self._locations.remove(
-                (self.destination_parent_fd, temporary_name))
-        except ValueError:
-            pass
-
-    def add_location(self, parent_fd, name) -> None:
-        location = (parent_fd, name)
-        if location not in self._locations:
-            self._locations.append(location)
-
-    def bind_file(self, file_object, temporary_name) -> None:
-        # Classify the namespace before the final ownership-transfer store.
-        # Until ``_file`` is assigned the helper still owns and cleans the
-        # FileIO object; after it is assigned this object has every fact needed
-        # to reconcile the exact private name.
-        self.reserve_temporary(temporary_name)
-        self._file = file_object
-
-    def release_file(self) -> None:
-        file_object = self._file
-        if file_object is None:
-            return
-        try:
-            file_object.close()
-        finally:
-            if file_object.closed:
-                self._file = None
-
-    def bind_lease(self, lease) -> None:
-        self._lease = lease
-
-    def remember_digest(self, digest, read_ns) -> None:
-        """Serve the copy's digest, read under the lease, while it holds."""
-        self._digest = _remember_held_digest(
-            _regular_file_receipt(self.descriptor, digest),
-            self._lease, read_ns, self.descriptor)
-
-    def owns_file(self, file_object) -> bool:
-        return self._file is file_object
-
-    def matches(self, parent_fd, name) -> bool:
-        descriptor = self.descriptor
-        return (
-            descriptor is not None
-            and _named_entry_matches(parent_fd, name, descriptor)
-        )
-
-    def intact(self) -> bool:
-        return (
-            self.descriptor is not None
-            and self._lease is not None
-            and self._lease.intact()
-        )
-
-    def reconcile_private_cleanup(self) -> bool:
-        """Durably remove only this exact still-private temporary name."""
-        descriptor = self.descriptor
-        if self.temporary_name is None:
-            return self.cleanup_exception is None
-        if descriptor is None:
-            if (
-                _named_entry_missing(
-                    self.destination_parent_fd, self.temporary_name)
-                and _fsync_directory_fds(self.destination_parent_fd)
-            ):
-                self.cleanup_exception = None
-                return True
-            self.cleanup_exception = OSError(
-                "reserved private copy name could not be reconciled exactly")
-            return False
-        if self.matches(
-                self.destination_parent_fd, self.destination_name):
-            return False
-        self.cleanup_exception = OSError(
-            "private copy cleanup has not been durably reconciled")
-        if self.matches(
-                self.destination_parent_fd, self.temporary_name):
-            if _remove_exact_file_at(
-                    self.destination_parent_fd,
-                    self.temporary_name,
-                    descriptor,
-                    prefix="ql-copy-cleanup",
-            ):
-                self.cleanup_exception = None
-                return True
-        if (
-            _named_entry_missing(
-                self.destination_parent_fd, self.temporary_name)
-            and _fsync_directory_fds(self.destination_parent_fd)
-        ):
-            # A failed unlink parent-fsync is uncertain, not success.  This
-            # explicit second durability gate is what resolves that state;
-            # otherwise the caller keeps its recovery tree/receipt path.
-            self.cleanup_exception = None
-            return True
-        return False
-
-    def close(self) -> None:
-        lease = self._lease
-        file_object = self._file
-        _forget_held_digest(self._digest)
-        self._digest = None
-        try:
-            if lease is not None:
-                lease.close()
-                self._lease = None
-        finally:
-            if file_object is not None:
-                try:
-                    file_object.close()
-                finally:
-                    if file_object.closed:
-                        self._file = None
-
-
-def _release_copy_publication(publication) -> None:
-    """Reconcile a private temp, then release its stable held resources."""
-    try:
-        publication.reconcile_private_cleanup()
-    finally:
-        publication.close()
-
-
-def _copy_file_noreplace_at(source_fd, publication):
-    """Durably copy one held file into a private directory without overwrite.
-
-    The caller-owned ``publication`` receives the read-only descriptor and
-    its change check before the namespace commit.  Only the digest is
-    returned, closing the CALL-to-STORE ownership gap at every caller.
-    """
-    destination_parent_fd = publication.destination_parent_fd
-    destination_name = publication.destination_name
-    source_value = os.fstat(source_fd)
-    if not stat.S_ISREG(source_value.st_mode):
-        raise OSError("backup source is not a regular file")
-    source_digest = _file_digest_fd(source_fd)
-    source_fidelity = _fidelity_fd(source_fd, include_times=False)
-    source_mtime_ns = int(os.fstat(source_fd).st_mtime_ns)
-    temporary_name = None
-    writable_file = None
-    destination_file = None
-    destination_lease = None
-    published = False
-    try:
-        for _ in range(16):
-            temporary_name = f".ql-copy-{secrets.token_hex(16)}"
-            publication.reserve_temporary(temporary_name)
-            try:
-                writable_file = io.FileIO(
-                    temporary_name,
-                    "x+b",
-                    opener=lambda path, flags: os.open(
-                        path,
-                        flags | os.O_NOFOLLOW | os.O_CLOEXEC,
-                        0o600,
-                        dir_fd=destination_parent_fd,
-                    ),
-                )
-                publication.bind_file(writable_file, temporary_name)
-                if publication.owns_file(writable_file):
-                    writable_file = None
-                break
-            except FileExistsError:
-                publication.clear_temporary_reservation(temporary_name)
-                temporary_name = None
-        if publication.descriptor is None or temporary_name is None:
-            raise OSError("could not reserve a private backup file")
-
-        writable_fd = publication.descriptor
-        offset = 0
-        while True:
-            chunk = os.pread(source_fd, 1024 * 1024, offset)
-            if not chunk:
-                break
-            written = 0
-            while written < len(chunk):
-                count = os.write(writable_fd, chunk[written:])
-                if count <= 0:
-                    raise OSError("backup copy made no write progress")
-                written += count
-            offset += len(chunk)
-        _copy_fidelity_fd(source_fd, writable_fd)
-        os.fsync(writable_fd)
-        if (
-            _file_digest_fd(source_fd) != source_digest
-            or _fidelity_fd(source_fd, include_times=False) != source_fidelity
-            or _fidelity_fd(
-                writable_fd, include_times=False) != source_fidelity
-            or int(os.fstat(source_fd).st_mtime_ns) != source_mtime_ns
-            or int(os.fstat(writable_fd).st_mtime_ns) != source_mtime_ns
-            or os.fstat(writable_fd).st_nlink != 1
-        ):
-            raise OSError("backup copy did not faithfully match its held source")
-
-        destination_file = io.FileIO(
-            temporary_name,
-            "rb",
-            opener=lambda path, flags: os.open(
-                path,
-                flags | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=destination_parent_fd,
-            ),
-        )
-        destination_fd = destination_file.fileno()
-        if not _same_entry(
-                os.fstat(destination_fd), os.fstat(writable_fd)):
-            raise OSError("private backup inode changed while reopened")
-        publication.release_file()
-        publication.bind_file(destination_file, temporary_name)
-        if publication.owns_file(destination_file):
-            destination_file = None
-        destination_lease = acquire_inode_write_exclusion(
-            publication.descriptor)
-        if destination_lease is None or not destination_lease.intact():
-            raise OSError("private backup copy changed since it was checked")
-        publication.bind_lease(destination_lease)
-        if publication.lease is destination_lease:
-            destination_lease = None
-        read_ns = time.time_ns()
-        if (
-            _file_digest_fd(publication.descriptor) != source_digest
-            or _file_digest_fd(source_fd) != source_digest
-            or _fidelity_fd(source_fd, include_times=False) != source_fidelity
-            or _fidelity_fd(
-                publication.descriptor,
-                include_times=False) != source_fidelity
-            or int(os.fstat(source_fd).st_mtime_ns) != source_mtime_ns
-            or int(os.fstat(
-                publication.descriptor).st_mtime_ns) != source_mtime_ns
-            or os.fstat(publication.descriptor).st_nlink != 1
-        ):
-            raise OSError("backup copy changed before publication")
-        deferred = _rename_exact_noreplace_at(
-            destination_parent_fd,
-            temporary_name,
-            destination_parent_fd,
-            destination_name,
-            publication.descriptor,
-        )
-        published = True
-        if deferred is not None:
-            raise deferred
-        if (
-            not _named_entry_missing(destination_parent_fd, temporary_name)
-            or not _named_entry_matches(
-                destination_parent_fd, destination_name, destination_fd)
-            or not _fsync_directory_fds(destination_parent_fd)
-            or not publication.intact()
-        ):
-            raise OSError("backup copy could not be committed safely")
-        publication.committed = True
-        publication.remember_digest(source_digest, read_ns)
-        return source_digest
-    except BaseException as exc:
-        if (
-            destination_file is not None
-            and publication.owns_file(destination_file)
-        ):
-            destination_file = None
-        if publication.matches(
-                destination_parent_fd, destination_name):
-            reconciled_publication = False
-            try:
-                reconciled_publication = (
-                    publication.intact()
-                    and _file_digest_fd(publication.descriptor)
-                        == source_digest
-                    and _file_digest_fd(source_fd) == source_digest
-                    and _fidelity_fd(
-                        source_fd, include_times=False) == source_fidelity
-                    and _fidelity_fd(
-                        publication.descriptor,
-                        include_times=False) == source_fidelity
-                    and int(os.fstat(source_fd).st_mtime_ns)
-                        == source_mtime_ns
-                    and int(os.fstat(
-                        publication.descriptor).st_mtime_ns)
-                        == source_mtime_ns
-                    and os.fstat(publication.descriptor).st_nlink == 1
-                    and _named_entry_missing(
-                        destination_parent_fd, temporary_name)
-                    and _fsync_directory_fds(destination_parent_fd)
-                )
-            except (OSError, TypeError, ValueError):
-                reconciled_publication = False
-            if reconciled_publication:
-                publication.committed = True
-                if isinstance(exc, (OSError, TypeError, ValueError)):
-                    return source_digest
-            raise
-        if destination_file is not None:
-            destination_fd = destination_file.fileno()
-            candidate = destination_name if published else temporary_name
-            if (
-                candidate is not None
-                and _named_entry_matches(
-                    destination_parent_fd, candidate, destination_fd)
-                and (
-                    not published
-                    or destination_lease is not None
-                    and destination_lease.intact()
-                )
-            ):
-                try:
-                    cleanup_exception = _unlink_exact_at(
-                        destination_parent_fd, candidate, destination_fd)
-                    if publication.cleanup_exception is None:
-                        publication.cleanup_exception = cleanup_exception
-                except BaseException:
-                    pass
-        elif publication.descriptor is not None:
-            # Once the exact final name exists it is preserved.  Removing it
-            # and then losing the parent-fsync result could resurrect an
-            # unreceipted public copy after a crash.  Callers can now bind the
-            # exact inode into their existing recovery/receipt path.
-            if not publication.matches(
-                    destination_parent_fd, destination_name):
-                try:
-                    publication.reconcile_private_cleanup()
-                except BaseException:
-                    pass
-        if destination_lease is not None:
-            destination_lease.close()
-        if destination_file is not None:
-            destination_file.close()
-        if writable_file is not None:
-            writable_fd = writable_file.fileno()
-            if (
-                temporary_name is not None
-                and _named_entry_matches(
-                    destination_parent_fd, temporary_name, writable_fd)
-            ):
-                try:
-                    _unlink_exact_at(
-                        destination_parent_fd, temporary_name, writable_fd)
-                except BaseException:
-                    pass
-            writable_file.close()
-        raise
 
 
 def _scan_backup_tree(root_fd):
@@ -1654,15 +874,11 @@ def _open_tree_file(root_fd, relative):
 def _snapshot_file(directory_fd, name):
     descriptor = _open_regular_file_at(directory_fd, name)
     try:
-        receipt = _regular_file_receipt(
-            descriptor, _file_digest_fd(descriptor))
-        return {
-            "identity": list(receipt["identity"]),
-            "size": receipt["size"],
-            "mtime_ns": receipt["mtime_ns"],
-            "changed_ns": receipt["changed_ns"],
-            "sha256": receipt["sha256"],
-        }
+        identity = _file_identity(os.fstat(descriptor))
+        digest = _file_digest_fd(descriptor)
+        if _file_identity(os.fstat(descriptor)) != identity:
+            raise OSError(errno.EAGAIN, "file changed while it was read")
+        return {**identity, "sha256": digest}
     finally:
         os.close(descriptor)
 
@@ -1674,10 +890,6 @@ def _file_identity(value):
         "mtime_ns": int(value.st_mtime_ns),
         "changed_ns": int(value.st_ctime_ns),
     }
-
-
-def _tree_has_digests(snapshot) -> bool:
-    return all("sha256" in value for value in snapshot["files"].values())
 
 
 def _tree_identity(snapshot):
@@ -1850,23 +1062,14 @@ def _receipt_matches_ignoring_ctime(current, expected) -> bool:
     )
 
 
-def _run_backup_sigint_deferred(callback):
-    """Defer Ctrl-C only across one raw-resource adoption."""
-    return run_sigint_deferred(
-        callback, detail="interrupt-safe snapshot access is unavailable")
-
-
-# Digests read while this process holds the file open. While its inode,
-# size and times are unchanged, reading it again would only return the same
-# digest.
-_HELD_DIGESTS = {}
 # Digests of files whose ctime was already older than the filesystem's
-# timestamp granularity when they were read. A later write, or a new file on
-# the reused inode number, moves the ctime, so these stay good after the file
-# is closed while the size and times match. A ctime on a
-# whole second may come from a filesystem that keeps only seconds. Only
-# local Linux filesystems keep a ctime no one can set: FAT and exFAT keep
-# none on disk, and FUSE and network mounts report whatever they are given.
+# timestamp granularity when they were read, and that did not change while
+# they were read. A later write, or a new file on the reused inode number,
+# moves the ctime, so these stay good after the file is closed while the
+# size and times match. A ctime on a whole second may come from a
+# filesystem that keeps only seconds. Only local Linux filesystems keep a
+# ctime no one can set: FAT and exFAT keep none on disk, and FUSE and
+# network mounts report whatever they are given.
 _SETTLED_DIGESTS = {}
 _SETTLED_DIGESTS_LIMIT = 16384
 _SETTLED_NS = 50_000_000
@@ -1874,37 +1077,28 @@ _SETTLED_WHOLE_SECOND_NS = 2_000_000_000
 
 
 def _file_digest_fd(descriptor):
+    read_ns = time.time_ns()
     value = os.fstat(descriptor)
     times = (int(value.st_size), int(value.st_mtime_ns), int(value.st_ctime_ns))
     key = (int(value.st_dev), int(value.st_ino))
-    for held in _HELD_DIGESTS.get(key, ()):
-        if held["times"] == times and held["lease"].intact():
-            return held["sha256"]
     settled = _SETTLED_DIGESTS.get(key)
     if settled is not None and settled[0] == times:
         return settled[1]
-    return _read_file_digest_fd(descriptor)
-
-
-def _remember_held_digest(snapshot, lease, read_ns, descriptor):
-    _type, device, inode = snapshot["identity"]
-    entry = {
-        "lease": lease,
-        "times": (snapshot["size"], snapshot["mtime_ns"],
-                  snapshot["changed_ns"]),
-        "sha256": snapshot["sha256"],
-    }
-    _HELD_DIGESTS.setdefault((device, inode), []).append(entry)
-    if read_ns is None:
-        return (device, inode), entry
-    changed = snapshot["changed_ns"]
+    digest = _read_file_digest_fd(descriptor)
+    after = os.fstat(descriptor)
+    changed = times[2]
     settle = (_SETTLED_WHOLE_SECOND_NS if changed % 1_000_000_000 == 0
               else _SETTLED_NS)
-    if changed < read_ns - settle and _keeps_own_ctime(descriptor):
+    if (
+        (int(after.st_size), int(after.st_mtime_ns),
+         int(after.st_ctime_ns)) == times
+        and changed < read_ns - settle
+        and _keeps_own_ctime(descriptor)
+    ):
         if len(_SETTLED_DIGESTS) >= _SETTLED_DIGESTS_LIMIT:
             _SETTLED_DIGESTS.clear()
-        _SETTLED_DIGESTS[(device, inode)] = (entry["times"], entry["sha256"])
-    return (device, inode), entry
+        _SETTLED_DIGESTS[key] = (times, digest)
+    return digest
 
 
 # Local filesystems: every write to a file there changes its ctime.
@@ -1950,318 +1144,6 @@ def _keeps_own_ctime(descriptor) -> bool:
     if fstatfs(descriptor, ctypes.byref(value)):
         return False
     return (int(value.f_type) & 0xFFFFFFFF) in _LOCAL_FILESYSTEM_MAGIC
-
-
-def _forget_held_digest(remembered) -> None:
-    if remembered is None:
-        return
-    key, entry = remembered
-    entries = _HELD_DIGESTS.get(key, [])
-    if entry in entries:
-        entries.remove(entry)
-    if not entries:
-        _HELD_DIGESTS.pop(key, None)
-
-
-def _hold_snapshot_files(root_fd, snapshot, held, *, sealed=False):
-    """Hold every exact regular file in a snapshot and watch it for writes.
-
-    Each file is read once, after it is held, and that digest serves every
-    later check while the file stays unwritten, or for a settled file
-    while its size and times are unchanged. A snapshot taken with
-    ``digests=False`` is matched on everything but the digest. With
-    ``sealed``, a file on a local filesystem whose inode, size and times
-    still equal the snapshot's keeps the snapshot's digest unread.
-    """
-    if type(held) is not dict or held:
-        raise ValueError("snapshot file owner must be an empty dictionary")
-    try:
-        for relative_text, expected in snapshot["files"].items():
-            relative = tuple(PurePosixPath(relative_text).parts)
-            item = {
-                "relative": relative,
-                "parents": [],
-                "parent_fd": root_fd,
-                "descriptor": None,
-                "lease": None,
-            }
-
-            def open_and_adopt():
-                parents, parent_fd, descriptor = _open_tree_file(
-                    root_fd, relative)
-                item.update({
-                    "relative": relative,
-                    "parents": parents,
-                    "parent_fd": parent_fd,
-                    "descriptor": descriptor,
-                })
-                held[relative_text] = item
-
-            _run_backup_sigint_deferred(open_and_adopt)
-
-            def acquire_and_adopt():
-                item["lease"] = acquire_inode_write_exclusion(
-                    item["descriptor"])
-
-            _run_backup_sigint_deferred(acquire_and_adopt)
-            lease = item["lease"]
-            if lease is None or not lease.intact():
-                raise OSError("snapshotted file changed since it was checked")
-            read_ns = time.time_ns()
-            current = None
-            if (sealed and "sha256" in expected
-                    and _keeps_own_ctime(item["descriptor"])):
-                identity = _file_identity(os.fstat(item["descriptor"]))
-                if identity == _fidelity_without(expected, "sha256"):
-                    current = {**identity, "sha256": expected["sha256"]}
-                    read_ns = None
-            if current is None:
-                current = _snapshot_file(item["parent_fd"], relative[-1])
-            if (current if "sha256" in expected
-                    else _fidelity_without(current, "sha256")) != expected:
-                raise OSError("snapshotted file changed before exclusion")
-            item["digest"] = _remember_held_digest(
-                current, lease, read_ns, item["descriptor"])
-        current = _exact_tree_snapshot(root_fd)
-        if (current if current is None or _tree_has_digests(snapshot)
-                else _tree_identity(current)) != snapshot:
-            raise OSError("tree changed while its files were opened")
-        return held
-    except BaseException as exc:
-        try:
-            _release_held_snapshot_files(held)
-        except BaseException as cleanup_exc:
-            if not isinstance(cleanup_exc, Exception):
-                cleanup_exc.add_note(
-                    f"snapshot hold also failed: {exc}")
-                raise
-            exc.add_note(
-                f"snapshot hold cleanup also failed: {cleanup_exc}")
-        raise
-
-
-def _release_held_snapshot_files_uninterruptibly(held) -> None:
-    error = None
-
-    def remember(candidate):
-        nonlocal error
-        if error is None or (
-            isinstance(error, Exception)
-            and not isinstance(candidate, Exception)
-        ):
-            error = candidate
-
-    while held:
-        _relative, item = held.popitem()
-        publication = item.get("publication")
-        item["publication"] = None
-        lease = item.get("lease")
-        item["lease"] = None
-        _forget_held_digest(item.pop("digest", None))
-        descriptor = item.get("descriptor")
-        item["descriptor"] = None
-        parents = item.get("parents")
-        item["parents"] = []
-
-        if publication is not None:
-            try:
-                _release_copy_publication(publication)
-            except BaseException as exc:
-                remember(exc)
-        else:
-            if lease is not None:
-                try:
-                    lease.close()
-                except BaseException as exc:
-                    remember(exc)
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except BaseException as exc:
-                    remember(exc)
-        if isinstance(parents, list):
-            while parents:
-                parent = parents.pop()
-                try:
-                    os.close(parent)
-                except BaseException as exc:
-                    remember(exc)
-
-    if error is not None:
-        raise error.with_traceback(error.__traceback__)
-
-
-def _release_held_snapshot_files(held) -> None:
-    """Retire every held resource without losing ownership to Ctrl-C."""
-    active = sys.exception()
-    try:
-        _run_backup_sigint_deferred(
-            lambda: _release_held_snapshot_files_uninterruptibly(held))
-    except BaseException as cleanup_exc:
-        if (
-            active is not None
-            and not isinstance(active, Exception)
-            and isinstance(cleanup_exc, Exception)
-        ):
-            active.add_note(
-                f"snapshot cleanup also failed: {cleanup_exc}")
-            return
-        raise
-
-
-def _held_snapshot_files_intact(root_fd, snapshot, held) -> bool:
-    if set(held) != set(snapshot["files"]):
-        return False
-    for relative_text, expected in snapshot["files"].items():
-        item = held[relative_text]
-        if (
-            not item["lease"].intact()
-            or not _relative_directories_are_named(
-                root_fd, item["relative"][:-1], item["parents"])
-            or not _named_entry_matches(
-                item["parent_fd"],
-                item["relative"][-1],
-                item["descriptor"],
-            )
-        ):
-            return False
-        try:
-            if _snapshot_file(
-                    item["parent_fd"], item["relative"][-1]) != expected:
-                return False
-        except OSError:
-            return False
-    return True
-
-
-def _fsync_exact_tree(root_fd, snapshot=None, held=None) -> bool:
-    """Durably flush one exact held tree, including every payload inode."""
-    snapshot = snapshot or _exact_tree_snapshot(root_fd)
-    if snapshot is None:
-        return False
-    local_held = None
-    try:
-        if held is None:
-            local_held = {}
-            _hold_snapshot_files(root_fd, snapshot, local_held)
-            held = local_held
-        if not _held_snapshot_files_intact(root_fd, snapshot, held):
-            return False
-        for item in held.values():
-            try:
-                os.fsync(item["descriptor"])
-            except OSError:
-                return False
-        for relative_text in sorted(
-                snapshot["directories"], key=lambda value: value.count("/"),
-                reverse=True):
-            relative = tuple(PurePosixPath(relative_text).parts)
-            parents = _open_relative_directories(root_fd, relative, create=False)
-            try:
-                directory_fd = parents[-1]
-                if (
-                    list(_entry_identity(os.fstat(directory_fd)))
-                        != snapshot["directories"][relative_text]
-                    or not _fsync_directory_fds(directory_fd)
-                ):
-                    return False
-            finally:
-                _close_descriptors(parents)
-        return (
-            _held_snapshot_files_intact(root_fd, snapshot, held)
-            and _fsync_directory_fds(root_fd)
-        )
-    except (OSError, TypeError, ValueError):
-        return False
-    finally:
-        if local_held is not None:
-            _release_held_snapshot_files(local_held)
-
-
-def _delete_exact_tree_contents(root_fd, snapshot, *, held=None,
-                                commit_guard=None):
-    """Delete only entries named by an already-verified exact snapshot."""
-    if (
-        _exact_tree_snapshot(root_fd) != snapshot
-        or held is not None
-        and not _held_snapshot_files_intact(root_fd, snapshot, held)
-    ):
-        raise OSError("tree changed before exact disposal")
-    deferred = None
-    unlinked_identities = set()
-    for relative_text, expected in sorted(
-            snapshot["files"].items(),
-            key=lambda item: (item[0].count("/"), item[0]),
-            reverse=True):
-        relative = tuple(PurePosixPath(relative_text).parts)
-        item = held.get(relative_text) if held is not None else None
-        parents = []
-        descriptor = None
-        try:
-            if item is None:
-                parents = _open_relative_directories(
-                    root_fd, relative[:-1], create=False)
-                parent_fd = parents[-1] if parents else root_fd
-                descriptor = _open_regular_file_at(parent_fd, relative[-1])
-            else:
-                parent_fd = item["parent_fd"]
-                descriptor = item["descriptor"]
-                if not item["lease"].intact():
-                    raise OSError("file changed during exact disposal")
-            current = _snapshot_file(parent_fd, relative[-1])
-            identity = tuple(expected["identity"])
-            hardlink_ctime_only = (
-                identity in unlinked_identities
-                and {
-                    key: value for key, value in current.items()
-                    if key != "changed_ns"
-                } == {
-                    key: value for key, value in expected.items()
-                    if key != "changed_ns"
-                }
-            )
-            if current != expected and not hardlink_ctime_only:
-                raise OSError("file changed during exact disposal")
-            if commit_guard is not None and not commit_guard():
-                raise OSError("replacement proof changed during exact disposal")
-            unlink_exception = _unlink_exact_at(
-                parent_fd, relative[-1], descriptor)
-            unlinked_identities.add(identity)
-            if deferred is None:
-                deferred = unlink_exception
-        finally:
-            if descriptor is not None and item is None:
-                os.close(descriptor)
-            _close_descriptors(parents)
-
-    for relative_text, expected_identity in sorted(
-            snapshot["directories"].items(),
-            key=lambda item: (item[0].count("/"), item[0]),
-            reverse=True):
-        relative = tuple(PurePosixPath(relative_text).parts)
-        parents = _open_relative_directories(
-            root_fd, relative[:-1], create=False)
-        parent_fd = parents[-1] if parents else root_fd
-        directory_fd = None
-        try:
-            directory_fd = _open_backup_directory(
-                relative[-1], dir_fd=parent_fd)
-            if (
-                list(_entry_identity(os.fstat(directory_fd)))
-                    != expected_identity
-                or not _named_directory_matches(
-                    parent_fd, relative[-1], directory_fd)
-            ):
-                raise OSError("directory changed during exact disposal")
-            rmdir_exception = _rmdir_exact_at(
-                parent_fd, relative[-1], directory_fd)
-            if deferred is None:
-                deferred = rmdir_exception
-        finally:
-            if directory_fd is not None:
-                os.close(directory_fd)
-            _close_descriptors(parents)
-    return deferred
 
 
 def _file_digest(path: Path) -> str:
@@ -2434,12 +1316,13 @@ _OPTIONAL_RECEIPT_MARKERS = (
 
 def _write_backup_receipt(directory_fd, origin, *, kind, complete,
                           requested, backed_up, source_receipt=None,
-                          owner=None):
+                          owner=None, sealed=None):
     if not _named_entry_missing(directory_fd, _RECEIPT_SIDECAR):
         return None
     tree = _exact_tree_snapshot(
         directory_fd,
         ignore_root_names=(_RECEIPT_SIDECAR, *_OPTIONAL_RECEIPT_MARKERS),
+        sealed=sealed,
     )
     if tree is None:
         return None
@@ -2503,13 +1386,9 @@ def _write_backup_receipt(directory_fd, origin, *, kind, complete,
                 directory_fd, _RECEIPT_SIDECAR, descriptor)
         ):
             try:
-                _remove_exact_file_at(
-                    directory_fd,
-                    _RECEIPT_SIDECAR,
-                    descriptor,
-                    prefix="ql-receipt-remove",
-                )
-            except BaseException:
+                os.unlink(_RECEIPT_SIDECAR, dir_fd=directory_fd)
+                fsync_dirs(directory_fd)
+            except OSError:
                 pass
         if not isinstance(
                 exc,
@@ -2869,14 +1748,17 @@ def _read_backup_receipt(directory_fd):
 
 
 def _seal_backup_result(path, directory_fd, origin, *, kind, complete,
-                        requested, backed_up, source_receipt=None, owner=None):
+                        requested, backed_up, source_receipt=None, owner=None,
+                        folder=None):
+    """Flush the backup to disk and write its receipt. ``folder`` is where
+    the backup is while it is still being copied, else ``path``."""
     durable_snapshot = _exact_tree_snapshot(
         directory_fd,
         ignore_root_names=(_RECEIPT_SIDECAR, *_OPTIONAL_RECEIPT_MARKERS),
     )
     if (
         durable_snapshot is None
-        or not _fsync_exact_tree(directory_fd)
+        or not fsync_tree(path if folder is None else folder)
     ):
         return BackupResult(
             Path(path),
@@ -2894,6 +1776,7 @@ def _seal_backup_result(path, directory_fd, origin, *, kind, complete,
         backed_up=backed_up,
         source_receipt=source_receipt,
         owner=owner,
+        sealed=durable_snapshot,
     )
     return BackupResult(
         Path(path),
@@ -3627,99 +2510,6 @@ def _canonical_receipt(receipt):
     return value if isinstance(value, dict) else None
 
 
-def _album_proof_is_intact(proof) -> bool:
-    try:
-        root_fd = proof["descriptors"][-1]
-        snapshot = proof["receipt"]["tree"]
-        return (
-            _backup_source_is_public(
-                proof["music_root"],
-                proof["parts"],
-                proof["descriptors"],
-            )
-            and _exact_tree_snapshot(root_fd) == snapshot
-            and _serializable_tree_fidelity(
-                _tree_fidelity_snapshot(root_fd)
-            ) == proof["receipt"]["fidelity"]
-            and _tree_directory_generations(
-                root_fd, snapshot
-            ) == proof["receipt"]["directory_generations"]
-            and _path_directory_generations(
-                proof["descriptors"]
-            ) == proof["receipt"]["path_generations"]
-            and _held_snapshot_files_intact(
-                root_fd, snapshot, proof["held"])
-        )
-    except (OSError, TypeError, ValueError):
-        return False
-
-
-def _hold_album_proof(path, expected_receipt):
-    """Bind a public album receipt and hold every file it names."""
-    expected = _canonical_receipt(expected_receipt)
-    if expected is None:
-        return None
-    opened = _open_backup_source(Path(path))
-    if opened is None:
-        return None
-    public, music_root, parts, descriptors = opened
-    held = None
-    try:
-        root_fd = descriptors[-1]
-        identity = _exact_tree_snapshot(root_fd, digests=False)
-        if identity is None:
-            raise OSError("replacement tree could not be read")
-        held = {}
-        _hold_snapshot_files(root_fd, identity, held)
-        snapshot = _exact_tree_snapshot(root_fd)
-        fidelity = _tree_fidelity_snapshot(root_fd)
-        if snapshot is None or fidelity is None:
-            raise OSError("replacement tree could not be sealed")
-        current = {
-            "version": 1,
-            "origin": os.fspath(public),
-            "tree": snapshot,
-            "fidelity": _serializable_tree_fidelity(fidelity),
-            "directory_generations": _tree_directory_generations(
-                root_fd, snapshot),
-            "path_generations": _path_directory_generations(descriptors),
-        }
-        if current != expected:
-            raise OSError("replacement receipt no longer matches")
-        proof = {
-            "public": public,
-            "music_root": music_root,
-            "parts": parts,
-            "descriptors": descriptors,
-            "held": held,
-            "receipt": expected,
-        }
-        if (
-            not _album_proof_is_intact(proof)
-            or not _fsync_exact_tree(root_fd, snapshot, held)
-            or not _album_proof_is_intact(proof)
-        ):
-            raise OSError("replacement could not be held durably")
-        return proof
-    except (OSError, TypeError, ValueError):
-        if held is not None:
-            _release_held_snapshot_files(held)
-        _close_descriptors(descriptors)
-        return None
-    except BaseException:
-        if held is not None:
-            _release_held_snapshot_files(held)
-        _close_descriptors(descriptors)
-        raise
-
-
-def _release_album_proof(proof) -> None:
-    if proof is None:
-        return
-    _release_held_snapshot_files(proof["held"])
-    _close_descriptors(proof["descriptors"])
-
-
 def _authorised_disposal_remainder_snapshot(
         directory_fd, current, persisted, receipt):
     """Extend authority only for later receipt-owned optional markers."""
@@ -3826,7 +2616,7 @@ def _proven_redundant(folder, backup_path, replacement_path,
         replacement_now = capture_album_tree_identity(replacement)
         if (
             replacement_now is None
-            or replacement_now != _album_tree_identity(
+            or replacement_now != album_tree_identity(
                 expected_replacement_receipt)
             or snapshot_tree(folder) != snapshot
             or not fsync_tree(replacement)
@@ -3956,79 +2746,13 @@ def _companion_relative_parts(value):
     return parts
 
 
-def _snapshot_file_from_descriptor(descriptor):
-    receipt = _regular_file_receipt(
-        descriptor, _file_digest_fd(descriptor))
-    return {
-        "identity": list(receipt["identity"]),
-        "size": receipt["size"],
-        "mtime_ns": receipt["mtime_ns"],
-        "changed_ns": receipt["changed_ns"],
-        "sha256": receipt["sha256"],
-    }
-
-
-def _cleanup_companion_workspace(parent_fd, name, workspace_fd,
-                                 snapshot=None) -> bool:
-    try:
-        if snapshot is None:
-            snapshot = _exact_tree_snapshot(workspace_fd)
-        if snapshot is None:
-            return False
-        held = {}
-        _hold_snapshot_files(workspace_fd, snapshot, held)
-        try:
-            return _remove_exact_tree_at(
-                parent_fd,
-                name,
-                workspace_fd,
-                prefix="ql-companion-workspace-cleanup",
-                expected_snapshot=snapshot,
-                held_files=held,
-            )
-        finally:
-            _release_held_snapshot_files(held)
-    except (OSError, TypeError, ValueError, shutil.Error):
-        return False
-
-
-def _remove_copy_temps(proof) -> bool:
-    """Unlink the copy temp files a hard stop left in a held album."""
-    held = proof["held"]
-    leftovers = {
-        relative_text: held.pop(relative_text)
-        for relative_text, item in list(held.items())
-        if re.fullmatch(r"\.ql-copy-[0-9a-f]{32}", item["relative"][-1])
-        and os.fstat(item["descriptor"]).st_nlink == 1
-    }
-    if not leftovers:
-        return True
-    try:
-        for item in leftovers.values():
-            deferred = _unlink_exact_at(
-                item["parent_fd"], item["relative"][-1], item["descriptor"])
-            if deferred is not None:
-                raise deferred
-    finally:
-        _release_held_snapshot_files(leftovers)
-    proof["receipt"] = _canonical_receipt(_album_source_receipt_from_opened(
-        proof["public"],
-        proof["music_root"],
-        proof["parts"],
-        proof["descriptors"],
-    ))
-    return proof["receipt"] is not None and _album_proof_is_intact(proof)
-
-
-def _remove_earlier_carry_folder(backup_fd, receipt, proof, album_receipt,
-                                 backup_snapshot) -> None:
+def _remove_earlier_carry_folder(backup_fd, receipt, album, album_receipt):
     """Remove the folder an earlier version's carry left beside the album.
 
     Its name comes from the record that carry wrote in the backup, and it
     goes only while every file in it has the bytes of one in the album or
     the backup.
     """
-    workspace_fd = None
     try:
         note = _receipt_marker_note(
             backup_fd, _COMPANION_CARRY_INTENT_SENTINEL, receipt)
@@ -4038,27 +2762,23 @@ def _remove_earlier_carry_folder(backup_fd, receipt, proof, album_receipt,
         if (
             not isinstance(name, str)
             or not re.fullmatch(r"\.ql-companion-carry-[0-9a-f]{32}", name)
-            or intent.get("origin") != os.fspath(proof["public"])
+            or intent.get("origin") != os.fspath(album)
         ):
             return
-        parent_fd = proof["descriptors"][-2]
-        workspace_fd = _open_backup_directory(name, dir_fd=parent_fd)
-        snapshot = _exact_tree_snapshot(workspace_fd)
+        workspace = album.parent / name
+        snapshot = _plain_tree(workspace)
         copies = {
             value["sha256"]
-            for tree in (album_receipt["tree"], backup_snapshot)
+            for tree in (album_receipt["tree"], receipt["tree"])
             for value in tree["files"].values()
         }
         if snapshot is not None and all(
-                value["sha256"] in copies
-                for value in snapshot["files"].values()):
-            _cleanup_companion_workspace(
-                parent_fd, name, workspace_fd, snapshot)
+                stat.S_ISDIR(value[2])
+                or _file_digest(workspace / relative) in copies
+                for relative, value in snapshot.items()):
+            delete_tree_verified(workspace, snapshot)
     except (OSError, TypeError, ValueError, KeyError):
         return
-    finally:
-        if workspace_fd is not None:
-            os.close(workspace_fd)
 
 
 def carry_backup_companions(
@@ -4069,19 +2789,21 @@ def carry_backup_companions(
         expected_owner=None,
         skip_conflicts=False,
 ):
-    """Carry absent non-audio payload from an exact backup without overwrite.
+    """Copy the backup's non-audio files the album lacks into it, replacing
+    nothing.
 
-    ``backup`` must be the carried complete ``BackupResult`` and the expected
-    replacement receipt must describe the exact public album before this call.
-    Both trees stay held and checked.  Existing byte-identical companions count
-    as already carried, so running it again after a hard stop finishes the
-    job; the copy temp files that stop left in the album are removed first.
-    Every conflict is left untouched and keeps the backup.
-    A conflict returns ``None`` unless ``skip_conflicts`` is set, in which case
-    the other companions are still carried; ``companion_conflicts`` names what
-    stayed behind.  On success, returns the replacement's new receipt for the
-    later semantic disposal gate.  Any uncertainty returns ``None`` and leaves
-    the backup.
+    ``backup`` must be a complete ``BackupResult``, and the expected
+    replacement receipt the album's as it was before this call: when either
+    changed since, nothing is copied. A companion the album holds with the
+    same bytes counts as carried, so running it again after a hard stop
+    finishes the job; the partial copies that stop left in the album are
+    removed first. A different file or a folder at a companion's name, or a
+    file where one of its folders goes, is left untouched and keeps the
+    backup: it returns ``None`` unless ``skip_conflicts`` is set, in which
+    case the other companions are still carried; ``companion_conflicts``
+    names what stayed behind. On success, returns the album's new receipt
+    for the later disposal check. Any doubt returns ``None`` and leaves the
+    backup.
     """
     if not _backup_owner_authorized(backup, expected_owner):
         return None
@@ -4089,28 +2811,27 @@ def carry_backup_companions(
     if opened is None:
         return None
     backup_fd = opened[-1][-1]
-    replacement_proof = None
-    held_backup = None
     try:
-        replacement_proof = _hold_album_proof(
-            replacement_path, expected_replacement_receipt)
-        if replacement_proof is None:
+        album = _library_path(replacement_path)
+        expected = _canonical_receipt(expected_replacement_receipt)
+        if (
+            album is None
+            or expected is None
+            or _same_entry(os.fstat(backup_fd), os.lstat(album))
+            or capture_album_tree_identity(album)
+                != album_tree_identity(expected)
+        ):
             return None
-        replacement_fd = replacement_proof["descriptors"][-1]
-        if _same_directory(
-                os.fstat(backup_fd), os.fstat(replacement_fd)):
-            return None
-        if not _remove_copy_temps(replacement_proof):
-            return None
-        backup_snapshot = _receipt_disposal_snapshot(
-            backup_fd, backup.receipt)
-        if backup_snapshot is None:
-            return None
-        held_backup = {}
-        _hold_snapshot_files(backup_fd, backup_snapshot, held_backup)
+        _remove_partial_copies(album)
+        replacement_files = {
+            relative: value
+            for relative, value in expected["tree"]["files"].items()
+            if not _COPY_TEMP.fullmatch(PurePosixPath(relative).name)
+        }
+        backup_files = backup.receipt["tree"]["files"]
         companions = [
             relative
-            for relative in backup.receipt["tree"]["files"]
+            for relative in backup_files
             if (
                 PurePosixPath(relative).name not in _SIDECARS
                 and Path(PurePosixPath(relative).name).suffix.lower()
@@ -4119,31 +2840,19 @@ def carry_backup_companions(
         ]
         missing_files = []
         for relative_text in sorted(companions):
-            source = held_backup.get(relative_text)
-            existing = replacement_proof["held"].get(relative_text)
-            if (
-                source is None
-                or not source["lease"].intact()
-                or _snapshot_file_from_descriptor(source["descriptor"])
-                    != backup_snapshot["files"][relative_text]
-            ):
-                return None
+            existing = replacement_files.get(relative_text)
             if existing is not None:
-                if _file_digest_fd(existing["descriptor"]) != (
-                        backup_snapshot["files"][relative_text][
-                            "sha256"]):
+                if existing["sha256"] != backup_files[relative_text]["sha256"]:
                     if skip_conflicts:
                         continue
                     return None
                 continue
-            if relative_text in replacement_proof[
-                    "receipt"]["tree"]["directories"]:
+            if relative_text in expected["tree"]["directories"]:
                 if skip_conflicts:
                     continue
                 return None
             missing_files.append(relative_text)
 
-        replacement_files = replacement_proof["receipt"]["tree"]["files"]
         carried_files = []
         for relative_text in missing_files:
             parts = _companion_relative_parts(relative_text)
@@ -4154,46 +2863,35 @@ def carry_backup_companions(
                     continue
                 return None
             carried_files.append(relative_text)
-        if not carried_files:
-            result = _canonical_receipt(replacement_proof["receipt"])
-            _remove_earlier_carry_folder(
-                backup_fd, backup.receipt, replacement_proof, result,
-                backup_snapshot)
-            return result
-        if not _album_proof_is_intact(replacement_proof):
-            return None
 
         for relative_text in carried_files:
-            parts = _companion_relative_parts(relative_text)
-            parents = _open_relative_directories(
-                replacement_fd, parts[:-1], create=True)
-            publication = _CopyPublication(
-                parents[-1] if parents else replacement_fd, parts[-1])
-            try:
-                digest = _copy_file_noreplace_at(
-                    held_backup[relative_text]["descriptor"], publication)
-            finally:
-                _release_copy_publication(publication)
-                _close_descriptors(parents)
-            if digest != backup_snapshot["files"][relative_text]["sha256"]:
+            target = _library_path(album / relative_text, create_parents=True)
+            if target is None:
                 return None
-        result = _album_source_receipt_from_opened(
-            replacement_proof["public"],
-            replacement_proof["music_root"],
-            replacement_proof["parts"],
-            replacement_proof["descriptors"],
-        )
-        if result is not None:
-            _remove_earlier_carry_folder(
-                backup_fd, backup.receipt, replacement_proof, result,
-                backup_snapshot)
+            copy_file(backup.path / relative_text, target,
+                      sha256=backup_files[relative_text]["sha256"])
+        result = capture_album_source_receipt(album)
+        if result is None:
+            return None
+        tree = result["tree"]
+        files = dict(tree["files"])
+        carried = {relative: files.pop(relative, {}).get("sha256")
+                   for relative in carried_files}
+        if (
+            files != replacement_files
+            or carried != {relative: backup_files[relative]["sha256"]
+                           for relative in carried_files}
+            or tree["root_identity"] != expected["tree"]["root_identity"]
+            or any(tree["directories"].get(relative) != value
+                   for relative, value
+                   in expected["tree"]["directories"].items())
+        ):
+            return None
+        _remove_earlier_carry_folder(backup_fd, backup.receipt, album, result)
         return result
-    except (OSError, TypeError, ValueError, shutil.Error):
+    except (OSError, TypeError, ValueError, KeyError):
         return None
     finally:
-        if held_backup is not None:
-            _release_held_snapshot_files(held_backup)
-        _release_album_proof(replacement_proof)
         _close_descriptors(opened[-1])
 
 
@@ -4819,7 +3517,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
             "in place."))
         return None
     if expected_receipt is not None and expected_receipt not in (
-            source_receipt, _album_tree_identity(source_receipt)):
+            source_receipt, album_tree_identity(source_receipt)):
         log.info(fmt(
             C.RED,
             f"  ✗  {public} changed after it was selected; leaving "
@@ -4958,7 +3656,7 @@ def _copy_album_to_backup(public, bp, snapshot, source_receipt, *, owner,
                           set_aside):
     """Copy the album at ``public`` to the backup ``bp`` and delete it from
     the library while it is the album ``snapshot`` and the receipt hold."""
-    payload = _payload(source_receipt)
+    payload = backup_payload(source_receipt)
     partial = bp.parent / (_PARTIAL_COPY_PREFIX + bp.name)
     why = ("its files have other hard links"
            if _tree_has_multiply_linked_file(source_receipt["fidelity"])
@@ -4983,12 +3681,12 @@ def _copy_album_to_backup(public, bp, snapshot, source_receipt, *, owner,
             result = _seal_backup_result(
                 bp, folder_fd, public, kind="upgrade", complete=False,
                 requested=len(payload), backed_up=len(payload),
-                source_receipt=source_receipt, owner=owner)
+                source_receipt=source_receipt, owner=owner, folder=partial)
         finally:
             os.close(folder_fd)
         if result.receipt is None:
             raise OSError(errno.EIO, "its backup record could not be written")
-        if _payload(result.receipt) != payload:
+        if backup_payload(result.receipt) != payload:
             raise OSError(errno.EIO, "its copy differs from it")
         if snapshot_tree(public) != snapshot:
             raise OSError(errno.EAGAIN, "it changed while it was copied")
@@ -5218,12 +3916,13 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
         try:
             result = _seal_backup_result(
                 bp, folder_fd, public, kind="gap-fill", complete=True,
-                requested=len(sources), backed_up=len(sources), owner=owner)
+                requested=len(sources), backed_up=len(sources), owner=owner,
+                folder=partial)
         finally:
             os.close(folder_fd)
         if result.receipt is None:
             raise OSError(errno.EIO, "its backup record could not be written")
-        if _payload(result.receipt) != payload:
+        if backup_payload(result.receipt) != payload:
             raise OSError(errno.EAGAIN, "a track changed while it was copied")
         for relative, (path, value, _receipt) in sources.items():
             if stat_identity(os.lstat(path)) != stat_identity(value):
@@ -5321,7 +4020,7 @@ def record_downsample_outputs(backup) -> bool:
         return False
     origin = Path(backup.receipt["origin"])
     outputs = {}
-    for relative in _payload(backup.receipt):
+    for relative in backup_payload(backup.receipt):
         streaminfo = _flac_streaminfo(origin / relative)
         if streaminfo is None:
             return False
@@ -5352,7 +4051,7 @@ def downsample_outputs_in_place(backup) -> bool:
     if not isinstance(outputs, dict):
         return False
     origin = Path(backup.receipt["origin"])
-    kept = _payload(backup.receipt)
+    kept = backup_payload(backup.receipt)
     return bool(kept) and all(
         outputs.get(relative) is not None
         and (_flac_streaminfo(origin / relative) == outputs[relative]
@@ -5480,7 +4179,7 @@ def stash_downsample_originals(files, album_dir):
             "  ⚠  The kept originals could not be verified. They remain "
             f"at {bp}, and no original will be rewritten."))
         return result, set(), {}
-    if _payload(result.receipt) != payload:
+    if backup_payload(result.receipt) != payload:
         log.info(fmt(
             C.YELLOW,
             "  ⚠  A kept-original copy changed before its exact receipt "
@@ -5532,7 +4231,7 @@ def restore_gap_fill_backup(backup, album_dir: Path,
             f"  ✗  Couldn't bind the real album path for restore.\n"
             f"     Backed-up tracks remain at: {source}"))
         return 0
-    payload = _payload(backup.receipt)
+    payload = backup_payload(backup.receipt)
     found = {}
     for relative, (size, digest) in sorted(payload.items()):
         target = album / relative
@@ -5661,7 +4360,7 @@ def restore_incomplete_upgrade_backup(
         for relative, value in source_receipt["tree"]["files"].items()
     }
     directories = source_receipt["tree"]["directories"]
-    payload = _payload(backup.receipt)
+    payload = backup_payload(backup.receipt)
     backup_snapshot = snapshot_tree(source)
     if (
         payload != expected
@@ -5851,7 +4550,7 @@ def restore_upgrade_backup(
     return restored
 
 
-def _payload(receipt):
+def backup_payload(receipt):
     """{relative path: (size, sha256)} of the files a whole-album receipt
     holds, without the backup's own files."""
     return {
@@ -6025,7 +4724,7 @@ def _restore_upgrade_backup(
     origin = _library_path(original_path, create_parents=True)
     if origin is None:
         return False
-    payload = _payload(backup.receipt)
+    payload = backup_payload(backup.receipt)
     backup_snapshot = snapshot_tree(source)
     stage = origin.parent / _hidden_name(source.name, ".ql-restore-stage-")
     aside = origin.parent / _hidden_name(source.name, ".ql-restore-partial-")
@@ -6206,7 +4905,7 @@ def settle_interrupted_restores() -> None:
         if os.path.lexists(stage):
             backup = load_backup_result(path)
             if backup is not None and backup.receipt["kind"] == "upgrade":
-                _clear_restore_folder(stage, _payload(backup.receipt))
+                _clear_restore_folder(stage, backup_payload(backup.receipt))
 
 
 def unfinished_restores():

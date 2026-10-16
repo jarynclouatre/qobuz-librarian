@@ -1,4 +1,4 @@
-"""Live, descriptor-held completion proof for one new full album."""
+"""Completion proof for one new full album, checked again before each step."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import os
 import re
 import stat
 import subprocess
-import threading
-import weakref
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
@@ -37,17 +35,12 @@ from qobuz_librarian.integrations.downsample_engine import (
     parse_flac_info,
 )
 from qobuz_librarian.integrations.rip import flac_audio_ok
-from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library.backup import (
-    _backup_source_is_public,
-    _exact_tree_snapshot,
-    _fsync_directory_fds,
-    _fsync_exact_tree,
-    _held_snapshot_files_intact,
-    _hold_snapshot_files,
-    _open_backup_source,
-    _tree_identity,
+    album_tree_identity,
+    capture_album_source_receipt,
+    capture_album_tree_identity,
 )
+from qobuz_librarian.safefile import fsync_dir, fsync_tree
 
 
 class LiveCompletionUnavailable(OSError):
@@ -56,84 +49,6 @@ class LiveCompletionUnavailable(OSError):
     def __init__(self, message, *, failure=None):
         super().__init__(message)
         self.failure = failure
-
-
-def _prefer_cleanup_error(current, candidate):
-    if candidate is None:
-        return current
-    if current is None or (
-        isinstance(current, Exception)
-        and not isinstance(candidate, Exception)
-    ):
-        return candidate
-    return current
-
-
-def _run_sigint_deferred(callback):
-    """Finish one raw-descriptor handoff before delivering Ctrl-C."""
-    return run_sigint_deferred(
-        callback, unavailable=LiveCompletionUnavailable,
-        detail="interrupt-safe completion access is unavailable")
-
-
-class _LiveCompletionLifetime:
-    """One-shot owner for the tree descriptors and their change checks."""
-
-    def __init__(self):
-        self.held = {}
-        self.chain = []
-        self.closed = False
-        self.lock = threading.RLock()
-
-    def close(self):
-        with self.lock:
-            if self.closed:
-                return None
-            error = None
-            while self.held:
-                _relative, item = self.held.popitem()
-                lease = item.get("lease")
-                item["lease"] = None
-                if lease is not None:
-                    try:
-                        lease.close()
-                    except BaseException as exc:
-                        error = _prefer_cleanup_error(error, exc)
-                descriptor = item.get("descriptor")
-                item["descriptor"] = None
-                if descriptor is not None:
-                    try:
-                        os.close(descriptor)
-                    except BaseException as exc:
-                        error = _prefer_cleanup_error(error, exc)
-                parents = item.get("parents")
-                if isinstance(parents, list):
-                    while parents:
-                        descriptor = parents.pop()
-                        try:
-                            os.close(descriptor)
-                        except BaseException as exc:
-                            error = _prefer_cleanup_error(error, exc)
-            while self.chain:
-                descriptor = self.chain.pop()
-                try:
-                    os.close(descriptor)
-                except BaseException as exc:
-                    error = _prefer_cleanup_error(error, exc)
-            self.closed = True
-            return error
-
-
-def _finalize_live_completion_lifetime(lifetime):
-    try:
-        _run_sigint_deferred(lifetime.close)
-    except LiveCompletionUnavailable:
-        try:
-            lifetime.close()
-        except BaseException:
-            pass
-    except BaseException:
-        pass
 
 
 def _identity(value):
@@ -345,7 +260,8 @@ def _prepare_managed(managed_lease, owner, expectation, download):
 
 
 class LiveCompletionLease:
-    """A live exact-album proof whose filesystem authority can be rechecked."""
+    """An album's completion proof that can be checked again: the album
+    must still hold the same files, unwritten, in the same folders."""
 
     def __init__(
         self,
@@ -355,75 +271,54 @@ class LiveCompletionLease:
         expectation,
         download,
         managed,
-        root,
-        parts,
-        snapshot,
+        album,
+        receipt,
         slot_relatives,
-        lifetime,
     ):
         self._managed_lease = managed_lease
         self._owner = owner
         self._expectation = expectation
         self._download = download
         self._managed = managed
-        self._root = root
-        self._parts = parts
-        self._snapshot = snapshot
+        self._album = album
+        self._receipt = receipt
+        self._tree = album_tree_identity(receipt)["tree"]
         self._slot_relatives = slot_relatives
-        self._lifetime = weakref.ref(lifetime)
-        self._finalizer = weakref.finalize(
-            self, _finalize_live_completion_lifetime, lifetime)
         self._evidence = None
-        self._lock = threading.RLock()
         self._closed = False
-        self._closing = False
         self._failed = False
 
     @property
     def evidence(self):
         return self.revalidate()
 
-    def _namespace_intact(self):
-        lifetime = self._lifetime()
-        if lifetime is None or lifetime.closed or not lifetime.chain:
-            return False
+    def _album_unchanged(self):
         try:
-            root_value = os.fstat(lifetime.chain[0])
-            album_value = os.fstat(lifetime.chain[-1])
-            return (
-                _backup_source_is_public(
-                    self._root, self._parts, lifetime.chain)
-                and (int(root_value.st_dev), int(root_value.st_ino))
-                == self._managed.library_root_identity[:2]
-                and _identity(album_value) == self._managed.album_identity
-            )
-        except (OSError, TypeError, ValueError):
+            root_value = os.lstat(self._managed.library_root)
+            album_value = os.lstat(self._album)
+        except OSError:
             return False
+        current = capture_album_tree_identity(self._album)
+        return (
+            current is not None
+            and current["tree"] == self._tree
+            and (int(root_value.st_dev), int(root_value.st_ino))
+            == self._managed.library_root_identity[:2]
+            and _identity(album_value) == self._managed.album_identity
+        )
 
-    def _build_evidence(self):
-        lifetime = self._lifetime()
-        if lifetime is None or lifetime.closed:
+    def _landing(self, slot, relative, mapping):
+        try:
+            descriptor = os.open(
+                self._album / relative,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError:
             raise LiveCompletionUnavailable(
-                "live album descriptors are unavailable")
-        mapping_by_slot = {
-            mapping.slot: mapping for mapping in self._managed.mappings
-        }
-        landings = []
-        quality = []
-        for slot, relative in self._slot_relatives:
-            item = lifetime.held.get(relative)
-            mapping = mapping_by_slot[slot]
-            if not isinstance(item, dict):
-                raise LiveCompletionUnavailable(
-                    "managed album audio changed")
-            descriptor = item.get("descriptor")
-            try:
-                value = os.fstat(descriptor)
-            except (OSError, TypeError, ValueError):
-                raise LiveCompletionUnavailable(
-                    "managed album audio changed") from None
+                "managed album audio changed") from None
+        try:
+            value = os.fstat(descriptor)
             identity = _identity(value)
-            receipt = self._snapshot["files"].get(relative)
+            receipt = self._receipt["tree"]["files"].get(relative)
             if (
                 not stat.S_ISREG(value.st_mode)
                 or int(value.st_nlink) != 1
@@ -439,26 +334,39 @@ class LiveCompletionLease:
                     "managed album audio identity changed")
             digest = receipt.get("sha256")
             rate, bits = _descriptor_quality(descriptor)
-            if not isinstance(digest, str) or not rate or not bits:
-                raise LiveCompletionUnavailable(
-                    "managed album audio quality could not be proved",
-                    failure=CompletionFailure.QUALITY_MISMATCH,
-                )
-            landing = LandingReceipt(
-                slot=slot,
-                path=mapping.destination_path,
-                identity=identity,
-                sha256=digest,
+        finally:
+            os.close(descriptor)
+        if not isinstance(digest, str) or not rate or not bits:
+            raise LiveCompletionUnavailable(
+                "managed album audio quality could not be proved",
+                failure=CompletionFailure.QUALITY_MISMATCH,
             )
+        landing = LandingReceipt(
+            slot=slot,
+            path=mapping.destination_path,
+            identity=identity,
+            sha256=digest,
+        )
+        return landing, TrackQuality(
+            slot=slot,
+            path=mapping.destination_path,
+            identity=identity,
+            sha256=digest,
+            served_bits=bits,
+            served_rate=rate,
+        )
+
+    def _build_evidence(self):
+        mapping_by_slot = {
+            mapping.slot: mapping for mapping in self._managed.mappings
+        }
+        landings = []
+        quality = []
+        for slot, relative in self._slot_relatives:
+            landing, track = self._landing(
+                slot, relative, mapping_by_slot[slot])
             landings.append(landing)
-            quality.append(TrackQuality(
-                slot=slot,
-                path=mapping.destination_path,
-                identity=identity,
-                sha256=digest,
-                served_bits=bits,
-                served_rate=rate,
-            ))
+            quality.append(track)
         inventory = AlbumInventory(
             path=self._managed.album_path,
             identity=self._managed.album_identity,
@@ -482,31 +390,18 @@ class LiveCompletionLease:
             )
         return assessment.evidence
 
-    def _album_unchanged(self, lifetime):
-        album_fd = lifetime.chain[-1]
-        return (
-            self._namespace_intact()
-            and _exact_tree_snapshot(album_fd) == self._snapshot
-            and _held_snapshot_files_intact(
-                album_fd, self._snapshot, lifetime.held)
-        )
-
     def _revalidate_once(self):
-        lifetime = self._lifetime()
-        if lifetime is None or lifetime.closed or not lifetime.chain:
-            raise LiveCompletionUnavailable(
-                "live completion descriptors are unavailable")
         if self._evidence is None:
             if self._managed_lease.revalidate() != self._managed:
                 raise LiveCompletionUnavailable(
                     "managed completion evidence changed")
-            if not self._album_unchanged(lifetime):
+            if not self._album_unchanged():
                 raise LiveCompletionUnavailable(
                     "managed album changed during completion verification")
             evidence = self._build_evidence()
         else:
             evidence = self._evidence
-        if not self._album_unchanged(lifetime):
+        if not self._album_unchanged():
             raise LiveCompletionUnavailable(
                 "managed album changed during completion verification")
         if self._managed_lease.revalidate() != self._managed:
@@ -514,15 +409,12 @@ class LiveCompletionLease:
                 "managed completion evidence changed")
         return evidence
 
-    def _revalidate_locked(self):
-        if self._closed or self._closing or self._failed:
+    def revalidate(self):
+        if self._closed or self._failed:
             raise LiveCompletionUnavailable(
                 "live completion authority is unavailable")
         try:
             evidence = self._revalidate_once()
-            if self._evidence is None:
-                self._evidence = evidence
-            return evidence
         except BaseException as exc:
             self._failed = True
             if isinstance(exc, LiveCompletionUnavailable):
@@ -531,56 +423,29 @@ class LiveCompletionLease:
                 raise
             raise LiveCompletionUnavailable(
                 "live completion could not be revalidated") from None
-
-    def revalidate(self):
-        with self._lock:
-            return self._revalidate_locked()
-
-    def _close_locked(self):
-        if self._closed:
-            return
-        self._closing = True
-        lifetime = self._lifetime()
-        if lifetime is None:
-            self._closed = True
-            if self._finalizer.alive:
-                self._finalizer.detach()
-            return
-        error = None
-        try:
-            error = _run_sigint_deferred(lifetime.close)
-        finally:
-            self._closed = lifetime.closed
-            if self._closed and self._finalizer.alive:
-                self._finalizer.detach()
-        if error is not None:
-            raise error.with_traceback(error.__traceback__)
+        if self._evidence is None:
+            self._evidence = evidence
+        return evidence
 
     def close(self):
-        with self._lock:
-            self._close_locked()
+        self._closed = True
 
     def __enter__(self):
         return self
 
-    def __exit__(self, _exc_type, exc, _traceback):
-        try:
-            self.close()
-        except BaseException as close_exc:
-            if exc is None:
-                raise
-            if not isinstance(close_exc, Exception):
-                close_exc.add_note(
-                    f"completion body also failed: {exc}")
-                raise
-            exc.add_note(
-                f"live completion cleanup also failed: {close_exc}")
+    def __exit__(self, _exc_type, _exc, _traceback):
+        self.close()
         return False
 
 
-def _capture_new_album_completion(
+def capture_new_album_completion(
     *, managed_lease, owner, expectation, download,
 ):
+    """Capture a proof for a brand-new full-album managed import.
+
+    Every file of the album is read once for its receipt, and the album,
+    each folder and every folder above it up to the music root are flushed
+    to disk before the proof is handed out."""
     _validate_inputs(owner, expectation, download)
     managed, album_parts, slot_relatives = _prepare_managed(
         managed_lease, owner, expectation, download)
@@ -592,107 +457,35 @@ def _capture_new_album_completion(
     if managed.library_root != root_path:
         raise LiveCompletionUnavailable(
             "managed library root changed")
-
-    lifetime = _LiveCompletionLifetime()
-    lease = None
-    try:
-        def open_and_adopt_chain():
-            source = _open_backup_source(
-                Path(root_path).joinpath(*album_parts))
-            if source is None:
-                raise LiveCompletionUnavailable(
-                    "managed album namespace could not be opened")
-            _public_album, root, parts, chain = source
-            lifetime.chain = chain
-            return root, parts
-
-        root, parts = _run_sigint_deferred(
-            open_and_adopt_chain)
-        if os.fspath(root) != managed.library_root or parts != album_parts:
-            raise LiveCompletionUnavailable(
-                "managed album namespace changed")
-        if not _backup_source_is_public(root, parts, lifetime.chain):
-            raise LiveCompletionUnavailable(
-                "managed album namespace changed")
-        root_value = os.fstat(lifetime.chain[0])
-        album_value = os.fstat(lifetime.chain[-1])
-        if (
-            (int(root_value.st_dev), int(root_value.st_ino))
-            != managed.library_root_identity[:2]
-            or _identity(album_value) != managed.album_identity
-        ):
-            raise LiveCompletionUnavailable(
-                "managed album identity changed")
-        listing = _exact_tree_snapshot(lifetime.chain[-1], digests=False)
-        if listing is None:
-            raise LiveCompletionUnavailable(
-                "managed album contains an unsafe entry")
-        actual_audio = {
-            relative
-            for relative in listing["files"]
-            if PurePosixPath(relative).suffix.lower() in cfg.AUDIO_EXTS
-        }
-        if actual_audio != {relative for _slot, relative in slot_relatives}:
-            raise LiveCompletionUnavailable(
-                "managed album audio inventory is not exact",
-                failure=CompletionFailure.INVENTORY_MISMATCH,
-            )
-        _hold_snapshot_files(
-            lifetime.chain[-1], listing, lifetime.held)
-        snapshot = _exact_tree_snapshot(lifetime.chain[-1])
-        if snapshot is None or _tree_identity(snapshot) != listing:
-            raise LiveCompletionUnavailable(
-                "managed album changed while it was held")
-        if not _fsync_exact_tree(
-            lifetime.chain[-1], snapshot, lifetime.held
-        ) or not _fsync_directory_fds(*lifetime.chain):
-            raise LiveCompletionUnavailable(
-                "managed album could not be made durable")
-        lease = LiveCompletionLease(
-            managed_lease=managed_lease,
-            owner=owner,
-            expectation=expectation,
-            download=download,
-            managed=managed,
-            root=root,
-            parts=parts,
-            snapshot=snapshot,
-            slot_relatives=slot_relatives,
-            lifetime=lifetime,
-        )
-        lease.revalidate()
-        return lease
-    except BaseException as exc:
-        cleanup_error = None
-        try:
-            if lease is not None:
-                lease.close()
-            else:
-                cleanup_error = _run_sigint_deferred(lifetime.close)
-        except BaseException as close_exc:
-            cleanup_error = close_exc
-        if cleanup_error is not None:
-            exc.add_note(
-                f"live completion cleanup also failed: {cleanup_error}")
-        if cleanup_error is not None and not isinstance(
-            cleanup_error, Exception
-        ):
-            raise cleanup_error.with_traceback(cleanup_error.__traceback__)
-        if isinstance(exc, LiveCompletionUnavailable):
-            raise
-        if not isinstance(exc, Exception):
-            raise
+    album = Path(root_path).joinpath(*album_parts)
+    receipt = capture_album_source_receipt(album)
+    if receipt is None:
         raise LiveCompletionUnavailable(
-            "live completion evidence could not be captured") from None
-
-
-def capture_new_album_completion(
-    *, managed_lease, owner, expectation, download,
-):
-    """Capture a live proof for a brand-new full-album managed import."""
-    return _capture_new_album_completion(
+            "managed album could not be read exactly")
+    actual_audio = {
+        relative
+        for relative in receipt["tree"]["files"]
+        if PurePosixPath(relative).suffix.lower() in cfg.AUDIO_EXTS
+    }
+    if actual_audio != {relative for _slot, relative in slot_relatives}:
+        raise LiveCompletionUnavailable(
+            "managed album audio inventory is not exact",
+            failure=CompletionFailure.INVENTORY_MISMATCH,
+        )
+    above = [Path(root_path).joinpath(*album_parts[:depth])
+             for depth in range(len(album_parts) - 1)]
+    if not fsync_tree(album) or not all(map(fsync_dir, above)):
+        raise LiveCompletionUnavailable(
+            "managed album could not be made durable")
+    lease = LiveCompletionLease(
         managed_lease=managed_lease,
         owner=owner,
         expectation=expectation,
         download=download,
+        managed=managed,
+        album=album,
+        receipt=receipt,
+        slot_relatives=slot_relatives,
     )
+    lease.revalidate()
+    return lease

@@ -98,7 +98,7 @@ def test_backup_refuses_anything_it_cannot_protect_and_leaves_the_album(
     (album / "01.flac").write_bytes(b"audio-bytes")
     with monkeypatch.context() as patch:
         patch.setattr(bk, "_same_filesystem", lambda a, b: False)
-        patch.setattr(bk, "_fsync_exact_tree", lambda *_a, **_k: False)
+        patch.setattr(bk, "fsync_tree", lambda *_a, **_k: False)
         assert backup_album_dir(album) is None
     assert (album / "01.flac").read_bytes() == b"audio-bytes"
 

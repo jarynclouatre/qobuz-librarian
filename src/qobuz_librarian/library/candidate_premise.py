@@ -18,14 +18,12 @@ from pathlib import Path
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.library.backup import (
-    _SIDECARS,
-    _album_tree_identity,
-    _close_descriptors,
-    _open_backup_source,
-    _path_directory_generations,
+    album_tree_identity,
+    backup_payload,
     canonical_album_source_receipt,
     canonical_album_tree_identity,
     capture_album_tree_identity,
+    capture_folder_generations,
     capture_music_root_identity,
     first_symlink,
 )
@@ -524,12 +522,9 @@ def resealed_after_put_back(value, backup_receipt, captures):
         return None
     try:
         source = backup_receipt["source_receipt"]
-        sealed = _canonical_receipt(_album_tree_identity(source), origin=origin)
-        backed_up = {
-            relative: value["sha256"]
-            for relative, value in backup_receipt["tree"]["files"].items()
-            if Path(relative).name not in _SIDECARS
-        }
+        sealed = _canonical_receipt(album_tree_identity(source), origin=origin)
+        backed_up = {relative: digest for relative, (_size, digest)
+                     in backup_payload(backup_receipt).items()}
         source_digests = {relative: value["sha256"]
                           for relative, value in source["tree"]["files"].items()}
     except (KeyError, TypeError):
@@ -660,29 +655,19 @@ def validate_container(candidate: dict) -> dict:
         _refuse_unsealed(candidate, premise)
     if premise["kind"] != "missing":
         return validate(candidate)
-    opened = _open_backup_source(Path(premise["path"]))
-    if opened is None:
-        raise CandidateStale(
-            "The local artist folder changed after this review was built. "
-            "Refresh the review; nothing was changed."
-        )
-    public, _music_root, _parts, descriptors = opened
     try:
-        current_generations = _path_directory_generations(descriptors)
+        current = capture_folder_generations(premise["path"])
     except OSError as exc:
         raise CandidateStale(
             "The local artist folder could not be verified. Refresh the "
             "review; nothing was changed.",
             cause="unreadable",
         ) from exc
-    finally:
-        _close_descriptors(descriptors)
     if (
-        str(public) != premise["path"]
+        current is None
+        or str(current[0]) != premise["path"]
         or not _durable_generations_match(
-            premise["receipt"].get("path_generations"),
-            current_generations,
-        )
+            premise["receipt"].get("path_generations"), current[1])
     ):
         raise CandidateStale(
             "The local artist folder changed after this review was built. "

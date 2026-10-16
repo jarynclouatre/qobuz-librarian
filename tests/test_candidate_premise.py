@@ -168,8 +168,8 @@ def test_missing_candidate_binds_the_reviewed_artist_tree(tmp_path, monkeypatch)
         identity[6] = replacements[identity[6]]
     monkeypatch.setattr(
         candidate_premise,
-        "_path_directory_generations",
-        lambda _descriptors: current_generations,
+        "capture_folder_generations",
+        lambda path: (Path(path), current_generations),
     )
     assert validate_container(candidate) == premise
 

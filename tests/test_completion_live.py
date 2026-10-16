@@ -111,38 +111,40 @@ def test_new_album_completion_revalidates_and_refuses_track_replacement(
         ),
         counts=DownloadCounts(),
     )
-    managed = ManagedImportEvidence(
-        owner=owner,
-        library_root=str(music),
-        library_root_identity=_identity5(music),
-        album_path="Artist/Album",
-        album_identity=_identity5(album),
-        manifest_hash="c" * 64,
-        mappings=(
-            ManagedMapping(
-                slots[1],
-                second_source[0],
-                second_source[1],
-                "Artist/Album/Disc 2/01.flac",
-                _identity5(second_landing),
-            ),
-            ManagedMapping(
-                slots[0],
-                first_source[0],
-                first_source[1],
-                "Artist/Album/Disc 1/01.flac",
-                _identity5(first_landing),
-            ),
-        ),
-    )
 
-    managed_lease = _StableManagedLease(managed)
-    with capture_new_album_completion(
-        managed_lease=managed_lease,
-        owner=owner,
-        expectation=expectation,
-        download=download,
-    ) as live:
+    def capture():
+        managed = ManagedImportEvidence(
+            owner=owner,
+            library_root=str(music),
+            library_root_identity=_identity5(music),
+            album_path="Artist/Album",
+            album_identity=_identity5(album),
+            manifest_hash="c" * 64,
+            mappings=(
+                ManagedMapping(
+                    slots[1],
+                    second_source[0],
+                    second_source[1],
+                    "Artist/Album/Disc 2/01.flac",
+                    _identity5(second_landing),
+                ),
+                ManagedMapping(
+                    slots[0],
+                    first_source[0],
+                    first_source[1],
+                    "Artist/Album/Disc 1/01.flac",
+                    _identity5(first_landing),
+                ),
+            ),
+        )
+        return capture_new_album_completion(
+            managed_lease=_StableManagedLease(managed),
+            owner=owner,
+            expectation=expectation,
+            download=download,
+        )
+
+    with capture() as live:
         evidence = live.evidence
         assert tuple(item.slot for item in evidence.landings) == slots
         assert evidence.inventory.audio == evidence.landings
@@ -157,6 +159,15 @@ def test_new_album_completion_revalidates_and_refuses_track_replacement(
         os.replace(replacement, first_landing)
         with pytest.raises(LiveCompletionUnavailable):
             _ = live.evidence
+        with pytest.raises(LiveCompletionUnavailable):
+            live.revalidate()
+
+    # A track rewritten in place with its time put back is refused too.
+    with capture() as live:
+        live.revalidate()
+        before = second_landing.stat()
+        second_landing.write_bytes(_test_flac(b"TWO"))
+        os.utime(second_landing, ns=(before.st_atime_ns, before.st_mtime_ns))
         with pytest.raises(LiveCompletionUnavailable):
             live.revalidate()
 

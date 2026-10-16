@@ -420,11 +420,14 @@ def test_executor_restores_or_keeps_upgrade_backup_after_import_failure(
     assert queue == [item]
 
 
-def test_executor_upgrade_carries_non_audio_companions_from_backup(monkeypatch, tmp_path):
+@pytest.mark.parametrize("conflict", [False, True])
+def test_executor_upgrade_carries_non_audio_companions_from_backup(
+        monkeypatch, tmp_path, conflict):
     # Regression: the bulk/web upgrade path (this executor) must carry non-
     # audio companions (booklets, scans, .cue/.log, and hand-placed art) out of
     # the backup into the rebuilt album before reaping it, exactly as the
-    # single-album process.py path does.
+    # single-album process.py path does. A partial copy a stop left goes, and
+    # a companion the new album holds other bytes for keeps the backup.
     from qobuz_librarian.library.backup import backup_album_dir
     from qobuz_librarian.modes import process as proc
     from qobuz_librarian.queue import executor
@@ -443,6 +446,9 @@ def test_executor_upgrade_carries_non_audio_companions_from_backup(monkeypatch, 
     assert backup is not None and backup.complete is True
     album_dir.mkdir(parents=True)
     (album_dir / "01.flac").write_bytes(b"new")
+    if conflict:
+        (album_dir / "booklet.pdf").write_bytes(b"another-booklet")
+    (album_dir / f".ql-copy-{'0' * 32}").write_bytes(b"the-boo")
 
     monkeypatch.setattr(executor, "find_album_dir_filesystem", lambda _a: album_dir)
     monkeypatch.setattr(proc, "find_album_dir_filesystem", lambda _a: album_dir)
@@ -461,12 +467,21 @@ def test_executor_upgrade_carries_non_audio_companions_from_backup(monkeypatch, 
     args = Namespace(no_import=False, consolidate=False)
     executor._resolve_queue_item(item, args, imported_globally=True)
 
-    # Backup reaped, but its non-audio companions carried into the live folder;
-    # the upgraded audio is left untouched (the old copy is not carried back).
-    assert not backup.path.exists()
-    assert (album_dir / "booklet.pdf").read_bytes() == b"the-booklet"
+    # The companions are carried into the live folder and the upgraded audio
+    # is left untouched (the old copy is not carried back). Then the backup is
+    # reaped, unless the album holds its own booklet: that stays, and the
+    # backup with the other one.
+    if conflict:
+        assert item["companions_kept"] == ["booklet.pdf"]
+        assert (backup.path / "booklet.pdf").read_bytes() == b"the-booklet"
+        assert (album_dir / "booklet.pdf").read_bytes() == b"another-booklet"
+    else:
+        assert not backup.path.exists()
+        assert (album_dir / "booklet.pdf").read_bytes() == b"the-booklet"
     assert (album_dir / "scans" / "front.jpg").read_bytes() == b"art"
     assert (album_dir / "01.flac").read_bytes() == b"new"
+    assert sorted(p.name for p in album_dir.iterdir()) == [
+        "01.flac", "booklet.pdf", "scans"]
 
 
 def test_executor_per_album_isolation_one_album_failure_keeps_others(monkeypatch, tmp_path):
