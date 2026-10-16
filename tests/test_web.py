@@ -3160,6 +3160,14 @@ def test_restore_and_startup_put_backups_home_but_never_by_a_path(
             flac(48001, b"new download") if upgraded
             else flac(96000, b"hi-res"))
 
+    # A gap-fill backup whose track the album holds byte for byte under
+    # another name stays, so the track is not there twice.
+    track.write_bytes(b"kept")
+    kept = backup_mod.backup_gap_fill_files([str(track)], track.parent)
+    (track.parent / "01 Song.flac").write_bytes(b"kept")
+    client.post("/backups/restore", data={"backup": kept.name})
+    assert kept.exists() and not track.exists()
+
     job_persistence._reset_for_tests()
     monkeypatch.setattr(job_persistence, "_disabled", False)
     job_persistence.init()

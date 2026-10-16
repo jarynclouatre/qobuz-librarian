@@ -54,6 +54,7 @@
   <section class="ql-work-card ql-quality-entry-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">{{ upgrade_state.count }} album{% if upgrade_state.count != 1 %}s{% endif %} to upgrade</p>
+      {% if upgrade_state.held_back %}<p class="ql-work-card-text">{{ upgrade_state.held_back }} more album{% if upgrade_state.held_back != 1 %}s{% endif %} from the discarded review {% if upgrade_state.held_back != 1 %}are{% else %}is{% endif %} left out until the next Library scan.</p>{% endif %}
     </div>
     <div class="ql-work-card-actions">
       <form action="/upgrade/review" method="post" data-busy-submit>

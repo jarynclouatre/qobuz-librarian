@@ -5205,7 +5205,8 @@ def run_lyric_retry(job):
             f"{'stays' if len(remaining) == 1 else 'stay'} queued; Retry now "
             "on Search tries again.")
     else:
-        job.summary = f"All {plural(len(existing), 'retried track')} resolved."
+        job.summary = ("The retried track was resolved." if len(existing) == 1
+                       else f"All {len(existing)} retried tracks were resolved.")
     log.info(job.summary)
     if not stopped and not failed and not counts.get("unsafe-path"):
         _close_completed_job(job)

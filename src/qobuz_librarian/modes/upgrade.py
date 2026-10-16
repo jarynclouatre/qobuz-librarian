@@ -21,7 +21,7 @@ from qobuz_librarian.library.catalog import (
 )
 from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
 from qobuz_librarian.library.tags import VA_NORMALIZED, known_year, normalize
-from qobuz_librarian.modes.process import process_album
+from qobuz_librarian.modes.process import UpgradedThenInterrupted, process_album
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.quality.decision import (
     load_capped,
@@ -69,6 +69,26 @@ def _artist_dir_from_upgrade_result(album, result):
     except Exception as exc:
         vlog(f"post-upgrade state refresh path lookup failed: {exc}")
     return None
+
+
+def _forget_upgraded_album(album, album_dir):
+    """Drop an album upgraded just before a stop from the saved Library and
+    Upgrade views, without the Qobuz check a finished upgrade gets."""
+    if (
+        generation_state.output_is_current("library")
+        and not library_scan_state.remove_album((album or {}).get("id"))
+    ):
+        generation_state.mark_output_status(
+            "library",
+            "stale",
+            reason="A CLI replacement could not update the saved Library view.",
+        )
+    if not upgrade_state.remove_album_dir(album_dir):
+        generation_state.mark_output_status(
+            "upgrade",
+            "stale",
+            reason="A CLI replacement could not update the saved Upgrade view.",
+        )
 
 
 def _refresh_saved_state_after_upgrade(album, result, token, args):
@@ -271,6 +291,7 @@ def run_upgrade_walk_mode(args, token):
     no_answer = False
     n_attempted = 0
     interrupted = False
+    stopped_during_removal = None
     unsafe_artists = []  # --auto-safe skipped artists, for end-of-run review
 
     log.info(fmt(C.GRAY,
@@ -313,10 +334,8 @@ def run_upgrade_walk_mode(args, token):
             log.info("")
             for c in candidates:
                 payload = c.get("payload") or {}
-                title = c.get("title") or "?"
-                if payload.get("version"):
-                    title = f"{title} ({payload['version']})"
-                title = truncate(title, 48)
+                title = truncate(post_job_hook.release_title(
+                    c.get("title"), payload.get("version")), 48)
                 year = known_year(payload.get("year")) or "?"
                 detail = c.get("detail") or "higher Qobuz quality"
                 log.info(f"    • {fmt(C.WHITE, title)} "
@@ -379,8 +398,10 @@ def run_upgrade_walk_mode(args, token):
                 album_id = payload.get("album_id")
                 label = f"[{j}/{n_albums}]"
                 log.info("")
+                title = post_job_hook.release_title(
+                    c.get("title"), payload.get("version"))
                 log.info(fmt(C.BOLD + C.WHITE,
-                    f"  {label} {truncate(c.get('title') or '?', 55)}"))
+                    f"  {label} {truncate(title, 55)}"))
                 try:
                     premise = candidate_premise.validate(c)
                 except candidate_premise.CandidateStale as exc:
@@ -408,6 +429,11 @@ def run_upgrade_walk_mode(args, token):
                                   token=token,
                                   expected_album_receipt=premise["receipt"])
                 except AuthLost:
+                    raise
+                except UpgradedThenInterrupted:
+                    n_upgraded_albums += 1
+                    stopped_during_removal = c.get("title") or "?"
+                    _forget_upgraded_album(album, payload.get("album_dir"))
                     raise
 
                 _pr_result = (_proc_result or {}).get("result", "")
@@ -489,6 +515,10 @@ def run_upgrade_walk_mode(args, token):
         log.info(fmt(C.GRAY,
             f"     Reviewed {plural(n_reviewed, 'artist')}; upgraded tracks in "
             f"{plural(n_upgraded_albums, 'album')}."))
+    if stopped_during_removal:
+        log.info(fmt(C.YELLOW,
+            f"     ⚠  {truncate(stopped_during_removal, 48)} was upgraded; the "
+            "stop came while its old copy was being removed."))
     if n_gone:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_gone, 'candidate')} no longer in the library. "

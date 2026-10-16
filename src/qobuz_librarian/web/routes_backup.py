@@ -292,7 +292,7 @@ def _unreadable_record_notice(request: Request, target: Path) -> str:
 def _restore_refused_notice(request: Request, target: Path, origin, *,
                             complete=True, replaced=False,
                             renamed=False) -> str:
-    """Say why an upgrade restore refused, in the figures it refused on."""
+    """Say why a restore refused, in the figures it refused on."""
     backup_size = backup_mod.album_tree_size(target)
     origin_size = backup_mod.album_tree_size(origin) if origin else None
     origin_display, _is_host = storage._resolve_host_path(str(origin or ""))
@@ -439,6 +439,14 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                 "error", "The album no longer holds the files Downsample "
                 "wrote, or the app can't confirm it does, so the kept "
                 "originals were not put back over them.")
+        elif (
+            kind == "gap-fill"
+            and backup_mod.files_back_under_new_names(target)
+            and backup_mod.files_not_back_in_album(
+                target, compare=True, exact=True) == (0, 0)
+        ):
+            note = _restore_refused_notice(
+                request, target, origin, complete=False, renamed=True)
         elif kind in {"gap-fill", "downsample"}:
             # These backups hold the good originals; the destination may hold a
             # partial or a rewritten copy, so the backup always wins the swap.

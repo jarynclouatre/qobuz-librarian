@@ -61,10 +61,24 @@ def cd_quality_note(tracks):
             f"{'it' if len(tracks) == 1 else 'they'} came at CD quality.")
 
 
-def cd_quality_note_in(summary):
-    """The CD-quality note a download's summary ends with, or ""."""
-    start = (summary or "").find(_CD_QUALITY_OPENING)
-    return summary[start:] if start >= 0 else ""
+_SIBLINGS_KEPT_OPENING = "Kept your other "
+
+
+def siblings_kept_note(names):
+    """Say which other folders of the album a Gap Fill kept, and why."""
+    one = len(names) == 1
+    return (f"{_SIBLINGS_KEPT_OPENING}{'copy' if one else 'copies'} "
+            f"{', '.join(names)}, since not every track in "
+            f"{'it' if one else 'them'} matches one here.")
+
+
+def download_notes_in(summary):
+    """The notes a download's summary ends with, or ""."""
+    summary = summary or ""
+    starts = [start for start in (summary.find(_SIBLINGS_KEPT_OPENING),
+                                  summary.find(_CD_QUALITY_OPENING))
+              if start >= 0]
+    return summary[min(starts):] if starts else ""
 
 
 def download_attention_kind(result):

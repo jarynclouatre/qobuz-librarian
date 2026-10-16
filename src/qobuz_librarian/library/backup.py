@@ -10197,6 +10197,16 @@ def _unfinished_upgrade(path) -> bool:
         return False
 
 
+def _kept_by_file(path) -> bool:
+    """Whether this is a gap-fill or repair backup, which holds only the
+    files it set aside. Metadata only."""
+    try:
+        return json.loads((path / _RECEIPT_SIDECAR).read_text(
+            encoding="utf-8"))["kind"] == "gap-fill"
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+
+
 def _backup_stamp(name):
     match = re.match(r"^(\d{8}_\d{6})(?:_(\d{6}))?_", name)
     return None if match is None else (match.group(1), match.group(2) or "")
@@ -11269,10 +11279,11 @@ def files_not_back_in_album(path, *, compare=False, exact=False):
     under another name counts only when its bytes are the same.
 
     None when that can't be told: the album isn't known or the backup can't
-    be read. Beside its album folder only an unfinished upgrade backup that
-    no later backup of the album replaced counts: a finished one's album
-    holds the new download, whose names may differ, and a download an
-    upgrade set aside holds none of the user's files.
+    be read. Beside its album folder only a gap-fill or repair backup, or
+    an unfinished upgrade backup that no later backup of the album replaced,
+    counts: a finished one's album holds the new download, whose names may
+    differ, and a download an upgrade set aside holds none of the user's
+    files.
     """
     counts = _files_in_album(path, compare=compare, exact=exact)
     return None if counts is None else counts[:2]
@@ -11291,7 +11302,7 @@ def _files_in_album(path, *, compare=False, exact=False):
     origin = _read_backup_origin(target) or _intended_origin(target)
     if origin is None:
         return None
-    if origin.is_dir() and (
+    if origin.is_dir() and not _kept_by_file(target) and (
             not _unfinished_upgrade(target)
             or _superseded(target, origin)):
         return 0, 0, 0

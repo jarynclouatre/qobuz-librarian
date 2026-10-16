@@ -284,8 +284,6 @@ def run_album_walk_mode(args, token):
         "Albums already complete or checked on earlier walks are skipped; "
         "--reset-walk-seen brings the checked ones back.",
         indent="  ", hanging="  ")))
-    log.info(fmt(C.GRAY,
-        "  --yes answers yes for every album not yet decided."))
     print()
 
     saved_consolidate = args.consolidate
@@ -451,8 +449,7 @@ def run_album_walk_mode(args, token):
     needs_attention = (interrupted or no_answer or partial_completion
                        or retry_needed or bool(discovery_errors))
     log.info(fmt(C.GRAY,
-        f"     Artists scanned: {n_artists_scanned} · "
-        f"Already complete: {n_albums_complete} · "
+        f"     Already complete: {n_albums_complete} · "
         f"Filled: {n_albums_filled}"))
     leftovers = []
     if n_albums_skipped:

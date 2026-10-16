@@ -39,6 +39,17 @@ def rip_shortfall(staged_dirs, qobuz_album, *, effective_tier=None, exempt=()):
     }
 
 
+def quality_met_line(n_ok, cd_quality_tracks):
+    """What the quality check says when the download meets the selected
+    quality, or "" when every track came at CD quality, since the check
+    leaves those tracks out."""
+    if not cd_quality_tracks:
+        return "Quality check: the download meets the selected quality."
+    if n_ok > len(cd_quality_tracks):
+        return "Quality check: the other tracks meet the selected quality."
+    return ""
+
+
 def verify_and_recover(qobuz_album, staged_dirs, *, redownload_at_max,
                        effective_tier, allow_retry=True, exempt=()):
     """Verify the staged rip and retry once at the max tier when safe."""

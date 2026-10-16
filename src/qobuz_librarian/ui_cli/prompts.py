@@ -14,6 +14,7 @@ from qobuz_librarian.library.catalog import (
     is_lossless_album,
 )
 from qobuz_librarian.library.tags import normalize, strip_album_decorations
+from qobuz_librarian.post_job_hook import release_title
 from qobuz_librarian.quality import decision as quality_decision
 from qobuz_librarian.quality.decision import album_max_quality
 from qobuz_librarian.quality.tiers import format_quality
@@ -225,7 +226,7 @@ def prompt_album_selection(albums, prefer_hires=False, can_load_more=False,
 
     for i, a in enumerate(albums, 1):
         artist = (a.get("artist") or {}).get("name") or "?"
-        title  = a.get("title") or "?"
+        title  = release_title(a.get("title"), a.get("version"))
         year   = album_year(a) or "?"
         tracks = a.get("tracks_count") or "?"
         track_word = "track" if tracks == 1 else "tracks"
@@ -542,7 +543,7 @@ def prompt_artist_name():
 def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=False,
                         existing_quality_label=None):
     artist = (album.get("artist") or {}).get("name") or "?"
-    title  = album.get("title") or "?"
+    title  = release_title(album.get("title"), album.get("version"))
     year   = album_year(album) or "?"
     qual   = album_quality_label(album)
     n_total   = len(missing) + len(present)

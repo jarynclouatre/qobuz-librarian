@@ -66,10 +66,14 @@ _DOWNLOAD_SUMMARY_LABELS = {
 
 def _summarize_download_result(r):
     """One-line job summary from process_album's result dict, naming any
-    track that came at CD quality."""
+    other folder of the album it kept and any track that came at CD
+    quality."""
     summary = _download_summary(r)
-    if summary and (r or {}).get("imported") and r.get("cd_quality_tracks"):
-        summary += f" {download_result.cd_quality_note(r['cd_quality_tracks'])}"
+    if summary and (r or {}).get("imported"):
+        if r.get("siblings_kept"):
+            summary += f" {download_result.siblings_kept_note(r['siblings_kept'])}"
+        if r.get("cd_quality_tracks"):
+            summary += f" {download_result.cd_quality_note(r['cd_quality_tracks'])}"
     return summary
 
 

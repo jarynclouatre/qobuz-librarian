@@ -324,6 +324,63 @@ def test_switching_to_a_sibling_keeps_the_folder_the_user_picked(
     assert queued[0]["siblings_to_delete"] == [third]
 
 
+def test_a_gap_fill_that_keeps_another_edition_is_done(
+        tmp_path, monkeypatch, tagged_flac):
+    """A terminal Gap Fill that deleted an identical copy and kept a different
+    edition ended Failed with exit 1, and skipped multi-artist filing because
+    the identical copy also held the new track's tags."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import run_lock
+    from qobuz_librarian.download_result import download_job_outcome
+    from qobuz_librarian.library.catalog import track_signatures_for_album_dirs
+    from qobuz_librarian.queue import executor
+    from qobuz_librarian.queue.builder import _build_queue_item
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    copy, remaster, explicit = (tmp_path / "music" / "Big Thief" / name for name in (
+        "Masterpiece (2016)", "Masterpiece (Remaster) (2016)",
+        "Masterpiece (Explicit) (2016)"))
+
+    def track(folder, n, isrc, album="Masterpiece (Remaster)"):
+        return tagged_flac(folder / f"{n:02}.flac", seconds=2, title=f"T{n}",
+                           albumartist="Big Thief", album=album, isrc=isrc,
+                           tracknumber=n, discnumber=1)
+
+    for n in (1, 2):
+        track(copy, n, f"GBAFL230000{n}")
+        track(explicit, n, f"US2U6160000{n}", album="Masterpiece (Explicit)")
+    track(remaster, 1, "GBAFL2300001")
+    tracks = [{"id": n, "title": f"T{n}", "track_number": n, "media_number": 1,
+               "duration": 2, "isrc": f"GBAFL230000{n}"} for n in (1, 2)]
+    album = {"id": "rm", "title": "Masterpiece", "artist": {"name": "Big Thief"},
+             "tracks": {"items": tracks}}
+    item = _build_queue_item(album=album, album_dir=remaster, label="M",
+                             missing=tracks[1:], present=tracks[:1],
+                             upgrade_only=False, auto_upgrade=False,
+                             siblings_to_delete=[copy, explicit])
+    executor._seal_queue_item_siblings(item)
+    staged = track(tmp_path / "staging" / "M", 2, "GBAFL2300002")
+    item["post_import_signatures"] = track_signatures_for_album_dirs([staged.parent])
+    staged.rename(remaster / staged.name)
+    item.update(n_ok=1, n_fail=0, n_lossy=0)
+    filed = []
+    monkeypatch.setattr(executor, "prompt_and_migrate_multi_artist_folder",
+                        lambda *_a, source_dir, **_k: filed.append(source_dir) or source_dir)
+    monkeypatch.setattr(executor, "retire_backup_beets_entries", lambda *_a: True)
+    lease = run_lock.acquire()
+    try:
+        result = executor._resolve_queue_item(
+            item, SimpleNamespace(migrate_multi_artist=True), True, record_fetch=False)
+    finally:
+        lease.close()
+
+    assert filed == [remaster]
+    assert download_job_outcome(result) == ("done", "")
+    assert result["siblings_kept"] == [explicit.name]
+    assert not copy.exists() and explicit.is_dir()
+
+
 def test_a_terminal_download_leaves_the_living_library_review(
         tmp_path, monkeypatch):
     """The living review is held in memory by whichever process serves the web

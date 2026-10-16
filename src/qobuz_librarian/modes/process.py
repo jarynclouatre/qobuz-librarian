@@ -107,6 +107,7 @@ from qobuz_librarian.quality.decision import (
     quality_relation,
 )
 from qobuz_librarian.quality.verify import (
+    quality_met_line,
     redownload_with_staged_fallback,
     retry_preserves_track_coverage,
     verify_and_recover,
@@ -897,6 +898,17 @@ def _offer_expanded_edition(album, album_dir, existing, extras, token, args):
     if exp is None:
         return None, [], None
     return exp, exp_extras, compare_album_quality(existing, exp)
+
+
+class UpgradedThenInterrupted(KeyboardInterrupt):
+    """Ctrl-C landed while the old copy of an upgraded album was removed."""
+
+
+def _dispose_replaced_original(backup, **kwargs):
+    try:
+        return dispose_backup(backup, **kwargs)
+    except KeyboardInterrupt:
+        raise UpgradedThenInterrupted from None
 
 
 def process_album(album, args, *, allow_force=True, label=None,
@@ -1703,8 +1715,10 @@ def process_album(album, args, *, allow_force=True, label=None,
                         "  ↻ recovered: re-fetched at the highest source after "
                         "a short first rip."))
                 elif not quality_verdict["under"]:
-                    log.info(fmt(C.GRAY,
-                        "  Quality check: the download meets the selected quality."))
+                    met = quality_met_line(
+                        n_ok, download_result.get("cd_quality_tracks"))
+                    if met:
+                        log.info(fmt(C.GRAY, f"  {met}"))
 
         # Downsampling and lyric_fetch run on staging BEFORE beets imports.
         if n_ok > 0 and not args.no_import:
@@ -1879,7 +1893,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         companions_kept = left
                         log.info(fmt(C.YELLOW, _keep_backup_for_companions(
                             upgrade_backup_path, left)))
-                    elif dispose_backup(
+                    elif _dispose_replaced_original(
                         upgrade_backup_path,
                         replacement_path=replacement_path,
                         expected_replacement_receipt=replacement_receipt,

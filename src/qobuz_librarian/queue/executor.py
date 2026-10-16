@@ -112,6 +112,7 @@ from qobuz_librarian.library.scanner import cache_album_tags, clear_scan_caches,
 from qobuz_librarian.modes.consolidate import match_sibling_track
 from qobuz_librarian.quality.decision import mark_local_album_capped
 from qobuz_librarian.quality.verify import (
+    quality_met_line,
     redownload_with_staged_fallback,
     retry_preserves_track_coverage,
     verify_and_recover,
@@ -160,13 +161,14 @@ class PreImportHooksResult:
 
 def _sibling_tracks_all_kept(sibling, kept):
     """True when every audio file in ``sibling`` is a recording ``kept`` also
-    holds, so retiring the sibling loses no track. A bonus track only the
-    sibling has, a file that can't be matched, or an unreadable tree keeps it."""
+    holds, so retiring the sibling loses no track. False when a file in the
+    sibling matches no track there, as in another edition or an untagged rip,
+    and None when either tree can't be read."""
     errors = []
     sibling_tracks = read_album_dir(Path(sibling), walk_errors=errors)
     kept_tracks = read_album_dir(Path(kept), walk_errors=errors)
     if errors or not kept_tracks:
-        return False
+        return None
     claimed = set()
     for track in sibling_tracks:
         match = match_sibling_track(track, kept_tracks)
@@ -1442,13 +1444,18 @@ def _resolve_queue_item(
 
     def imported_dir():
         signatures = item.get("post_import_signatures")
-        if (item.get("exact_edition") or bp is not None) and album_dir is not None:
-            # An upgrade is imported into the album's own folder.
-            return find_album_dir_by_track_signatures(signatures, expected_dir=album_dir)
+        if album_dir is not None:
+            # Gap Fill and Upgrade import into the album's own folder, and
+            # another copy of the album can hold tracks with the same tags.
+            found = find_album_dir_by_track_signatures(
+                signatures, expected_dir=album_dir)
+            if found is not None or item.get("exact_edition") or bp is not None:
+                return found
         return find_album_dir_by_track_signatures(signatures)
 
     _sibs = item.get("siblings_to_delete", [])
     item["_siblings_preserved"] = [os.fspath(path) for path in _sibs]
+    item["_siblings_kept"] = []
 
     # One strict per-album success flag covers art cleanup, sibling deletion,
     # backup resolution, and opt-in migration must all agree. A partial result
@@ -1646,11 +1653,22 @@ def _resolve_queue_item(
                             "before the download.",
                         ))
                         continue
-                    if not _sibling_tracks_all_kept(sibling_path, post_dir):
+                    covered = _sibling_tracks_all_kept(sibling_path, post_dir)
+                    if covered is False:
+                        item["_siblings_preserved"].remove(
+                            os.fspath(sibling_path))
+                        item["_siblings_kept"].append(name)
+                        log.info(fmt(
+                            C.GRAY,
+                            f"  ·  Kept {name}; not every track in it "
+                            f"matches one in {post_dir.name}.",
+                        ))
+                        continue
+                    if covered is None:
                         log.info(fmt(
                             C.YELLOW,
-                            f"  ⚠  Kept sibling {name}; couldn't confirm "
-                            f"{post_dir.name} has every track it holds.",
+                            f"  ⚠  Kept sibling {name}; its tracks couldn't "
+                            f"be compared with {post_dir.name}.",
                         ))
                         continue
                     sibling_backup = backup_album_dir(
@@ -1722,7 +1740,8 @@ def _resolve_queue_item(
                             folder_holds_all_tracks(
                                 replacement, _album_tracks,
                                 destructive=True)
-                            and _sibling_tracks_all_kept(held, replacement)
+                            and _sibling_tracks_all_kept(
+                                held, replacement) is True
                         ),
                     )
                     if not retired:
@@ -2155,6 +2174,7 @@ def _resolve_queue_item(
         "recovery_unverified": bool(item.get("recovery_unverified", False)),
         "quality_verdict": item.get("quality_verdict"),
         "siblings_preserved": item.get("_siblings_preserved", []),
+        "siblings_kept": item.get("_siblings_kept", []),
         "imported": imported_globally,
         "auto_upgrade": item["auto_upgrade"],
         "elapsed_s": int(item.get("elapsed", 0)),
@@ -3624,8 +3644,10 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     log.info(fmt(C.CYAN,
                         "    ↻ recovered: re-fetched at the highest source."))
                 elif not item["quality_verdict"]["under"]:
-                    log.info(fmt(C.GRAY,
-                        "    Quality check: the download meets the selected quality."))
+                    met = quality_met_line(
+                        item.get("n_ok", 0), item.get("cd_quality_tracks"))
+                    if met:
+                        log.info(fmt(C.GRAY, f"    {met}"))
                 elif on_quality_shortfall is not None:
                     # Still under target after the retry: the import proceeds,
                     # but the owning job must not look like a clean finish.

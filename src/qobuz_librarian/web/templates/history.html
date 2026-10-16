@@ -183,8 +183,8 @@
       <p class="ql-row-meta {{ 'ql-row-meta--warning' if job.tracks_missing or job.interrupted_by_restart else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>
       {% elif job.status == 'canceled' and job.summary %}
       <p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>
-      {% elif job.cd_quality_note %}
-      <p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.cd_quality_note }}</p>
+      {% elif job.download_notes %}
+      <p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.download_notes }}</p>
       {% endif %}
     </article>
     {% endfor %}
