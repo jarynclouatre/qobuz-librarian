@@ -88,6 +88,7 @@ def test_relocation_is_additive_and_keeps_destination_conflicts(
     destination_conflict.write_bytes(b"destination version")
     destination_art.write_bytes(b"same artwork")
     _database(database, tracks=(moving, conflict), artwork=source_art)
+    descriptors = len(os.listdir("/proc/self/fd"))
 
     authority = run_lock.acquire()
     try:
@@ -100,6 +101,7 @@ def test_relocation_is_additive_and_keeps_destination_conflicts(
     finally:
         authority.close()
 
+    assert len(os.listdir("/proc/self/fd")) == descriptors
     assert result.changed is True
     assert (destination / moving.name).read_bytes() == b"new track"
     assert destination_conflict.read_bytes() == b"destination version"
@@ -274,6 +276,7 @@ def test_copy_failure_rolls_back_without_touching_source(tmp_path, monkeypatch):
         raise OSError(errno.ENOSPC, "no space left")
 
     monkeypatch.setattr(relocation, "_copy_file", disk_full)
+    descriptors = len(os.listdir("/proc/self/fd"))
     authority = run_lock.acquire()
     try:
         with pytest.raises(OSError, match="no space left"):
@@ -286,6 +289,7 @@ def test_copy_failure_rolls_back_without_touching_source(tmp_path, monkeypatch):
     finally:
         authority.close()
 
+    assert len(os.listdir("/proc/self/fd")) == descriptors
     assert track.read_bytes() == b"audio"
     assert not destination.exists()
     assert _paths(database)[0] == [str(track)]

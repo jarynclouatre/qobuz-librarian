@@ -59,13 +59,17 @@ def test_resample_preserves_source_bit_depth():
 
 
 def test_resample_clean_hires_shrinks_and_verifies(tmp_path, _need_ffmpeg, _need_flac):
-    src = tmp_path / "track.flac"
+    # A link above the album, as a music folder reached through a linked
+    # home or mount is on a host install.
+    (tmp_path / "real" / "Album").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+    src = tmp_path / "real" / "Album" / "track.flac"
     _hires_flac(src, 2.0)
     in_size = src.stat().st_size
     af, _ = detect_resampler_filter()
 
     rel, sr, rate, saved, err = resample_one("track.flac", 96000, 48000, af,
-                                             base_dir=tmp_path)
+                                             base_dir=tmp_path / "link" / "Album")
     assert err is None
     assert saved is not None and saved > 0            # genuinely smaller
     assert src.stat().st_size == in_size - saved

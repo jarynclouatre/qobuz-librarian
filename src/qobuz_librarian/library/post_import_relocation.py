@@ -29,8 +29,6 @@ from pathlib import Path, PurePosixPath
 from qobuz_librarian import beets_db, run_lock
 from qobuz_librarian import config as cfg
 from qobuz_librarian.completion import normalise_album_id
-from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
-from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library import scanner
 from qobuz_librarian.library.post_import_relocation_db import (
     DatabaseRowsState,
@@ -182,14 +180,6 @@ def _open_regular(value, *, dir_fd=None) -> int:
     return descriptor
 
 
-def _open_entry_handle(value, *, dir_fd=None) -> int:
-    return os.open(
-        value,
-        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
-        dir_fd=dir_fd,
-    )
-
-
 def _entry_identity(value) -> tuple[int, int]:
     return int(value.st_dev), int(value.st_ino)
 
@@ -197,34 +187,12 @@ def _entry_identity(value) -> tuple[int, int]:
 _named_matches = functools.partial(_named_entry_matches, directory=False)
 
 
-def _run_descriptor_sigint_deferred(callback):
-    """Finish one descriptor ownership transition before delivering Ctrl-C."""
-    return run_sigint_deferred(
-        callback, detail="interrupt-safe relocation descriptor access is unavailable")
-
-
-def _close_descriptor_state(descriptors) -> None:
-    interrupted = None
+def _close_descriptors(descriptors) -> None:
     while descriptors:
-        descriptor = descriptors.pop()
         try:
-            os.close(descriptor)
+            os.close(descriptors.pop())
         except OSError:
             pass
-        except BaseException as exc:
-            if interrupted is None:
-                interrupted = exc
-    if interrupted is not None:
-        raise interrupted
-
-
-def _finalize_descriptor_state(descriptors) -> None:
-    try:
-        _run_descriptor_sigint_deferred(
-            lambda: _close_descriptor_state(descriptors)
-        )
-    except BaseException:
-        pass
 
 
 class _DescriptorOwner:
@@ -233,45 +201,18 @@ class _DescriptorOwner:
     def __init__(self):
         self._descriptors = []
         self._visible = []
-        self._finalizer = weakref.finalize(
-            self,
-            _finalize_descriptor_state,
-            self._descriptors,
-        )
+        weakref.finalize(self, _close_descriptors, self._descriptors)
 
-    def adopt(self, descriptor, *, visible=False):
-        if not self._finalizer.alive:
-            raise RuntimeError("descriptor owner is closed")
+    def open(self, opener, *, visible=False):
+        descriptor = opener()
         self._descriptors.append(descriptor)
         if visible:
             self._visible.append(descriptor)
         return descriptor
 
-    def open(self, opener, *, visible=False):
-        def open_and_adopt():
-            descriptor = opener()
-            owned_before = len(self._descriptors)
-            try:
-                return self.adopt(descriptor, visible=visible)
-            except BaseException:
-                if len(self._descriptors) == owned_before:
-                    try:
-                        os.close(descriptor)
-                    except OSError:
-                        pass
-                raise
-
-        return _run_descriptor_sigint_deferred(open_and_adopt)
-
     def close(self) -> None:
-        try:
-            _run_descriptor_sigint_deferred(
-                lambda: _close_descriptor_state(self._descriptors)
-            )
-        finally:
-            self._visible.clear()
-            if not self._descriptors:
-                self._finalizer.detach()
+        self._visible.clear()
+        _close_descriptors(self._descriptors)
 
     def __getitem__(self, index):
         return self._visible[index]
@@ -445,6 +386,11 @@ def _record_matches_fd(descriptor, expected) -> bool:
         return _file_record(descriptor) == expected
     except (OSError, TypeError, ValueError):
         return False
+
+
+def _stat_matches_fd(descriptor, expected) -> bool:
+    held = _stat_record(os.fstat(descriptor))
+    return {**held, "sha256": expected["sha256"]} == expected
 
 
 def _canonical_json(value) -> bytes:
@@ -1184,114 +1130,6 @@ def _retired_source_file_name(index) -> str:
     if type(index) is not int or index < 0 or index >= _MAX_TREE_ENTRIES:
         raise ValueError("relocation source file index is invalid")
     return f"source-file-{index:05d}"
-
-
-def _restore_private_entry(
-    private_fd,
-    private_name,
-    public_fd,
-    public_name,
-    descriptor,
-) -> bool:
-    if (
-        _named_entry_matches(public_fd, public_name, descriptor)
-        and _name_missing(private_fd, private_name)
-    ):
-        return True
-    if (
-        not _name_missing(public_fd, public_name)
-        or not _named_entry_matches(private_fd, private_name, descriptor)
-    ):
-        return False
-    try:
-        _rename_noreplace(
-            private_fd,
-            private_name,
-            public_fd,
-            public_name,
-        )
-    except BaseException:
-        pass
-    restored = (
-        _named_entry_matches(public_fd, public_name, descriptor)
-        and _name_missing(private_fd, private_name)
-    )
-    if restored:
-        os.fsync(private_fd)
-        os.fsync(public_fd)
-    return restored
-
-
-def _move_exact_to_private(
-    public_fd,
-    public_name,
-    private_fd,
-    private_name,
-    descriptor,
-) -> bool:
-    if (
-        not _named_entry_matches(public_fd, public_name, descriptor)
-        or not _name_missing(private_fd, private_name)
-    ):
-        return False
-    deferred = None
-    try:
-        _rename_noreplace(
-            public_fd,
-            public_name,
-            private_fd,
-            private_name,
-        )
-    except BaseException as exc:
-        deferred = exc
-
-    if _named_entry_matches(private_fd, private_name, descriptor):
-        try:
-            os.fsync(public_fd)
-            os.fsync(private_fd)
-        except BaseException as exc:
-            deferred = deferred or exc
-        if deferred is None:
-            return True
-        if not _restore_private_entry(
-            private_fd,
-            private_name,
-            public_fd,
-            public_name,
-            descriptor,
-        ):
-            raise PostImportRelocationAttention(
-                "an interrupted source retirement could not be restored"
-            ) from deferred
-        if isinstance(deferred, Exception):
-            return False
-        raise deferred
-
-    if _name_missing(public_fd, public_name):
-        unexpected = None
-        try:
-            unexpected = _open_entry_handle(private_name, dir_fd=private_fd)
-            if not _named_entry_matches(private_fd, private_name, unexpected):
-                raise OSError("relocation source replacement changed")
-            if _restore_private_entry(
-                private_fd,
-                private_name,
-                public_fd,
-                public_name,
-                unexpected,
-            ):
-                if deferred is not None and not isinstance(deferred, Exception):
-                    raise deferred
-                return False
-            raise PostImportRelocationAttention(
-                "a source replacement could not be restored after retirement"
-            )
-        finally:
-            if unexpected is not None:
-                os.close(unexpected)
-    if deferred is not None and not isinstance(deferred, Exception):
-        raise deferred
-    return False
 
 
 def _prepare_units(source_fd, workspace_fd, payload, namespace_fd) -> None:
@@ -2052,9 +1890,8 @@ def _unlink_exact_source_file(
     source_relative = f"{payload['source']}/{relative}"
     destination_relative = f"{payload['destination']}/{relative}"
     retired_name = _retired_source_file_name(index)
-    source_fd = destination_fd = retired_fd = None
+    retired_fd = None
     source_chain = destination_chain = []
-    source_exclusion = destination_exclusion = None
     expected_source = payload["source_snapshot"]["files"][relative]
     expected_destination = payload["public_snapshot"]["files"][relative]
 
@@ -2068,14 +1905,8 @@ def _unlink_exact_source_file(
                 destination_chain[-1] if destination_chain else root_fd
             )
             destination_name = _valid_relative(destination_relative)[-1]
-            source_exclusion = acquire_inode_write_exclusion(retired_fd)
-            destination_exclusion = acquire_inode_write_exclusion(destination_fd)
-            if source_exclusion is None or destination_exclusion is None:
-                return False
             if (
-                not source_exclusion.intact()
-                or not destination_exclusion.intact()
-                or not _named_matches(workspace_fd, retired_name, retired_fd)
+                not _named_matches(workspace_fd, retired_name, retired_fd)
                 or not _file_record_equivalent(
                     _file_record(retired_fd), expected_source, renamed=True
                 )
@@ -2087,27 +1918,10 @@ def _unlink_exact_source_file(
                 return False
             os.unlink(retired_name, dir_fd=workspace_fd)
             os.fsync(workspace_fd)
-            if (
-                not destination_exclusion.intact()
-                or not _named_matches(
-                    destination_parent, destination_name, destination_fd
-                )
-                or not _record_matches_fd(destination_fd, expected_destination)
-            ):
-                raise PostImportRelocationAttention(
-                    "relocation destination changed during source cleanup",
-                    paths=(Path(cfg.MUSIC_ROOT) / destination_relative,),
-                )
             return True
-        except PostImportRelocationAttention:
-            raise
         except (OSError, TypeError, ValueError):
             return False
         finally:
-            if destination_exclusion is not None:
-                destination_exclusion.close()
-            if source_exclusion is not None:
-                source_exclusion.close()
             if retired_fd is not None:
                 os.close(retired_fd)
             _close_all(destination_chain)
@@ -2135,89 +1949,22 @@ def _unlink_exact_source_file(
                 == _entry_identity(os.fstat(destination_parent))
                 and source_name == destination_name
             )
+            or not _record_matches_fd(destination_fd, expected_destination)
+            or not _record_matches_fd(source_fd, expected_source)
             or not _named_matches(
                 destination_parent, destination_name, destination_fd
             )
-            or not _record_matches_fd(source_fd, expected_source)
-            or not _record_matches_fd(destination_fd, expected_destination)
-        ):
-            return False
-        source_exclusion = acquire_inode_write_exclusion(source_fd)
-        destination_exclusion = acquire_inode_write_exclusion(destination_fd)
-        if source_exclusion is None or destination_exclusion is None:
-            return False
-        if (
-            not source_exclusion.intact()
-            or not destination_exclusion.intact()
             or not _named_matches(source_parent, source_name, source_fd)
-            or not _named_matches(
-                destination_parent, destination_name, destination_fd
-            )
-            or not _record_matches_fd(source_fd, expected_source)
-            or not _record_matches_fd(destination_fd, expected_destination)
+            or not _stat_matches_fd(destination_fd, expected_destination)
+            or not _stat_matches_fd(source_fd, expected_source)
         ):
             return False
-        if not _move_exact_to_private(
-            source_parent,
-            source_name,
-            workspace_fd,
-            retired_name,
-            source_fd,
-        ):
-            return False
-        if (
-            not source_exclusion.intact()
-            or not destination_exclusion.intact()
-            or not _named_matches(workspace_fd, retired_name, source_fd)
-            or not _file_record_equivalent(
-                _file_record(source_fd), expected_source, renamed=True
-            )
-            or not _named_matches(
-                destination_parent, destination_name, destination_fd
-            )
-            or not _record_matches_fd(destination_fd, expected_destination)
-        ):
-            restored = _restore_private_entry(
-                workspace_fd,
-                retired_name,
-                source_parent,
-                source_name,
-                source_fd,
-            )
-            raise PostImportRelocationAttention(
-                (
-                    "relocation destination changed during source cleanup"
-                    if restored
-                    else "retired relocation source requires recovery"
-                ),
-                paths=(
-                    Path(cfg.MUSIC_ROOT) / source_relative,
-                    Path(cfg.MUSIC_ROOT) / destination_relative,
-                ),
-            )
-        os.unlink(retired_name, dir_fd=workspace_fd)
-        os.fsync(workspace_fd)
-        if (
-            not destination_exclusion.intact()
-            or not _named_matches(
-                destination_parent, destination_name, destination_fd
-            )
-            or not _record_matches_fd(destination_fd, expected_destination)
-        ):
-            raise PostImportRelocationAttention(
-                "relocation destination changed during source cleanup",
-                paths=(Path(cfg.MUSIC_ROOT) / destination_relative,),
-            )
+        os.unlink(source_name, dir_fd=source_parent)
+        os.fsync(source_parent)
         return True
-    except PostImportRelocationAttention:
-        raise
     except (OSError, TypeError, ValueError):
         return False
     finally:
-        if destination_exclusion is not None:
-            destination_exclusion.close()
-        if source_exclusion is not None:
-            source_exclusion.close()
         _close_all(destination_chain)
         _close_all(source_chain)
 
@@ -2755,7 +2502,6 @@ def _recover_payload(
                     paths=(root / payload["source"],),
                 )
             _remove_workspace(root_fd, workspace_fd, payload)
-            workspace_fd = None
             _unlink_journal(namespace_fd, payload["operation_id"])
             return "rolled-back"
         states = _all_unit_states(root_fd, workspace_fd, payload) if prepared else []
@@ -2767,7 +2513,6 @@ def _recover_payload(
 
         if phase in {"intent", "prepared"} and not prepared:
             _remove_workspace(root_fd, workspace_fd, payload)
-            workspace_fd = None
             _remove_created_artist_if_empty(root_fd, payload)
             _unlink_journal(namespace_fd, payload["operation_id"])
             return "rolled-back"
@@ -2776,7 +2521,6 @@ def _recover_payload(
             state == "private" for state in states
         ):
             _remove_workspace(root_fd, workspace_fd, payload)
-            workspace_fd = None
             _remove_created_artist_if_empty(root_fd, payload)
             _unlink_journal(namespace_fd, payload["operation_id"])
             return "rolled-back"
@@ -2880,7 +2624,6 @@ def _recover_payload(
                 )
             _cleanup_source(root_fd, workspace_fd, payload)
             _remove_workspace(root_fd, workspace_fd, payload)
-            workspace_fd = None
             if retain_completion:
                 payload["phase"] = "retained"
                 _write_journal(namespace_fd, payload)
@@ -2891,7 +2634,6 @@ def _recover_payload(
 
         _rollback_units(root_fd, workspace_fd, payload)
         _remove_workspace(root_fd, workspace_fd, payload)
-        workspace_fd = None
         _remove_created_artist_if_empty(root_fd, payload)
         _unlink_journal(namespace_fd, payload["operation_id"])
         return "rolled-back"
@@ -3445,7 +3187,6 @@ def relocate_post_import_album(
                     committed = True
                     _cleanup_source(root_fd, workspace_fd, payload)
                     _remove_workspace(root_fd, workspace_fd, payload)
-                    workspace_fd = None
                     _unlink_journal(namespace_fd, operation_id)
                     return RelocationResult(
                         destination_path,

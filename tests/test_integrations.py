@@ -1302,6 +1302,23 @@ def test_art_guard_publishes_only_in_a_new_or_pinned_album_directory(tmp_path, m
     assert new_task.album.stored == 1
     assert new_fetchart.art_candidates == {}
 
+    failed_task, _, failed_fetchart, failed_dir = _art_guard_task(root, staging, "Not Stored")
+    loaded[:] = [failed_fetchart]
+    plugin._guard_art(session, failed_task)
+    failed_dir.mkdir(parents=True)
+    (failed_dir / "01.flac").write_bytes(b"audio")
+    failed_task.item.path = os.fsencode(failed_dir / "01.flac")
+
+    def store_fails():
+        raise OSError("database is locked")
+
+    failed_task.album.store = store_fails
+    failed_task.album.get_fresh_from_db = lambda: types.SimpleNamespace(artpath=None)
+    plugin._publish_art(session, failed_task)
+
+    assert sorted(path.name for path in failed_dir.iterdir()) == ["01.flac"]
+    assert failed_task.album.artpath is None
+
     real_copy = module._copy_candidate_to_private
 
     race_root = tmp_path / "race-music"

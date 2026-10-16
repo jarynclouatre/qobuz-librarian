@@ -25,18 +25,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.lyric_fetch import (
+    _BoundTrack,
     _exchange_existing,
-    _named_identity,
-    _regular_identity,
     _unlink_held_name,
 )
 from qobuz_librarian.integrations.rip import flac_audio_offset
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import flac_cache, scanner
 from qobuz_librarian.safefile import digest_fd as _sha256_fd
-from qobuz_librarian.safefile import named_entry_matches
+from qobuz_librarian.safefile import fsync_dir
 from qobuz_librarian.ui_cli.errors import plural
 
 
@@ -393,127 +391,6 @@ def _write_seektable(target_fd: int) -> bool:
     return r.returncode == 0
 
 
-class _BoundSource:
-    """One regular file beneath a fully held, no-follow absolute root chain."""
-
-    def __init__(self, path: Path, owned_root: Path):
-
-        self.path = Path(os.path.abspath(os.fspath(path)))
-        self.root = Path(os.path.abspath(os.fspath(owned_root)))
-        try:
-            relative = self.path.relative_to(self.root)
-        except ValueError:
-            raise OSError(
-                f"{self.path}: source is outside the downsample root") from None
-        if not relative.parts or any(
-                part in ("", ".", "..") for part in relative.parts):
-            raise OSError(f"{self.path}: invalid source path")
-
-        root_parts = self.root.parts
-        if not root_parts or root_parts[0] != os.path.sep:
-            raise OSError(f"{self.root}: invalid downsample root")
-        self._directory_fds = []
-        self._directory_names = []
-        self.track_fd = None
-        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-        try:
-            filesystem_root_fd = os.open(os.path.sep, directory_flags)
-            self._directory_fds.append(filesystem_root_fd)
-            for part in (*root_parts[1:], *relative.parts[:-1]):
-                child_fd = os.open(
-                    part,
-                    directory_flags,
-                    dir_fd=self._directory_fds[-1],
-                )
-                if not named_entry_matches(
-                        self._directory_fds[-1], part, child_fd,
-                        directory=True):
-                    os.close(child_fd)
-                    raise OSError(f"{self.path}: directory chain changed")
-                self._directory_names.append(part)
-                self._directory_fds.append(child_fd)
-
-            track_flags = (
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-            self.track_fd = os.open(
-                relative.parts[-1],
-                track_flags,
-                dir_fd=self._directory_fds[-1],
-            )
-            self.identity = _regular_identity(os.fstat(self.track_fd))
-            if (
-                self.identity is None
-                or not self.chain_is_named()
-                or self.named_identity() != self.identity
-            ):
-                raise OSError(f"{self.path}: source identity changed")
-        except BaseException:
-            self.close()
-            raise
-
-    @property
-    def parent_fd(self) -> int:
-        return self._directory_fds[-1]
-
-    @property
-    def name(self) -> str:
-        return self.path.name
-
-    def chain_is_named(self) -> bool:
-        try:
-            held_root = os.fstat(self._directory_fds[0])
-            named_root = os.stat(os.path.sep, follow_symlinks=False)
-            if (
-                not stat.S_ISDIR(held_root.st_mode)
-                or not stat.S_ISDIR(named_root.st_mode)
-                or held_root.st_dev != named_root.st_dev
-                or held_root.st_ino != named_root.st_ino
-            ):
-                return False
-            for index, name in enumerate(self._directory_names, start=1):
-                if not named_entry_matches(
-                        self._directory_fds[index - 1],
-                        name,
-                        self._directory_fds[index],
-                        directory=True,
-                ):
-                    return False
-        except (OSError, IndexError):
-            return False
-        return True
-
-    def named_identity(self):
-        try:
-            return _named_identity(self.parent_fd, self.name)
-        except OSError:
-            return None
-
-    def exact_track_is_named(self) -> bool:
-        if self.track_fd is None or not self.chain_is_named():
-            return False
-        try:
-            return (
-                _regular_identity(os.fstat(self.track_fd)) == self.identity
-                and self.named_identity() == self.identity
-            )
-        except OSError:
-            return False
-
-    def close(self) -> None:
-        if self.track_fd is not None:
-            try:
-                os.close(self.track_fd)
-            except OSError:
-                pass
-            self.track_fd = None
-        for descriptor in reversed(self._directory_fds):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        self._directory_fds.clear()
-
-
 def _descriptor_path(descriptor: int) -> Path:
     return Path(f"/proc/self/fd/{descriptor}")
 
@@ -597,34 +474,8 @@ def _copy_source_metadata(source_fd: int, target_fd: int):
     return None
 
 
-def _exact_temp_is_named(parent_fd: int, name: str, descriptor: int,
-                         expected=None) -> bool:
-    try:
-        frozen = expected or _regular_identity(os.fstat(descriptor))
-        return (
-            frozen is not None
-            and _regular_identity(os.fstat(descriptor)) == frozen
-            and _named_identity(parent_fd, name) == frozen
-        )
-    except OSError:
-        return False
-
-
-def _reopen_encode_temp_readonly(parent_fd: int, name: str, descriptor: int):
-    expected = _regular_identity(os.fstat(descriptor))
-    if expected is None or not _exact_temp_is_named(
-            parent_fd, name, descriptor, expected):
-        raise OSError("resampled output changed while it was being opened")
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    readonly_fd = os.open(name, flags, dir_fd=parent_fd)
-    if not _exact_temp_is_named(parent_fd, name, readonly_fd, expected):
-        os.close(readonly_fd)
-        raise OSError("resampled output changed while it was being opened")
-    return readonly_fd, expected
-
-
-def _receipt_matches_source(binding, receipt, exclusion) -> bool:
-    if not isinstance(receipt, dict) or not exclusion.intact():
+def _receipt_matches_source(binding, receipt) -> bool:
+    if not isinstance(receipt, dict):
         return False
     try:
         value = os.fstat(binding.track_fd)
@@ -643,13 +494,7 @@ def _receipt_matches_source(binding, receipt, exclusion) -> bool:
         ):
             return False
         digest = _sha256_fd(binding.track_fd)
-        after = os.fstat(binding.track_fd)
-        return (
-            exclusion.intact()
-            and binding.exact_track_is_named()
-            and _regular_identity(after) == binding.identity
-            and digest == receipt["sha256"]
-        )
+        return binding.exact_track_is_named() and digest == receipt["sha256"]
     except (OSError, TypeError, ValueError):
         return False
 
@@ -677,20 +522,13 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
     root = Path(base_dir or MUSIC_ROOT)
     src = root / rel
     binding = None
-    exclusion = None
-    temp_exclusion = None
     temp_fd = None
     temp_name = None
     try:
-        binding = _BoundSource(src, root)
-        exclusion = acquire_inode_write_exclusion(binding.track_fd)
-        if exclusion is None:
-            return (rel, sr, rate, None,
-                    "source is not a regular file; left it untouched")
+        binding = _BoundTrack(src, root)
         if (
             expected_source_receipt is not None
-            and not _receipt_matches_source(
-                binding, expected_source_receipt, exclusion)
+            and not _receipt_matches_source(binding, expected_source_receipt)
         ):
             return (rel, sr, rate, None,
                     "source no longer matches its kept original; "
@@ -737,7 +575,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                     "couldn't verify the resampled peak; left the original untouched")
         if _peak is not None and _peak > 0.0:
             enc_af = f"volume={_TARGET_PEAK_DBFS - _peak:.3f}dB,{af}"
-        if not exclusion.intact() or not binding.exact_track_is_named():
+        if not binding.exact_track_is_named():
             return (rel, sr, rate, None,
                     "source changed while it was being checked; "
                     "left the current file untouched")
@@ -780,26 +618,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
                     f"resampled file ({carry_error}); left the original "
                     "untouched")
         _write_seektable(temp_fd)
-        readonly_fd, temp_identity = _reopen_encode_temp_readonly(
-            binding.parent_fd, temp_name, temp_fd)
-        writable_fd = temp_fd
-        temp_fd = readonly_fd
-        os.close(writable_fd)
-        temp_path = _descriptor_path(temp_fd)
-        temp_exclusion = acquire_inode_write_exclusion(temp_fd)
-        if (
-            temp_exclusion is None
-            or temp_identity is None
-            or not _exact_temp_is_named(
-                binding.parent_fd, temp_name, temp_fd, temp_identity)
-            or not exclusion.intact()
-            or not temp_exclusion.intact()
-            or not binding.exact_track_is_named()
-        ):
-            return (rel, sr, rate, None,
-                    "source or resampled output changed during encoding; "
-                    "left the current file untouched")
-        out_size = temp_identity["size"]
+        out_size = os.fstat(temp_fd).st_size
         # Verify the encode decodes before it overwrites the source. A
         # downsample has no re-download to fall back on, so a corrupt encode
         # must never replace a good original.
@@ -855,41 +674,18 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             os.fchmod(temp_fd, src_mode)
         except OSError:
             pass
-        temp_identity = _regular_identity(os.fstat(temp_fd))
-        if (
-            temp_identity is None
-            or not _exact_temp_is_named(
-                binding.parent_fd, temp_name, temp_fd, temp_identity)
-            or not exclusion.intact()
-            or not temp_exclusion.intact()
-            or not binding.exact_track_is_named()
-        ):
-            return (rel, sr, rate, None,
-                    "source or resampled output changed before replacement; "
-                    "left the current file untouched")
         # The swap overwrites the only lossless master, so a flush that
-        # genuinely fails (ENOSPC/EIO, not a mount that can't fsync) must
-        # refuse the replace: the encode may exist only in the page cache.
-        if not backup_mod._fsync(temp_path):
+        # fails must refuse it: the encode may exist only in the page cache.
+        try:
+            os.fsync(temp_fd)
+        except OSError:
             return (rel, sr, rate, None,
                     "resampled copy couldn't be flushed to disk; "
                     "left the original untouched")
-        if (
-            not exclusion.intact()
-            or not temp_exclusion.intact()
-            or not binding.exact_track_is_named()
-            or not _exact_temp_is_named(
-                binding.parent_fd, temp_name, temp_fd, temp_identity)
-        ):
+        if not binding.exact_track_is_named():
             return (rel, sr, rate, None,
                     "source or resampled output changed before replacement; "
                     "left the current file untouched")
-
-        # _exchange_existing checks the final identity itself. Any write
-        # landing in the narrow handoff changes the full source identity and
-        # is refused.
-        exclusion.close()
-        exclusion = None
         _exchange_existing(
             binding.parent_fd,
             temp_name,
@@ -897,14 +693,14 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             temp_fd,
             binding.track_fd,
             expected_identity=binding.identity,
-            new_identity=temp_identity,
             post_exchange_guard=binding.chain_is_named,
         )
+        temp_name = None
         # The encode itself was flushed above, so rename atomicity leaves a
         # valid file either way, but a directory flush that genuinely fails
         # means the swap may quietly revert on a crash while the run reports
         # it done. Nothing here can be undone; say so instead of staying quiet.
-        if not backup_mod._fsync(_descriptor_path(binding.parent_fd)):
+        if not fsync_dir(_descriptor_path(binding.parent_fd)):
             return (rel, sr, rate, in_size - out_size,
                     "resampled, but the folder couldn't be flushed to disk; "
                     "the swap may not survive a power loss; check the drive")
@@ -918,43 +714,12 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
     except Exception as e:
         return (rel, sr, rate, None, str(e))
     finally:
-        try:
-            if exclusion is not None:
-                exclusion.close()
-        finally:
-            try:
-                # A mutable filename is never enough ownership evidence.
-                # Remove only the exact held temp this operation created;
-                # after a successful swap its descriptor names the published
-                # output, not temp_name, so this is safely a no-op.
-                if (
-                    temp_fd is not None
-                    and binding is not None
-                    and temp_name is not None
-                ):
-                    try:
-                        identity = _regular_identity(os.fstat(temp_fd))
-                        if identity is not None:
-                            _unlink_held_name(
-                                binding.parent_fd,
-                                temp_name,
-                                temp_fd,
-                                identity,
-                                write_exclusion=temp_exclusion,
-                            )
-                    except OSError:
-                        pass
-            finally:
-                try:
-                    if temp_exclusion is not None:
-                        temp_exclusion.close()
-                finally:
-                    try:
-                        if temp_fd is not None:
-                            os.close(temp_fd)
-                    finally:
-                        if binding is not None:
-                            binding.close()
+        if temp_name is not None:
+            _unlink_held_name(binding.parent_fd, temp_name, temp_fd)
+        if temp_fd is not None:
+            os.close(temp_fd)
+        if binding is not None:
+            binding.close()
 
 
 def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,

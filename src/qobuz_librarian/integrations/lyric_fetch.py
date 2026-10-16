@@ -46,10 +46,17 @@ import requests
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.api.client import ua_string
-from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
-from qobuz_librarian.library import backup as backup_mod
-from qobuz_librarian.safefile import identity_record, rename_exchange, rename_noreplace
-from qobuz_librarian.safefile import stat_identity as _node_identity
+from qobuz_librarian.safefile import (
+    delete_verified,
+    fsync_dir,
+    identity_record,
+    named_entry_matches,
+    rename_exchange,
+    rename_noreplace,
+    same_directory,
+    stat_identity,
+    write_all,
+)
 
 # mutagen and syncedlyrics are decoupled on purpose: tag-only operations
 # (classify/read/write embedded lyrics, .lrc sidecars) need only mutagen,
@@ -581,7 +588,7 @@ class _BoundTrack:
             relative = self.path.relative_to(self.root)
         except ValueError:
             raise OSError(
-                f"{self.path}: track is outside the owned lyrics root") from None
+                f"{self.path}: track is outside {self.root}") from None
         if not relative.parts or any(part in ("", ".", "..")
                                      for part in relative.parts):
             raise OSError(f"{self.path}: invalid track path")
@@ -593,33 +600,18 @@ class _BoundTrack:
             directory_flags = (
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             root_fd = os.open(str(self.root), directory_flags)
-            root_stat = os.fstat(root_fd)
-            named_root = os.stat(self.root, follow_symlinks=False)
-            if (
-                not stat.S_ISDIR(root_stat.st_mode)
-                or not stat.S_ISDIR(named_root.st_mode)
-                or root_stat.st_dev != named_root.st_dev
-                or root_stat.st_ino != named_root.st_ino
-            ):
-                os.close(root_fd)
-                raise OSError(f"{self.root}: owned lyrics root changed")
             self._directory_fds.append(root_fd)
+            if not same_directory(
+                    os.fstat(root_fd),
+                    os.stat(self.root, follow_symlinks=False)):
+                raise OSError(f"{self.root}: folder changed while it was opened")
 
             for part in relative.parts[:-1]:
                 child_fd = os.open(
                     part, directory_flags, dir_fd=self._directory_fds[-1])
-                held = os.fstat(child_fd)
-                named = os.stat(
-                    part,
-                    dir_fd=self._directory_fds[-1],
-                    follow_symlinks=False,
-                )
-                if (
-                    not stat.S_ISDIR(held.st_mode)
-                    or not stat.S_ISDIR(named.st_mode)
-                    or held.st_dev != named.st_dev
-                    or held.st_ino != named.st_ino
-                ):
+                if not named_entry_matches(
+                        self._directory_fds[-1], part, child_fd,
+                        directory=True):
                     os.close(child_fd)
                     raise OSError(f"{self.path}: directory chain changed")
                 self._directory_names.append(part)
@@ -653,32 +645,17 @@ class _BoundTrack:
 
     def chain_is_named(self) -> bool:
         try:
-            held_root = os.fstat(self._directory_fds[0])
-            named_root = os.stat(self.root, follow_symlinks=False)
-            if (
-                not stat.S_ISDIR(held_root.st_mode)
-                or not stat.S_ISDIR(named_root.st_mode)
-                or held_root.st_dev != named_root.st_dev
-                or held_root.st_ino != named_root.st_ino
-            ):
+            if not same_directory(
+                    os.fstat(self._directory_fds[0]),
+                    os.stat(self.root, follow_symlinks=False)):
                 return False
-            for index, name in enumerate(self._directory_names, start=1):
-                held = os.fstat(self._directory_fds[index])
-                named = os.stat(
-                    name,
-                    dir_fd=self._directory_fds[index - 1],
-                    follow_symlinks=False,
-                )
-                if (
-                    not stat.S_ISDIR(held.st_mode)
-                    or not stat.S_ISDIR(named.st_mode)
-                    or held.st_dev != named.st_dev
-                    or held.st_ino != named.st_ino
-                ):
-                    return False
         except (OSError, IndexError):
             return False
-        return True
+        return all(
+            named_entry_matches(
+                self._directory_fds[index - 1], name,
+                self._directory_fds[index], directory=True)
+            for index, name in enumerate(self._directory_names, start=1))
 
     def named_identity(self):
         try:
@@ -733,25 +710,15 @@ def _parent_is_still_named(
         except (OSError, TypeError, ValueError):
             return False
     try:
-        held = os.fstat(parent_fd)
-        named = os.stat(path.parent, follow_symlinks=False)
+        return same_directory(
+            os.fstat(parent_fd), os.stat(path.parent, follow_symlinks=False))
     except OSError:
         return False
-    return (
-        stat.S_ISDIR(named.st_mode)
-        and held.st_dev == named.st_dev
-        and held.st_ino == named.st_ino
-    )
 
 
 def _named_identity(parent_fd: int, name: str):
     value = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     return _regular_identity(value)
-
-
-def _named_node_identity(parent_fd: int, name: str):
-    return _node_identity(os.stat(
-        name, dir_fd=parent_fd, follow_symlinks=False))
 
 
 def _make_temp(parent_fd: int, target_name: str):
@@ -765,13 +732,12 @@ def _make_temp(parent_fd: int, target_name: str):
     raise FileExistsError(f"couldn't reserve a temporary file for {target_name}")
 
 
-def _write_all(fd: int, content: bytes) -> None:
-    view = memoryview(content)
-    while view:
-        written = os.write(fd, view)
-        if written <= 0:
-            raise OSError("short write")
-        view = view[written:]
+def _fsync_temp(temp_fd: int, name: str) -> None:
+    try:
+        os.fsync(temp_fd)
+    except OSError as exc:
+        raise OSError(f"{name}: replacement couldn't be flushed to disk; "
+                      "original left untouched") from exc
 
 
 def _copy_file_fd(source_fd: int, target_fd: int) -> None:
@@ -782,18 +748,7 @@ def _copy_file_fd(source_fd: int, target_fd: int) -> None:
         chunk = os.read(source_fd, 1024 * 1024)
         if not chunk:
             break
-        _write_all(target_fd, chunk)
-
-
-def _fd_has_content(fd: int, expected: bytes) -> bool:
-    os.lseek(fd, 0, os.SEEK_SET)
-    offset = 0
-    while offset < len(expected):
-        chunk = os.read(fd, min(1024 * 1024, len(expected) - offset))
-        if not chunk or chunk != expected[offset:offset + len(chunk)]:
-            return False
-        offset += len(chunk)
-    return os.read(fd, 1) == b""
+        write_all(target_fd, chunk)
 
 
 _journal_lock = threading.Lock()
@@ -829,146 +784,22 @@ def _emit_receipt(output, receipt) -> None:
         output.append(receipt)
 
 
-def _unlink_held_name(
-        parent_fd: int,
-        name: str,
-        held_fd: int,
-        expected_identity=None,
-        write_exclusion=None,
-) -> bool:
-    """Remove one held regular file without unlinking through its public name.
-
-    Linux has no inode-conditional unlink. Move the named candidate into a
-    freshly-created private directory first, then validate it there. A public
-    replacement that wins before the move is restored with no-overwrite rename;
-    one that appears afterward is never touched.
-    """
+def _unlink_held_name(parent_fd: int, name: str, held_fd: int) -> bool:
+    """Remove `name` while it is still the file `held_fd` holds."""
     if held_fd is None:
         return False
     try:
-        frozen = expected_identity or _regular_identity(os.fstat(held_fd))
-        if (
-            frozen is None
-            or _regular_identity(os.fstat(held_fd)) != frozen
-            or _named_identity(parent_fd, name) != frozen
-        ):
-            return False
+        expected = stat_identity(os.fstat(held_fd))
     except OSError:
         return False
+    return delete_verified(
+        f"/proc/self/fd/{parent_fd}/{name}", expected, sync=False)
 
-    quarantine_name = None
-    quarantine_fd = None
-    moved = False
-    moved_node = None
 
-    def _stable_named_node(parent, candidate):
-        try:
-            value = os.stat(candidate, dir_fd=parent, follow_symlinks=False)
-            return (
-                int(value.st_dev),
-                int(value.st_ino),
-                int(value.st_mode),
-                int(value.st_size),
-                int(value.st_mtime_ns),
-            )
-        except FileNotFoundError:
-            return None
-        except OSError:
-            return False
-
-    def _capture_quarantined_node():
-        nonlocal moved_node
-        if quarantine_fd is None:
-            return False
-        current = _stable_named_node(quarantine_fd, "held")
-        if current not in (None, False):
-            moved_node = current
-            return True
-        return False
-
-    def _moved_node_is_public():
-        return (
-            moved_node is not None
-            and _stable_named_node(quarantine_fd, "held") is None
-            and _stable_named_node(parent_fd, name) == moved_node
-        )
-
-    try:
-        for _ in range(16):
-            candidate = f".ql-delete-{secrets.token_hex(16)}"
-            try:
-                os.mkdir(candidate, 0o700, dir_fd=parent_fd)
-            except FileExistsError:
-                continue
-            quarantine_name = candidate
-            break
-        if quarantine_name is None:
-            return False
-        quarantine_fd = os.open(
-            quarantine_name,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=parent_fd,
-        )
-        try:
-            rename_noreplace(parent_fd, name, quarantine_fd, "held")
-        finally:
-            # Python may deliver a signal after renameat2 completed but before
-            # its wrapper returned. Derive the namespace outcome from the held
-            # inode instead of trusting control flow.
-            moved = _capture_quarantined_node()
-        moved_identity = _regular_identity(os.fstat(held_fd))
-        if (
-            moved_identity is None
-            or _named_identity(quarantine_fd, "held") != moved_identity
-            or any(
-                moved_identity[field] != frozen[field]
-                for field in (
-                    "device", "inode", "size", "modified_ns")
-            )
-        ):
-            return False
-        if write_exclusion is not None and not write_exclusion.intact():
-            return False
-        # The only remaining unlink is inside an unpredictable mode-0700
-        # directory held open by this process, not through the mutable public
-        # path that was validated above.
-        try:
-            os.unlink("held", dir_fd=quarantine_fd)
-        except BaseException:
-            # An interrupt after unlink is a completed forward operation. The
-            # caller can no longer roll the old inode back, but this positively
-            # prevents an empty private quarantine from being stranded.
-            moved = _capture_quarantined_node()
-            raise
-        moved = False
-        return True
-    except OSError:
-        return False
-    finally:
-        if moved and quarantine_fd is not None:
-            try:
-                rename_noreplace(
-                    quarantine_fd, "held", parent_fd, name)
-                moved = False
-            except OSError:
-                # A new public file is never overwritten. The quarantined
-                # candidate remains recoverable instead of being guessed at.
-                moved = not _moved_node_is_public()
-            except BaseException:
-                # As above, a late signal can mean the restore completed. Keep
-                # the derived state, then propagate the interruption.
-                moved = not _moved_node_is_public()
-                raise
-        if quarantine_fd is not None:
-            try:
-                os.close(quarantine_fd)
-            except OSError:
-                pass
-        if quarantine_name is not None and not moved:
-            try:
-                os.rmdir(quarantine_name, dir_fd=parent_fd)
-            except OSError:
-                pass
+def _stable_identity(identity):
+    """The fields a rename leaves alone: everything but ctime."""
+    return tuple(identity[field]
+                 for field in ("device", "inode", "size", "modified_ns"))
 
 
 def _exchange_existing(
@@ -981,167 +812,61 @@ def _exchange_existing(
         new_identity=None,
         post_exchange_guard=None,
 ):
+    """Swap the new file `temp_name` in for `target_name`, which must still be
+    the file `expected_fd` holds, then remove the old one. Returns the new
+    file's identity after the swap.
 
-    frozen_expected = (
-        expected_identity or _regular_identity(os.fstat(expected_fd)))
-    frozen_new = new_identity or _regular_identity(os.fstat(temp_fd))
-    exclusion = acquire_inode_write_exclusion(expected_fd)
-    if exclusion is None:
-        raise OSError(f"{target_name}: target is not a regular file")
+    A swap that does not check out afterwards is undone while both names
+    still hold the two files, and raises. Once it checks out it is kept: an
+    old file that cannot be removed stays under the temp name."""
+    expected = expected_identity or _regular_identity(os.fstat(expected_fd))
+    new = new_identity or _regular_identity(os.fstat(temp_fd))
 
-    def restore_original_layout() -> bool:
-        """Reconcile an exchange whose syscall or follow-up was interrupted."""
-        try:
-            old_node = _node_identity(os.fstat(expected_fd))
-            new_node = _node_identity(os.fstat(temp_fd))
-            named_target = _named_node_identity(parent_fd, target_name)
-            named_temp = _named_node_identity(parent_fd, temp_name)
-        except OSError:
-            return False
-        if named_target == old_node and named_temp == new_node:
+    def guard_passes() -> bool:
+        if post_exchange_guard is None:
             return True
-        if named_target != new_node or named_temp != old_node:
-            return False
         try:
-            rename_exchange(parent_fd, temp_name, parent_fd, target_name)
-        except BaseException:
-            # The exchange may have completed before Python delivered a signal.
-            # Derive the outcome below instead of trusting the raised control
-            # flow or replacing the original exception.
-            pass
-        try:
-            restored_old_node = _node_identity(os.fstat(expected_fd))
-            restored_new_node = _node_identity(os.fstat(temp_fd))
-            restored = (
-                _named_node_identity(parent_fd, target_name)
-                == restored_old_node
-                and _named_node_identity(parent_fd, temp_name)
-                == restored_new_node
-            )
-            if restored and isinstance(new_identity, dict):
-                # rename changes ctime. Refresh the caller-owned temporary
-                # identity so its ordinary finally block can remove only this
-                # exact rolled-back candidate instead of stranding it.
-                refreshed_new = _regular_identity(os.fstat(temp_fd))
-                if (
-                    refreshed_new is None
-                    or _named_identity(parent_fd, temp_name) != refreshed_new
-                ):
-                    return False
-                new_identity.clear()
-                new_identity.update(refreshed_new)
-            return restored
-        except OSError:
-            # Cleanup must not replace the original exception. Both held file
-            # descriptors remain open, and no unmatched public name is touched.
+            return post_exchange_guard() is True
+        except Exception:
             return False
 
-    def forward_layout_complete() -> bool:
-        """Prove the new file committed after the exact old name was removed."""
-        try:
-            new_after = _regular_identity(os.fstat(temp_fd))
-            old_after = _regular_identity(os.fstat(expected_fd))
-            if new_after is None or old_after is None:
-                return False
-            try:
-                _named_identity(parent_fd, temp_name)
-            except FileNotFoundError:
-                pass
-            else:
-                return False
-            return (
-                all(
-                    new_after[field] == frozen_new[field]
-                    for field in ("device", "inode", "size", "modified_ns")
-                )
-                and all(
-                    old_after[field] == frozen_expected[field]
-                    for field in ("device", "inode", "size", "modified_ns")
-                )
-                and _named_identity(parent_fd, target_name) == new_after
-            )
-        except OSError:
-            return False
-
-    swapped_fd = None
+    if (
+        expected is None
+        or new is None
+        or _regular_identity(os.fstat(expected_fd)) != expected
+        or _named_identity(parent_fd, target_name) != expected
+        or _named_identity(parent_fd, temp_name) != new
+        or not guard_passes()
+    ):
+        raise OSError(
+            f"{target_name}: target changed before atomic replacement")
+    rename_exchange(parent_fd, temp_name, parent_fd, target_name)
     try:
+        after = _regular_identity(os.fstat(temp_fd))
+        old = _regular_identity(os.fstat(expected_fd))
+        swapped = (
+            after is not None
+            and old is not None
+            and _named_identity(parent_fd, target_name) == after
+            and _stable_identity(after) == _stable_identity(new)
+            and _named_identity(parent_fd, temp_name) == old
+            and _stable_identity(old) == _stable_identity(expected)
+        )
+    except OSError:
+        swapped = False
+    if not swapped or not guard_passes():
         if (
-            frozen_expected is None
-            or frozen_new is None
-            or not exclusion.intact()
-            or _regular_identity(os.fstat(expected_fd)) != frozen_expected
-            or _regular_identity(os.fstat(temp_fd)) != frozen_new
-            or _named_identity(parent_fd, target_name) != frozen_expected
-            or _named_identity(parent_fd, temp_name) != frozen_new
+            named_entry_matches(parent_fd, target_name, temp_fd)
+            and named_entry_matches(parent_fd, temp_name, expected_fd)
         ):
-            raise OSError(
-                f"{target_name}: target changed before atomic replacement")
-
-        if not exclusion.intact():
-            raise OSError(
-                f"{target_name}: target changed before atomic replacement")
-        try:
-            # A signal can be delivered after renameat2 completed but before its
-            # wrapper returns, so every exceptional exit from this point first
-            # derives the real layout from the two held identities.
-            rename_exchange(parent_fd, temp_name, parent_fd, target_name)
-            swapped_fd = os.open(
-                temp_name,
-                os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent_fd,
-            )
-            new_after = _regular_identity(os.fstat(temp_fd))
-            old_after = _regular_identity(os.fstat(expected_fd))
-            swapped_identity = _regular_identity(os.fstat(swapped_fd))
-            names_match = (
-                exclusion.intact()
-                and new_after is not None
-                and old_after is not None
-                and all(
-                    new_after[field] == frozen_new[field]
-                    for field in ("device", "inode", "size", "modified_ns")
-                )
-                and all(
-                    old_after[field] == frozen_expected[field]
-                    for field in ("device", "inode", "size", "modified_ns")
-                )
-                and _named_identity(parent_fd, target_name) == new_after
-                and swapped_identity == old_after
-                and _named_identity(parent_fd, temp_name) == old_after
-            )
-            guard_passed = names_match
-            if guard_passed and post_exchange_guard is not None:
-                try:
-                    guard_passed = post_exchange_guard() is True
-                except Exception:
-                    guard_passed = False
-            guard_passed = guard_passed and exclusion.intact()
-            if guard_passed:
-                if _unlink_held_name(
-                        parent_fd,
-                        temp_name,
-                        expected_fd,
-                        old_after,
-                        write_exclusion=exclusion,
-                ):
-                    return new_after
-            raise OSError(
-                f"{target_name}: target changed during atomic replacement")
-        except BaseException as exc:
-            # Roll back whenever both exact names remain. If the old temporary
-            # name was already unlinked, classify the exact forward layout so
-            # the exceptional exit is never mistaken for an unknown swap.
-            if not restore_original_layout() and forward_layout_complete():
-                exc.add_note(
-                    f"{target_name}: atomic replacement completed before "
-                    "the interruption was delivered"
-                )
-            raise
-        finally:
-            if swapped_fd is not None:
-                os.close(swapped_fd)
-    finally:
-        exclusion.close()
+            try:
+                rename_exchange(parent_fd, temp_name, parent_fd, target_name)
+            except OSError:
+                pass
+        raise OSError(
+            f"{target_name}: target changed during atomic replacement")
+    _unlink_held_name(parent_fd, temp_name, expected_fd)
+    return after
 
 
 def save_flac_tags(
@@ -1160,9 +885,10 @@ def save_flac_tags(
     source_fd = None
     temp_fd = None
     temp_name = None
-    temp_identity = None
 
-    def commit_is_allowed() -> bool:
+    def still_allowed() -> bool:
+        if not _parent_is_still_named(owned_parent_fd, path, parent_guard):
+            return False
         if commit_guard is None:
             return True
         try:
@@ -1171,18 +897,14 @@ def save_flac_tags(
             return False
 
     try:
-        if not commit_is_allowed():
-            raise OSError(f"{path.name}: commit guard changed before tag rewrite")
         source_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         source_fd = os.open(path.name, source_flags, dir_fd=owned_parent_fd)
         before = _regular_identity(os.fstat(source_fd))
         if (
             before is None
             or (expected_identity is not None and before != expected_identity)
-            or not _parent_is_still_named(
-                owned_parent_fd, path, parent_guard)
             or _named_identity(owned_parent_fd, path.name) != before
-            or not commit_is_allowed()
+            or not still_allowed()
         ):
             raise OSError(f"{path.name}: source changed before tag rewrite")
 
@@ -1192,29 +914,8 @@ def save_flac_tags(
         _copy_file_fd(source_fd, temp_fd)
         shutil.copystat(
             f"/proc/self/fd/{source_fd}", f"/proc/self/fd/{temp_fd}")
-        if not commit_is_allowed():
-            raise OSError(f"{path.name}: commit guard changed during tag rewrite")
-        temp_path = Path(f"/proc/self/fd/{owned_parent_fd}/{temp_name}")
-        f.save(str(temp_path))
-
-        temp_identity = _regular_identity(os.fstat(temp_fd))
-        if temp_identity is None or _named_identity(
-                owned_parent_fd, temp_name) != temp_identity:
-            raise OSError(f"{path.name}: temporary replacement changed")
-        if not backup_mod._fsync(temp_path):
-            raise OSError(
-                f"{path.name}: replacement couldn't be flushed to disk; "
-                "original left untouched")
-        if (
-            not _parent_is_still_named(
-                owned_parent_fd, path, parent_guard)
-            or _regular_identity(os.fstat(source_fd)) != before
-            or _named_identity(owned_parent_fd, path.name) != before
-            or _regular_identity(os.fstat(temp_fd)) != temp_identity
-            or _named_identity(owned_parent_fd, temp_name) != temp_identity
-            or not commit_is_allowed()
-        ):
-            raise OSError(f"{path.name}: source changed during tag rewrite")
+        f.save(f"/proc/self/fd/{owned_parent_fd}/{temp_name}")
+        _fsync_temp(temp_fd, path.name)
 
         after = _exchange_existing(
             owned_parent_fd,
@@ -1223,36 +924,22 @@ def save_flac_tags(
             temp_fd,
             source_fd,
             before,
-            temp_identity,
-            post_exchange_guard=commit_guard,
+            post_exchange_guard=still_allowed,
         )
         temp_name = None
-        if (
-            after is None
-            or not _parent_is_still_named(
-                owned_parent_fd, path, parent_guard)
-            or _named_identity(owned_parent_fd, path.name) != after
-            or not commit_is_allowed()
-        ):
-            raise OSError(f"{path.name}: replacement identity couldn't be proved")
         _note_write(path, before, after)
         _emit_receipt(identity_change_out, {
             "path": os.path.abspath(os.fspath(path)),
             "before": before,
             "after": after,
         })
-        if not backup_mod._fsync(Path(f"/proc/self/fd/{owned_parent_fd}")):
+        if not fsync_dir(f"/proc/self/fd/{owned_parent_fd}"):
             raise OSError(
                 f"{path.name}: replacement completed, but the folder couldn't "
                 "be flushed to disk; the change may not survive a power loss")
     finally:
         if temp_name is not None:
-            _unlink_held_name(
-                owned_parent_fd,
-                temp_name,
-                temp_fd,
-                temp_identity,
-            )
+            _unlink_held_name(owned_parent_fd, temp_name, temp_fd)
         if temp_fd is not None:
             os.close(temp_fd)
         if source_fd is not None:
@@ -1308,15 +995,19 @@ def write_sidecar(
         _open_parent(target) if parent_fd is None else os.dup(parent_fd)
     )
     existing_fd = None
-    existing_identity = None
     temp_fd = None
     temp_name = None
-    temp_identity = None
-    published_identity = None
     created_target = False
     receipt_emitted = False
+
+    def still_allowed() -> bool:
+        return (
+            (track_guard is None or _guard_passes(track_guard))
+            and _parent_is_still_named(owned_parent_fd, target, parent_guard)
+        )
+
     try:
-        if track_guard is not None and track_guard() is not True:
+        if not still_allowed():
             raise OSError(f"{path.name}: track changed before sidecar write")
         existing_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         try:
@@ -1325,39 +1016,28 @@ def write_sidecar(
         except FileNotFoundError:
             pass
         if existing_fd is not None:
-            existing_identity = _regular_identity(os.fstat(existing_fd))
-            if existing_identity is None:
+            existing = _regular_identity(os.fstat(existing_fd))
+            if existing is None:
                 raise OSError(f"{target.name}: existing sidecar is not a file")
-            os.lseek(existing_fd, 0, os.SEEK_SET)
             chunks = []
-            while True:
-                chunk = os.read(existing_fd, 1024 * 1024)
-                if not chunk:
-                    break
+            while chunk := os.read(existing_fd, 1024 * 1024):
                 chunks.append(chunk)
             old = b"".join(chunks).decode("utf-8", errors="replace")
             if old.strip() and (
                 classify(old) != "plain" or classify(content) != "synced"
             ):
                 if (
-                    not _guard_passes(track_guard)
-                    or not _parent_is_still_named(
-                        owned_parent_fd, target, parent_guard)
-                    or _regular_identity(
-                        os.fstat(existing_fd)) != existing_identity
-                    or _named_identity(
-                        owned_parent_fd, target.name) != existing_identity
+                    _regular_identity(os.fstat(existing_fd)) != existing
+                    or _named_identity(owned_parent_fd, target.name) != existing
                 ):
                     raise OSError(
                         f"{target.name}: existing sidecar changed before keep")
                 _emit_receipt(sidecar_identity_out, {
                     "path": os.path.abspath(os.fspath(target)),
-                    "file": existing_identity,
+                    "file": existing,
                 })
                 return False
 
-        if track_guard is not None and track_guard() is not True:
-            raise OSError(f"{path.name}: track changed before sidecar write")
         temp_name, temp_fd = _make_temp(owned_parent_fd, target.name)
         if isinstance(directory_mutation_out, dict):
             directory_mutation_out["mutated"] = True
@@ -1366,135 +1046,60 @@ def write_sidecar(
             if existing_fd is not None
             else _new_file_mode(owned_parent_fd, path.name)
         ))
-        intended_content = content.encode("utf-8")
-        _write_all(temp_fd, intended_content)
-        temp_path = Path(f"/proc/self/fd/{owned_parent_fd}/{temp_name}")
-        if not backup_mod._fsync(temp_path):
-            raise OSError(
-                f"{target.name}: replacement couldn't be flushed to disk; "
-                "original left untouched")
-        temp_identity = _regular_identity(os.fstat(temp_fd))
-        if (
-            temp_identity is None
-            or (track_guard is not None and track_guard() is not True)
-            or not _parent_is_still_named(
-                owned_parent_fd, target, parent_guard)
-            or _named_identity(owned_parent_fd, temp_name) != temp_identity
-        ):
-            raise OSError(f"{target.name}: temporary sidecar changed")
+        write_all(temp_fd, content.encode("utf-8"))
+        _fsync_temp(temp_fd, target.name)
 
         if existing_fd is None:
-            if _regular_identity(os.fstat(temp_fd)) != temp_identity:
-                raise OSError(f"{target.name}: temporary sidecar changed")
-            temp_mode = stat.S_IMODE(os.fstat(temp_fd).st_mode)
             rename_noreplace(
-                owned_parent_fd,
-                temp_name,
-                owned_parent_fd,
-                target.name,
-            )
+                owned_parent_fd, temp_name, owned_parent_fd, target.name)
             created_target = True
             temp_name = None
-            created_stat = os.fstat(temp_fd)
-            created = _regular_identity(created_stat)
-            named_stat = os.stat(
-                target.name,
-                dir_fd=owned_parent_fd,
-                follow_symlinks=False,
-            )
-            publication_is_exact = (
-                created is not None
-                and _regular_identity(named_stat) == created
-                and stat.S_IMODE(created_stat.st_mode) == temp_mode
-                and all(
-                    created[field] == temp_identity[field]
-                    for field in (
-                        "device", "inode", "size", "modified_ns")
-                )
-                and _fd_has_content(temp_fd, intended_content)
-            )
-            if publication_is_exact:
-                published_identity = created
+            published = _regular_identity(os.fstat(temp_fd))
             if (
-                not publication_is_exact
-                or (track_guard is not None and track_guard() is not True)
-                or not _parent_is_still_named(
-                    owned_parent_fd, target, parent_guard)
+                published is None
+                or _named_identity(owned_parent_fd, target.name) != published
+                or not still_allowed()
             ):
                 raise OSError(
                     f"{target.name}: created sidecar changed after publication")
             _emit_receipt(creation_out, {
                 "path": os.path.abspath(os.fspath(target)),
-                "file": published_identity,
+                "file": published,
             })
             receipt_emitted = True
-            _note_write(target, None, published_identity)
+            _note_write(target, None, published)
         else:
-            if (
-                _regular_identity(os.fstat(existing_fd)) != existing_identity
-                or (track_guard is not None and track_guard() is not True)
-                or not _parent_is_still_named(
-                    owned_parent_fd, target, parent_guard)
-                or _regular_identity(os.fstat(temp_fd)) != temp_identity
-                or _named_identity(
-                    owned_parent_fd, target.name) != existing_identity
-            ):
-                raise OSError(f"{target.name}: existing sidecar changed")
-            replaced = _exchange_existing(
+            published = _exchange_existing(
                 owned_parent_fd,
                 temp_name,
                 target.name,
                 temp_fd,
                 existing_fd,
-                existing_identity,
-                temp_identity,
-                post_exchange_guard=track_guard,
+                existing,
+                post_exchange_guard=still_allowed,
             )
             temp_name = None
-            if replaced is not None:
-                _note_write(target, existing_identity, replaced)
-            if (
-                replaced is None
-                or (track_guard is not None and track_guard() is not True)
-                or not _parent_is_still_named(
-                    owned_parent_fd, target, parent_guard)
-                or _named_identity(
-                    owned_parent_fd, target.name) != replaced
-            ):
-                raise OSError(
-                    f"{target.name}: replacement identity couldn't be proved")
-            published_identity = replaced
+            _note_write(target, existing, published)
 
-        if not backup_mod._fsync(Path(f"/proc/self/fd/{owned_parent_fd}")):
+        if not fsync_dir(f"/proc/self/fd/{owned_parent_fd}"):
             raise OSError(
                 f"{target.name}: replacement completed, but the folder couldn't "
                 "be flushed to disk; the change may not survive a power loss")
         if (
-            (track_guard is not None and not _guard_passes(track_guard))
-            or not _parent_is_still_named(
-                owned_parent_fd, target, parent_guard)
-            or published_identity is None
-            or _regular_identity(os.fstat(temp_fd)) != published_identity
-            or _named_identity(
-                owned_parent_fd, target.name) != published_identity
+            not still_allowed()
+            or _named_identity(owned_parent_fd, target.name) != published
         ):
             raise OSError(f"{target.name}: final sidecar identity changed")
         _emit_receipt(sidecar_identity_out, {
             "path": os.path.abspath(os.fspath(target)),
-            "file": published_identity,
+            "file": published,
         })
         return True
     finally:
-        if (
-            created_target
-            and not receipt_emitted
-            and published_identity is not None
-        ):
-            _unlink_held_name(
-                owned_parent_fd, target.name, temp_fd, published_identity)
+        if created_target and not receipt_emitted:
+            _unlink_held_name(owned_parent_fd, target.name, temp_fd)
         if temp_name is not None:
-            _unlink_held_name(
-                owned_parent_fd, temp_name, temp_fd, temp_identity)
+            _unlink_held_name(owned_parent_fd, temp_name, temp_fd)
         if temp_fd is not None:
             os.close(temp_fd)
         if existing_fd is not None:

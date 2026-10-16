@@ -60,7 +60,6 @@ from qobuz_librarian.safefile import (
     fsync_dir,
     named_entry_matches,
     named_entry_missing,
-    rename_noreplace,
 )
 from qobuz_librarian.safefile import identity_record as _ownership_identity
 from qobuz_librarian.safefile import stat_identity as _staged_identity
@@ -338,45 +337,6 @@ def _open_absolute_merge_chain(value, *, create=False):
             os.close(descriptor)
         raise OSError("absolute directory chain changed while it was opened")
     return chain, names
-
-
-def _rollback_exact_merge_entry(source_fd, source_name, destination_fd, destination_name, held_fd):
-    """Restore one exact moved entry without overwriting either name."""
-
-    def layout():
-        source_exact = named_entry_matches(source_fd, source_name, held_fd, directory=False)
-        destination_exact = named_entry_matches(
-            destination_fd, destination_name, held_fd, directory=False
-        )
-        if source_exact and named_entry_missing(destination_fd, destination_name):
-            return "source"
-        if destination_exact and named_entry_missing(source_fd, source_name):
-            return "destination"
-        return "changed"
-
-    state = layout()
-    if state == "source":
-        return True
-    if state != "destination":
-        return False
-    try:
-        rename_noreplace(destination_fd, destination_name, source_fd, source_name)
-        if layout() != "source":
-            return False
-        os.fsync(destination_fd)
-        os.fsync(source_fd)
-        return True
-    except BaseException as exc:
-        restored = layout() == "source"
-        if isinstance(exc, OSError):
-            return restored
-        if restored:
-            exc.add_note("the exact merge entry was restored before the interruption")
-        else:
-            exc.add_note(
-                "the interrupted rollback preserved the exact entry at its last proved name"
-            )
-        raise
 
 
 def _under_retry_dir(p):
@@ -2477,12 +2437,7 @@ def inspect_managed_reservation(reservation, expected_owner):
             )
 
 
-def _owner_only_private_directory_mode(mode):
-    """Accept 0700 plus the setgid bit inherited from a shared parent."""
-    return stat.S_IMODE(mode) in (0o700, stat.S_ISGID | 0o700)
-
-
-def _retire_managed_carrier_with_interrupts_deferred(
+def _retire_managed_carrier(
     carrier_reference,
     expected_owner,
     expected_manifest_hash,
@@ -2490,6 +2445,10 @@ def _retire_managed_carrier_with_interrupts_deferred(
     *,
     prelaunch=False,
 ):
+    """Unlink one settled carrier once it is proved to be the recorded one.
+
+    Earlier versions moved the carrier into the quarantine folder first, so a
+    stop could leave it there or leave that folder empty; both finish here."""
     parameters = _managed_retirement_parameters(
         carrier_reference,
         expected_owner,
@@ -2502,543 +2461,91 @@ def _retire_managed_carrier_with_interrupts_deferred(
             "managed carrier retirement input is malformed",
         )
     reference, owner, carrier_path, parent = parameters
+    validator = _managed_prelaunch_retirement_history if prelaunch else _managed_retirement_history
+    legacy_name = "carrier.jsonl"
     parent_chain = []
-    parent_names = ()
-    opened_files = []
-    private_fd = None
-    exclusion = None
-    caught = None
-    namespace_mutated = False
-    private_name = "carrier.jsonl"
+    legacy_fd = None
+    opened = []
 
-    def parent_namespace_is_exact():
-        if not parent_chain:
-            return False
+    def refused(reason):
+        return ManagedCarrierRetirementResult(ManagedCarrierRetirementOutcome.REFUSED, reason)
+
+    try:
+        parent_chain, parent_names = _open_absolute_merge_chain(parent)
+        parent_fd = parent_chain[-1]
+        held = os.fstat(parent_fd)
+        if (int(held.st_dev), int(held.st_ino)) != (
+            reference["parent_device"],
+            reference["parent_inode"],
+        ):
+            return refused("managed carrier parent changed")
         try:
-            held = os.fstat(parent_chain[-1])
-        except OSError:
-            return False
-        return (
-            int(held.st_dev) == reference["parent_device"]
-            and int(held.st_ino) == reference["parent_inode"]
-            and _merge_chain_is_named(parent_chain, parent_names)
-        )
-
-    def parent_namespace_changed(reason):
-        return ManagedCarrierRetirementResult(
-            (
-                ManagedCarrierRetirementOutcome.UNCERTAIN
-                if namespace_mutated
-                else ManagedCarrierRetirementOutcome.REFUSED
-            ),
-            reason,
-        )
-
-    def expected_history(selected, *, parent_fd, name):
-        validator = (
-            _managed_prelaunch_retirement_history if prelaunch else _managed_retirement_history
-        )
-        return validator(
-            selected,
-            parent_fd=parent_fd,
+            legacy_fd = _open_exact_merge_dir(parent_fd, quarantine_name)
+        except FileNotFoundError:
+            pass
+        if legacy_fd is not None and not set(os.listdir(legacy_fd)) <= {legacy_name}:
+            return refused("managed carrier quarantine holds other files")
+        found = []
+        for directory, name in ((parent_fd, carrier_path.name), (legacy_fd, legacy_name)):
+            if directory is None:
+                continue
+            try:
+                carrier = _open_managed_carrier_file(directory, name)
+            except FileNotFoundError:
+                continue
+            opened.append(carrier)
+            found.append((directory, name, carrier))
+        if len(found) > 1:
+            return refused("managed carrier is at both names")
+        if not found:
+            if legacy_fd is not None:
+                os.rmdir(quarantine_name, dir_fd=parent_fd)
+                try:
+                    os.fsync(parent_fd)
+                except OSError:
+                    return ManagedCarrierRetirementResult(
+                        ManagedCarrierRetirementOutcome.UNCERTAIN,
+                        "managed carrier quarantine removal could not be committed",
+                    )
+            return ManagedCarrierRetirementResult(ManagedCarrierRetirementOutcome.ALREADY_ABSENT)
+        directory, name, carrier = found[0]
+        before = _managed_carrier_stat(carrier)
+        history = validator(
+            carrier,
+            parent_fd=directory,
             name=name,
             reference=reference,
             expected_owner=owner,
             expected_manifest_hash=expected_manifest_hash,
         )
-
-    def open_candidate(parent_fd, name):
-        try:
-            candidate = _open_managed_carrier_file(parent_fd, name)
-        except FileNotFoundError:
-            return None
-        except OSError:
-            return False
-        opened_files.append(candidate)
-        return candidate
-
-    def exact_name(parent_fd, name, candidate):
-        if candidate is None or candidate is False:
-            return False
-        try:
-            held = os.fstat(candidate.fileno())
-            return (
-                stat.S_ISREG(held.st_mode)
-                and held.st_uid == os.geteuid()
-                and stat.S_IMODE(held.st_mode) == 0o600
-                and held.st_nlink == 1
-                and int(held.st_dev) == reference["device"]
-                and int(held.st_ino) == reference["inode"]
-                and named_entry_matches(parent_fd, name, candidate.fileno(), directory=False)
-            )
-        except OSError:
-            return False
-
-    def private_group_is_exact():
-        if private_fd is None:
-            return named_entry_missing(parent_chain[-1], quarantine_name)
-        try:
-            held = os.fstat(private_fd)
-            return (
-                stat.S_ISDIR(held.st_mode)
-                and held.st_uid == os.geteuid()
-                and _owner_only_private_directory_mode(held.st_mode)
-                and _merge_directory_matches(
-                    private_fd,
-                    parent_chain[-1],
-                    quarantine_name,
-                )
-            )
-        except OSError:
-            return False
-
-    def open_private_group():
-        try:
-            descriptor = _open_exact_merge_dir(parent_chain[-1], quarantine_name)
-        except FileNotFoundError:
-            return None
-        except OSError:
-            return False
-        held = os.fstat(descriptor)
+        if history is None:
+            return refused("managed carrier history changed")
         if (
-            not stat.S_ISDIR(held.st_mode)
-            or held.st_uid != os.geteuid()
-            or not _owner_only_private_directory_mode(held.st_mode)
+            _managed_carrier_stat(carrier) != before
+            or not named_entry_matches(directory, name, carrier.fileno(), directory=False)
+            or not _merge_chain_is_named(parent_chain, parent_names)
         ):
-            os.close(descriptor)
-            return False
-        return descriptor
-
-    def create_private_group():
-        nonlocal namespace_mutated, private_fd
+            return refused("managed carrier changed since it was checked")
+        os.unlink(name, dir_fd=directory)
         try:
-            if not parent_namespace_is_exact():
-                return False
-            os.mkdir(quarantine_name, mode=0o700, dir_fd=parent_chain[-1])
-            namespace_mutated = True
-            private_fd = _open_exact_merge_dir(parent_chain[-1], quarantine_name)
-            held = os.fstat(private_fd)
-            if (
-                held.st_uid != os.geteuid()
-                or not _owner_only_private_directory_mode(held.st_mode)
-                or not private_group_is_exact()
-            ):
-                return False
-            os.fsync(parent_chain[-1])
-            return parent_namespace_is_exact()
+            if legacy_fd is not None:
+                os.rmdir(quarantine_name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
         except OSError:
-            return False
-
-    def private_entries():
-        if private_fd is None or not private_group_is_exact():
-            return None
-        try:
-            return os.listdir(private_fd)
-        except OSError:
-            return None
-
-    def layout(selected):
-        try:
-            public_exact = named_entry_matches(
-                parent_chain[-1], carrier_path.name, selected.fileno(), directory=False
-            )
-            private_exact = (
-                private_fd is not None
-                and private_group_is_exact()
-                and named_entry_matches(private_fd, private_name, selected.fileno(), directory=False)
-            )
-            private_missing = (
-                private_fd is None and named_entry_missing(parent_chain[-1], quarantine_name)
-            ) or (
-                private_fd is not None
-                and private_group_is_exact()
-                and named_entry_missing(private_fd, private_name)
-            )
-            held = os.fstat(selected.fileno())
-        except OSError:
-            return "changed"
-        if public_exact and private_missing:
-            return "public"
-        if private_exact and not public_exact:
-            return "private"
-        if private_missing and held.st_nlink == 0:
-            return "removed"
-        return "changed"
-
-    def restore_unexpected_private():
-        nonlocal namespace_mutated
-        if (
-            not parent_namespace_is_exact()
-            or not named_entry_missing(parent_chain[-1], carrier_path.name)
-            or private_fd is None
-            or not private_group_is_exact()
-            or named_entry_missing(private_fd, private_name)
-        ):
-            return False
-        unexpected = None
-        try:
-            unexpected = _open_managed_carrier_file(private_fd, private_name)
-            opened_files.append(unexpected)
-            if not parent_namespace_is_exact():
-                return False
-            rename_noreplace(
-                private_fd,
-                private_name,
-                parent_chain[-1],
-                carrier_path.name,
-            )
-            restored = named_entry_matches(
-                parent_chain[-1], carrier_path.name, unexpected.fileno(), directory=False
-            ) and named_entry_missing(private_fd, private_name)
-            if restored:
-                namespace_mutated = True
-                if not parent_namespace_is_exact():
-                    return False
-                os.fsync(private_fd)
-                if not parent_namespace_is_exact():
-                    return False
-                os.fsync(parent_chain[-1])
-                if not parent_namespace_is_exact():
-                    return False
-            return restored and parent_namespace_is_exact()
-        except OSError:
-            return False
-
-    def finish_cleanup():
-        error = None
-
-        def remember(exc):
-            nonlocal error
-            error = _prefer_managed_cleanup_error(error, exc)
-
-        nonlocal exclusion
-        current_exclusion = exclusion
-        exclusion = None
-        if current_exclusion is not None:
-            try:
-                current_exclusion.close()
-            except BaseException as exc:
-                remember(exc)
-        for candidate in reversed(opened_files):
-            try:
-                candidate.close()
-            except BaseException as exc:
-                remember(exc)
-        opened_files.clear()
-        nonlocal private_fd
-        current_private_fd = private_fd
-        private_fd = None
-        if current_private_fd is not None:
-            try:
-                _close_managed_descriptor(current_private_fd)
-            except BaseException as exc:
-                remember(exc)
-        for descriptor in reversed(parent_chain):
-            try:
-                _close_managed_descriptor(descriptor)
-            except BaseException as exc:
-                remember(exc)
-        parent_chain.clear()
-        return error
-
-    try:
-        parent_chain, parent_names = _open_absolute_merge_chain(parent)
-        if not parent_namespace_is_exact():
-            return parent_namespace_changed("managed carrier parent changed")
-        public = open_candidate(parent_chain[-1], carrier_path.name)
-        opened_private = open_private_group()
-        if opened_private is False:
             return ManagedCarrierRetirementResult(
-                ManagedCarrierRetirementOutcome.REFUSED,
-                "managed carrier private recovery changed",
+                ManagedCarrierRetirementOutcome.UNCERTAIN,
+                "managed carrier unlink could not be committed",
             )
-        private_fd = opened_private
-        private = open_candidate(private_fd, private_name) if private_fd is not None else None
-        public_exact = exact_name(parent_chain[-1], carrier_path.name, public)
-        private_exact = exact_name(private_fd, private_name, private)
-        if public is None and private is None:
-            if not parent_namespace_is_exact():
-                return parent_namespace_changed(
-                    "managed carrier parent changed before absence recovery"
-                )
-            entries = private_entries() if private_fd is not None else []
-            if entries is None or entries:
-                return ManagedCarrierRetirementResult(
-                    ManagedCarrierRetirementOutcome.REFUSED,
-                    "managed carrier private recovery changed",
-                )
-            try:
-                if private_fd is not None:
-                    os.fsync(private_fd)
-                    if not parent_namespace_is_exact():
-                        return parent_namespace_changed(
-                            "managed carrier parent changed during absence recovery"
-                        )
-                    if not private_group_is_exact():
-                        raise OSError("managed carrier quarantine changed")
-                    if not parent_namespace_is_exact():
-                        return parent_namespace_changed(
-                            "managed carrier parent changed before quarantine cleanup"
-                        )
-                    os.rmdir(quarantine_name, dir_fd=parent_chain[-1])
-                    namespace_mutated = True
-                os.fsync(parent_chain[-1])
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed during absence recovery"
-                    )
-            except OSError:
-                return ManagedCarrierRetirementResult(
-                    ManagedCarrierRetirementOutcome.UNCERTAIN,
-                    "managed carrier absence could not be committed",
-                )
-            if (
-                not named_entry_missing(parent_chain[-1], carrier_path.name)
-                or not named_entry_missing(parent_chain[-1], quarantine_name)
-                or not parent_namespace_is_exact()
-            ):
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed before absence was confirmed"
-                    )
-                return ManagedCarrierRetirementResult(
-                    ManagedCarrierRetirementOutcome.UNCERTAIN,
-                    "managed carrier reappeared during retirement",
-                )
-            if not parent_namespace_is_exact():
-                return parent_namespace_changed(
-                    "managed carrier parent changed before absence was confirmed"
-                )
-            return ManagedCarrierRetirementResult(ManagedCarrierRetirementOutcome.ALREADY_ABSENT)
-        if private_exact:
-            selected = private
-        elif public_exact and private is None:
-            selected = public
-        else:
-            return ManagedCarrierRetirementResult(
-                ManagedCarrierRetirementOutcome.REFUSED,
-                "managed carrier name or identity changed",
-            )
-        exclusion = acquire_inode_write_exclusion(selected.fileno())
-        if exclusion is None or not exclusion.intact():
-            return ManagedCarrierRetirementResult(
-                ManagedCarrierRetirementOutcome.REFUSED,
-                "managed carrier changed since it was checked",
-            )
-        selected_name = private_name if private_exact else carrier_path.name
-        selected_parent_fd = private_fd if private_exact else parent_chain[-1]
-        history = expected_history(
-            selected,
-            parent_fd=selected_parent_fd,
-            name=selected_name,
-        )
-        if not parent_namespace_is_exact():
-            return parent_namespace_changed(
-                "managed carrier parent changed during history validation"
-            )
-        if history is None or not exclusion.intact():
-            return ManagedCarrierRetirementResult(
-                ManagedCarrierRetirementOutcome.REFUSED,
-                "managed carrier history changed",
-            )
-        if selected_name == carrier_path.name:
-            if private_fd is None:
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed before private recovery creation"
-                    )
-                if not create_private_group():
-                    if not parent_namespace_is_exact():
-                        return parent_namespace_changed(
-                            "managed carrier parent changed during private recovery creation"
-                        )
-                    return ManagedCarrierRetirementResult(
-                        ManagedCarrierRetirementOutcome.UNCERTAIN,
-                        "managed carrier private recovery could not be created",
-                    )
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed during private recovery creation"
-                    )
-            if private_entries() != [] or layout(selected) != "public":
-                return ManagedCarrierRetirementResult(
-                    ManagedCarrierRetirementOutcome.REFUSED,
-                    "managed carrier private recovery changed",
-                )
-            if not parent_namespace_is_exact():
-                return parent_namespace_changed(
-                    "managed carrier parent changed before quarantine move"
-                )
-            deferred = None
-            try:
-                rename_noreplace(
-                    parent_chain[-1],
-                    carrier_path.name,
-                    private_fd,
-                    private_name,
-                )
-            except BaseException as exc:
-                deferred = exc
-            current_layout = layout(selected)
-            if current_layout == "private":
-                namespace_mutated = True
-            if not parent_namespace_is_exact():
-                if deferred is not None and not isinstance(deferred, Exception):
-                    deferred.add_note("managed carrier was retained in private recovery")
-                    raise deferred
-                return parent_namespace_changed(
-                    "managed carrier parent changed during quarantine move"
-                )
-            if current_layout != "private":
-                restored = restore_unexpected_private()
-                if deferred is not None and not isinstance(deferred, Exception):
-                    deferred.add_note("managed carrier retirement did not take ownership")
-                    raise deferred
-                return ManagedCarrierRetirementResult(
-                    (
-                        ManagedCarrierRetirementOutcome.REFUSED
-                        if restored or layout(selected) == "public"
-                        else ManagedCarrierRetirementOutcome.UNCERTAIN
-                    ),
-                    "managed carrier quarantine move was not exact",
-                )
-            try:
-                os.fsync(private_fd)
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed while quarantine was committed"
-                    )
-                os.fsync(parent_chain[-1])
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed while quarantine was committed"
-                    )
-            except OSError:
-                return ManagedCarrierRetirementResult(
-                    ManagedCarrierRetirementOutcome.UNCERTAIN,
-                    "managed carrier quarantine move could not be committed",
-                )
-            if deferred is not None:
-                if not isinstance(deferred, Exception):
-                    deferred.add_note("managed carrier was retained in private recovery")
-                    raise deferred
-                return ManagedCarrierRetirementResult(
-                    ManagedCarrierRetirementOutcome.UNCERTAIN,
-                    "managed carrier move reported an uncertain result",
-                )
-        history = expected_history(
-            selected,
-            parent_fd=private_fd,
-            name=private_name,
-        )
-        if not parent_namespace_is_exact():
-            return parent_namespace_changed(
-                "managed carrier parent changed during private recovery validation"
-            )
-        if history is None or not exclusion.intact() or layout(selected) != "private":
-            return ManagedCarrierRetirementResult(
-                ManagedCarrierRetirementOutcome.REFUSED,
-                "managed carrier private recovery changed",
-            )
-        if not parent_namespace_is_exact():
-            return parent_namespace_changed("managed carrier parent changed before carrier unlink")
-        deferred = None
-        try:
-            os.unlink(private_name, dir_fd=private_fd)
-        except BaseException as exc:
-            deferred = exc
-        current_layout = layout(selected)
-        if current_layout == "removed":
-            namespace_mutated = True
-        if not parent_namespace_is_exact():
-            if deferred is not None and not isinstance(deferred, Exception):
-                deferred.add_note(
-                    (
-                        "managed carrier was unlinked before interruption"
-                        if current_layout == "removed"
-                        else "managed carrier remains in private recovery"
-                    )
-                )
-                raise deferred
-            return parent_namespace_changed("managed carrier parent changed during carrier unlink")
-        if current_layout == "removed":
-            try:
-                os.fsync(private_fd)
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed while carrier unlink was committed"
-                    )
-                if private_entries() != [] or not private_group_is_exact():
-                    raise OSError("managed carrier quarantine changed")
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed before quarantine cleanup"
-                    )
-                os.rmdir(quarantine_name, dir_fd=parent_chain[-1])
-                namespace_mutated = True
-                os.fsync(parent_chain[-1])
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed while retirement was committed"
-                    )
-            except OSError:
-                return ManagedCarrierRetirementResult(
-                    ManagedCarrierRetirementOutcome.UNCERTAIN,
-                    "managed carrier unlink could not be committed",
-                )
-            if (
-                not named_entry_missing(parent_chain[-1], carrier_path.name)
-                or not named_entry_missing(parent_chain[-1], quarantine_name)
-                or not parent_namespace_is_exact()
-            ):
-                if not parent_namespace_is_exact():
-                    return parent_namespace_changed(
-                        "managed carrier parent changed before retirement was confirmed"
-                    )
-                return ManagedCarrierRetirementResult(
-                    ManagedCarrierRetirementOutcome.UNCERTAIN,
-                    "managed carrier namespace changed during retirement",
-                )
-            if deferred is not None:
-                if not isinstance(deferred, Exception):
-                    deferred.add_note("managed carrier was unlinked before interruption")
-                    raise deferred
-                return ManagedCarrierRetirementResult(
-                    ManagedCarrierRetirementOutcome.UNCERTAIN,
-                    "managed carrier unlink reported an uncertain result",
-                )
-            if not parent_namespace_is_exact():
-                return parent_namespace_changed(
-                    "managed carrier parent changed before retirement was confirmed"
-                )
-            return ManagedCarrierRetirementResult(ManagedCarrierRetirementOutcome.RETIRED)
-        if deferred is not None and not isinstance(deferred, Exception):
-            deferred.add_note("managed carrier remains in private recovery")
-            raise deferred
-        return ManagedCarrierRetirementResult(
-            ManagedCarrierRetirementOutcome.REFUSED,
-            "managed carrier could not be unlinked exactly",
-        )
+        return ManagedCarrierRetirementResult(ManagedCarrierRetirementOutcome.RETIRED)
     except (OSError, TypeError, ValueError):
-        return ManagedCarrierRetirementResult(
-            ManagedCarrierRetirementOutcome.REFUSED,
-            "managed carrier retirement could not be opened safely",
-        )
-    except BaseException as exc:
-        caught = exc
-        raise
+        return refused("managed carrier retirement could not be opened safely")
     finally:
-        try:
-            cleanup_error = _run_managed_sigint_deferred(finish_cleanup)
-        except BaseException as exc:
-            cleanup_error = exc
-        if cleanup_error is not None:
-            if caught is None:
-                raise cleanup_error.with_traceback(cleanup_error.__traceback__)
-            if not isinstance(cleanup_error, Exception):
-                cleanup_error.add_note(f"managed carrier retirement also failed: {caught}")
-                raise cleanup_error.with_traceback(cleanup_error.__traceback__)
-            caught.add_note(f"managed carrier cleanup also failed: {cleanup_error}")
+        for carrier in opened:
+            carrier.close()
+        if legacy_fd is not None:
+            os.close(legacy_fd)
+        for descriptor in reversed(parent_chain):
+            os.close(descriptor)
 
 
 def retire_managed_carrier(
@@ -3049,13 +2556,11 @@ def retire_managed_carrier(
 ):
     """Retire one exact sealed carrier, retaining ambiguity for recovery."""
     with _MANAGED_CARRIER_RETIREMENT_LOCK:
-        return _run_managed_sigint_deferred(
-            lambda: _retire_managed_carrier_with_interrupts_deferred(
-                carrier_reference,
-                expected_owner,
-                expected_manifest_hash,
-                quarantine_name,
-            )
+        return _retire_managed_carrier(
+            carrier_reference,
+            expected_owner,
+            expected_manifest_hash,
+            quarantine_name,
         )
 
 
@@ -3150,14 +2655,12 @@ def retire_prelaunch_managed_carrier(
         nonce = None
     quarantine_name = f".qobuz-retire-managed-beets-{nonce}" if isinstance(nonce, str) else ""
     with _MANAGED_CARRIER_RETIREMENT_LOCK:
-        return _run_managed_sigint_deferred(
-            lambda: _retire_managed_carrier_with_interrupts_deferred(
-                carrier_reference,
-                expected_owner,
-                expected_manifest_hash,
-                quarantine_name,
-                prelaunch=True,
-            )
+        return _retire_managed_carrier(
+            carrier_reference,
+            expected_owner,
+            expected_manifest_hash,
+            quarantine_name,
+            prelaunch=True,
         )
 
 

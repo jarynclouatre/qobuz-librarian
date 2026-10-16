@@ -9,7 +9,6 @@ from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
-from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import lyric_fetch, rip
 from qobuz_librarian.library import candidate_premise, downsample_state
 from qobuz_librarian.quality import upgrade_state
@@ -774,7 +773,6 @@ def write_post_import_sidecars(
                 change = {}
                 tag_directory_mutation = {}
                 sidecar_fd = None
-                sidecar_exclusion = None
                 try:
                     sidecar = fp.with_suffix(".lrc")
                     sidecar_identity = _sidecar_identity_from_receipt(
@@ -795,32 +793,22 @@ def write_post_import_sidecars(
                         parent_guard,
                     ):
                         raise OSError(f"{sidecar.name}: sidecar changed before tag strip")
-                    sidecar_exclusion = acquire_inode_write_exclusion(sidecar_fd)
-                    if sidecar_exclusion is None:
-                        raise OSError(
-                            f"{sidecar.name}: sidecar is not a regular file")
 
                     def sidecar_guard(
                         sidecar=sidecar,
                         sidecar_fd=sidecar_fd,
                         sidecar_identity=sidecar_identity,
-                        sidecar_exclusion=sidecar_exclusion,
                         parent_fd=parent_fd,
                         parent_guard=parent_guard,
                     ):
-                        return (
-                            sidecar_exclusion.intact()
-                            and _held_track_is_named(
-                                sidecar,
-                                parent_fd,
-                                sidecar_fd,
-                                sidecar_identity,
-                                parent_guard,
-                            )
+                        return _held_track_is_named(
+                            sidecar,
+                            parent_fd,
+                            sidecar_fd,
+                            sidecar_identity,
+                            parent_guard,
                         )
 
-                    if not sidecar_guard():
-                        raise OSError(f"{sidecar.name}: sidecar changed before tag strip")
                     preserved = lyric_fetch._read_bound_sidecar(
                         fp, parent_fd, parent_guard, track_guard)
                     if preserved is None or any(
@@ -871,8 +859,6 @@ def write_post_import_sidecars(
                         )
                     )
                 finally:
-                    if sidecar_exclusion is not None:
-                        sidecar_exclusion.close()
                     if sidecar_fd is not None:
                         os.close(sidecar_fd)
                     if (

@@ -665,7 +665,7 @@ def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path)
         sealed = {**launch, "generation": 2, "previous_hash": launch_hash,
                   "sealed": True, "mappings": mappings}
         sealed.pop("replaced_entries")
-        beets._write_managed_snapshot(stream.fileno(), sealed)
+        sealed_hash = beets._write_managed_snapshot(stream.fileno(), sealed)
     stat = carrier_path.stat()
     parent = tmp_path.stat()
     carrier = {
@@ -730,6 +730,18 @@ def test_replacement_catalogue_retires_only_captured_rows(monkeypatch, tmp_path)
         )
     connection.close()
     assert external.read_bytes() == b"external"
+
+    quarantine = ".qobuz-retire-managed-beets-" + "d" * 64
+    outcome = beets.ManagedCarrierRetirementOutcome
+    assert beets.retire_managed_carrier(
+        carrier, owner, "e" * 64, quarantine).outcome is outcome.REFUSED
+    assert carrier_path.exists()
+    assert beets.retire_managed_carrier(
+        carrier, owner, sealed_hash, quarantine).outcome is outcome.RETIRED
+    assert not carrier_path.exists()
+    assert not list(tmp_path.glob(".qobuz-retire-managed-beets-*"))
+    assert beets.retire_managed_carrier(
+        carrier, owner, sealed_hash, quarantine).outcome is outcome.ALREADY_ABSENT
 
 
 @pytest.mark.parametrize("scenario", ["clean", "ambiguous"])

@@ -8,8 +8,13 @@ import stat
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
-from qobuz_librarian.safefile import fsync_dirs, rename_noreplace
+from qobuz_librarian.safefile import (
+    AT_FDCWD,
+    delete_verified,
+    fsync_dir,
+    rename_noreplace,
+    stat_identity,
+)
 from qobuz_librarian.safefile import identity_record as _owned_file_identity
 
 _log = logging.getLogger("qobuz_librarian")
@@ -204,23 +209,6 @@ def _directory_cleanup_records(owned, expected_count):
     return parent_count, records
 
 
-def _directory_cleanup_entry_matches(st, record):
-    return all(
-        record[key] == value
-        for key, value in _owned_file_identity(st).items()
-    )
-
-
-def _close_owned_unlink_plan(plan):
-    if not isinstance(plan, dict):
-        return
-    for descriptor in reversed(plan.get("opened", ())):
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-
-
 _INVALID_OWNED_DELETION = object()
 _OWNED_QUARANTINE_NAME = re.compile(
     r"^\.ql-undo-(?:file|dir)-[0-9a-f]{32}$")
@@ -272,10 +260,9 @@ def _begin_owned_deletion(value, kind, progress):
     return deletion
 
 
-def _ownership_stable_matches(st, expected, *, directory=False):
-    wanted_mode = stat.S_ISDIR if directory else stat.S_ISREG
+def _ownership_stable_matches(st, expected):
     return (
-        wanted_mode(st.st_mode)
+        stat.S_ISREG(st.st_mode)
         and isinstance(expected, dict)
         and all(
             type(expected.get(field)) is int
@@ -288,1134 +275,206 @@ def _ownership_stable_matches(st, expected, *, directory=False):
     )
 
 
-def _owned_unlink_plan(root, owned):
-    """Open one leaf chain and accept only a proven resumable state."""
-    if not isinstance(owned, dict):
+def _lstat_or_none(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
         return None
+
+
+def _owned_chain(root, owned):
+    """Where one entry sits: the folder its chain hangs from, the folders
+    below that down to the entry's own, the leaf, how many of the folders
+    are above the root, and the cleanup records when they are valid."""
     relative = owned.get("relative")
     directories = owned.get("directories")
-    file_identity = owned.get("file")
-    deletion = _owned_deletion_record(owned, "file")
-    if (
-        not isinstance(relative, str)
-        or not isinstance(directories, list)
-        or not _valid_ownership_identity(file_identity)
-        or deletion is _INVALID_OWNED_DELETION
-        or (isinstance(deletion, dict)
-            and deletion.get("state") == "removed")
-    ):
+    if not isinstance(relative, str) or not isinstance(directories, list):
         return None
     root, rel = _owned_relative(Path(root), Path(root) / relative)
     if rel is None or len(directories) != len(rel.parts):
         return None
-    if not all(
-        isinstance(expected, list)
-        and len(expected) == 2
-        and all(type(value) is int for value in expected)
-        for expected in directories
-    ):
-        return None
-
     cleanup = _directory_cleanup_records(owned, len(directories))
-    if cleanup is not None:
-        parent_count, cleanup_records = cleanup
-        try:
-            cleanup_anchor = root.parents[parent_count]
-        except IndexError:
+    if cleanup is not None and cleanup[0] > 0:
+        music_root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
+        if (cleanup[0] >= len(root.parents)
+                or root.parents[cleanup[0]] != music_root):
             cleanup = None
-        else:
-            music_root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
-            if parent_count > 0 and cleanup_anchor != music_root:
-                cleanup = None
-    if cleanup is None:
-        parent_count = 0
-        cleanup_records = None
-
-    opened = []
-    try:
-        if root == root.parent:
-            current = _open_directory_nofollow(root)
-            opened.append(current)
-            directory_fds = [current]
-            parent_fds = [None]
-            directory_names = [root.name]
-            cleanup_records = None
-        else:
-            anchor = root.parents[parent_count]
-            current = _open_directory_nofollow(anchor)
-            opened.append(current)
-            directory_fds = []
-            parent_fds = []
-            directory_names = []
-            chain_names = [*root.relative_to(anchor).parts, *rel.parts[:-1]]
-            for part in chain_names:
-                parent = current
-                current = _open_directory_nofollow(part, dir_fd=current)
-                opened.append(current)
-                parent_fds.append(parent)
-                directory_fds.append(current)
-                directory_names.append(part)
-
-        owned_directory_fds = directory_fds[parent_count:]
-        if len(owned_directory_fds) != len(directories):
-            raise ValueError("owned directory chain length changed")
-        for fd, expected in zip(owned_directory_fds, directories, strict=True):
-            if _file_identity(os.fstat(fd)) != expected:
-                raise ValueError("owned directory identity changed")
-        cleanup_matches = (
-            [
-                _directory_cleanup_entry_matches(os.fstat(fd), record)
-                for fd, record in zip(directory_fds, cleanup_records, strict=True)
-            ]
-            if parent_fds[0] is not None and cleanup_records is not None
-            else None
-        )
-        leaf_fd = None
-        try:
-            leaf_fd = os.open(
-                rel.parts[-1],
-                os.O_RDONLY
-                | os.O_NOFOLLOW
-                | os.O_NONBLOCK
-                | os.O_CLOEXEC,
-                dir_fd=current,
-            )
-        except FileNotFoundError:
-            if deletion is None:
-                raise ValueError("owned leaf disappeared without deletion intent")
-        if leaf_fd is not None:
-            opened.append(leaf_fd)
-            leaf = os.fstat(leaf_fd)
-            named_leaf = os.stat(
-                rel.parts[-1], dir_fd=current, follow_symlinks=False)
-            if _owned_file_identity(leaf) != _owned_file_identity(named_leaf):
-                raise ValueError("owned leaf name changed")
-            if _owned_file_identity(leaf) != file_identity:
-                raise ValueError("owned leaf identity changed")
-        return {
-            "root": root,
-            "relative": rel,
-            "path": root / rel,
-            "opened": opened,
-            "leaf_parent": current,
-            "leaf_name": rel.parts[-1],
-            "leaf_fd": leaf_fd,
-            "owned": owned,
-            "file": file_identity,
-            "deletion": deletion,
-            "directory_fds": directory_fds,
-            "parent_fds": parent_fds,
-            "directory_names": directory_names,
-            "cleanup_records": cleanup_records,
-            "cleanup_matches": cleanup_matches,
-        }
-    except (OSError, TypeError, ValueError):
-        for descriptor in reversed(opened):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        return None
-
-
-def _refresh_owned_cleanup_records(plan):
-    """Refresh exact directory proofs changed by this Undo operation."""
-    records = plan.get("cleanup_records") if isinstance(plan, dict) else None
-    matches = plan.get("cleanup_matches") if isinstance(plan, dict) else None
-    if records is None or matches is None:
-        return
-    for directory_fd, record, matched in zip(
-            plan["directory_fds"], records, matches, strict=True):
-        # Never turn a directory that was already changed before this Undo
-        # attempt into one of our own mutations.
-        if not matched:
-            continue
-        try:
-            current = os.fstat(directory_fd)
-        except OSError:
-            continue
-        if _file_identity(current) != [record["device"], record["inode"]]:
-            continue
-        record.update(_owned_file_identity(current))
-
-
-def _open_owned_leaf_quarantine(plan):
-    deletion = plan.get("deletion")
-    if not isinstance(deletion, dict):
-        return {
-            "missing": True,
-            "fd": None,
-            "held_fd": None,
-            "held_full_match": False,
-            "held_stable_match": False,
-        }
-    name = deletion["quarantine"]
-    try:
-        quarantine_fd = _open_directory_nofollow(
-            name, dir_fd=plan["leaf_parent"])
-    except FileNotFoundError:
-        return {
-            "missing": True,
-            "fd": None,
-            "held_fd": None,
-            "held_full_match": False,
-            "held_stable_match": False,
-        }
-    except OSError:
-        return None
-    held_fd = None
-    try:
-        current = os.fstat(quarantine_fd)
-        named = os.stat(
-            name, dir_fd=plan["leaf_parent"], follow_symlinks=False)
-        if (
-            not stat.S_ISDIR(current.st_mode)
-            or _owned_file_identity(current) != _owned_file_identity(named)
-        ):
-            raise ValueError("quarantine directory changed")
-        try:
-            held_fd = os.open(
-                "held",
-                os.O_RDONLY
-                | os.O_NOFOLLOW
-                | os.O_NONBLOCK
-                | os.O_CLOEXEC,
-                dir_fd=quarantine_fd,
-            )
-        except FileNotFoundError:
-            held_fd = None
-        held_identity = None
-        held_full_match = False
-        held_stable_match = False
-        if held_fd is not None:
-            held = os.fstat(held_fd)
-            named_held = os.stat(
-                "held", dir_fd=quarantine_fd, follow_symlinks=False)
-            if _owned_file_identity(held) != _owned_file_identity(named_held):
-                raise ValueError("quarantined leaf changed")
-            held_identity = _owned_file_identity(held)
-            held_full_match = _ownership_identity_matches(
-                held, plan["file"])
-            held_stable_match = _ownership_stable_matches(
-                held, plan["file"])
-        return {
-            "missing": False,
-            "fd": quarantine_fd,
-            "held_fd": held_fd,
-            "held_identity": held_identity,
-            "held_full_match": held_full_match,
-            "held_stable_match": held_stable_match,
-        }
-    except (OSError, TypeError, ValueError):
-        if held_fd is not None:
-            try:
-                os.close(held_fd)
-            except OSError:
-                pass
-        try:
-            os.close(quarantine_fd)
-        except OSError:
-            pass
-        return None
-    except BaseException:
-        if held_fd is not None:
-            try:
-                os.close(held_fd)
-            except OSError:
-                pass
-        try:
-            os.close(quarantine_fd)
-        except OSError:
-            pass
-        raise
-
-
-def _close_owned_quarantine(snapshot):
-    if not isinstance(snapshot, dict):
-        return
-    for key in ("held_fd", "fd"):
-        descriptor = snapshot.get(key)
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-
-
-def _owned_unlink_leaf_matches(plan):
-    deletion = plan.get("deletion")
-    snapshot = _open_owned_leaf_quarantine(plan)
-    if snapshot is None:
-        return False
-    try:
-        public_exists = plan.get("leaf_fd") is not None
-        held_exists = snapshot.get("held_fd") is not None
-        if public_exists and held_exists:
-            return False
-        if deletion is None:
-            return public_exists and not held_exists
-        if held_exists:
-            if public_exists:
-                return False
-            if deletion.get("state") == "intent":
-                return snapshot.get("held_stable_match") is True
-            if deletion.get("state") == "held":
-                return snapshot.get("held_full_match") is True
-            return False
-        return True
-    finally:
-        _close_owned_quarantine(snapshot)
-
-
-def _remove_owned_leaf_quarantine(plan, snapshot):
-    if snapshot.get("missing"):
-        return True
-    if snapshot.get("held_fd") is not None:
-        return False
-    try:
-        held = os.fstat(snapshot["fd"])
-        named = os.stat(
-            plan["deletion"]["quarantine"],
-            dir_fd=plan["leaf_parent"],
-            follow_symlinks=False,
-        )
-        if (
-            not stat.S_ISDIR(named.st_mode)
-            or _owned_file_identity(held) != _owned_file_identity(named)
-        ):
-            return False
-        os.rmdir(
-            plan["deletion"]["quarantine"],
-            dir_fd=plan["leaf_parent"],
-        )
-        fsync_dirs(plan["leaf_parent"])
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-
-
-def _restore_owned_leaf_from_intent(
-        plan, snapshot, progress, cleanup_plan):
-    """Restore a rename-interrupted leaf without authorising its deletion."""
-    if (
-        snapshot.get("held_fd") is None
-        or snapshot.get("held_stable_match") is not True
-        or plan["deletion"].get("state") != "intent"
-    ):
-        return {"status": "held", "mutated": False}
-    previous_file = dict(plan["file"])
-    moved = False
-    try:
-        rename_noreplace(
-            snapshot["fd"],
-            "held",
-            plan["leaf_parent"],
-            plan["leaf_name"],
-        )
-        moved = True
-        restored = os.fstat(snapshot["held_fd"])
-        named = os.stat(
-            plan["leaf_name"],
-            dir_fd=plan["leaf_parent"],
-            follow_symlinks=False,
-        )
-        if (
-            _owned_file_identity(restored) != _owned_file_identity(named)
-            or not _ownership_stable_matches(restored, plan["file"])
-        ):
-            raise OSError("restored Undo leaf changed")
-        fsync_dirs(snapshot["fd"], plan["leaf_parent"])
-        plan["owned"]["file"] = _owned_file_identity(restored)
-        plan["file"] = plan["owned"]["file"]
-        plan["deletion"]["state"] = "intent"
-        _refresh_owned_cleanup_records(cleanup_plan)
-        if _record_owned_progress(progress):
-            return {"status": "restored", "mutated": True}
-        try:
-            rename_noreplace(
-                plan["leaf_parent"],
-                plan["leaf_name"],
-                snapshot["fd"],
-                "held",
-            )
-            held_again = os.fstat(snapshot["held_fd"])
-            named_again = os.stat(
-                "held", dir_fd=snapshot["fd"], follow_symlinks=False)
-            if (
-                _owned_file_identity(held_again)
-                != _owned_file_identity(named_again)
-                or not _ownership_stable_matches(
-                    held_again, previous_file)
-            ):
-                raise OSError("rolled-back Undo leaf changed")
-            fsync_dirs(
-                snapshot["fd"], plan["leaf_parent"])
-            plan["owned"]["file"] = previous_file
-            plan["file"] = previous_file
-            plan["deletion"]["state"] = "intent"
-            _refresh_owned_cleanup_records(cleanup_plan)
-            return {"status": "held", "mutated": True}
-        except (OSError, TypeError, ValueError):
-            return {"status": "restored", "mutated": True}
-    except (OSError, TypeError, ValueError):
-        if moved:
-            try:
-                rename_noreplace(
-                    plan["leaf_parent"],
-                    plan["leaf_name"],
-                    snapshot["fd"],
-                    "held",
-                )
-                fsync_dirs(
-                    snapshot["fd"], plan["leaf_parent"])
-            except OSError:
-                pass
-        _refresh_owned_cleanup_records(cleanup_plan)
-        _record_owned_progress(progress)
-        return {"status": "held", "mutated": moved}
-
-
-def _quarantine_owned_leaf(plan, *, progress=None, cleanup_plan=None):
-    """Durably remove one proved leaf through its persisted private name."""
-    cleanup_plan = cleanup_plan or plan
-    snapshot = None
-    lease_fd = plan.get("leaf_fd")
-    if lease_fd is None and isinstance(plan.get("deletion"), dict):
-        snapshot = _open_owned_leaf_quarantine(plan)
-        if snapshot is None:
-            return {"status": "refused", "mutated": False}
-        lease_fd = snapshot.get("held_fd")
-    exclusion = (
-        acquire_inode_write_exclusion(lease_fd)
-        if lease_fd is not None
-        else None
-    )
-    if lease_fd is not None and exclusion is None:
-        _close_owned_quarantine(snapshot)
-        return {"status": "refused", "mutated": False}
-
-    try:
-        deletion = _begin_owned_deletion(plan["owned"], "file", progress)
-    except BaseException:
-        if exclusion is not None:
-            exclusion.close()
-        _close_owned_quarantine(snapshot)
-        raise
-    if deletion is None:
-        if exclusion is not None:
-            exclusion.close()
-        _close_owned_quarantine(snapshot)
-        return {"status": "refused", "mutated": False}
-    plan["deletion"] = deletion
-
-    if snapshot is None:
-        try:
-            snapshot = _open_owned_leaf_quarantine(plan)
-        except BaseException:
-            if exclusion is not None:
-                exclusion.close()
-            raise
-    if snapshot is None:
-        if exclusion is not None:
-            exclusion.close()
-        return {"status": "refused", "mutated": False}
-    try:
-        if exclusion is not None and not exclusion.intact():
-            return {"status": "refused", "mutated": False}
-        public_exists = plan.get("leaf_fd") is not None
-        held_exists = snapshot.get("held_fd") is not None
-        if public_exists and held_exists:
-            return {"status": "refused", "mutated": False}
-
-        if not public_exists and held_exists:
-            if (
-                deletion.get("state") == "intent"
-                and snapshot.get("held_stable_match") is True
-            ):
-                return _restore_owned_leaf_from_intent(
-                    plan, snapshot, progress, cleanup_plan)
-            if (
-                deletion.get("state") != "held"
-                or snapshot.get("held_full_match") is not True
-            ):
-                return {"status": "held", "mutated": False}
-
-        if not public_exists and not held_exists:
-            if not snapshot.get("missing"):
-                if not _remove_owned_leaf_quarantine(plan, snapshot):
-                    return {"status": "held", "mutated": False}
-                _refresh_owned_cleanup_records(cleanup_plan)
-            else:
-                try:
-                    fsync_dirs(plan["leaf_parent"])
-                except OSError:
-                    return {"status": "held", "mutated": False}
-            deletion["state"] = "removed"
-            _refresh_owned_cleanup_records(cleanup_plan)
-            if not _record_owned_progress(progress):
-                return {"status": "held", "mutated": True}
-            return {"status": "removed", "mutated": True}
-
-        if public_exists and snapshot.get("missing"):
-            try:
-                os.mkdir(
-                    deletion["quarantine"],
-                    0o700,
-                    dir_fd=plan["leaf_parent"],
-                )
-                fsync_dirs(plan["leaf_parent"])
-            except OSError:
-                return {"status": "refused", "mutated": False}
-            _refresh_owned_cleanup_records(cleanup_plan)
-            if not _record_owned_progress(progress):
-                return {"status": "restored", "mutated": True}
-            _close_owned_quarantine(snapshot)
-            snapshot = _open_owned_leaf_quarantine(plan)
-            if snapshot is None or snapshot.get("missing"):
-                return {"status": "refused", "mutated": True}
-
-        if public_exists:
-            previous_file = dict(plan["file"])
-            moved_public = False
-            validated_moved = False
-            rolled_back = False
-            try:
-                current = os.fstat(plan["leaf_fd"])
-                named_current = os.stat(
-                    plan["leaf_name"],
-                    dir_fd=plan["leaf_parent"],
-                    follow_symlinks=False,
-                )
-                if (
-                    exclusion is None
-                    or not exclusion.intact()
-                    or _owned_file_identity(current)
-                    != _owned_file_identity(named_current)
-                    or not _ownership_identity_matches(
-                        current, plan["file"])
-                ):
-                    raise ValueError(
-                        "public leaf changed after deletion intent")
-                rename_noreplace(
-                    plan["leaf_parent"],
-                    plan["leaf_name"],
-                    snapshot["fd"],
-                    "held",
-                )
-                moved_public = True
-                moved = os.fstat(plan["leaf_fd"])
-                named = os.stat(
-                    "held", dir_fd=snapshot["fd"], follow_symlinks=False)
-                if (
-                    _owned_file_identity(moved) != _owned_file_identity(named)
-                    or not _ownership_stable_matches(moved, plan["file"])
-                ):
-                    raise ValueError("public leaf changed at quarantine")
-                validated_moved = True
-                fsync_dirs(
-                    snapshot["fd"], plan["leaf_parent"])
-            except (OSError, TypeError, ValueError):
-                if moved_public:
-                    try:
-                        rename_noreplace(
-                            snapshot["fd"],
-                            "held",
-                            plan["leaf_parent"],
-                            plan["leaf_name"],
-                        )
-                        restored = os.fstat(plan["leaf_fd"])
-                        named_restored = os.stat(
-                            plan["leaf_name"],
-                            dir_fd=plan["leaf_parent"],
-                            follow_symlinks=False,
-                        )
-                        if (
-                            _owned_file_identity(restored)
-                            != _owned_file_identity(named_restored)
-                            or not _ownership_stable_matches(
-                                restored, plan["file"])
-                        ):
-                            raise OSError("restored Undo leaf changed")
-                        fsync_dirs(
-                            snapshot["fd"], plan["leaf_parent"])
-                        rolled_back = True
-                    except (OSError, TypeError, ValueError):
-                        pass
-                if validated_moved and rolled_back:
-                    plan["owned"]["file"] = _owned_file_identity(restored)
-                    plan["file"] = plan["owned"]["file"]
-                    deletion["state"] = "intent"
-                _refresh_owned_cleanup_records(cleanup_plan)
-                persisted = _record_owned_progress(progress)
-                if validated_moved and rolled_back and not persisted:
-                    refreshed_file = dict(plan["file"])
-                    try:
-                        current = os.fstat(plan["leaf_fd"])
-                        named_current = os.stat(
-                            plan["leaf_name"],
-                            dir_fd=plan["leaf_parent"],
-                            follow_symlinks=False,
-                        )
-                        if (
-                            _owned_file_identity(current)
-                            != _owned_file_identity(named_current)
-                            or not _ownership_identity_matches(
-                                current, refreshed_file)
-                        ):
-                            raise OSError("restored Undo leaf changed")
-                        rename_noreplace(
-                            plan["leaf_parent"],
-                            plan["leaf_name"],
-                            snapshot["fd"],
-                            "held",
-                        )
-                        held_again = os.fstat(plan["leaf_fd"])
-                        named_again = os.stat(
-                            "held",
-                            dir_fd=snapshot["fd"],
-                            follow_symlinks=False,
-                        )
-                        if (
-                            _owned_file_identity(held_again)
-                            != _owned_file_identity(named_again)
-                            or not _ownership_stable_matches(
-                                held_again, refreshed_file)
-                        ):
-                            raise OSError("re-quarantined Undo leaf changed")
-                        fsync_dirs(
-                            snapshot["fd"], plan["leaf_parent"])
-                        plan["owned"]["file"] = previous_file
-                        plan["file"] = previous_file
-                        deletion["state"] = "intent"
-                        _refresh_owned_cleanup_records(cleanup_plan)
-                    except (OSError, TypeError, ValueError):
-                        pass
-                return {
-                    "status": "refused",
-                    "mutated": moved_public,
-                }
-            plan["owned"]["file"] = _owned_file_identity(moved)
-            plan["file"] = plan["owned"]["file"]
-            deletion["state"] = "held"
-            _refresh_owned_cleanup_records(cleanup_plan)
-            if not _record_owned_progress(progress):
-                return {"status": "held", "mutated": True}
-            _close_owned_quarantine(snapshot)
-            snapshot = _open_owned_leaf_quarantine(plan)
-            if snapshot is None or snapshot.get("held_fd") is None:
-                return {"status": "refused", "mutated": True}
-        elif deletion.get("state") != "held":
-            deletion["state"] = "held"
-            plan["owned"]["file"] = snapshot["held_identity"]
-            plan["file"] = plan["owned"]["file"]
-            _refresh_owned_cleanup_records(cleanup_plan)
-            if not _record_owned_progress(progress):
-                return {"status": "held", "mutated": False}
-
-        try:
-            held_now = os.fstat(snapshot["held_fd"])
-            named_held_now = os.stat(
-                "held", dir_fd=snapshot["fd"], follow_symlinks=False)
-            if (
-                exclusion is None
-                or not exclusion.intact()
-                or _owned_file_identity(held_now)
-                != _owned_file_identity(named_held_now)
-                or not _ownership_identity_matches(
-                    held_now, plan["file"])
-            ):
-                return {"status": "held", "mutated": False}
-            if exclusion is None or not exclusion.intact():
-                return {"status": "held", "mutated": False}
-            os.unlink("held", dir_fd=snapshot["fd"])
-            fsync_dirs(snapshot["fd"])
-        except (OSError, TypeError, ValueError):
-            # Keep the exact leaf under its persisted private name.
-            return {"status": "held", "mutated": False}
-
-        _refresh_owned_cleanup_records(cleanup_plan)
-        if not _record_owned_progress(progress):
-            return {"status": "held", "mutated": True}
-        try:
-            os.close(snapshot["held_fd"])
-        except OSError:
-            pass
-        snapshot["held_fd"] = None
-        if not _remove_owned_leaf_quarantine(plan, snapshot):
-            return {"status": "held", "mutated": True}
-        deletion["state"] = "removed"
-        _refresh_owned_cleanup_records(cleanup_plan)
-        if not _record_owned_progress(progress):
-            return {"status": "held", "mutated": True}
-        return {"status": "removed", "mutated": True}
-    finally:
-        if exclusion is not None:
-            exclusion.close()
-        _close_owned_quarantine(snapshot)
-
-
-def _owned_directory_chain(root, owned):
-    relative = owned.get("relative") if isinstance(owned, dict) else None
-    directories = owned.get("directories") if isinstance(owned, dict) else None
-    if not isinstance(relative, str) or not isinstance(directories, list):
-        return None
-    root, rel = _owned_relative(Path(root), Path(root) / relative)
-    if rel is None or len(directories) != len(rel.parts) or root == root.parent:
-        return None
-    cleanup = _directory_cleanup_records(owned, len(directories))
-    if cleanup is None:
-        return None
-    parent_count, records = cleanup
+    parent_count, records = cleanup or (0, None)
     try:
         anchor = root.parents[parent_count]
     except IndexError:
         return None
-    music_root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
-    if parent_count > 0 and anchor != music_root:
+    folders = []
+    for part in (*root.relative_to(anchor).parts, *rel.parts[:-1]):
+        folders.append((folders[-1] if folders else anchor) / part)
+    return anchor, folders, parent_count, records, folders[-1] / rel.parts[-1]
+
+
+def _owned_leaf(root, entry):
+    """Find what is left of one entry's file, checked against its record.
+
+    Every folder above it must still be a real folder, and from the root
+    down the one recorded. Returns the path to delete, under the file's own
+    name or the hidden name a 1.3 Undo moved it to, its stat, and the
+    entry's hidden folder. Path and stat are None when the file is already
+    gone after an Undo began. None when anything disagrees with the
+    record."""
+    chain = _owned_chain(root, entry)
+    deletion = _owned_deletion_record(entry, "file")
+    if (
+        chain is None
+        or deletion is _INVALID_OWNED_DELETION
+        or not _valid_ownership_identity(entry.get("file"))
+    ):
         return None
-    names = [*root.relative_to(anchor).parts, *rel.parts[:-1]]
-    if len(names) != len(records):
-        return None
-    return {
-        "root": root,
-        "relative": rel,
-        "anchor": anchor,
-        "names": names,
-        "records": records,
-        "cleanup": owned["directory_cleanup"],
-    }
-
-
-def _refresh_open_directory_records(opened, *, include_last=True):
-    entries = opened if include_last else opened[:-1]
-    for descriptor, record, matched in entries:
-        if not matched:
-            continue
-        try:
-            current = os.fstat(descriptor)
-        except OSError:
-            continue
-        if _file_identity(current) == [record["device"], record["inode"]]:
-            record.update(_owned_file_identity(current))
-
-
-def _restore_owned_directory(
-        parent_fd, name, held_fd, record, deletion, opened, progress,
-        *, terminal_skip=False):
-    previous_identity = {
-        field: record[field] for field in _OWNERSHIP_IDENTITY_FIELDS
-    }
-    previous_state = deletion["state"]
+    anchor, folders, parent_count, _records, leaf = chain
+    quarantine = (
+        leaf.parent / deletion["quarantine"] if deletion is not None else None)
     try:
-        rename_noreplace(
-            parent_fd, deletion["quarantine"], parent_fd, name)
-    except OSError:
-        record.update(_owned_file_identity(os.fstat(held_fd)))
-        deletion["state"] = "held"
-        _refresh_open_directory_records(opened)
-        _record_owned_progress(progress)
-        return "retry"
-    try:
-        fsync_dirs(parent_fd)
-    except OSError:
-        state = "intent"
-        try:
-            rename_noreplace(
-                parent_fd, name, parent_fd, deletion["quarantine"])
-            fsync_dirs(parent_fd)
-            state = "held"
-        except OSError:
-            pass
-        record.update(_owned_file_identity(os.fstat(held_fd)))
-        deletion["state"] = state
-        _refresh_open_directory_records(opened)
-        _record_owned_progress(progress)
-        return "retry"
-    try:
-        restored = os.fstat(held_fd)
-        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (
-            _owned_file_identity(restored) != _owned_file_identity(named)
-            or not stat.S_ISDIR(restored.st_mode)
-            or (
-                not terminal_skip
-                and not _ownership_stable_matches(
-                    restored, record, directory=True)
-            )
-        ):
-            _refresh_open_directory_records(opened, include_last=False)
-            _record_owned_progress(progress)
-            return "retry"
-        record.update(_owned_file_identity(restored))
-        deletion["state"] = "intent"
-        _refresh_open_directory_records(opened)
-        persisted = _record_owned_progress(progress)
-        if persisted:
-            return "skipped" if terminal_skip else "retry"
-        try:
-            rename_noreplace(
-                parent_fd, name, parent_fd, deletion["quarantine"])
-            held_again = os.fstat(held_fd)
-            named_again = os.stat(
-                deletion["quarantine"],
-                dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-            if (
-                _owned_file_identity(held_again)
-                != _owned_file_identity(named_again)
-                or not _ownership_stable_matches(
-                    held_again, previous_identity, directory=True)
+        for index, path in enumerate([anchor, *folders]):
+            current = os.lstat(path)
+            if not stat.S_ISDIR(current.st_mode) or (
+                index > parent_count
+                and _file_identity(current)
+                != entry["directories"][index - parent_count - 1]
             ):
-                raise OSError("rolled-back Undo directory changed")
-            fsync_dirs(parent_fd)
-            record.update(previous_identity)
-            deletion["state"] = previous_state
-            _refresh_open_directory_records(opened, include_last=False)
-        except (OSError, TypeError, ValueError):
-            pass
-        return "retry"
-    except (OSError, TypeError, ValueError):
-        return "retry"
+                return None
+        public = _lstat_or_none(leaf)
+        held = _lstat_or_none(quarantine / "held") if quarantine else None
+    except OSError:
+        return None
+    if public is not None and held is not None:
+        return None
+    if public is not None:
+        if not _ownership_identity_matches(public, entry["file"]):
+            return None
+        return leaf, public, quarantine
+    if held is not None:
+        # A 1.3 Undo stopped before it recorded the move keeps the ctime
+        # the move changed, so that file is matched without it.
+        if not (
+            deletion["state"] == "held"
+            and _ownership_identity_matches(held, entry["file"])
+            or deletion["state"] == "intent"
+            and _ownership_stable_matches(held, entry["file"])
+        ):
+            return None
+        return quarantine / "held", held, quarantine
+    if deletion is None:
+        return None
+    return None, None, quarantine
 
 
-def _cleanup_one_owned_directory(chain, index, progress):
-    records = chain["records"]
-    record = records[index]
+def _remove_owned_leaf(root, entry, progress):
+    """Delete one entry's file and record it removed, saving the intent to
+    delete it first."""
+    deletion = _begin_owned_deletion(entry, "file", progress)
+    if deletion is None:
+        return False
+    found = _owned_leaf(root, entry)
+    if found is None:
+        return False
+    path, current, quarantine = found
+    if path is not None and not delete_verified(path, stat_identity(current)):
+        return False
+    try:
+        os.rmdir(quarantine)
+        fsync_dir(quarantine.parent)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    deletion["state"] = "removed"
+    return _record_owned_progress(progress)
+
+
+def _remove_created_folder(anchor, folders, records):
+    """Remove the last of `folders` while it is empty and still the folder
+    the grab created. True once it is gone, False when the cleanup stops
+    there for good, None when it should be tried again."""
+    *ancestors, folder = folders
+    record = records[-1]
     deletion = _owned_deletion_record(record, "dir")
     if deletion is _INVALID_OWNED_DELETION:
-        return "refused"
-    opened_fds = []
-    opened_records = []
-    restored_public_skip = False
+        return None
     try:
-        current = _open_directory_nofollow(chain["anchor"])
-        opened_fds.append(current)
-        parent_fd = current
-        held_fd = None
-        public_exists = False
-        for current_index, (name, current_record) in enumerate(zip(
-                chain["names"][:index + 1], records[:index + 1], strict=True)):
-            parent_fd = current
+        for path, expected in zip(
+                [anchor, *ancestors], [None, *records[:-1]], strict=True):
+            current = os.lstat(path)
+            if not stat.S_ISDIR(current.st_mode) or (
+                expected is not None
+                and not _ownership_device_inode_matches(current, expected)
+            ):
+                return False
+        public = _lstat_or_none(folder)
+        if deletion is not None:
+            # A 1.3 Undo renamed the folder to a hidden name before removing
+            # it. Anything put in it since goes back under the folder's name.
+            quarantine = folder.parent / deletion["quarantine"]
             try:
-                current = _open_directory_nofollow(name, dir_fd=parent_fd)
+                os.rmdir(quarantine)
+                fsync_dir(folder.parent)
             except FileNotFoundError:
-                if current_index != index:
-                    return "refused"
-                public_exists = False
-                held_fd = None
-                break
-            opened_fds.append(current)
-            current_stat = os.fstat(current)
-            full_match = _directory_cleanup_entry_matches(
-                current_stat, current_record)
-            opened_records.append((current, current_record, full_match))
-            if current_index < index:
-                # Ancestors can legitimately change when a sibling album or
-                # disc is added.
-                if _file_identity(current_stat) != [
-                    current_record["device"], current_record["inode"]
-                ]:
-                    return "skipped"
-                continue
-            if not full_match:
-                # A public directory whose durable proof no longer matches is
-                # ambiguous after a rollback or restart.
-                if (
-                    isinstance(deletion, dict)
-                    and deletion.get("state") == "held"
-                    and _ownership_stable_matches(
-                        current_stat, current_record, directory=True)
-                ):
-                    # A crash after a no-overwrite private→public restore can
-                    # leave only ctime changed.
-                    restored_public_skip = True
-                else:
-                    return "refused" if deletion is not None else "skipped"
-            public_exists = True
-            held_fd = current
-
-        if deletion is None and not public_exists:
-            return "refused"
-        deletion = _begin_owned_deletion(record, "dir", progress)
-        if deletion is None:
-            return "retry"
-
-        quarantine_fd = None
-        try:
-            quarantine_fd = _open_directory_nofollow(
-                deletion["quarantine"], dir_fd=parent_fd)
-        except FileNotFoundError:
-            quarantine_fd = None
-        except OSError:
-            return "refused"
-        if quarantine_fd is not None:
-            opened_fds.append(quarantine_fd)
-            quarantined = os.fstat(quarantine_fd)
-            named_quarantine = os.stat(
-                deletion["quarantine"],
-                dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-            if (
-                _owned_file_identity(quarantined)
-                != _owned_file_identity(named_quarantine)
-            ):
-                return "refused"
-            if public_exists:
-                return "refused"
-            if not _ownership_identity_matches(quarantined, record):
-                if (
-                    deletion.get("state") == "intent"
-                    and _ownership_stable_matches(
-                        quarantined, record, directory=True)
-                ):
-                    return _restore_owned_directory(
-                        parent_fd,
-                        chain["names"][index],
-                        quarantine_fd,
-                        record,
-                        deletion,
-                        opened_records,
-                        progress,
-                    )
-                return "refused"
-            held_fd = quarantine_fd
-
-        if restored_public_skip:
-            return "skipped" if quarantine_fd is None else "refused"
-
-        if not public_exists and quarantine_fd is None:
-            try:
-                fsync_dirs(parent_fd)
-            except OSError:
-                return "retry"
-            deletion["state"] = "removed"
-            _refresh_open_directory_records(opened_records)
-            return "removed" if _record_owned_progress(progress) else "retry"
-
-        if public_exists and quarantine_fd is None:
-            previous_identity = {
-                field: record[field]
-                for field in _OWNERSHIP_IDENTITY_FIELDS
-            }
-            previous_state = deletion["state"]
-            moved_public = False
-            validated_moved = False
-            rolled_back = False
-            try:
-                current = os.fstat(held_fd)
-                named_current = os.stat(
-                    chain["names"][index],
-                    dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-                if (
-                    _owned_file_identity(current)
-                    != _owned_file_identity(named_current)
-                    or not _directory_cleanup_entry_matches(
-                        current, record)
-                ):
-                    raise ValueError(
-                        "public directory changed after deletion intent")
-                rename_noreplace(
-                    parent_fd,
-                    chain["names"][index],
-                    parent_fd,
-                    deletion["quarantine"],
-                )
-                moved_public = True
-                moved = os.fstat(held_fd)
-                named = os.stat(
-                    deletion["quarantine"],
-                    dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-                if (
-                    _owned_file_identity(moved) != _owned_file_identity(named)
-                    or not _ownership_stable_matches(
-                        moved, record, directory=True)
-                ):
-                    raise ValueError("public directory changed at quarantine")
-                validated_moved = True
-                fsync_dirs(parent_fd)
-            except (OSError, TypeError, ValueError):
-                if moved_public:
-                    try:
-                        rename_noreplace(
-                            parent_fd,
-                            deletion["quarantine"],
-                            parent_fd,
-                            chain["names"][index],
-                        )
-                        restored = os.fstat(held_fd)
-                        named_restored = os.stat(
-                            chain["names"][index],
-                            dir_fd=parent_fd,
-                            follow_symlinks=False,
-                        )
-                        if (
-                            _owned_file_identity(restored)
-                            != _owned_file_identity(named_restored)
-                            or not _ownership_stable_matches(
-                                restored, record, directory=True)
-                        ):
-                            raise OSError("restored Undo directory changed")
-                        fsync_dirs(parent_fd)
-                        rolled_back = True
-                    except (OSError, TypeError, ValueError):
-                        pass
-                if validated_moved and rolled_back:
-                    record.update(_owned_file_identity(restored))
-                    deletion["state"] = "intent"
-                    _refresh_open_directory_records(opened_records)
-                else:
-                    _refresh_open_directory_records(
-                        opened_records, include_last=False)
-                persisted = _record_owned_progress(progress)
-                if validated_moved and rolled_back and not persisted:
-                    refreshed_identity = {
-                        field: record[field]
-                        for field in _OWNERSHIP_IDENTITY_FIELDS
-                    }
-                    try:
-                        current = os.fstat(held_fd)
-                        named_current = os.stat(
-                            chain["names"][index],
-                            dir_fd=parent_fd,
-                            follow_symlinks=False,
-                        )
-                        if (
-                            _owned_file_identity(current)
-                            != _owned_file_identity(named_current)
-                            or not _ownership_identity_matches(
-                                current, refreshed_identity)
-                        ):
-                            raise OSError("restored Undo directory changed")
-                        rename_noreplace(
-                            parent_fd,
-                            chain["names"][index],
-                            parent_fd,
-                            deletion["quarantine"],
-                        )
-                        held_again = os.fstat(held_fd)
-                        named_again = os.stat(
-                            deletion["quarantine"],
-                            dir_fd=parent_fd,
-                            follow_symlinks=False,
-                        )
-                        if (
-                            _owned_file_identity(held_again)
-                            != _owned_file_identity(named_again)
-                            or not _ownership_stable_matches(
-                                held_again,
-                                refreshed_identity,
-                                directory=True,
-                            )
-                        ):
-                            raise OSError(
-                                "re-quarantined Undo directory changed")
-                        fsync_dirs(parent_fd)
-                        record.update(previous_identity)
-                        deletion["state"] = previous_state
-                        _refresh_open_directory_records(
-                            opened_records, include_last=False)
-                    except (OSError, TypeError, ValueError):
-                        pass
-                return "retry"
-            record.update(_owned_file_identity(moved))
-            deletion["state"] = "held"
-            _refresh_open_directory_records(opened_records)
-            if not _record_owned_progress(progress):
-                return "retry"
-        elif deletion["state"] != "held":
-            record.update(_owned_file_identity(os.fstat(held_fd)))
-            deletion["state"] = "held"
-            _refresh_open_directory_records(opened_records)
-            if not _record_owned_progress(progress):
-                return "retry"
-
-        try:
-            held_now = os.fstat(held_fd)
-            named_now = os.stat(
-                deletion["quarantine"],
-                dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-            if (
-                _owned_file_identity(held_now)
-                != _owned_file_identity(named_now)
-                or not _ownership_identity_matches(held_now, record)
-            ):
-                return "refused"
-            os.rmdir(deletion["quarantine"], dir_fd=parent_fd)
-            fsync_dirs(parent_fd)
-        except OSError as exc:
-            return _restore_owned_directory(
-                parent_fd,
-                chain["names"][index],
-                held_fd,
-                record,
-                deletion,
-                opened_records,
-                progress,
-                terminal_skip=exc.errno in (errno.ENOTEMPTY, errno.EEXIST),
-            )
-        deletion["state"] = "removed"
-        _refresh_open_directory_records(
-            opened_records, include_last=not public_exists)
-        return "removed" if _record_owned_progress(progress) else "retry"
-    except (OSError, TypeError, ValueError):
-        return "refused"
-    finally:
-        for descriptor in reversed(opened_fds):
-            try:
-                os.close(descriptor)
-            except OSError:
                 pass
-
-
-def _cleanup_owned_directories(root, owned, progress):
-    chain = _owned_directory_chain(root, owned)
-    if chain is None:
+            except OSError as exc:
+                if (
+                    exc.errno not in (errno.ENOTEMPTY, errno.EEXIST)
+                    or public is not None
+                    or not _ownership_device_inode_matches(
+                        os.lstat(quarantine), record)
+                ):
+                    return None
+                try:
+                    rename_noreplace(AT_FDCWD, quarantine, AT_FDCWD, folder)
+                except OSError:
+                    return None
+                fsync_dir(folder.parent)
+                return False
+        if public is None:
+            return True
+        if (
+            not stat.S_ISDIR(public.st_mode)
+            or not _ownership_device_inode_matches(public, record)
+        ):
+            return False
+        os.rmdir(folder)
+        fsync_dir(folder.parent)
         return True
-    complete = chain["cleanup"].get("complete", False)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        return False if exc.errno in (errno.ENOTEMPTY, errno.EEXIST) else None
+
+
+def _remove_created_folders(root, owned, progress):
+    """Remove the folders the grab created, deepest first, stopping at the
+    first one that holds something else or is not the folder it made.
+    False when that should be tried again."""
+    chain = _owned_chain(root, owned)
+    if chain is None or chain[3] is None:
+        return True
+    anchor, folders, _parent_count, records, _leaf = chain
+    cleanup = owned["directory_cleanup"]
+    complete = cleanup.get("complete", False)
     if type(complete) is not bool:
         return False
     if complete:
         return True
-    created_tail = []
-    for index in reversed(range(len(chain["records"]))):
-        if chain["records"][index]["created"] is not True:
+    for index in reversed(range(len(records))):
+        if records[index]["created"] is not True:
             break
-        created_tail.append(index)
-    if not created_tail:
-        chain["cleanup"]["complete"] = True
-        return _record_owned_progress(progress)
-
-    while True:
-        candidate = None
-        for index in created_tail:
-            deletion = _owned_deletion_record(chain["records"][index], "dir")
-            if deletion is _INVALID_OWNED_DELETION:
-                return False
-            if deletion is None or deletion["state"] != "removed":
-                candidate = index
-                break
-        if candidate is None:
-            chain["cleanup"]["complete"] = True
-            return _record_owned_progress(progress)
-        outcome = _cleanup_one_owned_directory(chain, candidate, progress)
-        if outcome == "removed":
-            continue
-        if outcome == "skipped":
-            chain["cleanup"]["complete"] = True
-            return _record_owned_progress(progress)
-        return False
+        removed = _remove_created_folder(
+            anchor, folders[:index + 1], records[:index + 1])
+        if removed is None:
+            return False
+        if not removed:
+            break
+    cleanup["complete"] = True
+    return _record_owned_progress(progress)
 
 
 def _unlink_owned_path(root, owned, *, progress=None, outcome_out=None):
-    """Remove exact owned leaves, then retry exact created-folder cleanup."""
+    """Remove exact owned leaves, then the empty folders the grab created."""
     if not isinstance(owned, dict):
         return None
     companions = owned.get("companions", [])
@@ -1496,49 +555,22 @@ def _unlink_owned_path(root, owned, *, progress=None, outcome_out=None):
     ):
         return None
 
-    plans = []
-    plan_by_entry = {}
-    try:
-        for entry, deletion in zip(entries, deletion_records, strict=True):
-            if deletion is not None and deletion["state"] == "removed":
-                continue
-            plan = _owned_unlink_plan(root, entry)
-            if plan is None:
-                return None
-            plans.append(plan)
-            plan_by_entry[id(entry)] = plan
-        if not all(_owned_unlink_leaf_matches(plan) for plan in plans):
-            return None
-        main_plan = plan_by_entry.get(id(owned))
-        for entry in [*companions, owned]:
-            deletion = _owned_deletion_record(entry, "file")
-            if isinstance(deletion, dict) and deletion["state"] == "removed":
-                continue
-            plan = plan_by_entry[id(entry)]
-            result = _quarantine_owned_leaf(
-                plan,
-                progress=progress,
-                cleanup_plan=main_plan or plan,
-            )
-            if result["status"] != "removed":
-                _update_outcome()
-                return None
-    except (OSError, TypeError, ValueError):
+    pending = [
+        entry for entry in [*companions, owned]
+        if (_owned_deletion_record(entry, "file") or {}).get("state")
+        != "removed"
+    ]
+    # Nothing is deleted unless every file left still matches its record.
+    if any(_owned_leaf(root, entry) is None for entry in pending):
         return None
-    finally:
-        for plan in reversed(plans):
-            _close_owned_unlink_plan(plan)
+    for entry in pending:
+        if not _remove_owned_leaf(root, entry, progress):
+            _update_outcome()
+            return None
 
-    files_complete = all(
-        isinstance(_owned_deletion_record(entry, "file"), dict)
-        and _owned_deletion_record(entry, "file")["state"] == "removed"
-        for entry in entries
-    )
-    cleanup_complete = (
-        files_complete and _cleanup_owned_directories(root, owned, progress))
-    _update_outcome(
-        cleanup_pending=files_complete and not cleanup_complete)
-    if not files_complete or not cleanup_complete:
+    cleanup_complete = _remove_created_folders(root, owned, progress)
+    _update_outcome(cleanup_pending=not cleanup_complete)
+    if not cleanup_complete:
         return None
     return root / main_relative
 

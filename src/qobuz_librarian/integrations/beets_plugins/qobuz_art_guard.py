@@ -22,7 +22,6 @@ from qobuz_librarian.integrations.beets import (
     _open_ownership_dir,
     _ownership_identity,
     _ownership_relative_parts,
-    _rollback_exact_merge_entry,
 )
 from qobuz_librarian.safefile import named_entry_matches, named_entry_missing, rename_noreplace
 
@@ -468,161 +467,15 @@ def _exact_file_layout(parent_fd, public_name, private_name, held_fd):
     return "uncertain"
 
 
-def _restore_exact_file(parent_fd, public_name, private_name, held_fd):
-    layout = _exact_file_layout(
-        parent_fd, public_name, private_name, held_fd)
-    if layout == "public":
-        return True
-    if layout != "private":
+def _remove_exact_file(parent_fd, name, held_fd):
+    if not named_entry_matches(parent_fd, name, held_fd, directory=False):
         return False
     try:
-        _rollback_exact_merge_entry(
-            parent_fd, public_name, parent_fd, private_name, held_fd)
-    except BaseException:
-        pass
-    if _exact_file_layout(
-            parent_fd, public_name, private_name, held_fd) != "public":
-        return False
-    try:
+        os.unlink(name, dir_fd=parent_fd)
         os.fsync(parent_fd)
-    except BaseException:
-        return False
-    return True
-
-
-def _open_exact_entry(parent_fd, name):
-    descriptor = os.open(
-        name,
-        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
-        dir_fd=parent_fd,
-    )
-    try:
-        if not named_entry_matches(parent_fd, name, descriptor):
-            raise OSError("private artwork entry changed while it was opened")
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
-def _restore_unexpected_private_file(
-        parent_fd, public_name, private_name, held_fd):
-    """Put back an unexpected entry moved by a raced path-based rename."""
-    if (
-        not named_entry_missing(parent_fd, public_name)
-        or named_entry_missing(parent_fd, private_name)
-    ):
-        return False
-    unexpected_fd = None
-    try:
-        unexpected_fd = _open_exact_entry(parent_fd, private_name)
-        if named_entry_matches(parent_fd, private_name, held_fd):
-            return False
-        deferred = None
-        try:
-            rename_noreplace(
-                parent_fd, private_name, parent_fd, public_name)
-        except BaseException as exc:
-            deferred = exc
-        restored = (
-            named_entry_matches(parent_fd, public_name, unexpected_fd)
-            and named_entry_missing(parent_fd, private_name)
-        )
-        if restored:
-            try:
-                os.fsync(parent_fd)
-            except BaseException as exc:
-                if deferred is None:
-                    deferred = exc
-                restored = False
-        if deferred is not None and not isinstance(deferred, OSError):
-            if not restored:
-                deferred.add_note(
-                    "the unexpected artwork entry could not be restored")
-            raise deferred
-        return restored
     except OSError:
         return False
-    finally:
-        if unexpected_fd is not None:
-            os.close(unexpected_fd)
-
-
-def _remove_exact_file(parent_fd, name, held_fd):
-    quarantine = os.fsencode(f".qobuz-art-cleanup-{secrets.token_hex(16)}")
-    deferred = None
-    try:
-        if _exact_file_layout(
-                parent_fd, name, quarantine, held_fd) != "public":
-            return False
-        try:
-            rename_noreplace(
-                parent_fd, name, parent_fd, quarantine)
-        except BaseException as exc:
-            if _exact_file_layout(
-                    parent_fd, name, quarantine, held_fd) != "private":
-                _restore_unexpected_private_file(
-                    parent_fd, name, quarantine, held_fd)
-                if isinstance(exc, OSError):
-                    return False
-                raise
-            deferred = exc
-
-        if _exact_file_layout(
-                parent_fd, name, quarantine, held_fd) != "private":
-            _restore_unexpected_private_file(
-                parent_fd, name, quarantine, held_fd)
-            return False
-        try:
-            os.fsync(parent_fd)
-        except BaseException as exc:
-            restored = _restore_exact_file(
-                parent_fd, name, quarantine, held_fd)
-            error = deferred or exc
-            if not restored:
-                error.add_note("the exact artwork cleanup could not be restored")
-            if not isinstance(error, OSError):
-                raise error
-            return False
-
-        unlink_error = None
-        try:
-            os.unlink(quarantine, dir_fd=parent_fd)
-        except BaseException as exc:
-            layout = _exact_file_layout(
-                parent_fd, name, quarantine, held_fd)
-            if layout != "removed":
-                restored = _restore_exact_file(
-                    parent_fd, name, quarantine, held_fd)
-                error = deferred or exc
-                if not restored:
-                    error.add_note(
-                        "the exact artwork cleanup could not be restored")
-                if not isinstance(error, OSError):
-                    raise error
-                return False
-            unlink_error = exc
-
-        sync_error = None
-        try:
-            os.fsync(parent_fd)
-        except BaseException as exc:
-            sync_error = exc
-        removed = _exact_file_layout(
-            parent_fd, name, quarantine, held_fd) == "removed"
-        error = deferred or unlink_error or sync_error
-        if error is not None and not isinstance(error, OSError):
-            raise error
-        return removed and sync_error is None
-    except BaseException:
-        layout = _exact_file_layout(
-            parent_fd, name, quarantine, held_fd)
-        if layout == "private":
-            _restore_exact_file(parent_fd, name, quarantine, held_fd)
-        elif layout == "uncertain":
-            _restore_unexpected_private_file(
-                parent_fd, name, quarantine, held_fd)
-        raise
+    return True
 
 
 def _open_candidate(candidate):

@@ -15,14 +15,12 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.recovery import (
     decode_recovery_json,
     normalise_recovery_owner,
     recovery_owner_matches,
 )
-from qobuz_librarian.safefile import fsync_dirs, write_new_at
-from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
+from qobuz_librarian.safefile import delete_verified, fsync_dir, fsync_dirs, write_new_at
 from qobuz_librarian.safefile import named_entry_missing as _name_missing_at
 from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace
 from qobuz_librarian.safefile import stat_identity as _identity
@@ -33,6 +31,8 @@ _MAX_TREE_ENTRIES = 100_000
 _RUN_DIR_RE = re.compile(r"^\.qobuz-run-[0-9a-f]{24}$")
 _KEPT_RUN_SUFFIX = "-no-import"
 _KEPT_RUN_RE = re.compile(r"^\.qobuz-run-[0-9a-f]{24}-no-import$")
+# Earlier versions removed a folder by moving it to .empty-<hex>/entry first.
+_EMPTY_LEFTOVER_RE = re.compile(r"^\.empty-[0-9a-f]{24}$")
 _TREE_GROUP_KINDS = {"beets", "quality", "interrupted"}
 _FILE_GROUP_KINDS = {
     "rejected",
@@ -497,156 +497,6 @@ def tree_matches(receipt):
     return current is not None and receipt.same_contents(current)
 
 
-class _RacedStagingEntryRetained(OSError):
-    """A raced public entry remains at a reported private recovery name."""
-
-
-def _open_exact_entry(parent_fd, name):
-    descriptor = os.open(
-        name,
-        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
-        dir_fd=parent_fd,
-    )
-    try:
-        if not _named_entry_matches(parent_fd, name, descriptor):
-            raise OSError("staging entry changed while it was opened")
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
-def _fsync_staging_directory(path):
-    staging = Path(os.path.abspath(os.fspath(cfg.STAGING_DIR)))
-    candidate = Path(os.path.abspath(os.fspath(path)))
-    chain = []
-    try:
-        if candidate == staging:
-            chain.append(os.open(staging, _directory_flags()))
-            held = _identity(os.fstat(chain[-1]))
-            named = _identity(os.stat(staging, follow_symlinks=False))
-            if not stat.S_ISDIR(named[2]) or not _same_node(held, named):
-                raise OSError("staging root changed while it was opened")
-        else:
-            _, _, _, chain, _ = _open_staging_chain(candidate, directory=True)
-        os.fsync(chain[-1])
-    finally:
-        _close_chain(chain)
-
-
-def _raced_entry_error(source_path, destination_path, detail):
-    return _RacedStagingEntryRetained(
-        f"{destination_path}: raced staging entry retained in private staging "
-        f"recovery ({detail}); public name {source_path} was not overwritten"
-    )
-
-
-def _restore_raced_entry(
-    source_parent_fd,
-    source_name,
-    destination_parent_fd,
-    destination_name,
-    *,
-    source_path,
-    destination_path,
-):
-    """Restore the exact entry captured by a raced path-based rename.
-
-    The destination name is private and unpredictable, and callers invoke
-    this only after proving it was absent immediately before renameat2. This
-    preserves the existing threat boundary: it does not try to defend a
-    private random name against hostile guessing.
-    """
-    descriptor = None
-    deferred = None
-    try:
-        try:
-            descriptor = _open_exact_entry(destination_parent_fd, destination_name)
-        except FileNotFoundError:
-            return False
-        except OSError as exc:
-            if _name_missing_at(destination_parent_fd, destination_name):
-                return False
-            raise _raced_entry_error(
-                source_path, destination_path, "the retained entry could not be inspected"
-            ) from exc
-
-        if _name_missing_at(source_parent_fd, source_name):
-            try:
-                _rename_noreplace(
-                    destination_parent_fd,
-                    destination_name,
-                    source_parent_fd,
-                    source_name,
-                )
-            except BaseException as exc:
-                deferred = exc
-
-        restored = (
-            _named_entry_matches(source_parent_fd, source_name, descriptor)
-            and _name_missing_at(destination_parent_fd, destination_name)
-        )
-        sync_error = None
-        if restored:
-            try:
-                fsync_dirs(source_parent_fd, destination_parent_fd)
-            except BaseException as exc:
-                sync_error = exc
-            if deferred is not None and not isinstance(deferred, OSError):
-                if sync_error is not None:
-                    deferred.add_note(
-                        "the raced staging entry was restored but its parent "
-                        "directories could not be committed"
-                    )
-                raise deferred
-            if sync_error is not None and not isinstance(sync_error, OSError):
-                raise sync_error
-            return sync_error is None
-
-        retained = _named_entry_matches(destination_parent_fd, destination_name, descriptor)
-        if retained:
-            try:
-                fsync_dirs(source_parent_fd, destination_parent_fd)
-            except BaseException as exc:
-                sync_error = exc
-            if deferred is not None and not isinstance(deferred, OSError):
-                deferred.add_note(
-                    f"the raced staging entry remains at {destination_path}"
-                )
-                raise deferred
-            if sync_error is not None and not isinstance(sync_error, OSError):
-                sync_error.add_note(
-                    f"the raced staging entry remains at {destination_path}"
-                )
-                raise sync_error
-            error = _raced_entry_error(
-                source_path, destination_path, "the public name was occupied or unavailable"
-            )
-            if sync_error is not None:
-                error.add_note("the private recovery directory could not be committed")
-            if isinstance(deferred, OSError):
-                raise error from deferred
-            if isinstance(sync_error, OSError):
-                raise error from sync_error
-            raise error
-
-        if deferred is not None and not isinstance(deferred, OSError):
-            deferred.add_note(
-                f"inspect both {source_path} and {destination_path}; the raced "
-                "staging entry could not be reconciled"
-            )
-            raise deferred
-        error = _raced_entry_error(
-            source_path, destination_path, "its exact name could not be reconciled"
-        )
-        if isinstance(deferred, OSError):
-            raise error from deferred
-        raise error
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-
-
 def _open_retry_root():
     staging = Path(os.path.abspath(os.fspath(cfg.STAGING_DIR)))
     staging.mkdir(parents=True, exist_ok=True)
@@ -834,57 +684,6 @@ def inspect_staging_run_reference(reference, expected_owner):
     return StagingReferenceInspection(status, reason="inspection")
 
 
-def _release_tree_exclusions(held):
-    for descriptor, exclusion, _identity_record in reversed(held):
-        exclusion.close()
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-
-
-def _tree_exclusions_intact(held):
-    try:
-        return all(
-            exclusion.intact() and _identity(os.fstat(descriptor)) == identity_record
-            for descriptor, exclusion, identity_record in held
-        )
-    except OSError:
-        return False
-
-
-def _acquire_tree_exclusions(tree):
-    """Hold every exact regular-file inode and watch it for writes."""
-    held = []
-    try:
-        for relative, identity_record in tree.files:
-            path = tree.path / relative
-            chain = []
-            descriptor = None
-            try:
-                _, _, _, chain, descriptor = _open_staging_chain(path, directory=False)
-                if _identity(os.fstat(descriptor)) != identity_record:
-                    _release_tree_exclusions(held)
-                    return None
-                exclusion = acquire_inode_write_exclusion(descriptor)
-                if exclusion is None or not exclusion.intact():
-                    if exclusion is not None:
-                        exclusion.close()
-                    _release_tree_exclusions(held)
-                    return None
-                held.append((descriptor, exclusion, identity_record))
-                descriptor = None
-            finally:
-                _close_chain(chain, descriptor)
-        if not _tree_exclusions_intact(held) or not tree_matches(tree):
-            _release_tree_exclusions(held)
-            return None
-        return held
-    except BaseException:
-        _release_tree_exclusions(held)
-        raise
-
-
 def retain_staging_run(run, *, label="interrupted", on_intent=None, release=False):
     """Move one quiescent exact run tree outside import for later review.
 
@@ -907,19 +706,6 @@ def retain_staging_run(run, *, label="interrupted", on_intent=None, release=Fals
     current = capture_staging_run(run)
     if current is None:
         return None
-    exclusions = _acquire_tree_exclusions(current)
-    if exclusions is None:
-        # A file changed while the run was checked. Leave the hidden run at
-        # its exact public name; it remains ineligible for import and can be
-        # retained on a later pass.
-        return None
-    try:
-        return _retain_staging_run_locked(current, label, exclusions, owner, on_intent)
-    finally:
-        _release_tree_exclusions(exclusions)
-
-
-def _retain_staging_run_locked(current, label, exclusions, owner, on_intent):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", label)[:48] or "interrupted"
     group = _new_private_group(f"{stamp}-{safe}")
@@ -964,7 +750,7 @@ def _retain_staging_run_locked(current, label, exclusions, owner, on_intent):
             discard_unused_marker()
             raise
 
-    if not _tree_exclusions_intact(exclusions) or not tree_matches(current):
+    if not tree_matches(current):
         discard_unused_marker()
         return None
 
@@ -983,23 +769,6 @@ def _retain_staging_run_locked(current, label, exclusions, owner, on_intent):
 
     recovered = load_group(group, kind="interrupted", expected_owner=owner)
     if recovered is not None:
-        if not _tree_exclusions_intact(exclusions):
-            raise OSError(
-                "a file of the interrupted download changed while it was "
-                "retained; review its recovery record"
-            )
-        # Flush both renamed directory entries after the already-durable
-        # manifest. If either flush is unavailable, the sealed transaction is
-        # still discoverable and refuses unsafe automatic import after restart.
-        for directory in (current.path.parent, group):
-            chain = []
-            try:
-                _, _, _, chain, _ = _open_staging_chain(directory, directory=True)
-                os.fsync(chain[-1])
-            except OSError:
-                pass
-            finally:
-                _close_chain(chain)
         return recovered
     if moved is None:
         discard_unused_marker()
@@ -1040,6 +809,14 @@ def remove_empty_retry_groups():
         staging_fd, retry_fd, _retry_root = _open_retry_root()
         for name in os.listdir(retry_fd):
             try:
+                if _EMPTY_LEFTOVER_RE.fullmatch(name):
+                    leftover_fd = os.open(name, _directory_flags(), dir_fd=retry_fd)
+                    try:
+                        os.rmdir("entry", dir_fd=leftover_fd)
+                    except OSError:
+                        pass
+                    finally:
+                        os.close(leftover_fd)
                 os.rmdir(name, dir_fd=retry_fd)
                 removed += 1
             except OSError:
@@ -1076,334 +853,58 @@ def _is_private_retry_group(path):
     return len(relative.parts) == 1 and relative.parts[0] not in ("", ".", "..")
 
 
+def _flush_both(source_parent, destination):
+    # The rename has happened either way; a failed flush must not make the
+    # caller think the entry is still at its old name.
+    try:
+        fsync_dirs(source_parent, destination)
+    except OSError:
+        pass
+
+
 def _move_file(receipt, destination, destination_name=None):
     destination = Path(destination)
     destination_name = destination_name or receipt.path.name
     source_chain = destination_chain = []
     source_fd = None
-    move_started = False
-
-    def layout():
-        if source_fd is None or not source_chain or not destination_chain:
-            return "unchanged"
-        try:
-            held = _identity(os.fstat(source_fd))
-            source_named = _identity(
-                os.stat(
-                    receipt.path.name,
-                    dir_fd=source_chain[-1],
-                    follow_symlinks=False,
-                )
-            )
-        except OSError:
-            source_named = None
-            try:
-                held = _identity(os.fstat(source_fd))
-            except OSError:
-                return "changed"
-        try:
-            destination_named = _identity(
-                os.stat(
-                    destination_name,
-                    dir_fd=destination_chain[-1],
-                    follow_symlinks=False,
-                )
-            )
-        except OSError:
-            destination_named = None
-        source_exact = source_named == held and _same_file_after_move(receipt.identity, held)
-        destination_exact = destination_named == held and _same_file_after_move(
-            receipt.identity, held
-        )
-        if source_exact and _name_missing_at(destination_chain[-1], destination_name):
-            return "source"
-        if destination_exact and _name_missing_at(source_chain[-1], receipt.path.name):
-            return "destination"
-        return "changed"
-
-    def restore_source():
-        state = layout()
-        if state == "source":
-            return True
-        if state != "destination":
-            return False
-        try:
-            _rename_noreplace(
-                destination_chain[-1], destination_name, source_chain[-1], receipt.path.name
-            )
-            if layout() != "source":
-                return False
-            fsync_dirs(source_chain[-1], destination_chain[-1])
-            return True
-        except BaseException as exc:
-            restored = layout() == "source"
-            committed = False
-            if restored:
-                try:
-                    fsync_dirs(source_chain[-1], destination_chain[-1])
-                    committed = True
-                except BaseException as sync_exc:
-                    if not isinstance(sync_exc, OSError):
-                        raise
-            if isinstance(exc, OSError):
-                return restored and committed
-            if not restored or not committed:
-                exc.add_note(
-                    "the interrupted staging-file rollback retained the "
-                    "exact file at its last proved name"
-                )
-            raise
-
     try:
-        staging, _, source_relative, source_chain, source_fd = _open_staging_chain(
+        _, _, source_relative, source_chain, source_fd = _open_staging_chain(
             receipt.path, directory=False
         )
-        held = _identity(os.fstat(source_fd))
-        named = _identity(
-            os.stat(source_relative.parts[-1], dir_fd=source_chain[-1], follow_symlinks=False)
-        )
-        if (
-            held != receipt.identity
-            or named != receipt.identity
-            or not _chain_is_named(staging, source_relative, source_chain, directory=False)
+        _, _, _, destination_chain, _ = _open_staging_chain(destination, directory=True)
+        source_parent, name = source_chain[-1], source_relative.parts[-1]
+        if capture_file(receipt.path, expected=receipt.identity) is None or not _name_missing_at(
+            destination_chain[-1], destination_name
         ):
             return None
-        _, _, destination_relative, destination_chain, _ = _open_staging_chain(
-            destination, directory=True
-        )
-        if not _name_missing_at(destination_chain[-1], destination_name):
-            return None
-        move_started = True
-        _rename_noreplace(
-            source_chain[-1], source_relative.parts[-1], destination_chain[-1], destination_name
-        )
+        _rename_noreplace(source_parent, name, destination_chain[-1], destination_name)
         landed = os.stat(destination_name, dir_fd=destination_chain[-1], follow_symlinks=False)
-        if not _same_file_after_move(
-            receipt.identity, _identity(landed)
-        ) or not _same_file_after_move(receipt.identity, _identity(os.fstat(source_fd))):
-            raise OSError("staging file changed during move")
-        return destination / destination_name
-    except BaseException as exc:
-        state = layout()
-        safe = state in {"source", "unchanged"}
-        if state == "destination":
-            safe = restore_source()
-        elif move_started and state == "changed":
-            safe = _restore_raced_entry(
-                source_chain[-1],
-                receipt.path.name,
-                destination_chain[-1],
-                destination_name,
-                source_path=receipt.path,
-                destination_path=destination / destination_name,
-            )
-        if isinstance(exc, _RacedStagingEntryRetained):
-            raise
-        if isinstance(exc, (OSError, TypeError, ValueError)):
-            return None
-        if not safe:
-            exc.add_note(
-                "the interrupted staging-file move preserved the exact file at its last proved name"
-            )
-        raise
+        moved = _same_file_after_move(receipt.identity, _identity(landed))
+        if not moved and _name_missing_at(source_parent, name):
+            _rename_noreplace(destination_chain[-1], destination_name, source_parent, name)
+        _flush_both(source_parent, destination_chain[-1])
+        return destination / destination_name if moved else None
+    except (OSError, TypeError, ValueError):
+        return None
     finally:
         _close_chain(source_chain, source_fd)
         _close_chain(destination_chain)
 
 
 def remove_file(receipt):
-    receipt = receipt if isinstance(receipt, StagedFile) else capture_file(receipt)
-    if receipt is None:
+    """Unlink one exact staging file. True once it is gone and its folder is
+    flushed to disk."""
+    if isinstance(receipt, StagedFile):
+        receipt = capture_file(receipt.path, expected=receipt.identity)
+    else:
+        receipt = capture_file(receipt)
+    if receipt is None or not delete_verified(receipt.path, receipt.identity, sync=False):
         return False
-    private = _new_private_group(".cleanup")
-    source_chain = destination_chain = []
-    source_fd = None
-    exclusion = None
-    move_started = False
-    moved = False
-    completed = False
-    durable = False
-    restored = False
-
-    def named_identity(parent_fd, name):
-        try:
-            return _identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
-        except FileNotFoundError:
-            return None
-        except OSError:
-            return False
-
-    def layout():
-        if source_fd is None or not source_chain or not destination_chain:
-            return "unchanged"
-        try:
-            held = _identity(os.fstat(source_fd))
-        except OSError:
-            return "changed"
-        if not _same_file_after_move(receipt.identity, held):
-            return "changed"
-        source_named = named_identity(source_chain[-1], receipt.path.name)
-        private_named = named_identity(destination_chain[-1], "entry")
-        if source_named == held and private_named is None:
-            return "source"
-        if private_named == held and source_named != held:
-            return "private"
-        if moved and private_named is None and source_named != held:
-            return "removed"
-        return "changed"
-
-    def restore_source():
-        state = layout()
-        if state == "source":
-            return True
-        if state != "private":
-            return False
-        try:
-            _rename_noreplace(
-                destination_chain[-1],
-                "entry",
-                source_chain[-1],
-                receipt.path.name,
-            )
-            if layout() != "source":
-                return False
-            fsync_dirs(source_chain[-1], destination_chain[-1])
-            return True
-        except BaseException as exc:
-            recovered = layout() == "source"
-            committed = False
-            if recovered:
-                try:
-                    fsync_dirs(source_chain[-1], destination_chain[-1])
-                    committed = True
-                except BaseException as sync_exc:
-                    if not isinstance(sync_exc, OSError):
-                        raise
-            if isinstance(exc, OSError):
-                return recovered and committed
-            if not recovered or not committed:
-                exc.add_note(
-                    "the interrupted staging cleanup retained the exact file "
-                    "at its last proved name"
-                )
-            raise
-
     try:
-        staging, _, source_relative, source_chain, source_fd = _open_staging_chain(
-            receipt.path, directory=False
-        )
-        held = _identity(os.fstat(source_fd))
-        named = named_identity(source_chain[-1], source_relative.parts[-1])
-        if (
-            held != receipt.identity
-            or named != receipt.identity
-            or not _chain_is_named(staging, source_relative, source_chain, directory=False)
-        ):
-            return False
-
-        exclusion = acquire_inode_write_exclusion(source_fd)
-        if exclusion is None:
-            return False
-        if (
-            not exclusion.intact()
-            or _identity(os.fstat(source_fd)) != receipt.identity
-            or named_identity(source_chain[-1], source_relative.parts[-1]) != receipt.identity
-            or not _chain_is_named(staging, source_relative, source_chain, directory=False)
-        ):
-            return False
-
-        _, _, _, destination_chain, _ = _open_staging_chain(private, directory=True)
-        if not exclusion.intact() or layout() != "source":
-            return False
-        if not _name_missing_at(destination_chain[-1], "entry"):
-            return False
-        move_started = True
-        try:
-            _rename_noreplace(
-                source_chain[-1],
-                source_relative.parts[-1],
-                destination_chain[-1],
-                "entry",
-            )
-        finally:
-            moved = layout() == "private"
-        if not moved or not exclusion.intact():
-            raise OSError("staging file changed during cleanup move")
-
-        private_identity = _identity(os.fstat(source_fd))
-        if (
-            named_identity(destination_chain[-1], "entry") != private_identity
-            or not _same_file_after_move(receipt.identity, private_identity)
-            or not exclusion.intact()
-        ):
-            raise OSError("staging file changed during cleanup move")
-
-        # Commit both sides of the cross-directory rename before destroying
-        # its only remaining name. A failed flush rolls the exact entry back.
-        fsync_dirs(source_chain[-1], destination_chain[-1])
-
-        # The unpredictable mode-0700 directory is now the only name for the
-        # exact held inode. The final identity gate runs right before the
-        # unlink.
-        if (
-            _identity(os.fstat(source_fd)) != private_identity
-            or named_identity(destination_chain[-1], "entry") != private_identity
-            or not exclusion.intact()
-        ):
-            raise OSError("staging file changed before cleanup unlink")
-        try:
-            os.unlink("entry", dir_fd=destination_chain[-1])
-        except BaseException:
-            completed = named_identity(destination_chain[-1], "entry") is None
-            moved = not completed
-            raise
-        completed = True
-        moved = False
-        os.fsync(destination_chain[-1])
-        durable = True
-        return True
-    except BaseException as exc:
-        state = layout()
-        if state == "removed":
-            completed = True
-            moved = False
-        elif not completed and state == "private":
-            restored = restore_source()
-            moved = layout() == "private"
-        elif not completed and move_started and state == "changed":
-            restored = _restore_raced_entry(
-                source_chain[-1],
-                receipt.path.name,
-                destination_chain[-1],
-                "entry",
-                source_path=receipt.path,
-                destination_path=private / "entry",
-            )
-            moved = False
-        elif state in {"source", "unchanged"}:
-            restored = True
-            moved = False
-        if isinstance(exc, _RacedStagingEntryRetained):
-            raise
-        if isinstance(exc, (OSError, TypeError, ValueError)):
-            return completed and durable
-        if completed:
-            exc.add_note("the staging cleanup completed before the interruption was delivered")
-        elif not restored:
-            exc.add_note(
-                "the interrupted staging cleanup retained the exact file in private recovery"
-            )
-        raise
-    finally:
-        if exclusion is not None:
-            exclusion.close()
-        _close_chain(source_chain, source_fd)
-        _close_chain(destination_chain)
-        if not moved:
-            try:
-                private.rmdir()
-            except OSError:
-                pass
+        fsync_dir(receipt.path.parent, strict=True)
+    except OSError:
+        return False
+    return True
 
 
 def _file_group_kind(label):
@@ -1430,7 +931,7 @@ def quarantine_file(receipt, label="rejected", *, owner=None, on_intent=None):
         durable = True
         for directory in (receipt.path.parent, private):
             try:
-                _fsync_staging_directory(directory)
+                fsync_dir(directory, strict=True)
             except OSError:
                 durable = False
         return durable
@@ -1498,94 +999,22 @@ def quarantine_file(receipt, label="rejected", *, owner=None, on_intent=None):
 def _move_tree(receipt, destination, destination_name):
     destination = Path(destination)
     source_chain = destination_chain = []
-    destination_path = destination / destination_name
-    destination_is_private = _is_private_retry_group(destination)
-    move_started = False
-
-    def layout():
-        if len(source_chain) < 2 or not destination_chain:
-            return "unchanged"
-        source_exact = receipt.moved_to(receipt.path) is not None
-        destination_exact = receipt.moved_to(destination_path) is not None
-        if source_exact and _name_missing_at(destination_chain[-1], destination_name):
-            return "source"
-        if destination_exact and _name_missing_at(source_chain[-2], receipt.path.name):
-            return "destination"
-        return "changed"
-
-    def restore_source():
-        state = layout()
-        if state == "source":
-            return True
-        if state != "destination":
-            return False
-        try:
-            _rename_noreplace(
-                destination_chain[-1], destination_name, source_chain[-2], receipt.path.name
-            )
-            if layout() != "source":
-                return False
-            fsync_dirs(source_chain[-2], destination_chain[-1])
-            return True
-        except BaseException as exc:
-            restored = layout() == "source"
-            committed = False
-            if restored:
-                try:
-                    fsync_dirs(source_chain[-2], destination_chain[-1])
-                    committed = True
-                except BaseException as sync_exc:
-                    if not isinstance(sync_exc, OSError):
-                        raise
-            if isinstance(exc, OSError):
-                return restored and committed
-            if not restored or not committed:
-                exc.add_note(
-                    "the interrupted staging-tree rollback retained the "
-                    "exact tree at its last proved name"
-                )
-            raise
-
     try:
-        staging, _, source_relative, source_chain, _ = _open_staging_chain(
-            receipt.path, directory=True
-        )
-        if not tree_matches(receipt):
-            return None
+        _, _, source_relative, source_chain, _ = _open_staging_chain(receipt.path, directory=True)
         _, _, _, destination_chain, _ = _open_staging_chain(destination, directory=True)
-        if not _name_missing_at(destination_chain[-1], destination_name):
+        source_parent, name = source_chain[-2], source_relative.parts[-1]
+        if not tree_matches(receipt) or not _name_missing_at(
+            destination_chain[-1], destination_name
+        ):
             return None
-        move_started = True
-        _rename_noreplace(
-            source_chain[-2], source_relative.parts[-1], destination_chain[-1], destination_name
-        )
-        landed = receipt.moved_to(destination_path)
-        if landed is None:
-            raise OSError("staging tree changed during move")
+        _rename_noreplace(source_parent, name, destination_chain[-1], destination_name)
+        landed = receipt.moved_to(destination / destination_name)
+        if landed is None and _name_missing_at(source_parent, name):
+            _rename_noreplace(destination_chain[-1], destination_name, source_parent, name)
+        _flush_both(source_parent, destination_chain[-1])
         return landed
-    except BaseException as exc:
-        state = layout()
-        safe = state in {"source", "unchanged"}
-        if state == "destination":
-            safe = restore_source()
-        elif move_started and destination_is_private and state == "changed":
-            safe = _restore_raced_entry(
-                source_chain[-2],
-                receipt.path.name,
-                destination_chain[-1],
-                destination_name,
-                source_path=receipt.path,
-                destination_path=destination_path,
-            )
-        if isinstance(exc, _RacedStagingEntryRetained):
-            raise
-        if isinstance(exc, (OSError, TypeError, ValueError)):
-            return None
-        if not safe:
-            exc.add_note(
-                "the interrupted staging-tree move preserved the exact tree at its last proved name"
-            )
-        raise
+    except (OSError, TypeError, ValueError):
+        return None
     finally:
         _close_chain(source_chain)
         _close_chain(destination_chain)
@@ -2432,48 +1861,12 @@ def _remove_empty_directory(path, expected):
         or not _same_node(current.root_identity, expected)
     ):
         return False
-    private = _new_private_group(".empty")
-    moved = _move_tree(current, private, "entry")
-    if moved is None:
-        try:
-            private.rmdir()
-        except OSError:
-            pass
-        return False
     try:
-        (private / "entry").rmdir()
-        private.rmdir()
-        return True
-    except BaseException as exc:
-        retained = capture_tree(private / "entry", original_relative=moved.original_relative)
-        restored = False
-        completed = False
-        private_fd = None
-        try:
-            private_fd = os.open(private, _directory_flags())
-            completed = retained is None and _name_missing_at(private_fd, "entry")
-        except FileNotFoundError:
-            completed = True
-        except OSError:
-            pass
-        finally:
-            if private_fd is not None:
-                os.close(private_fd)
-        if retained is not None and moved.same_contents(retained, moved=True):
-            restored = _move_tree(retained, Path(path).parent, Path(path).name) is not None
-        if completed or restored:
-            try:
-                private.rmdir()
-            except OSError:
-                pass
-        if isinstance(exc, OSError):
-            return completed
-        if not completed and not restored:
-            exc.add_note(
-                "the interrupted empty-directory cleanup retained the exact "
-                "directory in private recovery"
-            )
-        raise
+        os.rmdir(current.path)
+    except OSError:
+        return False
+    fsync_dir(current.path.parent)
+    return True
 
 
 def _prune_tree_directories(receipt):
@@ -2585,6 +1978,11 @@ def restore_group(group, *, expected_owner=None):
                 return None
             restored.append((tree, moved))
     except BaseException as exc:
+        if len(restored) < len(group.trees):
+            tree = group.trees[len(restored)]
+            landed = tree.moved_to(destinations[len(restored)])
+            if landed is not None:
+                restored.append((tree, landed))
         if not rollback():
             exc.add_note(
                 "the interrupted staging restore kept every exact tree at "

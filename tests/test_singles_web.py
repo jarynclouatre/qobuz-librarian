@@ -185,6 +185,47 @@ def test_undo_refuses_a_replacement_when_the_inode_is_reused(
         _remove_job(job)
 
 
+def test_undo_finishes_a_track_an_earlier_version_set_aside(
+        client, monkeypatch, fresh_singles, tmp_path):
+    import qobuz_librarian.integrations.beets as beets_mod
+    from qobuz_librarian.safefile import identity_record
+
+    d = tmp_path / "Artist" / "Album"
+    d.mkdir(parents=True)
+    track = d / "01 - Track.flac"
+    track.write_bytes(b"downloaded copy")
+    owned = _owned_path(d, track)
+    # 1.3 moved the track into a hidden folder and recorded that before it
+    # deleted it.
+    aside = d / (".ql-undo-file-" + "0" * 32)
+    aside.mkdir()
+    track.rename(aside / "held")
+    owned["file"] = identity_record((aside / "held").stat())
+    owned["deletion"] = {
+        "version": 1, "state": "held", "quarantine": aside.name}
+
+    job = jm.Job(title="Track", artist="Artist", album_id="album")
+    job.status = jm.JobStatus.DONE
+    job.single = {
+        "dir": str(d), "track_id": "track", "title": "Track",
+        "artist": "Artist", "album": "Album", "marked": False,
+        "owned_path": owned,
+    }
+    jm.registry.add(job)
+    forgotten = []
+    monkeypatch.setattr(
+        beets_mod, "forget_beets_entries",
+        lambda paths: forgotten.extend(paths) or True,
+    )
+    try:
+        client.post(f"/jobs/{job.id}/undo", follow_redirects=False)
+        assert list(d.iterdir()) == []
+        assert job.single.get("removed") is True
+        assert forgotten == [track]
+    finally:
+        _remove_job(job)
+
+
 def test_undo_no_isrc_removes_the_grabbed_disc_not_a_same_numbered_twin(
         client, monkeypatch, fresh_singles, tmp_path):
     import qobuz_librarian.api.search as search_mod
