@@ -71,7 +71,7 @@ docker run --rm -v qobuz-librarian-config:/dest -v /your/beets/dir:/src alpine \
 
 Replace `library.db` with your filename (check the `library:` path in your `config.yaml` if unsure), or bind-mount a host directory at `/config/beets` instead. The container will not overwrite either file on start. If renaming the DB to `musiclibrary.db` is not convenient, point `BEETS_DB_PATH` at your file instead (e.g. `BEETS_DB_PATH=/config/beets/library.db`) and the app reads it from there.
 
-The default Compose config volume provides the local Linux filesystem guarantees the database needs. If you replace it, run the app on Linux with `/proc/self/fd` and use a local mount that provides hard links, xattrs, advisory `flock`, file leases, atomic `renameat2` exchange, and file and directory `fsync`; do not place the database on NFS or SMB/CIFS. See [Configuration](configuration.md#beets--streamrip-config) for details.
+Keep the database on a local filesystem: the default Compose config volume or a local bind mount, not NFS or SMB/CIFS. See [Configuration](configuration.md#beets--streamrip-config) for details.
 
 ## Optional beets fingerprinting
 

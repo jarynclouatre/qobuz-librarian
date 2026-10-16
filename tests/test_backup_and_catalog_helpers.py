@@ -1229,15 +1229,14 @@ def test_execute_consolidation_backs_up_overlap_and_refuses_a_replacement(
     assert not (root / "backups").exists()
 
 
-@pytest.mark.parametrize("failure_point", ("before-publication", "after-publication"))
-def test_consolidation_publication_failure_keeps_recovery_and_reports_failure(
-        tmp_path, monkeypatch, failure_point):
+def test_consolidation_database_failure_keeps_recovery_and_reports_failure(
+        tmp_path, monkeypatch):
     import sqlite3
 
     import qobuz_librarian.config as cfg
     from qobuz_librarian.modes import consolidate as consolidation
 
-    root = tmp_path / failure_point
+    root = tmp_path
     sibling = root / "Album Deluxe"
     sibling.mkdir(parents=True)
     reviewed = sibling / "01.flac"
@@ -1276,18 +1275,12 @@ def test_consolidation_publication_failure_keeps_recovery_and_reports_failure(
     }
     primary_seal, sibling_seal, binding = _bind_consolidation_summary(
         summary, root, monkeypatch)
-    real_publish = consolidation.AtomicSQLiteWrite.commit_and_publish
 
-    def fail_publication(transaction, *args, **kwargs):
-        if failure_point == "after-publication":
-            real_publish(transaction, *args, **kwargs)
-        raise OSError(f"injected {failure_point} failure")
+    def fail_before_commit(*_args):
+        raise OSError("injected failure")
 
     monkeypatch.setattr(
-        consolidation.AtomicSQLiteWrite,
-        "commit_and_publish",
-        fail_publication,
-    )
+        consolidation._BeetsItemSeal, "_deletions_match", fail_before_commit)
     try:
         removed, n_failed = execute_consolidation(summary)
     finally:
@@ -1302,7 +1295,7 @@ def test_consolidation_publication_failure_keeps_recovery_and_reports_failure(
     ]
     with sqlite3.connect(database) as connection:
         rows = connection.execute("SELECT id FROM items").fetchall()
-    assert rows == ([] if failure_point == "after-publication" else [(1,)])
+    assert rows == [(1,)]
 
 
 def test_consolidation_backup_expires_only_while_the_primary_keeps_its_tracks(

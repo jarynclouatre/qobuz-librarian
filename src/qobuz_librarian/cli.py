@@ -1318,12 +1318,13 @@ def main():
     # dry run skips it. A queue that stopped part way holds all other work
     # until it is resumed, so this waits for it too.
     if not args.dry_run and not queue_started:
+        from qobuz_librarian import beets_db
         from qobuz_librarian.integrations import beets as beets_mod
         from qobuz_librarian.integrations import staging as staging_mod
         from qobuz_librarian.library import backup as backup_mod
         from qobuz_librarian.modes import process as process_mode
         try:
-            beets_mod.recover_interrupted_beets_write()
+            beets_db.remove_old_copies()
             beets_mod.remove_stale_import_overrides()
             process_mode.finish_interrupted_upgrades()
             if not saved_queue:

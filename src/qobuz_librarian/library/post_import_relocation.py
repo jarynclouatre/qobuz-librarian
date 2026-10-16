@@ -26,17 +26,12 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 
+from qobuz_librarian import beets_db, run_lock
 from qobuz_librarian import config as cfg
-from qobuz_librarian import run_lock
 from qobuz_librarian.completion import normalise_album_id
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library import scanner
-from qobuz_librarian.library.catalog import (
-    _close_migration_database_anchor,
-    _migration_database_anchor_matches,
-    _open_migration_database_anchor,
-)
 from qobuz_librarian.library.post_import_relocation_db import (
     DatabaseRowsState,
     capture_relocation_rows,
@@ -46,13 +41,6 @@ from qobuz_librarian.library.post_import_relocation_db import (
     require_safe_relocation_database,
     rollback_relocation_rows,
     vanished_destination_rows,
-)
-from qobuz_librarian.library.sqlite_atomic import (
-    AtomicSQLiteWrite,
-    SQLitePublicationUncertain,
-    SQLiteRecoveryRequired,
-    inspect_sqlite_source,
-    reconcile_atomic_sqlite,
 )
 from qobuz_librarian.recovery import decode_recovery_json
 from qobuz_librarian.run_lock import RunLockLease
@@ -1793,70 +1781,58 @@ def _path_mapping(root: Path, payload) -> dict[str, str]:
     }
 
 
-def _capture_database(anchor, root, payload, authority_matches) -> dict:
-    if anchor is None or anchor.get("descriptor") is None:
+def _read_database(inspect, authority_matches=None):
+    database = beets_db.path()
+    if database is None or not database.is_file():
         raise OSError("an existing Beets database is required for album relocation")
+    if authority_matches is not None and not authority_matches():
+        raise OSError("relocation authority changed before the Beets database was read")
+    result = beets_db.read(database, inspect)
+    if authority_matches is not None and not authority_matches():
+        raise OSError("relocation authority changed while the Beets database was read")
+    return result
+
+
+def _capture_database(root, payload, authority_matches) -> dict:
     mapping = _path_mapping(root, payload)
     required = [
         source for source in mapping if _audio_relative(Path(source).name)
     ]
-    timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-    timeout = float(timeout) if timeout and timeout > 0 else 5.0
-    return inspect_sqlite_source(
-        anchor,
-        _migration_database_anchor_matches,
+    return _read_database(
         lambda connection: capture_relocation_rows(
             connection,
             mapping,
             music_root=root,
             required_item_sources=required,
         ),
-        connect=sqlite3.connect,
-        timeout=timeout,
-        anchors_match=authority_matches,
+        authority_matches,
     )
 
 
 def _forget_vanished_destination_rows(root, mapping, destination) -> None:
     """Drop the Beets rows of deleted files that sit where the move goes,
     before anything is recorded or moved."""
-    timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-    timeout = float(timeout) if timeout and timeout > 0 else 5.0
-    anchor = _open_migration_database_anchor()
-    transaction = None
+    database = beets_db.path()
+    if database is None or not database.is_file():
+        return
     try:
-        if anchor is None or anchor.get("descriptor") is None:
-            return
-        if not inspect_sqlite_source(
-            anchor,
-            _migration_database_anchor_matches,
+        if not beets_db.read(
+            database,
             lambda connection: vanished_destination_rows(
                 connection, mapping, music_root=root
             ),
-            connect=sqlite3.connect,
-            timeout=timeout,
         ):
             return
-        transaction = AtomicSQLiteWrite(
-            anchor,
-            _migration_database_anchor_matches,
-            connect=sqlite3.connect,
-            timeout=timeout,
-        )
-        connection = transaction.open()
-        connection.execute("BEGIN IMMEDIATE")
-        require_safe_relocation_database(connection)
-        dropped = forget_vanished_destination_rows(
-            connection, mapping, music_root=root
-        )
-        if not dropped:
-            connection.rollback()
-            return
-        transaction.commit_and_publish(
-            lambda: _migration_database_anchor_matches(anchor),
-            lambda current: current.execute("PRAGMA quick_check").fetchone()
-            == ("ok",),
-        )
+        with beets_db.transaction(database) as connection:
+            require_safe_relocation_database(connection)
+            dropped = forget_vanished_destination_rows(
+                connection, mapping, music_root=root
+            )
+            if not dropped:
+                connection.rollback()
+                return
+            if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                raise sqlite3.DatabaseError("the Beets database failed its check")
         log.info(
             "Dropped %s of files deleted outside the app from %s.",
             plural(dropped, "Beets entry", "Beets entries"),
@@ -1866,24 +1842,12 @@ def _forget_vanished_destination_rows(root, mapping, destination) -> None:
         raise PostImportRelocationUnavailable(
             errno.EIO, f"the Beets rows of deleted files couldn't be dropped: {exc}"
         ) from exc
-    finally:
-        if transaction is not None:
-            transaction.close()
-        _close_migration_database_anchor(anchor)
 
 
-def _database_state(anchor, capture, authority_matches=None):
-    if anchor is None or anchor.get("descriptor") is None:
-        raise OSError("the Beets database needed for relocation recovery is missing")
-    timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-    timeout = float(timeout) if timeout and timeout > 0 else 5.0
-    return inspect_sqlite_source(
-        anchor,
-        _migration_database_anchor_matches,
+def _database_state(capture, authority_matches=None):
+    return _read_database(
         lambda connection: classify_relocation_rows(connection, capture),
-        connect=sqlite3.connect,
-        timeout=timeout,
-        anchors_match=authority_matches,
+        authority_matches,
     )
 
 
@@ -2031,13 +1995,12 @@ def _journal_matches(namespace_fd, payload) -> bool:
 
 
 def _publication_authority_matches(
-    authority, root_fd, namespace_fd, database_anchor, payload
+    authority, root_fd, namespace_fd, payload
 ) -> bool:
     try:
         if (
             type(authority) is not RunLockLease
             or authority.intact() is not True
-            or not _migration_database_anchor_matches(database_anchor)
             or not _journal_matches(namespace_fd, payload)
             or not _source_snapshot_matches(root_fd, payload)
             or not _public_snapshot_matches(root_fd, payload)
@@ -2517,13 +2480,12 @@ def capture_post_import_relocation_expectation(
             _close_all(root_owner)
 
 
-def _base_authority_matches(authority, root, root_fd, database_anchor, payload) -> bool:
+def _base_authority_matches(authority, root, root_fd, payload) -> bool:
     try:
         return (
             type(authority) is RunLockLease
             and authority.intact() is True
             and _root_matches(root_fd, root)
-            and _migration_database_anchor_matches(database_anchor)
             and _source_artist_matches(root_fd, payload)
             and _source_snapshot_matches(root_fd, payload)
             and _initial_destination_matches(root_fd, payload)
@@ -2640,26 +2602,12 @@ def _validate_payload(payload, *, operation_id=None) -> None:
             _valid_relative(value)
 
 
-def _database_recovery_state(database_anchor, payload, authority_matches):
-    reconcile_atomic_sqlite(database_anchor, _migration_database_anchor_matches)
-    if not _migration_database_anchor_matches(database_anchor):
-        raise OSError("Beets database changed during relocation recovery")
-    return _database_state(
-        database_anchor, payload["database_capture"], authority_matches
-    )
-
-
-def _rollback_database_publication(database_anchor, payload, authority_matches):
-    timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-    timeout = float(timeout) if timeout and timeout > 0 else 5.0
+def _rollback_database_publication(payload, authority_matches):
+    database = beets_db.path()
+    if database is None or not database.is_file():
+        raise OSError("the Beets database needed for relocation recovery is missing")
     state = rollback_relocation_rows(
-        database_anchor,
-        _migration_database_anchor_matches,
-        authority_matches,
-        payload["database_capture"],
-        connect=sqlite3.connect,
-        timeout=timeout,
-    )
+        database, authority_matches, payload["database_capture"])
     if state not in {DatabaseRowsState.OLD, DatabaseRowsState.EMPTY}:
         raise OSError("Beets path rollback did not complete")
     return state
@@ -2691,7 +2639,6 @@ def _recover_payload(
     root,
     root_fd,
     namespace_fd,
-    database_anchor,
     payload,
     *,
     handoff_matches=None,
@@ -2727,11 +2674,10 @@ def _recover_payload(
             type(authority) is RunLockLease
             and authority.intact() is True
             and _root_matches(root_fd, root)
-            and _migration_database_anchor_matches(database_anchor)
             and _journal_matches(namespace_fd, payload)
         )
-        database_state = _database_recovery_state(
-            database_anchor, payload, authority_matches
+        database_state = _database_state(
+            payload["database_capture"], authority_matches
         )
         phase = payload["phase"]
         if retain_completion and phase in {"committed", "retained"}:
@@ -2839,11 +2785,10 @@ def _recover_payload(
             type(authority) is RunLockLease
             and authority.intact() is True
             and _root_matches(root_fd, root)
-            and _migration_database_anchor_matches(database_anchor)
             and _journal_matches(namespace_fd, payload)
         )
-        database_state = _database_recovery_state(
-            database_anchor, payload, authority_matches
+        database_state = _database_state(
+            payload["database_capture"], authority_matches
         )
         if database_state is DatabaseRowsState.MIXED:
             raise PostImportRelocationAttention(
@@ -2889,7 +2834,6 @@ def _recover_payload(
                     authority,
                     root_fd,
                     namespace_fd,
-                    database_anchor,
                     payload,
                 ):
                     raise PostImportRelocationAttention(
@@ -2912,11 +2856,10 @@ def _recover_payload(
                         authority,
                         root_fd,
                         namespace_fd,
-                        database_anchor,
                         payload,
                     )
                     database_state = _rollback_database_publication(
-                        database_anchor, payload, rollback_authority
+                        payload, rollback_authority
                     )
                 forward = False
         elif database_state is DatabaseRowsState.NEW:
@@ -3017,19 +2960,14 @@ def reconcile_post_import_relocations(
                     operation_id = name[:-5]
                     payload = _read_journal(namespace_fd, operation_id)
                     _validate_payload(payload, operation_id=operation_id)
-                    database_anchor = _open_migration_database_anchor()
-                    try:
-                        _recover_payload(
-                            authority,
-                            root,
-                            root_fd,
-                            namespace_fd,
-                            database_anchor,
-                            payload,
-                            handoff_matches=handoff_matches,
-                        )
-                    finally:
-                        _close_migration_database_anchor(database_anchor)
+                    _recover_payload(
+                        authority,
+                        root,
+                        root_fd,
+                        namespace_fd,
+                        payload,
+                        handoff_matches=handoff_matches,
+                    )
                 return RelocationRecoveryResult(RelocationRecoveryStatus.CLEAR)
             finally:
                 _close_all(root_owner)
@@ -3039,13 +2977,7 @@ def reconcile_post_import_relocations(
             str(exc),
             exc.paths,
         )
-    except (
-        OSError,
-        sqlite3.Error,
-        SQLitePublicationUncertain,
-        SQLiteRecoveryRequired,
-        ValueError,
-    ) as exc:
+    except (OSError, sqlite3.Error, ValueError) as exc:
         return RelocationRecoveryResult(
             RelocationRecoveryStatus.ATTENTION_REQUIRED,
             str(exc),
@@ -3054,20 +2986,19 @@ def reconcile_post_import_relocations(
 
 
 def _require_handoff_publication(
-    authority, root_fd, namespace_fd, database_anchor, payload
+    authority, root_fd, namespace_fd, payload
 ) -> None:
     authority_matches = lambda: _publication_authority_matches(
         authority,
         root_fd,
         namespace_fd,
-        database_anchor,
         payload,
     )
     if not authority_matches():
         raise PostImportRelocationAttention(
             "the deferred relocation changed before its handoff was recorded"
         )
-    state = _database_recovery_state(database_anchor, payload, authority_matches)
+    state = _database_state(payload["database_capture"], authority_matches)
     if state not in {DatabaseRowsState.NEW, DatabaseRowsState.EMPTY}:
         raise PostImportRelocationAttention(
             "Beets no longer contains the deferred relocation"
@@ -3097,7 +3028,6 @@ def seal_post_import_relocation_handoff(
             )
         root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
         root_fd, root_owner = _open_music_root(root)
-        database_anchor = None
         try:
             _clean_journal_temps(namespace_fd, root_fd)
             journal = _read_journal(namespace_fd, operation_id)
@@ -3119,19 +3049,17 @@ def seal_post_import_relocation_handoff(
                 raise PostImportRelocationUnavailable(
                     errno.EEXIST, "the relocation is sealed to another handoff"
                 )
-            database_anchor = _open_migration_database_anchor()
             _require_handoff_publication(
-                authority, root_fd, namespace_fd, database_anchor, journal
+                authority, root_fd, namespace_fd, journal
             )
             if existing is None:
                 journal["handoff"] = expected
                 _write_journal(namespace_fd, journal)
                 _require_handoff_publication(
-                    authority, root_fd, namespace_fd, database_anchor, journal
+                    authority, root_fd, namespace_fd, journal
                 )
             return digest
         finally:
-            _close_migration_database_anchor(database_anchor)
             _close_all(root_owner)
 
 
@@ -3154,7 +3082,6 @@ def acknowledge_post_import_relocation(
             )
         root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
         root_fd, root_owner = _open_music_root(root)
-        database_anchor = None
         try:
             _clean_journal_temps(namespace_fd, root_fd)
             payload = _read_journal(namespace_fd, operation_id)
@@ -3170,17 +3097,15 @@ def acknowledge_post_import_relocation(
                 raise PostImportRelocationUnavailable(
                     errno.EPERM, "the relocation acknowledgement does not match"
                 )
-            database_anchor = _open_migration_database_anchor()
             if payload["phase"] == "awaiting-handoff":
                 _require_handoff_publication(
-                    authority, root_fd, namespace_fd, database_anchor, payload
+                    authority, root_fd, namespace_fd, payload
                 )
             outcome = _recover_payload(
                 authority,
                 root,
                 root_fd,
                 namespace_fd,
-                database_anchor,
                 payload,
                 handoff_matches=lambda current_id, current_handoff: (
                     current_id == operation_id and current_handoff == handoff
@@ -3195,7 +3120,6 @@ def acknowledge_post_import_relocation(
                     "the deferred relocation could not be committed"
                 )
         finally:
-            _close_migration_database_anchor(database_anchor)
             _close_all(root_owner)
             scanner.clear_scan_caches()
 
@@ -3219,7 +3143,6 @@ def release_post_import_relocation(
             return
         root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
         root_fd, root_owner = _open_music_root(root)
-        database_anchor = None
         try:
             _clean_journal_temps(namespace_fd, root_fd)
             payload = _read_journal(namespace_fd, operation_id)
@@ -3234,13 +3157,11 @@ def release_post_import_relocation(
                 raise PostImportRelocationUnavailable(
                     errno.EPERM, "the retained relocation release does not match"
                 )
-            database_anchor = _open_migration_database_anchor()
             outcome = _recover_payload(
                 authority,
                 root,
                 root_fd,
                 namespace_fd,
-                database_anchor,
                 payload,
                 handoff_matches=lambda current_id, current_handoff: (
                     current_id == operation_id and current_handoff == handoff
@@ -3262,7 +3183,6 @@ def release_post_import_relocation(
                 )
             _unlink_journal(namespace_fd, operation_id)
         finally:
-            _close_migration_database_anchor(database_anchor)
             _close_all(root_owner)
 
 
@@ -3312,7 +3232,6 @@ def relocate_post_import_album(
         root_fd = source_fd = destination_fd = None
         root_owner = None
         source_chain = destination_chain = []
-        database_anchor = None
         try:
             root_fd, root_owner = _open_music_root(root)
             source_fd, source_chain = _open_relative_directory(
@@ -3421,7 +3340,6 @@ def relocate_post_import_album(
                 ),
                 destination_path,
             )
-            database_anchor = _open_migration_database_anchor()
             operation_id = secrets.token_hex(32)
             payload = {
                 "version": _JOURNAL_VERSION,
@@ -3447,9 +3365,7 @@ def relocate_post_import_album(
                 "handoff": None,
             }
             initial_authority = lambda: (
-                _base_authority_matches(
-                    authority, root, root_fd, database_anchor, payload
-                )
+                _base_authority_matches(authority, root, root_fd, payload)
                 and (
                     canonical_expected is None
                     or _directory_identity_matches_fd(
@@ -3459,7 +3375,7 @@ def relocate_post_import_album(
             )
             try:
                 payload["database_capture"] = _capture_database(
-                    database_anchor, root, payload, initial_authority
+                    root, payload, initial_authority
                 )
             except sqlite3.IntegrityError as exc:
                 raise PostImportRelocationUnavailable(errno.EEXIST, str(exc)) from exc
@@ -3498,18 +3414,12 @@ def relocate_post_import_album(
                         authority,
                         root_fd,
                         namespace_fd,
-                        database_anchor,
                         payload,
                     )
-                    timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-                    timeout = float(timeout) if timeout and timeout > 0 else 5.0
                     state = publish_relocation_rows(
-                        database_anchor,
-                        _migration_database_anchor_matches,
+                        beets_db.path(),
                         authority_matches,
                         payload["database_capture"],
-                        connect=sqlite3.connect,
-                        timeout=timeout,
                     )
                     if state not in {DatabaseRowsState.NEW, DatabaseRowsState.EMPTY}:
                         raise OSError("Beets path publication did not complete")
@@ -3559,7 +3469,6 @@ def relocate_post_import_album(
                         root,
                         root_fd,
                         namespace_fd,
-                        database_anchor,
                         payload,
                     )
                     if outcome == "committed" and isinstance(exc, Exception):
@@ -3581,7 +3490,6 @@ def relocate_post_import_album(
                     if workspace_fd is not None:
                         os.close(workspace_fd)
         finally:
-            _close_migration_database_anchor(database_anchor)
             _close_all(destination_chain)
             _close_all(source_chain)
             _close_all(root_owner)

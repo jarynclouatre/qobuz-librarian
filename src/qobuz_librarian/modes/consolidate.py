@@ -8,16 +8,12 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from qobuz_librarian import config
+from qobuz_librarian import beets_db, config
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations import beets as beets_integration
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import catalog, scanner
 from qobuz_librarian.library.scanner import parse_track_num
-from qobuz_librarian.library.sqlite_atomic import (
-    AtomicSQLiteWrite,
-    inspect_sqlite_source,
-)
 from qobuz_librarian.library.tags import (
     canonical_recording_id,
     canonical_track_slot,
@@ -503,7 +499,6 @@ def _database_schema(connection):
     ).fetchone():
         raise sqlite3.DatabaseError(
             "custom triggers make exact track removal unverifiable")
-    beets_integration._require_delete_journal_mode(connection)
     item_info = tuple(connection.execute("PRAGMA table_info(items)"))
     attribute_info = tuple(connection.execute(
         "PRAGMA table_info(item_attributes)"))
@@ -690,11 +685,11 @@ def _attributes_for_albums(connection, columns, album_ids):
 
 class _BeetsItemSeal:
     def __init__(
-            self, anchor, schema_receipt=None,
+            self, database, schema_receipt=None,
             item_rows=(), attribute_rows=(), album_rows=(),
             album_item_rows=(), album_attribute_rows=(),
             empty_album_ids=()):
-        self.anchor = anchor
+        self.database = database
         self.schema_receipt = schema_receipt
         self.item_rows = item_rows
         self.attribute_rows = attribute_rows
@@ -711,7 +706,6 @@ class _BeetsItemSeal:
     def _matches(self, connection, anchors_match):
         if (
             self._closed
-            or not beets_integration._beets_database_anchor_matches(self.anchor)
             or not anchors_match()
             or _database_schema(connection) != self.schema_receipt
         ):
@@ -809,7 +803,6 @@ class _BeetsItemSeal:
     def _deletions_match(self, connection, anchors_match):
         if (
             self._closed
-            or not beets_integration._beets_database_anchor_matches(self.anchor)
             or not anchors_match()
             or _database_schema(connection) != self.schema_receipt
         ):
@@ -858,181 +851,123 @@ class _BeetsItemSeal:
     def run(self, mutate, before_matches, after_matches):
         if self._closed:
             return False, None, "the reviewed database binding was closed"
-        descriptor = None if self.anchor is None else self.anchor["descriptor"]
-        if descriptor is None:
-            if (
-                not beets_integration._beets_database_anchor_matches(self.anchor)
-                or not before_matches()
-            ):
+        if self.database is None:
+            if not _no_database() or not before_matches():
                 return False, None, "the reviewed files or database changed"
             result = mutate()
             if result is None or not result.complete:
                 return False, result, "the protected backup was incomplete"
-            if (
-                not beets_integration._beets_database_anchor_matches(self.anchor)
-                or not after_matches()
-            ):
+            if not _no_database() or not after_matches():
                 return False, result, "the reviewed filesystem state changed"
             return True, result, None
 
-        transaction = None
         result = None
-        outcome = None
-        caught = None
         try:
-            timeout = getattr(config, "BEETS_TIMEOUT", 5)
-            timeout = float(timeout) if timeout and timeout > 0 else 5.0
-            transaction = AtomicSQLiteWrite(
-                self.anchor,
-                beets_integration._beets_database_anchor_matches,
-                connect=sqlite3.connect,
-                timeout=timeout,
-            )
-            connection = transaction.open()
-            connection.execute("BEGIN IMMEDIATE")
-            if not self._matches(connection, before_matches):
-                raise OSError("the reviewed files or beets rows changed")
-            # The recoverable copy must exist before database rows are
-            # removed.
-            result = mutate()
-            if result is None or not result.complete:
-                connection.rollback()
-                outcome = (
-                    False,
-                    result,
-                    "the protected backup was incomplete",
-                )
-            else:
+            with beets_db.transaction(self.database) as connection:
+                if not self._matches(connection, before_matches):
+                    raise OSError("the reviewed files or beets rows changed")
+                # The recoverable copy must exist before database rows are
+                # removed.
+                result = mutate()
+                if result is None or not result.complete:
+                    connection.rollback()
+                    return False, result, "the protected backup was incomplete"
                 if not self._matches(connection, after_matches):
                     raise OSError("the reviewed state changed during backup")
                 self._delete_rows(connection)
-                if (
-                    not beets_integration._beets_database_anchor_matches(
-                        self.anchor)
-                    or not after_matches()
-                ):
-                    raise OSError(
-                        "the reviewed state changed before database commit")
-                transaction.commit_and_publish(
-                    after_matches,
-                    lambda current: self._deletions_match(
-                        current, after_matches),
-                )
-                outcome = True, result, None
-        except BaseException as exc:
-            caught = exc
-        if transaction is not None:
-            try:
-                transaction.close()
-            except BaseException as exc:
-                if caught is None or (
-                    isinstance(caught, Exception)
-                    and not isinstance(exc, Exception)
-                ):
-                    caught = exc
-                else:
-                    caught.add_note(
-                        "SQLite transaction cleanup also failed")
-        if caught is not None:
-            if not isinstance(caught, Exception):
-                raise caught.with_traceback(caught.__traceback__)
-            return False, result, str(caught)
-        return outcome
+                if not self._deletions_match(connection, after_matches):
+                    raise OSError("the reviewed state changed before database commit")
+        except Exception as exc:
+            return False, result, str(exc)
+        return True, result, None
 
     def close(self):
-        if self._closed:
-            return
         self._closed = True
-        beets_integration._close_beets_database_anchor(self.anchor)
+
+
+def _no_database():
+    database = beets_db.path()
+    return database is None or not database.is_file()
 
 
 def _capture_beets_items(paths, anchors_match):
-    anchor = beets_integration._open_beets_database_anchor()
-    if anchor is None or anchor["descriptor"] is None:
+    if _no_database():
         if not anchors_match():
-            beets_integration._close_beets_database_anchor(anchor)
             raise OSError("reviewed album changed before database binding")
-        return _BeetsItemSeal(anchor)
+        return _BeetsItemSeal(None)
+    database = beets_db.path()
 
-    try:
-        def capture(connection):
-            schema_receipt = _database_schema(connection)
-            variants = _path_variants(paths)
-            item_rows = _items_for_paths(
-                connection, schema_receipt[3], variants)
-            item_columns = schema_receipt[3]
-            attribute_columns = schema_receipt[4]
-            album_columns = schema_receipt[7]
-            album_attribute_columns = schema_receipt[8]
-            item_id_index = item_columns.index("id")
-            item_album_index = item_columns.index("album_id")
-            item_ids = tuple(row[item_id_index] for row in item_rows)
-            attribute_rows = _attributes_for_items(
-                connection, attribute_columns, item_ids)
-            album_ids = set()
-            for row in item_rows:
-                album_id = row[item_album_index]
-                if album_id is None:
-                    continue
-                if type(album_id) is not int or album_id <= 0:
-                    raise sqlite3.DatabaseError(
-                        "beets item has an invalid album identity")
-                album_ids.add(album_id)
-            album_ids = tuple(sorted(album_ids))
-            album_rows = _albums_for_ids(
-                connection, album_columns, album_ids)
-            album_row_id_index = album_columns.index("id")
-            if tuple(
-                row[album_row_id_index] for row in album_rows
-            ) != album_ids:
+    def capture(connection):
+        schema_receipt = _database_schema(connection)
+        variants = _path_variants(paths)
+        item_rows = _items_for_paths(
+            connection, schema_receipt[3], variants)
+        item_columns = schema_receipt[3]
+        attribute_columns = schema_receipt[4]
+        album_columns = schema_receipt[7]
+        album_attribute_columns = schema_receipt[8]
+        item_id_index = item_columns.index("id")
+        item_album_index = item_columns.index("album_id")
+        item_ids = tuple(row[item_id_index] for row in item_rows)
+        attribute_rows = _attributes_for_items(
+            connection, attribute_columns, item_ids)
+        album_ids = set()
+        for row in item_rows:
+            album_id = row[item_album_index]
+            if album_id is None:
+                continue
+            if type(album_id) is not int or album_id <= 0:
                 raise sqlite3.DatabaseError(
-                    "beets item refers to an unrecognised album")
-            album_item_rows = _items_for_albums(
-                connection, item_columns, album_ids)
-            selected_ids = set(item_ids)
-            empty_album_ids = []
-            for album_id in album_ids:
-                member_ids = {
-                    row[item_id_index]
-                    for row in album_item_rows
-                    if row[item_album_index] == album_id
-                }
-                selected_members = {
-                    row[item_id_index]
-                    for row in item_rows
-                    if row[item_album_index] == album_id
-                }
-                if not member_ids or not selected_members.issubset(member_ids):
-                    raise sqlite3.DatabaseError(
-                        "beets album membership could not be proved")
-                if member_ids.issubset(selected_ids):
-                    empty_album_ids.append(album_id)
-            album_attribute_rows = _attributes_for_albums(
-                connection, album_attribute_columns, album_ids)
-            return _BeetsItemSeal(
-                anchor,
-                schema_receipt,
-                item_rows,
-                attribute_rows,
-                album_rows,
-                album_item_rows,
-                album_attribute_rows,
-                tuple(empty_album_ids),
-            )
-
-        timeout = getattr(config, "BEETS_TIMEOUT", 5)
-        timeout = float(timeout) if timeout and timeout > 0 else 5.0
-        return inspect_sqlite_source(
-            anchor,
-            beets_integration._beets_database_anchor_matches,
-            capture,
-            connect=sqlite3.connect,
-            timeout=timeout,
-            anchors_match=anchors_match,
+                    "beets item has an invalid album identity")
+            album_ids.add(album_id)
+        album_ids = tuple(sorted(album_ids))
+        album_rows = _albums_for_ids(
+            connection, album_columns, album_ids)
+        album_row_id_index = album_columns.index("id")
+        if tuple(
+            row[album_row_id_index] for row in album_rows
+        ) != album_ids:
+            raise sqlite3.DatabaseError(
+                "beets item refers to an unrecognised album")
+        album_item_rows = _items_for_albums(
+            connection, item_columns, album_ids)
+        selected_ids = set(item_ids)
+        empty_album_ids = []
+        for album_id in album_ids:
+            member_ids = {
+                row[item_id_index]
+                for row in album_item_rows
+                if row[item_album_index] == album_id
+            }
+            selected_members = {
+                row[item_id_index]
+                for row in item_rows
+                if row[item_album_index] == album_id
+            }
+            if not member_ids or not selected_members.issubset(member_ids):
+                raise sqlite3.DatabaseError(
+                    "beets album membership could not be proved")
+            if member_ids.issubset(selected_ids):
+                empty_album_ids.append(album_id)
+        album_attribute_rows = _attributes_for_albums(
+            connection, album_attribute_columns, album_ids)
+        return _BeetsItemSeal(
+            database,
+            schema_receipt,
+            item_rows,
+            attribute_rows,
+            album_rows,
+            album_item_rows,
+            album_attribute_rows,
+            tuple(empty_album_ids),
         )
-    except BaseException:
-        beets_integration._close_beets_database_anchor(anchor)
-        raise
+
+    if not anchors_match():
+        raise OSError("reviewed album changed before database binding")
+    seal = beets_db.read(database, capture)
+    if not anchors_match():
+        raise OSError("reviewed album changed while its database rows were read")
+    return seal
 
 
 @dataclass

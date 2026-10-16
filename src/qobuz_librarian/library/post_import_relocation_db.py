@@ -1,11 +1,11 @@
 """Exact Beets row handling for crash-recoverable post-import relocation.
 
-The caller owns the filesystem transaction and the bound database anchor.  This
-module only captures the complete ``items`` and ``albums`` rows whose path field
-will change, classifies those rows after a restart, and publishes an exact
-compare-and-swap update through :class:`AtomicSQLiteWrite`.
+The caller owns the filesystem transaction.  This module only captures the
+complete ``items`` and ``albums`` rows whose path field will change, classifies
+those rows after a restart, and makes an exact compare-and-swap update in one
+SQLite transaction.
 
-Capture and classification accept an already reserved SQLite connection.  They
+Capture and classification accept an already open SQLite connection.  They
 never open a configured path, so a missing Beets database cannot be created by
 accident.
 """
@@ -21,9 +21,9 @@ from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
 from typing import Any
 
+from qobuz_librarian import beets_db
 from qobuz_librarian import config as cfg
 from qobuz_librarian.library.scanner import is_library_system_folder
-from qobuz_librarian.library.sqlite_atomic import AtomicSQLiteWrite
 
 _CAPTURE_VERSION = 1
 _TABLE_PATH_COLUMNS = (("items", "path"), ("albums", "artpath"))
@@ -144,13 +144,8 @@ def _columns(connection: sqlite3.Connection, table: str) -> tuple[str, ...]:
 
 
 def require_safe_relocation_database(connection: sqlite3.Connection) -> None:
-    """Reject schemas or journal modes that make exact path updates unsafe."""
+    """Reject schemas that make exact path updates unverifiable."""
 
-    journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
-    if journal_mode is None or str(journal_mode[0]).casefold() != "delete":
-        raise sqlite3.DatabaseError(
-            "safe Beets path updates require SQLite delete-journal mode"
-        )
     trigger = connection.execute(
         "SELECT name FROM sqlite_master WHERE type = 'trigger' "
         "AND lower(tbl_name) IN ('items', 'albums') LIMIT 1"
@@ -581,15 +576,11 @@ def _exact_update(
 
 
 def publish_relocation_rows(
-    anchor: dict[str, Any],
-    anchor_matches: Callable[[dict[str, Any]], bool],
+    database: os.PathLike[str],
     authority_matches: Callable[[], bool],
     capture: object,
-    *,
-    connect: Callable[..., sqlite3.Connection] = sqlite3.connect,
-    timeout: float = 5.0,
 ) -> DatabaseRowsState:
-    """Publish captured old rows as new through an atomic database replacement.
+    """Update captured old rows to new in one transaction.
 
     ``authority_matches`` is supplied by the filesystem transaction and must
     prove its source, destination, journal, and operation authority each time it
@@ -600,18 +591,7 @@ def publish_relocation_rows(
     root, validated = _validated_capture(capture)
     if not callable(authority_matches) or not authority_matches():
         raise OSError("relocation authority changed before the Beets update")
-    if anchor is None or anchor.get("descriptor") is None:
-        raise OSError("an existing bound Beets database is required")
-
-    transaction = AtomicSQLiteWrite(
-        anchor,
-        anchor_matches,
-        connect=connect,
-        timeout=timeout,
-    )
-    try:
-        connection = transaction.open()
-        connection.execute("BEGIN IMMEDIATE")
+    with beets_db.transaction(database) as connection:
         require_safe_relocation_database(connection)
         if not authority_matches():
             raise OSError("relocation authority changed during the Beets update")
@@ -637,30 +617,17 @@ def publish_relocation_rows(
             raise sqlite3.IntegrityError("Beets path updates were not exact")
         if not authority_matches():
             raise OSError("relocation authority changed during the Beets update")
-        transaction.commit_and_publish(
-            authority_matches,
-            lambda current: (
-                _classify_validated(current, root, validated)
-                is DatabaseRowsState.NEW
-            ),
-        )
-        if not authority_matches():
-            raise OSError("relocation authority changed after the Beets update")
-        return DatabaseRowsState.NEW
-    finally:
-        transaction.close()
+    if not authority_matches():
+        raise OSError("relocation authority changed after the Beets update")
+    return DatabaseRowsState.NEW
 
 
 def rollback_relocation_rows(
-    anchor: dict[str, Any],
-    anchor_matches: Callable[[dict[str, Any]], bool],
+    database: os.PathLike[str],
     authority_matches: Callable[[], bool],
     capture: object,
-    *,
-    connect: Callable[..., sqlite3.Connection] = sqlite3.connect,
-    timeout: float = 5.0,
 ) -> DatabaseRowsState:
-    """Restore captured new rows to their exact old paths atomically.
+    """Restore captured new rows to their exact old paths in one transaction.
 
     This is the inverse of :func:`publish_relocation_rows`.  It exists for a
     committed relocation whose external ownership hand-off was interrupted:
@@ -672,18 +639,7 @@ def rollback_relocation_rows(
     root, validated = _validated_capture(capture)
     if not callable(authority_matches) or not authority_matches():
         raise OSError("relocation authority changed before the Beets rollback")
-    if anchor is None or anchor.get("descriptor") is None:
-        raise OSError("an existing bound Beets database is required")
-
-    transaction = AtomicSQLiteWrite(
-        anchor,
-        anchor_matches,
-        connect=connect,
-        timeout=timeout,
-    )
-    try:
-        connection = transaction.open()
-        connection.execute("BEGIN IMMEDIATE")
+    with beets_db.transaction(database) as connection:
         require_safe_relocation_database(connection)
         if not authority_matches():
             raise OSError("relocation authority changed during the Beets rollback")
@@ -711,18 +667,9 @@ def rollback_relocation_rows(
             raise sqlite3.IntegrityError("Beets path rollback was not exact")
         if not authority_matches():
             raise OSError("relocation authority changed during the Beets rollback")
-        transaction.commit_and_publish(
-            authority_matches,
-            lambda current: (
-                _classify_validated(current, root, validated)
-                is DatabaseRowsState.OLD
-            ),
-        )
-        if not authority_matches():
-            raise OSError("relocation authority changed after the Beets rollback")
-        return DatabaseRowsState.OLD
-    finally:
-        transaction.close()
+    if not authority_matches():
+        raise OSError("relocation authority changed after the Beets rollback")
+    return DatabaseRowsState.OLD
 
 
 __all__ = [

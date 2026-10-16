@@ -1,4 +1,5 @@
 """Upgrade and gap-fill backup/restore functions."""
+import ctypes
 import errno
 import filecmp
 import functools
@@ -23,7 +24,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
 from qobuz_librarian.integrations.rip import flac_audio_ok
 from qobuz_librarian.interrupts import run_sigint_deferred
-from qobuz_librarian.library import scanner, sqlite_atomic
+from qobuz_librarian.library import scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
 from qobuz_librarian.recovery import (
     decode_recovery_json,
@@ -2159,12 +2160,49 @@ def _remember_held_digest(snapshot, lease, read_ns, descriptor):
     return (device, inode), entry
 
 
+# Local filesystems: every write to a file there changes its ctime.
+_LOCAL_FILESYSTEM_MAGIC = frozenset({
+    0x0000ADF5,  # ADOS
+    0x0000EF53,  # ext2/ext3/ext4
+    0x01021994,  # tmpfs
+    0x24051905,  # UBIFS
+    0x2FC12FC1,  # ZFS
+    0x3153464A,  # JFS
+    0x3434,  # NILFS
+    0x52654973,  # ReiserFS
+    0x58465342,  # XFS
+    0x794C7630,  # overlayfs backed by a local lower filesystem
+    0x858458F6,  # ramfs
+    0x9123683E,  # Btrfs
+    0xF2F52010,  # F2FS
+})
+
+
+class _LinuxStatFS(ctypes.Structure):
+    _fields_ = (
+        ("f_type", ctypes.c_long),
+        ("f_bsize", ctypes.c_long),
+        ("f_blocks", ctypes.c_ulong),
+        ("f_bfree", ctypes.c_ulong),
+        ("f_bavail", ctypes.c_ulong),
+        ("f_files", ctypes.c_ulong),
+        ("f_ffree", ctypes.c_ulong),
+        ("f_fsid", ctypes.c_int * 2),
+        ("f_namelen", ctypes.c_long),
+        ("f_frsize", ctypes.c_long),
+        ("f_flags", ctypes.c_long),
+        ("f_spare", ctypes.c_long * 4),
+    )
+
+
 def _keeps_own_ctime(descriptor) -> bool:
-    try:
-        return (sqlite_atomic._filesystem_magic(descriptor)
-                in sqlite_atomic._LOCAL_FILESYSTEM_MAGIC)
-    except OSError:
+    fstatfs = ctypes.CDLL(None, use_errno=True).fstatfs
+    fstatfs.argtypes = (ctypes.c_int, ctypes.POINTER(_LinuxStatFS))
+    fstatfs.restype = ctypes.c_int
+    value = _LinuxStatFS()
+    if fstatfs(descriptor, ctypes.byref(value)):
         return False
+    return (int(value.f_type) & 0xFFFFFFFF) in _LOCAL_FILESYSTEM_MAGIC
 
 
 def _forget_held_digest(remembered) -> None:

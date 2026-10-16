@@ -10,8 +10,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from qobuz_librarian import beets_db, raise_open_file_limit, run_lock
 from qobuz_librarian import config as cfg
-from qobuz_librarian import raise_open_file_limit, run_lock
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import lyrics as lyrics_mode
@@ -288,8 +288,8 @@ def _settle_interrupted_upgrades() -> list:
     if storage._unwritable_volumes():
         return []
     try:
-        if beets_mod.recover_interrupted_beets_write():
-            _log.warning("Settled a beets write a hard stop cut short.")
+        if beets_db.remove_old_copies():
+            _log.info("Removed the beets database copies an earlier version left.")
         beets_mod.remove_stale_import_overrides()
         finished, put_back = process_mode.finish_interrupted_upgrades()
     except Exception:

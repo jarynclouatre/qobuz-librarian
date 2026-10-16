@@ -19,11 +19,9 @@ Behaviour you should not change without understanding the consequence:
 - predicted_album_paths uses a list, not a set, to preserve deterministic
   candidate order across runs (set hash iteration is non-deterministic).
 """
-import functools
 import math
 import os
 import re
-import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,8 +50,6 @@ from qobuz_librarian.library.tags import (
     strip_leading_article,
     strip_year_decoration,
 )
-from qobuz_librarian.safefile import named_entry_matches as _migration_named_entry_matches
-from qobuz_librarian.safefile import named_entry_missing as _migration_name_missing
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -1796,144 +1792,6 @@ def _count_audio_files_in(d):
     except OSError:
         pass
     return n
-
-
-def _open_migration_directory(path, *, dir_fd=None):
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
-    return os.open(path, flags, dir_fd=dir_fd)
-
-
-def _migration_absolute_parts(value):
-    raw = os.fspath(value)
-    if isinstance(raw, bytes):
-        raw = os.fsdecode(raw)
-    if not isinstance(raw, str) or not raw or "\x00" in raw:
-        raise OSError("invalid absolute path")
-    absolute = Path(os.path.abspath(raw))
-    try:
-        relative = absolute.relative_to(Path(os.path.sep))
-    except ValueError:
-        raise OSError("path has no stable filesystem anchor") from None
-    return absolute, tuple(relative.parts)
-
-
-def _open_absolute_migration_chain(value):
-    """Hold every no-follow component from `/` through one directory."""
-    _absolute, names = _migration_absolute_parts(value)
-    chain = [_open_migration_directory(os.path.sep)]
-    try:
-        for name in names:
-            child = _open_migration_directory(name, dir_fd=chain[-1])
-            if not _migration_named_directory_matches(
-                    chain[-1], name, child):
-                os.close(child)
-                raise OSError("migration directory changed while it was opened")
-            chain.append(child)
-        return chain, names
-    except BaseException:
-        for descriptor in reversed(chain):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        raise
-
-
-def _migration_chain_is_named(chain, names):
-    if len(chain) != len(names) + 1:
-        return False
-    return all(
-        _migration_named_directory_matches(
-            chain[index], name, chain[index + 1])
-        for index, name in enumerate(names)
-    )
-
-
-def _open_migration_database_anchor():
-    configured = getattr(config, "BEETS_DB_PATH", None)
-    if not configured:
-        return None
-    database, parts = _migration_absolute_parts(configured)
-    if not parts:
-        raise OSError("invalid beets database path")
-    parent_chain, parent_names = _open_absolute_migration_chain(
-        database.parent)
-    descriptor = None
-    try:
-        try:
-            descriptor = os.open(
-                database.name,
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent_chain[-1],
-            )
-        except FileNotFoundError:
-            descriptor = None
-        if descriptor is not None and not stat.S_ISREG(
-                os.fstat(descriptor).st_mode):
-            raise OSError("beets database is not a regular file")
-        anchor = {
-            "path": database,
-            "parent_chain": parent_chain,
-            "parent_names": parent_names,
-            "name": database.name,
-            "descriptor": descriptor,
-        }
-        if not _migration_database_anchor_matches(anchor):
-            raise OSError("configured beets database changed while it was opened")
-        return anchor
-    except BaseException:
-        if descriptor is not None:
-            os.close(descriptor)
-        for directory_fd in reversed(parent_chain):
-            os.close(directory_fd)
-        raise
-
-
-def _migration_database_anchor_matches(anchor):
-    if anchor is None:
-        return True
-    try:
-        configured = getattr(config, "BEETS_DB_PATH", None)
-        if not configured:
-            return False
-        current, _parts = _migration_absolute_parts(configured)
-        if current != anchor["path"] or not _migration_chain_is_named(
-                anchor["parent_chain"], anchor["parent_names"]):
-            return False
-        descriptor = anchor["descriptor"]
-        if descriptor is None:
-            return _migration_name_missing(
-                anchor["parent_chain"][-1], anchor["name"])
-        return (
-            stat.S_ISREG(os.fstat(descriptor).st_mode)
-            and _migration_named_entry_matches(
-                anchor["parent_chain"][-1],
-                anchor["name"],
-                descriptor,
-            )
-        )
-    except (OSError, TypeError, ValueError):
-        return False
-
-
-_migration_named_directory_matches = functools.partial(
-    _migration_named_entry_matches, directory=True)
-
-
-def _close_migration_database_anchor(anchor):
-    if anchor is None:
-        return
-    descriptor = anchor.get("descriptor")
-    if descriptor is not None:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-    for directory_fd in reversed(anchor.get("parent_chain", ())):
-        try:
-            os.close(directory_fd)
-        except OSError:
-            pass
 
 
 def multi_artist_migration_destination(album, source_dir):

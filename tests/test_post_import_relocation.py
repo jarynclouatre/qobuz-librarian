@@ -293,6 +293,44 @@ def test_copy_failure_rolls_back_without_touching_source(tmp_path, monkeypatch):
     assert not list(music.glob(".qobuz-librarian-relocation-*"))
 
 
+def test_relocation_never_overwrites_beets_rows_changed_since_capture(
+        tmp_path, monkeypatch):
+    music, data, database = _configure(tmp_path, monkeypatch)
+    source = music / "Artist, Other" / "Album"
+    destination = music / "Artist" / "Album"
+    source.mkdir(parents=True)
+    track = source / "01 - Track.flac"
+    track.write_bytes(b"audio")
+    _database(database, tracks=(track,))
+    moved_by_beets = str(music / "Elsewhere" / track.name)
+
+    def beets_moves_the_track(name):
+        if name == "after-filesystem-publication":
+            connection = sqlite3.connect(database)
+            with connection:
+                connection.execute(
+                    "UPDATE items SET path = ? WHERE id = 1",
+                    (os.fsencode(moved_by_beets),),
+                )
+            connection.close()
+
+    monkeypatch.setattr(relocation, "_checkpoint", beets_moves_the_track)
+    authority = run_lock.acquire()
+    try:
+        with pytest.raises(relocation.PostImportRelocationAttention):
+            relocation.relocate_post_import_album(
+                source,
+                destination,
+                kind=relocation.RelocationKind.WHOLE_ALBUM,
+                authority=authority,
+            )
+    finally:
+        authority.close()
+
+    assert _paths(database)[0] == [moved_by_beets]
+    assert track.read_bytes() == b"audio"
+
+
 def test_album_link_is_refused_without_following_it(tmp_path, monkeypatch):
     music, _data, database = _configure(tmp_path, monkeypatch)
     source = music / "Artist, Other" / "Album"

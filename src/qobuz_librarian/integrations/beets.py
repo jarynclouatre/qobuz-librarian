@@ -27,7 +27,6 @@ import shutil
 import signal
 import sqlite3
 import stat
-import struct
 import subprocess
 import sys
 import tempfile
@@ -39,6 +38,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 
+from qobuz_librarian import beets_db
 from qobuz_librarian import config as cfg
 from qobuz_librarian.completion import (
     ManagedImportEvidence,
@@ -52,22 +52,17 @@ from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library import tags as tags_mod
 from qobuz_librarian.library.post_import_relocation_db import deleted_from_library
 from qobuz_librarian.library.scanner import clear_scan_caches
-from qobuz_librarian.library.sqlite_atomic import (
-    AtomicSQLiteWrite,
-    _SQLiteDatabaseExclusion,
-    inspect_sqlite_source,
-)
 from qobuz_librarian.recovery import (
     decode_recovery_json,
     normalise_recovery_owner,
 )
-from qobuz_librarian.safefile import identity_record as _ownership_identity
 from qobuz_librarian.safefile import (
+    fsync_dir,
     named_entry_matches,
     named_entry_missing,
     rename_noreplace,
-    write_atomic,
 )
+from qobuz_librarian.safefile import identity_record as _ownership_identity
 from qobuz_librarian.safefile import stat_identity as _staged_identity
 from qobuz_librarian.ui_cli import errors
 from qobuz_librarian.ui_cli.ask import ask
@@ -343,195 +338,6 @@ def _open_absolute_merge_chain(value, *, create=False):
             os.close(descriptor)
         raise OSError("absolute directory chain changed while it was opened")
     return chain, names
-
-
-def _open_beets_database_anchor():
-    """Bind the configured database parent chain and exact public leaf."""
-    configured = getattr(cfg, "BEETS_DB_PATH", None)
-    if not configured:
-        return None
-    database, parts = _merge_absolute_parts(configured)
-    if not parts:
-        raise OSError("invalid beets database path")
-    parent_chain, parent_names = _open_absolute_merge_chain(database.parent)
-    descriptor = None
-    try:
-        try:
-            descriptor = os.open(
-                database.name,
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent_chain[-1],
-            )
-        except FileNotFoundError:
-            descriptor = None
-        if descriptor is not None and not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError("beets database is not a regular file")
-        anchor = {
-            "path": database,
-            "parent_chain": parent_chain,
-            "parent_names": parent_names,
-            "name": database.name,
-            "descriptor": descriptor,
-        }
-        if not _beets_database_anchor_matches(anchor):
-            raise OSError("configured beets database changed while it was opened")
-        return anchor
-    except BaseException:
-        if descriptor is not None:
-            os.close(descriptor)
-        for directory_fd in reversed(parent_chain):
-            os.close(directory_fd)
-        raise
-
-
-def _beets_database_anchor_matches(anchor):
-    if anchor is None:
-        return True
-    try:
-        configured = getattr(cfg, "BEETS_DB_PATH", None)
-        if not configured:
-            return False
-        current, _parts = _merge_absolute_parts(configured)
-        if current != anchor["path"] or not _merge_chain_is_named(
-            anchor["parent_chain"], anchor["parent_names"]
-        ):
-            return False
-        descriptor = anchor["descriptor"]
-        if descriptor is None:
-            return named_entry_missing(anchor["parent_chain"][-1], anchor["name"])
-        return named_entry_matches(
-            anchor["parent_chain"][-1],
-            anchor["name"],
-            descriptor,
-            directory=False,
-        )
-    except (OSError, TypeError, ValueError):
-        return False
-
-
-def _close_beets_database_anchor(anchor):
-    if anchor is None:
-        return
-    descriptor = anchor.get("descriptor")
-    if descriptor is not None:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-    for directory_fd in reversed(anchor.get("parent_chain", ())):
-        try:
-            os.close(directory_fd)
-        except OSError:
-            pass
-
-
-def _bootstrap_beets_database_anchor(anchor):
-    """Create the configured database once without adopting a racing file."""
-    if anchor is None or anchor["descriptor"] is not None:
-        return
-    if not _beets_database_anchor_matches(anchor):
-        raise OSError("configured beets database changed before creation")
-    parent_fd = anchor["parent_chain"][-1]
-    temporary = f".qobuz-beets-bootstrap-{secrets.token_hex(16)}"
-    descriptor = None
-    connection = None
-    try:
-        descriptor = os.open(
-            temporary,
-            os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-            dir_fd=parent_fd,
-        )
-        os.fchmod(descriptor, 0o600)
-        if not named_entry_matches(parent_fd, temporary, descriptor, directory=False) or not (
-            _beets_database_anchor_matches(anchor)
-        ):
-            raise OSError("configured beets database changed during creation")
-        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-        timeout = float(timeout) if timeout and timeout > 0 else 5.0
-        connection = sqlite3.connect(
-            f"file:/proc/self/fd/{descriptor}?mode=rw&vfs=unix",
-            uri=True,
-            timeout=timeout,
-        )
-        journal_mode = connection.execute("PRAGMA journal_mode=MEMORY").fetchone()
-        if journal_mode is None or str(journal_mode[0]).casefold() != "memory":
-            raise sqlite3.DatabaseError("could not initialise the beets database safely")
-        connection.execute("PRAGMA user_version = 0")
-        connection.commit()
-        connection.close()
-        connection = None
-        os.fsync(descriptor)
-        if not named_entry_matches(parent_fd, temporary, descriptor, directory=False) or not (
-            _beets_database_anchor_matches(anchor)
-        ):
-            raise OSError("configured beets database changed during creation")
-
-        try:
-            rename_noreplace(parent_fd, temporary, parent_fd, anchor["name"])
-        except FileExistsError as exc:
-            raise OSError("configured beets database appeared before creation") from exc
-        anchor["descriptor"] = descriptor
-        os.fsync(parent_fd)
-        if not _beets_database_anchor_matches(anchor):
-            raise OSError("configured beets database changed after creation")
-    except BaseException:
-        if descriptor is not None and anchor["descriptor"] is None:
-            if named_entry_matches(parent_fd, anchor["name"], descriptor, directory=False):
-                anchor["descriptor"] = descriptor
-            elif named_entry_matches(parent_fd, temporary, descriptor, directory=False):
-                try:
-                    os.unlink(temporary, dir_fd=parent_fd)
-                    os.fsync(parent_fd)
-                except OSError:
-                    pass
-            if anchor["descriptor"] is None:
-                os.close(descriptor)
-        raise
-    finally:
-        if connection is not None:
-            connection.close()
-
-
-def _require_no_items_triggers(connection):
-    trigger = connection.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
-        "AND tbl_name = 'items' COLLATE NOCASE LIMIT 1"
-    ).fetchone()
-    if trigger is not None:
-        raise sqlite3.DatabaseError("custom items triggers make path updates unverifiable")
-
-
-def _require_delete_journal_mode(connection):
-    journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
-    if journal_mode is None or str(journal_mode[0]).casefold() != "delete":
-        raise sqlite3.DatabaseError("safe path updates require SQLite delete-journal mode")
-
-
-def _preflight_beets_database_anchor(anchor, anchors_match=None):
-    """Reject an unsafe DB before the first associated filesystem mutation."""
-    if anchor is None:
-        return
-    if not _beets_database_anchor_matches(anchor):
-        raise OSError("configured beets database changed before the move")
-    if anchor["descriptor"] is None:
-        raise OSError("configured beets database does not exist")
-    try:
-        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-        timeout = float(timeout) if timeout and timeout > 0 else 5.0
-        inspect_sqlite_source(
-            anchor,
-            _beets_database_anchor_matches,
-            lambda connection: (
-                _require_no_items_triggers(connection),
-                _require_delete_journal_mode(connection),
-            ),
-            connect=sqlite3.connect,
-            timeout=timeout,
-            anchors_match=anchors_match,
-        )
-    except sqlite3.Error as exc:
-        raise OSError(f"beets database preflight failed: {exc}") from exc
 
 
 def _rollback_exact_merge_entry(source_fd, source_name, destination_fd, destination_name, held_fd):
@@ -1627,99 +1433,59 @@ def _managed_catalogue_album(connection, destinations, root, *, replaced_entries
     return album_id, tuple(paths)
 
 
-def _managed_album_boundary(destinations, root, root_identity, *, database_anchor=None,
-                            replaced_entries=None):
+def _managed_album_boundary(destinations, root, root_identity, *, replaced_entries=None):
     """Bind imported destinations to one live Beets album directory."""
-    current_anchor = None
-    anchor = database_anchor
-    try:
-        if anchor is None:
-            current_anchor = _open_beets_database_anchor()
-            anchor = current_anchor
-        if (
-            anchor is None
-            or anchor.get("descriptor") is None
-            or not _beets_database_anchor_matches(anchor)
-        ):
-            return None
 
-        def inspect(connection):
-            root_path = os.path.abspath(root)
-            catalogue_album = _managed_catalogue_album(
-                connection, destinations, root_path, replaced_entries=replaced_entries,
-            )
-            if catalogue_album is None:
-                return None
-            _album_id, paths = catalogue_album
-            # The album folder is wherever the user's path template put this
-            # album's tracks: their deepest shared folder, so disc folders of
-            # any name below it stay inside it. A template that names the
-            # disc in the album's own folder takes the standard import.
-            album_path = os.path.commonpath(
-                [os.path.dirname(relative) for relative in paths]
-            )
-            if album_path in ("", "."):
-                return None
-            album_identity = _managed_album_directory_identity(root_path, root_identity, album_path)
-            if album_identity is None:
-                return None
-            return album_path, album_identity
-
-        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-        timeout = float(timeout) if timeout and timeout > 0 else 5.0
-        return inspect_sqlite_source(
-            anchor,
-            _beets_database_anchor_matches,
-            inspect,
-            connect=sqlite3.connect,
-            timeout=timeout,
+    def inspect(connection):
+        root_path = os.path.abspath(root)
+        catalogue_album = _managed_catalogue_album(
+            connection, destinations, root_path, replaced_entries=replaced_entries,
         )
+        if catalogue_album is None:
+            return None
+        _album_id, paths = catalogue_album
+        # The album folder is wherever the user's path template put this
+        # album's tracks: their deepest shared folder, so disc folders of
+        # any name below it stay inside it. A template that names the
+        # disc in the album's own folder takes the standard import.
+        album_path = os.path.commonpath(
+            [os.path.dirname(relative) for relative in paths]
+        )
+        if album_path in ("", "."):
+            return None
+        album_identity = _managed_album_directory_identity(root_path, root_identity, album_path)
+        if album_identity is None:
+            return None
+        return album_path, album_identity
+
+    database = beets_db.path()
+    if database is None:
+        return None
+    try:
+        return beets_db.read(database, inspect)
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return None
-    finally:
-        if current_anchor is not None:
-            _close_beets_database_anchor(current_anchor)
 
 
-def _managed_database_matches(database_anchor, destinations, root, *, replaced_entries=None):
-    current_anchor = None
-    anchor = database_anchor
+def _managed_database_matches(destinations, root, *, replaced_entries=None):
+    database = beets_db.path()
+    if database is None:
+        return False
     try:
-        if anchor is None:
-            return False
-        if anchor.get("descriptor") is None:
-            current_anchor = _open_beets_database_anchor()
-            anchor = current_anchor
-        elif not _beets_database_anchor_matches(anchor):
-            return False
-        if (
-            anchor is None
-            or anchor.get("descriptor") is None
-            or not _beets_database_anchor_matches(anchor)
-        ):
-            return False
-        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-        timeout = float(timeout) if timeout and timeout > 0 else 5.0
         return bool(
-            inspect_sqlite_source(
-                anchor,
-                _beets_database_anchor_matches,
+            beets_db.read(
+                database,
                 lambda connection: _managed_catalogue_album(
                     connection, destinations, root, replaced_entries=replaced_entries,
                 )
                 is not None,
-                connect=sqlite3.connect,
-                timeout=timeout,
             )
         )
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return False
-    finally:
-        if current_anchor is not None:
-            _close_beets_database_anchor(current_anchor)
 
 
-def _read_managed_ownership_evidence(capture, *, database_anchor=None):
+def _read_managed_ownership_evidence(capture):
     if not isinstance(capture, dict):
         return None
     manifest = capture.get("_file")
@@ -1891,8 +1657,7 @@ def _read_managed_ownership_evidence(capture, *, database_anchor=None):
         return None
     replaced = (_beets_snapshot_from_record(first["replaced_entries"])
                 if "replaced_entries" in first else None)
-    if not _managed_database_matches(database_anchor, destinations, final["root"],
-                                     replaced_entries=replaced):
+    if not _managed_database_matches(destinations, final["root"], replaced_entries=replaced):
         return None
     return (
         final
@@ -1903,8 +1668,7 @@ def _read_managed_ownership_evidence(capture, *, database_anchor=None):
     )
 
 
-def _managed_completion_from_snapshot(carrier, evidence, *, database_anchor=None,
-                                      replaced_entries=None):
+def _managed_completion_from_snapshot(carrier, evidence, *, replaced_entries=None):
     try:
         if (
             type(carrier) is not dict
@@ -2006,7 +1770,6 @@ def _managed_completion_from_snapshot(carrier, evidence, *, database_anchor=None
             destination_paths,
             evidence["root"],
             root_identity,
-            database_anchor=database_anchor,
             replaced_entries=replaced_entries,
         )
         if album_boundary is None:
@@ -3420,14 +3183,10 @@ class _ManagedEvidenceLifetime:
         self,
         *,
         capture,
-        database_anchor,
-        database_exclusion,
         root_chain,
         parent_chain,
     ):
         self.capture = capture
-        self.database_anchor = database_anchor
-        self.database_exclusion = database_exclusion
         self.root_chain = root_chain
         self.parent_chain = parent_chain
         self.closed = False
@@ -3440,32 +3199,6 @@ class _ManagedEvidenceLifetime:
         def remember(exc):
             nonlocal error
             error = _prefer_managed_cleanup_error(error, exc)
-
-        exclusion = self.database_exclusion
-        self.database_exclusion = None
-        if exclusion is not None:
-            try:
-                remember(exclusion.release())
-            except BaseException as exc:
-                remember(exc)
-
-        anchor = self.database_anchor
-        self.database_anchor = None
-        if anchor is not None:
-            descriptor = anchor.get("descriptor")
-            anchor["descriptor"] = None
-            if descriptor is not None:
-                try:
-                    _close_managed_descriptor(descriptor)
-                except BaseException as exc:
-                    remember(exc)
-            descriptors = tuple(reversed(anchor.get("parent_chain", ())))
-            anchor["parent_chain"] = []
-            for descriptor in descriptors:
-                try:
-                    _close_managed_descriptor(descriptor)
-                except BaseException as exc:
-                    remember(exc)
 
         carrier = self.capture.get("_file")
         self.capture["_file"] = None
@@ -3507,28 +3240,22 @@ def _finalize_managed_evidence_lifetime(lifetime):
 
 
 class ManagedEvidenceLease:
-    """Keep restart evidence and its filesystem/database anchors live."""
+    """Keep restart evidence and its filesystem anchors live."""
 
     def __init__(
         self,
         *,
         carrier,
         capture,
-        database_anchor,
-        database_exclusion,
         root_chain,
         parent_chain,
     ):
         self._carrier = carrier
         self._capture = capture
-        self._database_anchor = database_anchor
-        self._database_exclusion = database_exclusion
         self._root_chain = root_chain
         self._parent_chain = parent_chain
         lifetime = _ManagedEvidenceLifetime(
             capture=capture,
-            database_anchor=database_anchor,
-            database_exclusion=database_exclusion,
             root_chain=root_chain,
             parent_chain=parent_chain,
         )
@@ -3559,10 +3286,7 @@ class ManagedEvidenceLease:
         before = _managed_carrier_stat(self._capture["_file"])
         if before[4] != 1:
             raise ManagedEvidenceUnavailable("managed completion carrier has another public link")
-        snapshot = _read_managed_ownership_evidence(
-            self._capture,
-            database_anchor=self._database_anchor,
-        )
+        snapshot = _read_managed_ownership_evidence(self._capture)
         if snapshot is None:
             raise ManagedEvidenceUnavailable(
                 "managed completion evidence changed while it was read"
@@ -3570,7 +3294,6 @@ class ManagedEvidenceLease:
         evidence = _managed_completion_from_snapshot(
             self._carrier,
             snapshot,
-            database_anchor=self._database_anchor,
             replaced_entries=_beets_snapshot_from_record(
                 self._capture["replaced_entries"])
                 if "replaced_entries" in self._capture else None,
@@ -3608,8 +3331,6 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
     parent_chain = []
     root_chain = []
     carrier_file = None
-    database_anchor = None
-    exclusion = _SQLiteDatabaseExclusion()
     lease = None
     try:
         if type(expected_owner) is RecoveryOwner:
@@ -3768,19 +3489,14 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
         ):
             raise ManagedEvidenceUnavailable("managed completion namespace changed")
 
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None or database_anchor.get("descriptor") is None:
+        if not database.is_file():
             raise ManagedEvidenceUnavailable("managed completion database is unavailable")
-        exclusion.acquire(database_anchor["parent_chain"][-1])
-        _preflight_beets_database_anchor(database_anchor)
         lease = ManagedEvidenceLease(
             carrier={
                 **carrier_reference,
                 "owner": dict(expected_owner),
             },
             capture=capture,
-            database_anchor=database_anchor,
-            database_exclusion=exclusion,
             root_chain=root_chain,
             parent_chain=parent_chain,
         )
@@ -3796,8 +3512,6 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
         else:
             lifetime = _ManagedEvidenceLifetime(
                 capture={"_file": carrier_file},
-                database_anchor=database_anchor,
-                database_exclusion=exclusion,
                 root_chain=root_chain,
                 parent_chain=parent_chain,
             )
@@ -4455,64 +4169,6 @@ def _configured_beets_plugins(runtime=None, folder=None):
     }
 
 
-# SQLite's unix locks: a writer holds the reserved byte just after this one
-# until it commits.
-_SQLITE_PENDING_BYTE = 0x40000000
-_FLOCK = struct.Struct("hhqqi4x")
-
-
-def _database_write_locked(anchor):
-    """True while another process holds SQLite's write lock on the database."""
-    descriptor = (anchor or {}).get("descriptor")
-    if descriptor is None:
-        return False
-    probe = _FLOCK.pack(fcntl.F_WRLCK, os.SEEK_SET, _SQLITE_PENDING_BYTE, 2, 0)
-    try:
-        held = fcntl.fcntl(descriptor, fcntl.F_GETLK, probe)
-    except OSError:
-        return False
-    return _FLOCK.unpack(held)[0] != fcntl.F_UNLCK
-
-
-def recover_interrupted_beets_write():
-    """Let SQLite settle the journal a beets write cut short by a hard stop
-    left beside the database, which keeps every later import out. Only
-    while no program holds the database's write lock. True when it did."""
-    exclusion = _SQLiteDatabaseExclusion()
-    anchor = None
-    try:
-        anchor = _open_beets_database_anchor()
-        if anchor is None or anchor["descriptor"] is None:
-            return False
-        parent_fd = anchor["parent_chain"][-1]
-        if named_entry_missing(parent_fd, anchor["name"] + "-journal"):
-            return False
-        exclusion.acquire(parent_fd)
-        if _database_write_locked(anchor) or not _beets_database_anchor_matches(anchor):
-            return False
-        connection = sqlite3.connect(
-            os.fspath(anchor["path"]), timeout=_beets_lock_wait(),
-            isolation_level=None)
-        try:
-            mode = connection.execute("PRAGMA journal_mode").fetchone()
-            if mode is None or str(mode[0]).casefold() != "delete":
-                return False
-            # A write is what makes SQLite remove the journal once it has
-            # rolled back whatever the cut-short write left half done.
-            connection.execute("BEGIN IMMEDIATE")
-            (version,) = connection.execute("PRAGMA user_version").fetchone()
-            connection.execute(f"PRAGMA user_version = {int(version)}")
-            connection.execute("COMMIT")
-        finally:
-            connection.close()
-        return named_entry_missing(parent_fd, anchor["name"] + "-journal")
-    except (OSError, sqlite3.Error, TypeError, ValueError):
-        return False
-    finally:
-        exclusion.release()
-        _close_beets_database_anchor(anchor)
-
-
 def remove_stale_import_overrides():
     """Remove the one-shot import settings files a hard stop left beside the
     beets database. An import holds a lock on its own file while it runs, so
@@ -4543,12 +4199,6 @@ def remove_stale_import_overrides():
         finally:
             os.close(descriptor)
     return removed
-
-
-def _beets_lock_wait():
-    """Seconds an import waits on a Beets database another program locked."""
-    idle = float(cfg.BEETS_TIMEOUT or 0)
-    return 60.0 if not idle or idle >= 120 else idle / 2
 
 
 def _staged_compilation(paths):
@@ -4657,52 +4307,56 @@ def _back_up_before_migrations(plugin_config, database_path):
     if not expected:
         return False
     backup = Path(f"{database_path}-before-migrations.bak")
-    anchor = None
-    try:
-        anchor = _open_beets_database_anchor()
-        if anchor is None or anchor.get("descriptor") is None:
-            return False
+    database = beets_db.path()
+    if database is None or not database.is_file():
+        return False
 
-        def inspect(connection):
-            tables = {
-                row[0] for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'")
+    def inspect(connection):
+        tables = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        done = set()
+        if "migrations" in tables:
+            done = {
+                (row[0], row[1]) for row in connection.execute(
+                    "SELECT name, table_name FROM migrations")
             }
-            done = set()
-            if "migrations" in tables:
-                done = {
-                    (row[0], row[1]) for row in connection.execute(
-                        "SELECT name, table_name FROM migrations")
-                }
-            if expected <= done:
-                return False
-            if backup.exists():
-                return True
-            # The inspection holds the database's write lock, so the file
-            # on disk is a whole, settled copy.
-            def chunks():
-                offset = 0
-                while chunk := os.pread(anchor["descriptor"], 1 << 20, offset):
-                    yield chunk
-                    offset += len(chunk)
-
-            write_atomic(backup, chunks(), prefix=f".{backup.name}.")
-            log.info(fmt(C.GRAY, f"  Saved a copy of the beets database at {backup} "
-                                 "before Beets updates it."))
+        if expected <= done:
+            return False
+        if backup.exists():
             return True
+        # SQLite's own copy is whole whatever the journal mode.
+        descriptor, temporary = tempfile.mkstemp(
+            dir=backup.parent, prefix=f".{backup.name}.", suffix=".tmp")
+        os.close(descriptor)
+        try:
+            target = sqlite3.connect(temporary)
+            try:
+                connection.backup(target)
+            finally:
+                target.close()
+            descriptor = os.open(temporary, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary, backup)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+        fsync_dir(backup.parent)
+        log.info(fmt(C.GRAY, f"  Saved a copy of the beets database at {backup} "
+                             "before Beets updates it."))
+        return True
 
-        return bool(inspect_sqlite_source(
-            anchor,
-            _beets_database_anchor_matches,
-            inspect,
-            connect=sqlite3.connect,
-            timeout=_beets_lock_wait(),
-        ))
+    try:
+        return bool(beets_db.read(database, inspect))
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return False
-    finally:
-        if anchor is not None:
-            _close_beets_database_anchor(anchor)
 
 
 def _build_import_override_yaml(
@@ -4753,7 +4407,7 @@ def _build_import_override_yaml(
         override_yaml += "  set_fields:\n    comp: 'True'\n"
     # Another program reading the library, such as `beet web`, can hold it
     # longer than Beets' default five seconds.
-    override_yaml += f"timeout: {_beets_lock_wait():g}\n"
+    override_yaml += f"timeout: {beets_db.timeout():g}\n"
     # A database this import creates has nothing a migration could lose, and
     # beets would leave a copy of it beside the new file for every migration.
     try:
@@ -5721,9 +5375,7 @@ def _finish_beets_thread(thread, completion):
                 error = exc
 
 
-def _spawn_owned_beets_process(
-    owner, args, *, database_exclusion=None, before_spawn=None, **options
-):
+def _spawn_owned_beets_process(owner, args, *, before_spawn=None, **options):
     """Spawn under a guardian that remains until the child is reaped."""
     factory = subprocess.Popen
     process = None
@@ -5739,7 +5391,6 @@ def _spawn_owned_beets_process(
         {
             "cancel": False,
             "error": None,
-            "retained_lock_fd": None,
             "retired": False,
             "retirement_error": None,
             "spawn_attempted": False,
@@ -5750,14 +5401,7 @@ def _spawn_owned_beets_process(
     )
 
     def _guardian():
-        child_lock_fd = None
-        retirement_proven = False
         try:
-            if database_exclusion is not None:
-                child_lock_fd = database_exclusion.duplicate_for_child()
-                pass_fds = set(options.get("pass_fds", ()))
-                pass_fds.add(child_lock_fd)
-                options["pass_fds"] = tuple(sorted(pass_fds))
             if retire_request.is_set():
                 owner["cancel"] = True
             if not owner["cancel"]:
@@ -5784,7 +5428,7 @@ def _spawn_owned_beets_process(
                     owner["retirement_error"] = wait_error
             process_to_retire = owner.get("process")
             if process_to_retire is not None:
-                retirement_error, retirement_proven = _retire_beets_process_now(
+                retirement_error, _proven = _retire_beets_process_now(
                     process_to_retire,
                     spawn_attempted=owner["spawn_attempted"],
                     require_group_drain=factory is _SYSTEM_POPEN,
@@ -5793,31 +5437,7 @@ def _spawn_owned_beets_process(
                     owner["retirement_error"] = retirement_error
                 elif retirement_error is not None:
                     owner["retirement_error"].add_note("beets process retirement also failed")
-            else:
-                retirement_proven = not owner["spawn_attempted"]
-            if child_lock_fd is not None and retirement_proven:
-                lease_error, retirement_proven = database_exclusion.retire_child_duplicate(
-                    child_lock_fd
-                )
-                child_lock_fd = None
-                if owner["retirement_error"] is None:
-                    owner["retirement_error"] = lease_error
-                elif lease_error is not None:
-                    owner["retirement_error"].add_note("beets child-lock retirement also failed")
         finally:
-            if child_lock_fd is not None and retirement_proven:
-                try:
-                    os.close(child_lock_fd)
-                except BaseException as exc:
-                    if owner["retirement_error"] is None:
-                        owner["retirement_error"] = exc
-                    else:
-                        owner["retirement_error"].add_note(
-                            "beets guardian lock cleanup also failed"
-                        )
-            elif child_lock_fd is not None:
-                owner["retained_lock_fd"] = child_lock_fd
-                child_lock_fd = None
             owner["retired"] = True
             completion_error = _set_beets_event(retire_completion)
             if owner["retirement_error"] is None:
@@ -6089,7 +5709,7 @@ def _wait_owned_beets_process_without_reaping(process, timeout):
         time.sleep(0.01)
 
 
-def _run_owned_beets_capture(args, *, env, timeout, database_exclusion, before_spawn=None):
+def _run_owned_beets_capture(args, *, env, timeout, before_spawn=None):
     owner = {"process": None}
     caught = None
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -6116,7 +5736,6 @@ def _run_owned_beets_capture(args, *, env, timeout, database_exclusion, before_s
         process = _spawn_owned_beets_process(
             owner,
             args,
-            database_exclusion=database_exclusion,
             before_spawn=before_spawn,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -6258,37 +5877,12 @@ def _beets_direct(
     beets_runtime=None,
     before_managed_spawn=None,
 ):
-    exclusion = _SQLiteDatabaseExclusion()
-    database_anchor = None
     result = None
     caught = None
-    database_ready = False
-    database_busy = False
     try:
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None:
-            raise OSError("configured beets database is unavailable")
-        exclusion.acquire(database_anchor["parent_chain"][-1])
-        # Another program part-way through a write holds SQLite's write lock
-        # and leaves its journal beside the database; wait for it to finish
-        # rather than give up at once.
-        deadline = time.monotonic() + _beets_lock_wait()
-        while True:
-            try:
-                _bootstrap_beets_database_anchor(database_anchor)
-                _preflight_beets_database_anchor(database_anchor)
-                break
-            except (OSError, sqlite3.Error):
-                database_busy = _database_write_locked(database_anchor)
-                if not database_busy or time.monotonic() >= deadline:
-                    raise
-                time.sleep(1)
-        database_ready = True
         result = _beets_direct_guarded(
             override_path,
             paths,
-            database_exclusion=exclusion,
-            database_anchor=database_anchor,
             ownership_capture=ownership_capture,
             intended_audio=intended_audio,
             managed_capture=managed_capture,
@@ -6304,42 +5898,7 @@ def _beets_direct(
             caught.add_note(f"beets run cleanup also failed: {cleanup_error}")
         else:
             caught = cleanup_error
-
-    exclusion_error = exclusion.release()
-    _close_beets_database_anchor(database_anchor)
-    if exclusion_error is not None:
-        if caught is not None:
-            caught.add_note("beets database exclusion cleanup also failed")
-        else:
-            log.info(
-                fmt(
-                    C.RED,
-                    "  ✗  The beets database exclusion could not be released; "
-                    "the import was not accepted.",
-                )
-            )
-            return False, "error"
     if caught is not None:
-        if not database_ready and isinstance(
-            caught, (OSError, sqlite3.Error, TypeError, ValueError)
-        ):
-            if database_busy:
-                log.info(
-                    fmt(
-                        C.RED,
-                        "  ✗  The beets database is busy: another program is "
-                        "writing to it. Nothing was imported; retry once it "
-                        "has finished.",
-                    )
-                )
-            else:
-                log.info(
-                    fmt(
-                        C.RED,
-                        f"  ✗  The beets database is not safe to open ({caught}).",
-                    )
-                )
-            return False, "error"
         raise caught.with_traceback(caught.__traceback__)
     return result
 
@@ -6348,8 +5907,6 @@ def _beets_direct_guarded(
     override_path,
     paths,
     *,
-    database_exclusion,
-    database_anchor=None,
     ownership_capture=None,
     intended_audio=None,
     managed_capture=None,
@@ -6551,7 +6108,6 @@ def _beets_direct_guarded(
                 return _spawn_owned_beets_process(
                     process_owner,
                     cmd,
-                    database_exclusion=database_exclusion,
                     before_spawn=(
                         prepare_managed_spawn
                         if isinstance(managed_capture, dict)
@@ -6654,10 +6210,7 @@ def _beets_direct_guarded(
         else None
     )
     managed_result = (
-        _read_managed_ownership_evidence(
-            managed_capture,
-            database_anchor=database_anchor,
-        )
+        _read_managed_ownership_evidence(managed_capture)
         if managed_capture is not None
         else None
     )
@@ -6756,7 +6309,7 @@ def _beets_direct_guarded(
         log.info(fmt(
             C.RED,
             "  ✗  The beets database was busy: another program held it for "
-            f"over {_beets_lock_wait():g} seconds. Retry once it has finished.",
+            f"over {beets_db.timeout():g} seconds. Retry once it has finished.",
         ))
     log.info(fmt(C.RED, f"  ✗  beets exited {proc.returncode}."))
     log.info(fmt(C.GRAY, f"     Config: {cfg.BEETS_CONFIG_DIR}/config.yaml"))
@@ -7170,14 +6723,12 @@ def capture_beets_album_entries(album_dir):
     except (OSError, TypeError, ValueError):
         return None
 
-    database_anchor = None
+    database = beets_db.path()
+    if database is None:
+        return None
+    if not database.exists():
+        return BeetsAlbumSnapshot((), (), (), (), (), (), (), ())
     try:
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None:
-            return None
-        if database_anchor["descriptor"] is None:
-            return BeetsAlbumSnapshot((), (), (), (), (), (), (), ())
-
         def inspect(connection):
             (
                 album_columns,
@@ -7245,19 +6796,9 @@ def capture_beets_album_entries(album_dir):
                 tuple(album_attribute_rows),
             )
 
-        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-        timeout = float(timeout) if timeout and timeout > 0 else 5.0
-        return inspect_sqlite_source(
-            database_anchor,
-            _beets_database_anchor_matches,
-            inspect,
-            connect=sqlite3.connect,
-            timeout=timeout,
-        )
+        return beets_db.read(database, inspect)
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return None
-    finally:
-        _close_beets_database_anchor(database_anchor)
 
 
 def _carry_item_fields(connection, retiring, replacements, item_columns):
@@ -7352,149 +6893,128 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
     except (OSError, TypeError, ValueError):
         return False
 
-    database_anchor = None
-    transaction = None
+    database = beets_db.path()
+    if database is None or not database.is_file():
+        return False
     try:
-        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-        timeout = float(timeout) if timeout and timeout > 0 else 5.0
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None or database_anchor["descriptor"] is None:
-            return False
-        transaction = AtomicSQLiteWrite(
-            database_anchor,
-            _beets_database_anchor_matches,
-            connect=sqlite3.connect,
-            timeout=timeout,
-        )
-        connection = transaction.open()
-        connection.execute("BEGIN IMMEDIATE")
-        (
-            album_columns,
-            item_columns,
-            album_attribute_columns,
-            item_attribute_columns,
-        ) = _replacement_catalogue_columns(connection)
-        item_ids = tuple(sorted(_captured_beets_item_ids(connection, snapshot)))
+        with beets_db.transaction(database) as connection:
+            (
+                album_columns,
+                item_columns,
+                album_attribute_columns,
+                item_attribute_columns,
+            ) = _replacement_catalogue_columns(connection)
+            item_ids = tuple(sorted(_captured_beets_item_ids(connection, snapshot)))
 
-        item_id_index = item_columns.index("id")
-        item_path_index = item_columns.index("path")
-        captured_ids = set(item_ids)
-        replacement_rows = {path: [] for path in expected_paths}
-        for row in connection.execute(
-            f"SELECT {','.join(_sql_identifier(column) for column in item_columns)} "
-            "FROM items ORDER BY id"
-        ):
-            item_id = row[item_id_index]
-            path = _catalogue_item_path(row[item_path_index], allow_external=True)
-            if item_id in captured_ids:
-                continue
-            if path in replacement_rows:
-                replacement_rows[path].append(item_id)
-            elif path == replacement_root or replacement_root in path.parents:
-                raise sqlite3.IntegrityError("replacement catalogue has an unexpected item")
-        if any(len(ids) != 1 for ids in replacement_rows.values()):
-            raise sqlite3.IntegrityError("replacement catalogue is incomplete")
-
-        retiring_album_ids = []
-        if item_ids:
-            placeholders = ",".join("?" for _ in item_ids)
-            for album_id in snapshot.album_ids:
-                remaining = connection.execute(
-                    f"SELECT 1 FROM items WHERE album_id = ? "
-                    f"AND id NOT IN ({placeholders}) LIMIT 1",
-                    (album_id, *item_ids),
-                ).fetchone()
-                if remaining is None:
-                    retiring_album_ids.append(album_id)
-            if len(retiring_album_ids) == 1 and _adopt_replacement_album(
-                    connection, retiring_album_ids[0], snapshot,
-                    [ids[0] for ids in replacement_rows.values()],
-                    album_columns):
-                retiring_album_ids = []
-            _carry_item_fields(
-                connection,
-                {item_id: _catalogue_item_path(raw, allow_external=True)
-                 for item_id, raw in connection.execute(
-                     f"SELECT id, path FROM items WHERE id IN ({placeholders})", item_ids)},
-                {path: ids[0] for path, ids in replacement_rows.items()},
-                item_columns)
-
-            deleted_attributes = connection.execute(
-                f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
-                item_ids,
-            )
-            if deleted_attributes.rowcount != len(snapshot.item_attribute_rows):
-                raise sqlite3.IntegrityError("captured beets item metadata changed")
-            deleted_items = connection.execute(
-                f"DELETE FROM items WHERE id IN ({placeholders})", item_ids
-            )
-            if deleted_items.rowcount != len(item_ids):
-                raise sqlite3.IntegrityError("captured beets items changed")
-
-        if retiring_album_ids:
-            placeholders = ",".join("?" for _ in retiring_album_ids)
-            expected_attribute_count = sum(
-                1
-                for row in snapshot.album_attribute_rows
-                if row[snapshot.album_attribute_columns.index("entity_id")]
-                in retiring_album_ids
-            )
-            deleted_attributes = connection.execute(
-                f"DELETE FROM album_attributes WHERE entity_id IN ({placeholders})",
-                retiring_album_ids,
-            )
-            if deleted_attributes.rowcount != expected_attribute_count:
-                raise sqlite3.IntegrityError("captured beets album metadata changed")
-            deleted_albums = connection.execute(
-                f"DELETE FROM albums WHERE id IN ({placeholders})", retiring_album_ids
-            )
-            if deleted_albums.rowcount != len(retiring_album_ids):
-                raise sqlite3.IntegrityError("captured beets albums changed")
-
-        if not item_ids:
-            connection.rollback()
-            return before_commit is None or before_commit()
-
-        def validate(current):
-            if current.execute("PRAGMA quick_check").fetchone() != ("ok",):
-                return False
-            if _consolidation_rows_for_ids(
-                current, "items", item_columns, "id", item_ids
+            item_id_index = item_columns.index("id")
+            item_path_index = item_columns.index("path")
+            captured_ids = set(item_ids)
+            replacement_rows = {path: [] for path in expected_paths}
+            for row in connection.execute(
+                f"SELECT {','.join(_sql_identifier(column) for column in item_columns)} "
+                "FROM items ORDER BY id"
             ):
-                return False
-            counts = {path: 0 for path in expected_paths}
-            for item_id, raw_path in current.execute("SELECT id, path FROM items"):
+                item_id = row[item_id_index]
+                path = _catalogue_item_path(row[item_path_index], allow_external=True)
                 if item_id in captured_ids:
-                    return False
-                path = _catalogue_item_path(raw_path, allow_external=True)
-                if path in counts:
-                    counts[path] += 1
-            return all(count == 1 for count in counts.values())
+                    continue
+                if path in replacement_rows:
+                    replacement_rows[path].append(item_id)
+                elif path == replacement_root or replacement_root in path.parents:
+                    raise sqlite3.IntegrityError("replacement catalogue has an unexpected item")
+            if any(len(ids) != 1 for ids in replacement_rows.values()):
+                raise sqlite3.IntegrityError("replacement catalogue is incomplete")
 
-        transaction.commit_and_publish(
-            lambda: (_beets_database_anchor_matches(database_anchor)
-                     and (before_commit is None or before_commit())), validate,
-        )
+            retiring_album_ids = []
+            if item_ids:
+                placeholders = ",".join("?" for _ in item_ids)
+                for album_id in snapshot.album_ids:
+                    remaining = connection.execute(
+                        f"SELECT 1 FROM items WHERE album_id = ? "
+                        f"AND id NOT IN ({placeholders}) LIMIT 1",
+                        (album_id, *item_ids),
+                    ).fetchone()
+                    if remaining is None:
+                        retiring_album_ids.append(album_id)
+                if len(retiring_album_ids) == 1 and _adopt_replacement_album(
+                        connection, retiring_album_ids[0], snapshot,
+                        [ids[0] for ids in replacement_rows.values()],
+                        album_columns):
+                    retiring_album_ids = []
+                _carry_item_fields(
+                    connection,
+                    {item_id: _catalogue_item_path(raw, allow_external=True)
+                     for item_id, raw in connection.execute(
+                         f"SELECT id, path FROM items WHERE id IN ({placeholders})", item_ids)},
+                    {path: ids[0] for path, ids in replacement_rows.items()},
+                    item_columns)
+
+                deleted_attributes = connection.execute(
+                    f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
+                    item_ids,
+                )
+                if deleted_attributes.rowcount != len(snapshot.item_attribute_rows):
+                    raise sqlite3.IntegrityError("captured beets item metadata changed")
+                deleted_items = connection.execute(
+                    f"DELETE FROM items WHERE id IN ({placeholders})", item_ids
+                )
+                if deleted_items.rowcount != len(item_ids):
+                    raise sqlite3.IntegrityError("captured beets items changed")
+
+            if retiring_album_ids:
+                placeholders = ",".join("?" for _ in retiring_album_ids)
+                expected_attribute_count = sum(
+                    1
+                    for row in snapshot.album_attribute_rows
+                    if row[snapshot.album_attribute_columns.index("entity_id")]
+                    in retiring_album_ids
+                )
+                deleted_attributes = connection.execute(
+                    f"DELETE FROM album_attributes WHERE entity_id IN ({placeholders})",
+                    retiring_album_ids,
+                )
+                if deleted_attributes.rowcount != expected_attribute_count:
+                    raise sqlite3.IntegrityError("captured beets album metadata changed")
+                deleted_albums = connection.execute(
+                    f"DELETE FROM albums WHERE id IN ({placeholders})", retiring_album_ids
+                )
+                if deleted_albums.rowcount != len(retiring_album_ids):
+                    raise sqlite3.IntegrityError("captured beets albums changed")
+
+            if not item_ids:
+                connection.rollback()
+                return before_commit is None or before_commit()
+
+            def validate(current):
+                if current.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                    return False
+                if _consolidation_rows_for_ids(
+                    current, "items", item_columns, "id", item_ids
+                ):
+                    return False
+                counts = {path: 0 for path in expected_paths}
+                for item_id, raw_path in current.execute("SELECT id, path FROM items"):
+                    if item_id in captured_ids:
+                        return False
+                    path = _catalogue_item_path(raw_path, allow_external=True)
+                    if path in counts:
+                        counts[path] += 1
+                return all(count == 1 for count in counts.values())
+            if not validate(connection):
+                raise sqlite3.IntegrityError("the replacement catalogue was not exact")
+            if before_commit is not None and not before_commit():
+                raise OSError("the replacement changed before the database commit")
         clear_scan_caches()
         return True
     except Exception as exc:
-        outcome = (
-            "the committed catalogue change may already be visible"
-            if transaction is not None and transaction.published
-            else "leaving the captured entries unchanged"
-        )
         log.info(
             fmt(
                 C.YELLOW,
                 f"  ⚠  Couldn't safely retire the replaced Beets entries ({exc}); "
-                f"{outcome}.",
+                "leaving the captured entries unchanged.",
             )
         )
         return False
-    finally:
-        if transaction is not None:
-            transaction.close()
-        _close_beets_database_anchor(database_anchor)
 
 
 def retire_managed_replacement_entries(carrier, owner, replacement_dir,
@@ -7686,130 +7206,105 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
     except (OSError, TypeError, ValueError, KeyError):
         return False
 
-    database_anchor = None
-    transaction = None
+    database = beets_db.path()
+    if database is None or not database.is_file():
+        return False
     try:
-        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-        timeout = float(timeout) if timeout and timeout > 0 else 5.0
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None or database_anchor["descriptor"] is None:
-            return False
-        if not inspect_sqlite_source(
-            database_anchor,
-            _beets_database_anchor_matches,
+        if not beets_db.read(
+            database,
             lambda current: _backup_retirement(current, old_paths, replacement_paths)[0],
-            connect=sqlite3.connect,
-            timeout=timeout,
         ):
             return True
-        transaction = AtomicSQLiteWrite(
-            database_anchor,
-            _beets_database_anchor_matches,
-            connect=sqlite3.connect,
-            timeout=timeout,
-        )
-        connection = transaction.open()
-        connection.execute("BEGIN IMMEDIATE")
-        (
-            retiring_ids,
-            retiring_album_ids,
-            replacement_album_id,
-            album_attribute_columns,
-            item_attribute_columns,
-        ) = _backup_retirement(connection, old_paths, replacement_paths)
-        if not retiring_ids:
-            connection.rollback()
-            return True
-
-        placeholders = ",".join("?" for _ in retiring_ids)
-        expected_item_attributes = _consolidation_rows_for_ids(
-            connection,
-            "item_attributes",
-            item_attribute_columns,
-            "entity_id",
-            retiring_ids,
-        )
-        deleted_attributes = connection.execute(
-            f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
-            retiring_ids,
-        )
-        if deleted_attributes.rowcount != len(expected_item_attributes):
-            raise sqlite3.IntegrityError("Beets item metadata changed")
-        deleted_items = connection.execute(
-            f"DELETE FROM items WHERE id IN ({placeholders})",
-            retiring_ids,
-        )
-        if deleted_items.rowcount != len(retiring_ids):
-            raise sqlite3.IntegrityError("Beets items changed")
-
-        empty_album_ids = []
-        for album_id in sorted(retiring_album_ids):
-            if connection.execute(
-                "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,)
-            ).fetchone() is None:
-                empty_album_ids.append(album_id)
-        if empty_album_ids:
-            placeholders = ",".join("?" for _ in empty_album_ids)
-            expected_album_attributes = _consolidation_rows_for_ids(
-                connection,
-                "album_attributes",
+        with beets_db.transaction(database) as connection:
+            (
+                retiring_ids,
+                retiring_album_ids,
+                replacement_album_id,
                 album_attribute_columns,
+                item_attribute_columns,
+            ) = _backup_retirement(connection, old_paths, replacement_paths)
+            if not retiring_ids:
+                connection.rollback()
+                return True
+
+            placeholders = ",".join("?" for _ in retiring_ids)
+            expected_item_attributes = _consolidation_rows_for_ids(
+                connection,
+                "item_attributes",
+                item_attribute_columns,
                 "entity_id",
-                empty_album_ids,
+                retiring_ids,
             )
             deleted_attributes = connection.execute(
-                f"DELETE FROM album_attributes WHERE entity_id IN ({placeholders})",
-                empty_album_ids,
+                f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
+                retiring_ids,
             )
-            if deleted_attributes.rowcount != len(expected_album_attributes):
-                raise sqlite3.IntegrityError("Beets album metadata changed")
-            deleted_albums = connection.execute(
-                f"DELETE FROM albums WHERE id IN ({placeholders})",
-                empty_album_ids,
+            if deleted_attributes.rowcount != len(expected_item_attributes):
+                raise sqlite3.IntegrityError("Beets item metadata changed")
+            deleted_items = connection.execute(
+                f"DELETE FROM items WHERE id IN ({placeholders})",
+                retiring_ids,
             )
-            if deleted_albums.rowcount != len(empty_album_ids):
-                raise sqlite3.IntegrityError("Beets albums changed")
+            if deleted_items.rowcount != len(retiring_ids):
+                raise sqlite3.IntegrityError("Beets items changed")
 
-        def validate(current):
-            if current.execute("PRAGMA quick_check").fetchone() != ("ok",):
-                return False
-            counts = {path: [] for path in replacement_paths}
-            for item_id, album_id, raw_path in current.execute(
-                "SELECT id, album_id, path FROM items"
-            ):
-                path = _catalogue_item_path(raw_path, allow_external=True)
-                if item_id in retiring_ids or path in old_only_paths:
+            empty_album_ids = []
+            for album_id in sorted(retiring_album_ids):
+                if connection.execute(
+                    "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,)
+                ).fetchone() is None:
+                    empty_album_ids.append(album_id)
+            if empty_album_ids:
+                placeholders = ",".join("?" for _ in empty_album_ids)
+                expected_album_attributes = _consolidation_rows_for_ids(
+                    connection,
+                    "album_attributes",
+                    album_attribute_columns,
+                    "entity_id",
+                    empty_album_ids,
+                )
+                deleted_attributes = connection.execute(
+                    f"DELETE FROM album_attributes WHERE entity_id IN ({placeholders})",
+                    empty_album_ids,
+                )
+                if deleted_attributes.rowcount != len(expected_album_attributes):
+                    raise sqlite3.IntegrityError("Beets album metadata changed")
+                deleted_albums = connection.execute(
+                    f"DELETE FROM albums WHERE id IN ({placeholders})",
+                    empty_album_ids,
+                )
+                if deleted_albums.rowcount != len(empty_album_ids):
+                    raise sqlite3.IntegrityError("Beets albums changed")
+
+            def validate(current):
+                if current.execute("PRAGMA quick_check").fetchone() != ("ok",):
                     return False
-                if path in counts:
-                    counts[path].append(album_id)
-            return all(
-                album_ids == [replacement_album_id]
-                for album_ids in counts.values()
-            )
-
-        transaction.commit_and_publish(
-            lambda: _beets_database_anchor_matches(database_anchor), validate
-        )
+                counts = {path: [] for path in replacement_paths}
+                for item_id, album_id, raw_path in current.execute(
+                    "SELECT id, album_id, path FROM items"
+                ):
+                    path = _catalogue_item_path(raw_path, allow_external=True)
+                    if item_id in retiring_ids or path in old_only_paths:
+                        return False
+                    if path in counts:
+                        counts[path].append(album_id)
+                return all(
+                    album_ids == [replacement_album_id]
+                    for album_ids in counts.values()
+                )
+            if not validate(connection):
+                raise sqlite3.IntegrityError("the restored catalogue was not exact")
         clear_scan_caches()
         return True
     except Exception as exc:
-        outcome = (
-            "the committed catalogue change may already be visible"
-            if transaction is not None and transaction.published
-            else "leaving the catalogue unchanged"
-        )
         log.info(
             fmt(
                 C.YELLOW,
                 f"  ⚠  Couldn't safely retire the backup's Beets entries ({exc}); "
-                f"{outcome}.",
+                "leaving the catalogue unchanged.",
             )
         )
         return False
-    finally:
-        if transaction is not None:
-            transaction.close()
-        _close_beets_database_anchor(database_anchor)
 
 
 def _fold_duplicate_album_group(
@@ -8104,67 +7599,36 @@ def _consolidate_duplicate_albums(protected_paths=None, folders=None):
     protected = _consolidation_protected_paths(protected_paths)
     if folders is not None:
         folders = {str(_consolidation_absolute_path(folder)) for folder in folders}
-    database_anchor = None
-    transaction = None
-    connection = None
     merged = 0
     try:
-        timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-        timeout = float(timeout) if timeout and timeout > 0 else 5.0
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None or database_anchor["descriptor"] is None:
-            return
-        candidates, _columns = inspect_sqlite_source(
-            database_anchor,
-            _beets_database_anchor_matches,
-            lambda current: _duplicate_album_groups(current, folders),
-            connect=sqlite3.connect,
-            timeout=timeout,
-        )
+        candidates, _columns = beets_db.read(
+            database, lambda current: _duplicate_album_groups(current, folders))
         if all(_consolidation_path_is_protected(directory, protected)
                for directory, _ids in candidates):
             return
-        transaction = AtomicSQLiteWrite(
-            database_anchor,
-            _beets_database_anchor_matches,
-            connect=sqlite3.connect,
-            timeout=timeout,
-        )
-        connection = transaction.open()
-        connection.execute("BEGIN IMMEDIATE")
-        groups, columns = _duplicate_album_groups(connection, folders)
-        for directory, ids in groups:
-            if _consolidation_path_is_protected(directory, protected):
-                vlog(f"consolidation: keep ownership-protected folder {directory}")
-                continue
-            if _fold_duplicate_album_group(connection, ids, *columns):
-                merged += 1
+        with beets_db.transaction(database) as connection:
+            groups, columns = _duplicate_album_groups(connection, folders)
+            for directory, ids in groups:
+                if _consolidation_path_is_protected(directory, protected):
+                    vlog(f"consolidation: keep ownership-protected folder {directory}")
+                    continue
+                if _fold_duplicate_album_group(connection, ids, *columns):
+                    merged += 1
 
-        if not merged:
-            connection.rollback()
-            return
-        transaction.commit_and_publish(
-            lambda: _beets_database_anchor_matches(database_anchor),
-            lambda current: current.execute("PRAGMA quick_check").fetchone() == ("ok",),
-        )
+            if not merged:
+                connection.rollback()
+                return
+            if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                raise sqlite3.DatabaseError("the beets database failed its check")
     except Exception as exc:
-        outcome = (
-            "the committed replacement may already be visible"
-            if transaction is not None and transaction.published
-            else "leaving them unchanged"
-        )
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't safely fold duplicate beets entries ({exc}); {outcome}.",
+                f"  ⚠  Couldn't safely fold duplicate beets entries ({exc}); "
+                "leaving them unchanged.",
             )
         )
         return
-    finally:
-        if transaction is not None:
-            transaction.close()
-        if database_anchor is not None:
-            _close_beets_database_anchor(database_anchor)
 
     if merged:
         if folders is None:
@@ -8192,7 +7656,7 @@ def forget_beets_entries(paths):
     remove` is used with exact item IDs rather than a direct sqlite delete so
     beets cleans up the album row and any flexible-attribute rows along with
     the item, leaving the database consistent. Resolving those IDs from the
-    anchored database also handles root-relative rows when Beets' ordinary
+    configured database also handles root-relative rows when Beets' ordinary
     config names another mount alias for the same managed library.
     """
     paths = [str(p) for p in paths if str(p)]
@@ -8292,23 +7756,13 @@ def forget_deleted_copies(album_dirs):
                     found.append((key, paths))
         return found
 
-    database_anchor = None
+    database = beets_db.path()
+    if database is None or not database.is_file():
+        return
     try:
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None or database_anchor["descriptor"] is None:
-            return
-        found = inspect_sqlite_source(
-            database_anchor,
-            _beets_database_anchor_matches,
-            inspect,
-            connect=sqlite3.connect,
-            timeout=_beets_lock_wait(),
-        )
+        found = beets_db.read(database, inspect)
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return
-    finally:
-        if database_anchor is not None:
-            _close_beets_database_anchor(database_anchor)
     if not found:
         return
     gone = deleted_from_library(
@@ -8403,23 +7857,13 @@ def beets_entry_ids(paths):
                 continue
         return frozenset(found)
 
-    database_anchor = None
+    database = beets_db.path()
+    if database is None or not database.is_file():
+        return None
     try:
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None or database_anchor["descriptor"] is None:
-            return None
-        return inspect_sqlite_source(
-            database_anchor,
-            _beets_database_anchor_matches,
-            inspect,
-            connect=sqlite3.connect,
-            timeout=_beets_lock_wait(),
-        )
+        return beets_db.read(database, inspect)
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return None
-    finally:
-        if database_anchor is not None:
-            _close_beets_database_anchor(database_anchor)
 
 
 def _replaced_beets_entries(connection, item_ids, folder):
@@ -8468,71 +7912,56 @@ def forget_replaced_beets_entries(item_ids=(), *, folder=None):
             return 0
     elif not item_ids:
         return 0
-    database_anchor = None
-    transaction = None
+    database = beets_db.path()
+    if database is None or not database.is_file():
+        return 0
     try:
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None or database_anchor["descriptor"] is None:
-            return 0
-        if not inspect_sqlite_source(
-            database_anchor,
-            _beets_database_anchor_matches,
-            lambda current: _replaced_beets_entries(current, item_ids, folder),
-            connect=sqlite3.connect,
-            timeout=_beets_lock_wait(),
+        if not beets_db.read(
+            database, lambda current: _replaced_beets_entries(current, item_ids, folder)
         ):
             return 0
-        transaction = AtomicSQLiteWrite(
-            database_anchor,
-            _beets_database_anchor_matches,
-            connect=sqlite3.connect,
-            timeout=_beets_lock_wait(),
-        )
-        connection = transaction.open()
-        connection.execute("BEGIN IMMEDIATE")
-        if connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'trigger' LIMIT 1"
-        ).fetchone() is not None:
-            raise sqlite3.DatabaseError("custom database triggers")
-        dropped = 0
-        for old_id, newest, album_id in _replaced_beets_entries(
-                connection, item_ids, folder):
-            kept = {
-                key for (key,) in connection.execute(
-                    "SELECT key FROM item_attributes WHERE entity_id = ?",
-                    (newest,))
-            }
-            for key, value in connection.execute(
-                "SELECT key, value FROM item_attributes WHERE entity_id = ?",
-                (old_id,),
-            ).fetchall():
-                if key not in kept:
-                    connection.execute(
-                        "INSERT INTO item_attributes (entity_id, key, value) "
-                        "VALUES (?, ?, ?)",
-                        (newest, key, value),
-                    )
-            connection.execute(
-                "DELETE FROM item_attributes WHERE entity_id = ?", (old_id,))
+        with beets_db.transaction(database) as connection:
             if connection.execute(
-                "DELETE FROM items WHERE id = ?", (old_id,)
-            ).rowcount != 1:
-                raise sqlite3.IntegrityError("replaced entry changed")
-            if album_id is not None and connection.execute(
-                "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,)
-            ).fetchone() is None:
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' LIMIT 1"
+            ).fetchone() is not None:
+                raise sqlite3.DatabaseError("custom database triggers")
+            dropped = 0
+            for old_id, newest, album_id in _replaced_beets_entries(
+                    connection, item_ids, folder):
+                kept = {
+                    key for (key,) in connection.execute(
+                        "SELECT key FROM item_attributes WHERE entity_id = ?",
+                        (newest,))
+                }
+                for key, value in connection.execute(
+                    "SELECT key, value FROM item_attributes WHERE entity_id = ?",
+                    (old_id,),
+                ).fetchall():
+                    if key not in kept:
+                        connection.execute(
+                            "INSERT INTO item_attributes (entity_id, key, value) "
+                            "VALUES (?, ?, ?)",
+                            (newest, key, value),
+                        )
                 connection.execute(
-                    "DELETE FROM album_attributes WHERE entity_id = ?",
-                    (album_id,))
-                connection.execute("DELETE FROM albums WHERE id = ?", (album_id,))
-            dropped += 1
-        if not dropped:
-            connection.rollback()
-            return 0
-        transaction.commit_and_publish(
-            lambda: _beets_database_anchor_matches(database_anchor),
-            lambda current: current.execute("PRAGMA quick_check").fetchone() == ("ok",),
-        )
+                    "DELETE FROM item_attributes WHERE entity_id = ?", (old_id,))
+                if connection.execute(
+                    "DELETE FROM items WHERE id = ?", (old_id,)
+                ).rowcount != 1:
+                    raise sqlite3.IntegrityError("replaced entry changed")
+                if album_id is not None and connection.execute(
+                    "SELECT 1 FROM items WHERE album_id = ? LIMIT 1", (album_id,)
+                ).fetchone() is None:
+                    connection.execute(
+                        "DELETE FROM album_attributes WHERE entity_id = ?",
+                        (album_id,))
+                    connection.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+                dropped += 1
+            if not dropped:
+                connection.rollback()
+                return 0
+            if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                raise sqlite3.DatabaseError("the beets database failed its check")
     except Exception as exc:
         log.info(fmt(
             C.YELLOW,
@@ -8540,11 +7969,6 @@ def forget_replaced_beets_entries(item_ids=(), *, folder=None):
             f"({exc}); beets lists those tracks twice.",
         ))
         return 0
-    finally:
-        if transaction is not None:
-            transaction.close()
-        if database_anchor is not None:
-            _close_beets_database_anchor(database_anchor)
     clear_scan_caches()
     return dropped
 
@@ -8589,88 +8013,50 @@ def _remove_beets_rows(matches, warn, keep=frozenset()):
             return tracked
 
         try:
-            timeout = getattr(cfg, "BEETS_TIMEOUT", 5)
-            timeout = float(timeout) if timeout and timeout > 0 else 5.0
-            return inspect_sqlite_source(
-                database_anchor,
-                _beets_database_anchor_matches,
-                _inspect,
-                connect=sqlite3.connect,
-                timeout=timeout,
-            )
+            return beets_db.read(beets_db.path(), _inspect)
         except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
             warn(f"couldn't {stage} the library: {exc}")
             return None
 
-    def _run_guarded():
-        tracked = _tracked_ids("read")
-        if tracked is None:
-            return ForgetBeetsEntriesResult(False)
-        if not tracked:
-            return ForgetBeetsEntriesResult(True)
-        query = []
-        for item_id in tracked:
-            if query:
-                query.append(",")
-            query.append(f"id:{item_id}")
-        try:
+    tracked = _tracked_ids("read")
+    if tracked is None:
+        return ForgetBeetsEntriesResult(False)
+    if not tracked:
+        return ForgetBeetsEntriesResult(True)
+    query = []
+    for item_id in tracked:
+        if query:
+            query.append(",")
+        query.append(f"id:{item_id}")
+    try:
+        rm = _run_owned_beets_capture(
+            base + ["remove", "-f", *query],
+            env=beet_env,
+            timeout=120,
+            before_spawn=lambda: _require_beets_runtime(runtime),
+        )
+        # A nonzero exit is usually a transient DB lock. Retry once
+        # before falling back to the manual-recovery message.
+        if rm.returncode != 0:
             rm = _run_owned_beets_capture(
                 base + ["remove", "-f", *query],
                 env=beet_env,
                 timeout=120,
-                database_exclusion=exclusion,
                 before_spawn=lambda: _require_beets_runtime(runtime),
             )
-            # A nonzero exit is usually a transient DB lock. Retry once
-            # before falling back to the manual-recovery message.
-            if rm.returncode != 0:
-                rm = _run_owned_beets_capture(
-                    base + ["remove", "-f", *query],
-                    env=beet_env,
-                    timeout=120,
-                    database_exclusion=exclusion,
-                    before_spawn=lambda: _require_beets_runtime(runtime),
-                )
-        except (OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
-            warn(f"beet remove couldn't run: {exc}")
-            return ForgetBeetsEntriesResult(False)
-        if rm.returncode != 0:
-            warn(f"beet remove exited {rm.returncode}")
-            return ForgetBeetsEntriesResult(False)
-        remaining = _tracked_ids("verify")
-        if remaining is None:
-            return ForgetBeetsEntriesResult(False)
-        if remaining:
-            warn("beet remove left them catalogued")
-            return ForgetBeetsEntriesResult(False)
-        return ForgetBeetsEntriesResult(True, len(tracked))
-
-    exclusion = _SQLiteDatabaseExclusion()
-    database_anchor = None
-    result = ForgetBeetsEntriesResult(False)
-    caught = None
-    try:
-        database_anchor = _open_beets_database_anchor()
-        if database_anchor is None:
-            raise OSError("configured beets database is unavailable")
-        exclusion.acquire(database_anchor["parent_chain"][-1])
-        _preflight_beets_database_anchor(database_anchor)
-        result = _run_guarded()
     except (OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
-        warn(f"couldn't read the library: {exc}")
-    except BaseException as exc:
-        caught = exc
-
-    exclusion_error = exclusion.release()
-    _close_beets_database_anchor(database_anchor)
-    if exclusion_error is not None:
-        warn("the database exclusion could not be released safely")
-        result = ForgetBeetsEntriesResult(False)
-    if caught is not None:
-        if exclusion_error is not None:
-            caught.add_note("beets database exclusion cleanup also failed")
-        raise caught.with_traceback(caught.__traceback__)
-    return result
+        warn(f"beet remove couldn't run: {exc}")
+        return ForgetBeetsEntriesResult(False)
+    if rm.returncode != 0:
+        warn(f"beet remove exited {rm.returncode}")
+        return ForgetBeetsEntriesResult(False)
+    remaining = _tracked_ids("verify")
+    if remaining is None:
+        return ForgetBeetsEntriesResult(False)
+    if remaining:
+        warn("beet remove left them catalogued")
+        return ForgetBeetsEntriesResult(False)
+    return ForgetBeetsEntriesResult(True, len(tracked))
 
 
 def staging_preflight(args):
