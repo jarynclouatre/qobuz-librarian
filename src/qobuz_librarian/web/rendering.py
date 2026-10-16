@@ -39,6 +39,20 @@ def _ql_notice_html(kind: str, body: str) -> str:
     )
 
 
+def _ql_toast_html(kind: str, body: str, group: str) -> str:
+    """A notice for the toast, sent beside an htmx swap of something else.
+
+    It replaces the group's earlier toast. A warning or error stays until the
+    user closes it, so a refusal is still there to read."""
+    keep = "" if kind in ("success", "info") else f' data-flash-persistent="{group}"'
+    return (
+        f'<div id="download-toast" hx-swap-oob="beforeend">'
+        f'<div class="ql-notice ql-notice-{kind}" data-flash '
+        f'data-flash-kind="{kind}" data-flash-group="{group}"{keep}>'
+        f'<span>{body}</span></div></div>'
+    )
+
+
 _here = Path(__file__).parent
 templates = Jinja2Templates(directory=str(_here / "templates"))
 

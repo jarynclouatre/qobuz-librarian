@@ -276,6 +276,54 @@ def test_ctrl_c_in_a_second_artist_run_keeps_both_runs_approvals(
     assert [item["album_dir"] for item in kept] == dirs[:2]
 
 
+def test_switching_to_a_sibling_keeps_the_folder_the_user_picked(
+        tmp_path, monkeypatch):
+    """When the folder picked to keep had no Qobuz match and the user switched
+    to a sibling that did, the picked folder was queued for deletion."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.modes import artist
+
+    root = tmp_path / "music" / "Artist"
+    picked, other, third = (root / name for name in (
+        "Masterpiece", "Masterpiece (Remaster)", "Masterpiece (Deluxe)"))
+    for d in (picked, other, third):
+        d.mkdir(parents=True)
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(cfg, "ARTIST_API_DELAY", 0)
+    monkeypatch.setattr(artist, "list_artist_album_dirs",
+                        lambda _d: [picked, other, third])
+    monkeypatch.setattr(artist, "resolve_artist", lambda *_a: (None, None))
+    monkeypatch.setattr(artist, "_flush_stdin", lambda: None)
+    album = {"id": "q1", "title": "Masterpiece",
+             "tracks": {"items": [{"id": 1}, {"id": 2}]}}
+    monkeypatch.setattr(artist, "match_album_dir", lambda d, *_a, **_k:
+                        SimpleNamespace(status="no_match", qobuz_album=None,
+                                        existing=[], present=[], missing=[])
+                        if d == picked else
+                        SimpleNamespace(status="partial", qobuz_album=album,
+                                        existing=[{"id": 1}],
+                                        present=[{"id": 1}],
+                                        missing=[{"id": 2}]))
+    queued = []
+
+    def build(**item):
+        queued.append(item)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(artist, "_build_queue_item", build)
+    replies = iter(["1", "y", "y"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(replies))
+    args = SimpleNamespace(yes=False, dry_run=False, consolidate=False,
+                           prefer_hires=False, include_bonus=False,
+                           no_upgrade=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        artist.run_artist_gap_fill("Artist", root, args, "tok", fresh=True)
+
+    assert queued[0]["album_dir"] == other
+    assert queued[0]["siblings_to_delete"] == [third]
+
+
 def test_a_terminal_download_leaves_the_living_library_review(
         tmp_path, monkeypatch):
     """The living review is held in memory by whichever process serves the web

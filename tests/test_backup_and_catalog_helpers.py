@@ -699,6 +699,8 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
     """A backup whose companion file differs from the library's is listed as
     retained and never removed; a removable one is checked again before
     Remove deletes it, and one past the read budget shows as unverified."""
+    from mutagen.flac import FLAC
+
     import qobuz_librarian.library.backup as bk
 
     _need_audio_tools()
@@ -713,6 +715,9 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
         monkeypatch.setattr(bk.cfg, "MUSIC_ROOT", tmp_path / name / "music")
         monkeypatch.setattr(bk, "_only_copy_cache", None)
         _real_flac(backup / "01.flac")
+        tagged = FLAC(backup / "01.flac")
+        tagged["lyrics"] = "[00:01.00] only here"
+        tagged.save()
         shutil.copyfile(backup / "01.flac", origin / "01.flac")
         (backup / "booklet.pdf").write_bytes(b"original booklet")
         (origin / "booklet.pdf").write_bytes(origin_booklet)
@@ -757,24 +762,37 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
     assert not backup.exists()
     assert (origin / "booklet.pdf").read_bytes() == b"original booklet"
 
-    # An upgrade's backup differs from the album by design; Remove is offered
-    # and goes once every track has a verified replacement. Another album
-    # backup whose tracks differ has no Remove, which would refuse it.
+    # An upgrade's backup goes once the album's new track verifies, a
+    # gap-fill backup only once the album's copy has the same audio. A
+    # truncated copy, or other audio for a gap-fill, keeps it. Lyrics only
+    # the backup's copy has are copied onto the album's first.
     monkeypatch.setattr(bk, "_BACKUP_LISTING_READ_BYTES", 1 << 30)
-    backup, origin, _candidate = stage("refilled", b"original booklet")
-    _real_flac(origin / "01.flac", seconds=3)
-    [(path, album, result)] = bk.list_retained_backups()
-    assert (result.status, result.file) == ("retained", "01.flac")
-    assert 'hx-post="/backups/discard"' not in _render_backup_diagnostics([(path, album, result)])
-    assert bk.discard_replaced_upgrade_backup(backup) is False
-    backup, origin, _candidate = stage("upgraded", b"original booklet", kind="upgrade")
-    _real_flac(origin / "01.flac", seconds=3)
-    [(path, album, result)] = bk.list_retained_backups()
-    assert (result.status, result.file) == ("retained", "01.flac")
-    assert 'hx-post="/backups/discard"' in _render_backup_diagnostics([(path, album, result)])
-    assert bk.discard_redundant_backup(backup) is False
-    assert bk.discard_replaced_upgrade_backup(backup) is True
-    assert not backup.exists()
+    for kind in ("gap-fill", "upgrade"):
+        backup, origin, _candidate = stage(kind, b"original booklet", kind=kind)
+        whole = (backup / "01.flac").read_bytes()
+        (origin / "01.flac").write_bytes(whole[:len(whole) // 2])
+        monkeypatch.setattr(bk, "_only_copy_cache", None)
+        [(path, album, result)] = bk.list_retained_backups()
+        assert (result.status, result.file) == ("retained", "01.flac")
+        assert 'hx-post="/backups/discard"' not in _render_backup_diagnostics([(path, album, result)])
+        assert bk.discard_replaced_backup(backup) is False
+        _real_flac(origin / "01.flac", seconds=3)
+        if kind == "gap-fill":
+            assert bk.discard_replaced_backup(backup) is False
+            shutil.copyfile(backup / "01.flac", origin / "01.flac")
+            retagged = FLAC(origin / "01.flac")
+            retagged["comment"] = "downloaded again"
+            del retagged["lyrics"]
+            retagged.save()
+        assert (backup / "01.flac").read_bytes() == whole
+        monkeypatch.setattr(bk, "_only_copy_cache", None)
+        [(path, album, result)] = bk.list_retained_backups()
+        assert result.status != "retained"
+        assert 'hx-post="/backups/discard"' in _render_backup_diagnostics([(path, album, result)])
+        assert bk.discard_redundant_backup(backup) is False
+        assert bk.discard_replaced_backup(backup) is True
+        assert not backup.exists()
+        assert FLAC(origin / "01.flac")["lyrics"] == ["[00:01.00] only here"]
 
 
 def test_gap_fill_restore_keeps_the_backup_whenever_it_cannot_finish(

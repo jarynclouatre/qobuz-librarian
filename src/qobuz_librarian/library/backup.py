@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -6224,11 +6225,34 @@ def warn_pin_failed(bp: Path) -> None:
 
 # Diagnostic results are advisory. The budget reserves expected hash reads,
 # including receipt validation; metadata walks still cover every backup.
-# Disposal never uses this cache or budget.
+# Disposal never uses this cache or budget. Settings lists the backups on
+# every view, so the budget stays small: content is read to prove it before
+# a deletion, not to fill in a row.
 _ONLY_COPY_TTL_SEC = 10.0
 _BACKUP_LISTING_READ_BYTES = 8 * 1024 * 1024
 _only_copy_cache: tuple[float, tuple, list] | None = None
 _only_copy_lock = threading.Lock()
+# What the last Remove found for each backup, with the files it looked at,
+# so a row the listing can't check fully says why Remove refused it.
+_removal_refusals: dict[Path, tuple[list, "BackupClassification"]] = {}
+
+
+def _files_signature(*roots):
+    """Each file's name, inode, size and times, or None when one can't be
+    read."""
+    signature = []
+    try:
+        for root in roots:
+            entries = _list_tree(root) if root is not None else None
+            if entries is None:
+                return None
+            for entry in entries:
+                info = entry.lstat()
+                signature.append((os.fspath(entry), info.st_ino, info.st_size,
+                                  info.st_mtime_ns, info.st_ctime_ns))
+    except OSError:
+        return None
+    return signature
 
 
 def awaiting_retention(path: Path) -> bool:
@@ -6328,6 +6352,14 @@ def list_retained_backups():
                     if entry.name.startswith(".ql-dispose-backup-")
                     else _classify_retained_backup(entry, origin, budget)
                 )
+                remembered = _removal_refusals.get(entry)
+                if (
+                    result.status == "unverified"
+                    and remembered is not None
+                    and remembered[0] is not None
+                    and remembered[0] == _files_signature(entry, origin)
+                ):
+                    result = remembered[1]
                 out.append((entry, origin, result))
         except OSError:
             pass
@@ -7154,6 +7186,26 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                     held_committed_payload,
             ):
                 raise OSError("backup copy could not be flushed to disk")
+            if (
+                _reserved_backup_entry_present(source_fd)
+                or _reserved_backup_entry_present(partial_fd)
+            ):
+                raise OSError("reserved backup metadata appeared during the copy")
+            if not _write_backup_origin_durable(partial_fd, public):
+                raise OSError("backup origin could not be recorded")
+            result = _seal_backup_result(
+                bp,
+                partial_fd,
+                public,
+                kind="upgrade",
+                complete=False,
+                requested=n_files,
+                backed_up=n_files,
+                source_receipt=current_source_receipt,
+                owner=owner,
+            )
+            if result.receipt is None:
+                raise OSError("backup copy could not be verified")
             move_exception = _rename_exact_noreplace_at(
                 backup_root_fd,
                 partial_name,
@@ -7243,119 +7295,6 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                     requested=len(source_snapshot["files"]),
                 )
             return None
-
-        if (
-            _reserved_backup_entry_present(source_fd)
-            or _reserved_backup_entry_present(committed_fd)
-        ):
-            source_is_public = (
-                _backup_source_is_public(
-                    music_root, source_parts, source_fds)
-                and _source_parent_is_bound(
-                    music_root, source_parts, source_fds[:-1],
-                    current_source_receipt)
-                and _source_root_is_bound(
-                    source_fd, current_source_receipt)
-            )
-            discarded = source_is_public and _remove_exact_tree_at(
-                backup_root_fd,
-                bp.name,
-                committed_fd,
-                prefix="ql-backup-discard",
-            )
-            log.info(fmt(
-                C.RED,
-                "  ✗  Reserved backup metadata appeared during the copy; "
-                + (
-                    "the original remains in place and the copy was discarded."
-                    if discarded
-                    else f"the exact copy is retained at {bp}."
-                )))
-            if discarded:
-                return None
-            return _upgrade_recovery_carrier(
-                bp,
-                committed_fd,
-                requested=len(source_snapshot["files"]),
-            )
-
-        if not _write_backup_origin_durable(committed_fd, public):
-            source_unchanged = (
-                _backup_source_is_public(
-                    music_root, source_parts, source_fds)
-                and _source_parent_is_bound(
-                    music_root, source_parts, source_fds[:-1],
-                    current_source_receipt)
-                and _source_root_is_bound(
-                    source_fd, current_source_receipt)
-                and _tree_fidelity_snapshot(source_fd) == source_fidelity
-            )
-            discarded = source_unchanged and _remove_exact_tree_at(
-                backup_root_fd,
-                bp.name,
-                committed_fd,
-                prefix="ql-backup-discard",
-            )
-            log.info(fmt(
-                C.RED,
-                "  ✗  Backup copied but couldn't record its origin; "
-                + (
-                    "the original remains in place and the copy was discarded."
-                    if discarded
-                    else f"the exact copy is retained at {bp}."
-                )))
-            if discarded:
-                return None
-            return _upgrade_recovery_carrier(
-                bp,
-                committed_fd,
-                requested=len(source_snapshot["files"]),
-            )
-
-        result = _seal_backup_result(
-            bp,
-            committed_fd,
-            public,
-            kind="upgrade",
-            complete=False,
-            requested=len(source_snapshot["files"]),
-            backed_up=len(source_snapshot["files"]),
-            source_receipt=current_source_receipt,
-            owner=owner,
-        )
-        if result.receipt is None:
-            source_unchanged = (
-                _backup_source_is_public(
-                    music_root, source_parts, source_fds)
-                and _source_parent_is_bound(
-                    music_root, source_parts, source_fds[:-1],
-                    current_source_receipt)
-                and _source_root_is_bound(
-                    source_fd, current_source_receipt)
-                and _tree_fidelity_snapshot(source_fd) == source_fidelity
-            )
-            discarded = source_unchanged and _remove_exact_tree_at(
-                backup_root_fd,
-                bp.name,
-                committed_fd,
-                prefix="ql-backup-discard",
-            )
-            log.info(fmt(
-                C.RED,
-                "  ✗  Backup copied but could not be verified; "
-                + (
-                    "the original remains in place and the copy was discarded."
-                    if discarded
-                    else f"the exact copy is retained at {bp}."
-                )))
-            if discarded:
-                return None
-            return _upgrade_recovery_carrier(
-                bp,
-                committed_fd,
-                requested=len(source_snapshot["files"]),
-                backed_up=len(source_snapshot["files"]),
-            )
 
         def _retained_incomplete_result():
             if _source_parent_is_bound(
@@ -9665,12 +9604,18 @@ def restore_upgrade_backup(
     A complete backup moves back. An incomplete one, which a stop part way
     through the backup leaves, supplies the files the album is missing and
     replaces none: a file that differs keeps both copies, and the backup
-    stays.
+    stays. One whose files the album holds, some under new names, is left
+    alone, so no track ends up there twice.
     """
     if backup.complete:
         restored = _restore_upgrade_backup(
             backup, original_path, expected_owner=expected_owner,
             replace_partial=replace_partial)
+    elif files_back_under_new_names(backup.path):
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  {original_path} already has every file in the backup at "
+            f"{backup.path}, some under new names; nothing was put back."))
+        restored = False
     else:
         outcome = restore_incomplete_upgrade_backup(
             backup, original_path, expected_owner=expected_owner)
@@ -10605,7 +10550,11 @@ def _partial_copy_settled(root_fd, backup_name, origin, source_receipt):
     except OSError:
         return False
     try:
-        copied = _exact_tree_snapshot(partial_fd, digests=False)
+        copied = _exact_tree_snapshot(
+            partial_fd,
+            digests=False,
+            ignore_root_names=(_ORIGIN_SIDECAR, _RECEIPT_SIDECAR),
+        )
         if (
             copied is not None
             and set(copied["files"]) <= set(source_receipt["tree"]["files"])
@@ -10663,14 +10612,112 @@ def _audio_duration_seconds(path: Path):
         return None
 
 
+def _read_tags(path: Path, **kwargs):
+    """Parse a track's header blocks through a small read buffer, so the
+    audio after them is not read."""
+    with open(path, "rb", buffering=8192) as handle:
+        return scanner.mutagen.File(handle, **kwargs)
+
+
 def _audio_isrc(path: Path):
     try:
-        parsed = scanner.mutagen.File(os.fspath(path), easy=True)
+        parsed = _read_tags(path, easy=True)
         values = (parsed.tags or {}).get("isrc") if parsed is not None else None
     except Exception:
         return None
     value = str(values[0]).strip().upper() if values else ""
     return value or None
+
+
+def _decoded_audio_digest(path: Path):
+    """(rate, bits, channels, sha256 of the decoded samples) of a FLAC, or
+    None when it does not decode."""
+    try:
+        info = scanner.mutagen.File(os.fspath(path)).info
+        digest = hashlib.sha256()
+        with subprocess.Popen(
+                ["flac", "-d", "-s", "-c", "--force-raw-format",
+                 "--endian=little", "--sign=signed", os.fspath(path)],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, env=cfg.child_env()) as decoder:
+            for chunk in iter(lambda: decoder.stdout.read(1 << 20), b""):
+                digest.update(chunk)
+        if decoder.returncode != 0:
+            return None
+        return (info.sample_rate, info.bits_per_sample, info.channels,
+                digest.hexdigest())
+    except Exception:
+        return None
+
+
+def _same_decoded_audio(source: Path, destination: Path) -> bool:
+    if (source.suffix.lower() != ".flac"
+            or destination.suffix.lower() != ".flac"):
+        return False
+    digest = _decoded_audio_digest(source)
+    return digest is not None and digest == _decoded_audio_digest(destination)
+
+
+def _lyrics_rank(path: Path) -> int:
+    """0 for no lyrics, 1 for plain, 2 for synced, in the tags of any format
+    or a .lrc beside the track."""
+    from qobuz_librarian.integrations.lyric_fetch import classify
+
+    values = []
+    try:
+        parsed = _read_tags(path)
+        tags = parsed.tags if parsed is not None else None
+        for key in (tags.keys() if tags is not None else ()):
+            name = str(key).lower()
+            if name.startswith("sylt"):
+                return 2
+            if "lyrics" in name or name.startswith("uslt") or name == "\xa9lyr":
+                value = tags[key]
+                text = getattr(value, "text", value)
+                values += [str(item) for item in (
+                    text if isinstance(text, list) else [text])]
+    except Exception:
+        pass
+    lrc = path.with_suffix(".lrc")
+    try:
+        if lrc.is_file() and not lrc.is_symlink():
+            values.append(lrc.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        pass
+    return max((("none", "plain", "synced").index(classify(value))
+                for value in values), default=0)
+
+
+def some_names(names) -> str:
+    """The first three names, then how many more there are."""
+    if len(names) <= 3:
+        return ", ".join(names)
+    return f"{', '.join(names[:3])} and {len(names) - 3} more"
+
+
+def _carry_lyrics(source: Path, destination: Path, carried: list) -> bool:
+    """Copy the lyrics only the backup's track has onto the album's, and
+    add the album's track to ``carried`` when they were copied."""
+    from qobuz_librarian.integrations import lyric_fetch
+
+    if _lyrics_rank(source) <= _lyrics_rank(destination):
+        return True
+    try:
+        lyric_fetch.carry_lyrics(
+            source, cfg.UPGRADE_BACKUP_DIR, destination, cfg.MUSIC_ROOT,
+            cfg.LYRICS_FORMAT)
+    except Exception as exc:
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  Couldn't copy the lyrics of {source.name} onto "
+            f"{destination}: {exc}"))
+        return False
+    if _lyrics_rank(destination) < _lyrics_rank(source):
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  The lyrics of {source.name} were not written onto "
+            f"{destination}; keeping the backup."))
+        return False
+    carried.append(destination.name)
+    return True
 
 
 def _same_recording(replacement_view: Path, source: Path, taken):
@@ -10704,10 +10751,17 @@ class BackupClassification:
     def detail(self):
         return {
             "identical": "Removable: every file matches its album copy. Removal checks again.",
-            "replacement": "The replacement passed the retention checks.",
+            "replacement": "Removable: the album holds a verified copy of every track. Removal checks again.",
+            "compare": "Not checked yet: Remove first checks that the album's copy of each track has the same audio."
+            + (f" Then it copies the lyrics of this backup's {self.file} onto the same track in the album, so they are kept." if self.file else ""),
+            "other_audio": f"Not removable: the album's copy of {self.file} has different audio from this backup's.",
+            "lyrics": f"Removable: the album holds a verified copy of every track. Remove first copies the lyrics of this backup's {self.file} onto the same track in the album, so they are kept.",
             "missing": f"Not removable: {self.file} is missing from the album.",
             "different": f"Not removable: {self.file} differs from the album copy.",
-            "audio": f"Not removable: the replacement for {self.file} failed verification.",
+            "audio": f"Not removable: the album's {self.file} does not decode cleanly.",
+            "length": f"Not removable: the length of {self.file} can't be read in the backup or the album.",
+            "shorter": f"Not removable: the album's {self.file} is shorter than this backup's.",
+            "smaller": f"Not removable: the album's {self.file} is smaller than this backup's.",
             "origin": "Not removable: the original album folder is unavailable.",
             "album_metadata": "Not removable: the album contains backup recovery metadata.",
             "album_structure": "Unverified: the album contains unreadable or unsupported file entries.",
@@ -10716,7 +10770,7 @@ class BackupClassification:
             "owner": "Not removable here: this backup belongs to a saved recovery operation.",
             "empty": "Not removable: no backed-up files could be verified.",
             "unreadable": "Unverified: some files could not be read.",
-            "budget": "Unverified: the listing's file-check limit was reached. Remove runs the full check.",
+            "budget": "Not checked yet: its files are too large to check while this page loads. Remove checks them first. If a track here has lyrics the album's copy lacks, Remove copies them onto it first, so they are kept.",
             "interrupted": "Backup cleanup was interrupted.",
         }[self.reason]
 
@@ -10741,6 +10795,9 @@ def _classify_backup_contents(
         match_recordings=False,
         renamed=None,
         budget=None,
+        same_audio=False,
+        carry_lyrics=False,
+        pairs=None,
 ):
     """Compare payloads; retention permits verified replacement audio.
 
@@ -10748,7 +10805,11 @@ def _classify_backup_contents(
     album be matched to the album track with its ISRC, for a refill that the
     import filed under a different name. ``renamed`` maps each backed-up
     file to the album track that stands in for it; a file it leaves out is
-    missing."""
+    missing. ``same_audio`` requires each album track to decode to exactly
+    the samples of the backed-up one. With ``carry_lyrics`` a .lrc beside a
+    backed-up track counts as that track's lyrics, which Remove copies over,
+    not as a file the album must hold. ``pairs`` collects each backed-up
+    track with the album track that verified in its place."""
     try:
         entries = _list_tree(backup_view)
         if entries is None:
@@ -10761,9 +10822,13 @@ def _classify_backup_contents(
                     files.append(entry)
             elif not stat.S_ISDIR(mode):
                 return BackupClassification("unverified", "unreadable")
+        if carry_lyrics:
+            files = [f for f in files if f.suffix.lower() != ".lrc" or not any(
+                f.with_suffix(ext).is_file() for ext in cfg.AUDIO_EXTS)]
         files.sort(key=lambda f: (f.suffix.lower() in cfg.AUDIO_EXTS, str(f)))
         taken = {f.relative_to(backup_view) for f in files}
         skipped = False
+        lyrics = []
         for source in files:
             relative = source.relative_to(backup_view)
             destination = replacement_view / relative
@@ -10782,20 +10847,28 @@ def _classify_backup_contents(
             if destination is None or not destination.is_file():
                 return BackupClassification("retained", "missing", str(relative))
             if audio_replacement and source.suffix.lower() in cfg.AUDIO_EXTS:
+                if budget is not None and not budget.reserve(destination.stat().st_size):
+                    skipped = True
+                    continue
                 source_duration = _audio_duration_seconds(source)
                 destination_duration = _audio_duration_seconds(destination)
-                if (
-                    source_duration is None
-                    or destination_duration is None
-                    or destination_duration
-                        + max(2.0, source_duration * 0.01)
-                        < source_duration
-                    or destination.suffix.lower() == ".flac"
-                    and flac_audio_ok(destination) is not True
-                    or not allow_smaller_audio
-                    and destination.stat().st_size < source.stat().st_size
-                ):
+                if source_duration is None or destination_duration is None:
+                    return BackupClassification("retained", "length", str(relative))
+                if (destination_duration + max(2.0, source_duration * 0.01)
+                        < source_duration):
+                    return BackupClassification("retained", "shorter", str(relative))
+                if (destination.suffix.lower() == ".flac"
+                        and flac_audio_ok(destination) is not True):
                     return BackupClassification("retained", "audio", str(relative))
+                if (not allow_smaller_audio
+                        and destination.stat().st_size < source.stat().st_size):
+                    return BackupClassification("retained", "smaller", str(relative))
+                if same_audio and not _same_decoded_audio(source, destination):
+                    return BackupClassification("retained", "other_audio", str(relative))
+                if _lyrics_rank(source) > _lyrics_rank(destination):
+                    lyrics.append(str(relative))
+                if pairs is not None:
+                    pairs.append((source, destination))
             else:
                 source_size = source.stat().st_size
                 destination_size = destination.stat().st_size
@@ -10810,13 +10883,15 @@ def _classify_backup_contents(
             return BackupClassification("unverified", "budget")
         if not files:
             return BackupClassification("retained", "empty")
+        if lyrics:
+            return BackupClassification("removable", "lyrics", some_names(lyrics))
         return BackupClassification(
             "removable", "replacement" if audio_replacement else "identical")
     except (OSError, TypeError, ValueError):
         return BackupClassification("unverified", "unreadable")
 
 
-def _classify_retained_backup(path, origin, budget):
+def _classify_retained_backup(path, origin, budget, *, compare_audio=False):
     if origin is None:
         return BackupClassification("retained", "origin")
     opened = _open_backup_source(origin)
@@ -10830,7 +10905,12 @@ def _classify_retained_backup(path, origin, budget):
     finally:
         _close_descriptors(opened[-1])
     result = _classify_backup_contents(origin, path, budget=budget)
-    if not result.removable:
+    # An album track whose bytes differ, or that is filed under another name,
+    # may be the replacement Remove accepts. Which proof applies is in the
+    # receipt.
+    replaced = (result.reason in {"different", "missing"}
+                and Path(result.file).suffix.lower() in (*cfg.AUDIO_EXTS, ".lrc"))
+    if not result.removable and not replaced:
         return result
     # Loading the sealed receipt hashes the backup again. Reserve that read
     # before loading it; large candidates stay explicitly unverified.
@@ -10849,6 +10929,22 @@ def _classify_retained_backup(path, origin, budget):
             return BackupClassification("retained", "incomplete")
         if not _backup_owner_authorized(candidate, None):
             return BackupClassification("retained", "owner")
+        if replaced:
+            proof = _replacement_proof(candidate)
+            if proof is None:
+                return result
+            result = _classify_backup_contents(
+                origin, path, audio_replacement=True, budget=budget,
+                carry_lyrics=True,
+                **{**proof, "same_audio": compare_audio and proof.get("same_audio", False)})
+            if not result.removable:
+                return result
+            # Decoding every track to compare it is Remove's job, not the
+            # listing's.
+            if proof.get("same_audio") and not compare_audio:
+                return BackupClassification(
+                    "unverified", "compare",
+                    result.file if result.reason == "lyrics" else "")
         opened = _open_rooted_directory(cfg.UPGRADE_BACKUP_DIR, path)
         if opened is None:
             return BackupClassification("retained", "record")
@@ -10864,17 +10960,21 @@ def _classify_retained_backup(path, origin, budget):
 
 def _retention_view_is_redundant(
         replacement_view: Path, backup_view: Path, *, allow_smaller_audio=False,
-        match_recordings=False,
+        match_recordings=False, same_audio=False, carry_lyrics=False,
 ) -> bool:
-    return _classify_backup_contents(
+    result = _classify_backup_contents(
         replacement_view, backup_view, audio_replacement=True,
         allow_smaller_audio=allow_smaller_audio,
         match_recordings=match_recordings,
-    ).removable
+        same_audio=same_audio,
+        carry_lyrics=carry_lyrics,
+    )
+    return result.removable and not (carry_lyrics and result.reason == "lyrics")
 
 
 def _dispose_retention_candidate(
-        candidate, *, allow_smaller_audio=False, match_recordings=False):
+        candidate, *, allow_smaller_audio=False, match_recordings=False,
+        same_audio=False, carry_lyrics=False):
     if not isinstance(candidate, BackupResult) or candidate.receipt is None:
         return False
     replacement = Path(candidate.receipt["origin"])
@@ -10896,6 +10996,8 @@ def _dispose_retention_candidate(
                 backup_view,
                 allow_smaller_audio=allow_smaller_audio,
                 match_recordings=match_recordings,
+                same_audio=same_audio,
+                carry_lyrics=carry_lyrics,
             )
         ),
     )
@@ -11032,20 +11134,70 @@ def discard_redundant_backup(path) -> bool:
     )
 
 
-def discard_replaced_upgrade_backup(path) -> bool:
-    """Dispose one upgrade backup whose album holds a verified replacement
-    for every file it kept, because the user asked.
+def _replacement_proof(candidate):
+    """How the album may stand in for this backup's audio, as arguments for
+    the retention proof, or None where only identical files will do.
 
-    The upgrade's audio is new, so the byte-identical proof can never pass.
-    This applies the proof the retention sweep does, without the wait: each
-    kept file has a decode-clean track at its path, no shorter and no
-    smaller.
+    An upgrade's tracks sit at the same paths. Gap Fill and Repair download
+    the track again, which Beets may file under another name, so its ISRC
+    finds it too. Repair kept damaged copies, so the proof Repair applies to
+    its own backup holds, whatever their size. Gap Fill kept the user's own
+    tracks, which go only when the album's copy decodes to the same samples.
+    """
+    kind = candidate.receipt.get("kind")
+    if kind == "upgrade":
+        return {}
+    if kind != "gap-fill":
+        return None
+    if re.match(r"^\d{8}_\d{6}_\d{6}_repair_", candidate.path.name):
+        return {"match_recordings": True, "allow_smaller_audio": True}
+    return {"match_recordings": True, "allow_smaller_audio": True,
+            "same_audio": True}
+
+
+def discard_replaced_backup(path, carried=None) -> bool:
+    """Dispose one upgrade, gap-fill or repair backup whose album holds a
+    verified replacement for every file it kept, because the user asked.
+
+    The new download's bytes differ, so the byte-identical proof can never
+    pass. Each kept track needs a decode-clean track standing in for it in
+    the album, as ``_replacement_proof`` describes. Lyrics only the backup's
+    track has are copied onto the album's first, and the album's tracks
+    that got them are added to ``carried``; when that fails, the backup
+    stays.
     """
     candidate = load_backup_result(Path(path))
-    if (candidate is None or not isinstance(candidate.receipt, dict)
-            or candidate.receipt.get("kind") != "upgrade"):
+    if candidate is None or not isinstance(candidate.receipt, dict):
         return False
-    return _dispose_retention_candidate(candidate)
+    proof = _replacement_proof(candidate)
+    if proof is None:
+        return False
+    pairs = []
+    if not _classify_backup_contents(
+            Path(candidate.receipt["origin"]), candidate.path,
+            audio_replacement=True, carry_lyrics=True, pairs=pairs,
+            **proof).removable:
+        return False
+    carried = [] if carried is None else carried
+    if not all(_carry_lyrics(source, destination, carried)
+               for source, destination in pairs):
+        return False
+    return _dispose_retention_candidate(candidate, carry_lyrics=True, **proof)
+
+
+def removal_refusal(path):
+    """Why Remove keeps this backup, from a full check without the listing's
+    read limit. The listing's cached answer goes, and until its files change
+    the row says this instead of that it was not checked."""
+    global _only_copy_cache
+    path = Path(path)
+    origin = _read_backup_origin(path)
+    result = _classify_retained_backup(
+        path, origin, _BackupReadBudget(sys.maxsize), compare_audio=True)
+    with _only_copy_lock:
+        _only_copy_cache = None
+        _removal_refusals[path] = (_files_signature(path, origin), result)
+    return result
 
 
 def album_tree_size(path):
@@ -11101,10 +11253,12 @@ def album_folder_replaced(backup) -> bool:
         _close_descriptors(descriptors)
 
 
-def files_not_back_in_album(path, *, compare=False):
+def files_not_back_in_album(path, *, compare=False, exact=False):
     """(missing, different) for the files this backup holds: how many have
-    nothing at their place in the album it came from, so the backup is their
-    only copy, and with ``compare`` how many have a different file there.
+    nothing at their place in the album it came from, nor a file of the same
+    size under another name, so the backup is their only copy, and with
+    ``compare`` how many have a different file there. With ``exact`` a file
+    under another name counts only when its bytes are the same.
 
     None when that can't be told: the album isn't known or the backup can't
     be read. Beside its album folder only an unfinished upgrade backup that
@@ -11112,6 +11266,19 @@ def files_not_back_in_album(path, *, compare=False):
     holds the new download, whose names may differ, and a download an
     upgrade set aside holds none of the user's files.
     """
+    counts = _files_in_album(path, compare=compare, exact=exact)
+    return None if counts is None else counts[:2]
+
+
+def files_back_under_new_names(path) -> bool:
+    """Whether every file this backup holds that is missing by name from its
+    album is there, byte for byte, under another name."""
+    counts = _files_in_album(path, exact=True)
+    return counts is not None and counts[0] == 0 and counts[2] > 0
+
+
+def _files_in_album(path, *, compare=False, exact=False):
+    """(missing, different, renamed) for files_not_back_in_album."""
     target = Path(path)
     origin = _read_backup_origin(target) or _intended_origin(target)
     if origin is None:
@@ -11119,11 +11286,12 @@ def files_not_back_in_album(path, *, compare=False):
     if origin.is_dir() and (
             not _unfinished_upgrade(target)
             or _superseded(target, origin)):
-        return 0, 0
+        return 0, 0, 0
     entries = _list_tree(target)
     if entries is None:
         return None
-    missing = different = 0
+    missing = different = renamed = 0
+    album_files = None
     try:
         for source in entries:
             relative = source.relative_to(target)
@@ -11134,13 +11302,25 @@ def files_not_back_in_album(path, *, compare=False):
                 continue
             destination = origin / relative
             if not destination.is_file():
-                missing += 1
+                if album_files is None:
+                    album_files = [
+                        entry for entry in _list_tree(origin) or ()
+                        if stat.S_ISREG(entry.lstat().st_mode)]
+                size = source.stat().st_size
+                if any(
+                        entry.stat().st_size == size
+                        and (not exact
+                             or filecmp.cmp(source, entry, shallow=False))
+                        for entry in album_files):
+                    renamed += 1
+                else:
+                    missing += 1
             elif compare and not filecmp.cmp(
                     source, destination, shallow=False):
                 different += 1
     except OSError:
         return None
-    return missing, different
+    return missing, different, renamed
 
 
 def discard_backup_unchecked(path) -> bool:
@@ -11155,7 +11335,7 @@ def discard_backup_unchecked(path) -> bool:
     only copy, so it is never deleted this way.
     """
     target = Path(path)
-    counts = files_not_back_in_album(target)
+    counts = files_not_back_in_album(target, exact=True)
     if counts is not None and counts[0]:
         return False
     opened = _open_rooted_directory(cfg.UPGRADE_BACKUP_DIR, target)

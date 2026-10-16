@@ -5702,6 +5702,12 @@ details[open] > summary .ql-review-chevron {
   background-color: color-mix(in oklab, var(--ql-surface) 94%, var(--ql-bg));
   box-shadow: var(--ql-shadow);
 }
+/* A refusal can name a long folder; it wraps instead of pushing the close
+   button off a phone's screen. */
+.ql-toast-host .ql-notice > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 /* Log/scan console follows the active theme. */
 .log-console {

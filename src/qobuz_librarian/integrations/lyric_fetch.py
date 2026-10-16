@@ -1535,6 +1535,42 @@ def write_output(path: Path, f, content: str, fmt: str, *, binding):
     return change["after"]
 
 
+def carry_lyrics(source: Path, source_root: Path, track: Path,
+                 owned_root: Path, lyrics_format: str) -> None:
+    """Give ``track`` the lyrics ``source`` holds, by the Lyrics pass's rule.
+
+    Missing lyrics are added and plain ones give way to synced; synced ones
+    stay and nothing is removed. They go where ``lyrics_format`` asks; a
+    .lrc already beside the track counts as lyrics it has. Raises when they
+    could not be written."""
+    rank = ("none", "plain", "synced").index
+    with _BoundTrack(source, source_root) as held:
+        old = FLAC(f"/proc/self/fd/{held.track_fd}")
+        old_tag = get_existing_lyrics(old)
+        old_sidecar = _read_bound_sidecar(
+            source, held.parent_fd, held.chain_is_named,
+            held.exact_track_is_named)
+    lyrics = _best_existing_lyrics(old_tag, old_sidecar)
+    kind = classify(lyrics)
+    if kind == "none":
+        return
+    places = _required_representations(lyrics_format)
+    with _BoundTrack(track, owned_root) as binding:
+        f = FLAC(f"/proc/self/fd/{binding.track_fd}")
+        tag = get_existing_lyrics(f)
+        sidecar = _read_bound_sidecar(
+            track, binding.parent_fd, binding.chain_is_named,
+            binding.exact_track_is_named)
+        if rank(classify(_best_existing_lyrics(tag, sidecar))) >= rank(kind):
+            return
+        kinds = {"embed": classify(tag), "sidecar": classify(sidecar)}
+        targets = [name for name in ("embed", "sidecar")
+                   if name in places and rank(kinds[name]) < rank(kind)]
+        write_output(track, f, lyrics,
+                     "both" if len(targets) == 2 else targets[0],
+                     binding=binding)
+
+
 # Title suffixes that confuse provider matching. Strip Spotify-style
 # "(Remastered 2009)", "(Album Version)", "[Mono]", trailing
 # " - 2009 Remaster", etc., before querying - providers index the canonical

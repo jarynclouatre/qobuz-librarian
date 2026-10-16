@@ -3231,6 +3231,16 @@ elif album.endswith("Renamed (2024)"):
     backup_mod.restore_upgrade_backup(
         backup_mod.load_backup_result(path), Path(album))
     os._exit(92)
+elif album.endswith("Sealed (2026)"):
+    backup_mod._same_filesystem = lambda *_args: False
+    rename = backup_mod._rename_exact_noreplace_at
+
+    def rename_then_stop(source_fd, source_name, *args):
+        rename(source_fd, source_name, *args)
+        if source_name.startswith(backup_mod._PARTIAL_COPY_PREFIX):
+            os._exit(91)
+
+    backup_mod._rename_exact_noreplace_at = rename_then_stop
 elif album.endswith("Interrupted (2025)"):
     backup_mod._same_filesystem = lambda *_args: False
     unlink = os.unlink
@@ -3299,6 +3309,21 @@ os._exit(92)
     assert (renamed / backup_mod._RECEIPT_SIDECAR).exists()
     lifespan._put_back_albums_left_in_backups()
     assert sorted(p.name for p in renamed.iterdir()) == ["01 - Song.flac"]
+    assert sorted(p.name for p in (root / "backups").iterdir()) == [
+        kept.name]
+
+    # A hard stop right after the copy took its backup's name leaves the
+    # album whole beside a duplicate, which the next start removes.
+    sealed = root / "music" / "Artist" / "Sealed (2026)"
+    sealed.mkdir()
+    (sealed / "01 - Song.flac").write_bytes(b"one")
+    stopped = subprocess.run(
+        [sys.executable, "-c", script, str(root / "music"),
+         str(root / "backups"), str(sealed)],
+        env={**os.environ, "DATA_DIR": child_home, "HOME": child_home})
+    assert stopped.returncode == 91
+    lifespan._put_back_albums_left_in_backups()
+    assert (sealed / "01 - Song.flac").read_bytes() == b"one"
     assert sorted(p.name for p in (root / "backups").iterdir()) == [
         kept.name]
 

@@ -17,7 +17,7 @@ from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album, get_artist_albums
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE
 from qobuz_librarian.library import hidden as hidden_mod
-from qobuz_librarian.library import missing_types
+from qobuz_librarian.library import missing_types, scanner
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
     _count_audio_files_in,
@@ -26,7 +26,6 @@ from qobuz_librarian.library.catalog import (
     bonus_versions,
     find_expanded_edition,
     find_extras_in_existing,
-    match_dir_to_catalog,
     unstreamable,
 )
 from qobuz_librarian.library.discovery import (
@@ -42,9 +41,12 @@ from qobuz_librarian.library.discovery import (
 from qobuz_librarian.library.scanner import (
     clear_scan_caches,
     list_artist_album_dirs,
+    read_album_dir,
 )
 from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.modes.process import (
+    _fmt_quality,
+    _track_quality,
     detect_sibling_album_groups,
     pick_canonical_sibling,
     process_album,
@@ -91,6 +93,42 @@ def _downsample_note(album):
     if target_hz < sr_hz:
         return f"  → will downsample to {target_hz / 1000:g}kHz"
     return ""
+
+
+def _file_format(track):
+    """(bits, rate) for a lossless file, else (0, 0, format name). AAC in an
+    .m4a reports 16 bits like a CD file, and an untagged file comes back
+    without its quality, so those read their own header."""
+    path = track.get("path") or ""
+    ext = path.rpartition(".")[2].lower()
+    bits, rate = _track_quality(track)
+    if ext == "m4a" or not (bits and rate):
+        try:
+            info = scanner.mutagen.File(path).info
+        except Exception:
+            info = None
+        if info is None:
+            return (0, 0, ext.upper() or "?")
+        if ext == "m4a" and getattr(info, "codec", "") != "alac":
+            return (0, 0, "AAC")
+        bits = getattr(info, "bits_per_sample", 0) or 0
+        rate = getattr(info, "sample_rate", 0) or 0
+    if bits and rate:
+        return (bits, rate)
+    return (0, 0, ext.upper() or "?")
+
+
+def _folder_quality_label(album_dir):
+    """The quality of the folder's own files, best first, so the user picking
+    which copy to keep sees what is on disk rather than what Qobuz offers."""
+    found = {_file_format(t) for t in read_album_dir(album_dir, walk_errors=[])}
+    if not found:
+        return "quality unknown"
+    labels = [_fmt_quality(q) if q[0] else q[2]
+              for q in sorted(found, reverse=True)]
+    if len(labels) == 1:
+        return labels[0]
+    return "mixed " + ", ".join(labels)
 
 
 def _consolidation_disabled_notice(args, mode_name):
@@ -182,15 +220,10 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             log.info(fmt(C.WHITE, f"  Group '{bare}':"))
             for j, d in enumerate(dirs, 1):
                 n_audio = _count_audio_files_in(d)
-                _sib_qual = ""
-                if catalog:
-                    _sc = match_dir_to_catalog(d, catalog, artist_name)
-                    if _sc:
-                        _sib_qual = f"  {fmt(C.CYAN, album_quality_label(_sc))}"
                 log.info(f"    {fmt(C.BOLD, str(j))}. "
                          f"{fmt(C.WHITE, d.name)}  "
                          f"{fmt(C.GRAY, f'[{plural(n_audio, "audio file")}]')}"
-                         f"{_sib_qual}")
+                         f"  {fmt(C.CYAN, _folder_quality_label(d))}")
             log.info(fmt(C.GRAY,
                 "    Pick which to keep; others are deleted after a successful fill."))
             log.info(fmt(C.GRAY, "    Enter to skip the entire group."))
@@ -333,9 +366,10 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                     break
                 time.sleep(cfg.ARTIST_API_DELAY)
                 if m.status != "no_match":
-                    all_in_group = sibling_choices[original_ad] + [original_ad]
-                    sibling_choices[next_try] = [d for d in all_in_group
-                                                 if d is not next_try]
+                    # The folder the user chose to keep stays on disk.
+                    sibling_choices[next_try] = [
+                        d for d in sibling_choices[original_ad]
+                        if d is not next_try]
                     sibling_choices.pop(original_ad, None)
                     ad = next_try
                     log.info(fmt(C.GREEN, f"    ✓  Switched to {ad.name}."))

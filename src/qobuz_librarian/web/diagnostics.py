@@ -126,11 +126,6 @@ def _reject_nothing_uses(inspection, saved_operations):
     )
 
 
-def _upgrade_backup(path):
-    carried = backup_mod.load_backup_result(path)
-    return carried is not None and carried.receipt.get("kind") == "upgrade"
-
-
 def _album_name_from_path(path):
     """An album folder read back as a name: artist, then album."""
     parts = [part for part in Path(str(path)).parts if part not in ("/", "")]
@@ -690,18 +685,6 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         where = dest if origin else "the album folder it came from"
         by_file = re.match(
             r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_", path.name)
-        # An upgrade's backup differs from the album by design; Remove checks
-        # the album holds a verified replacement for each track instead.
-        replaced = (
-            not by_file and origin
-            and classification.reason in {"different", "audio"}
-            and Path(classification.file).suffix.lower() in cfg.AUDIO_EXTS
-            and _upgrade_backup(path))
-        if replaced:
-            reason = html.escape(
-                f"The album now holds a different copy of {classification.file}. "
-                "Remove deletes this backup only once every track it holds "
-                "has a verified replacement there.")
         if by_file:
             # These restore file by file and the backup wins each swap.
             restore_confirm = (
@@ -713,21 +696,26 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 "while that folder holds less than the backup, and replaces "
                 "what it holds.")
         # Remove proves every file back first, so it can only succeed where
-        # the listing could not finish its own check.
-        proof = (
-            f"every track it holds has a verified replacement in {where}"
-            if replaced else
-            f"every file it holds is verified byte-for-byte back in {where}")
+        # the listing could not finish its own check or found it removable.
+        lyrics = (
+            f" The lyrics of its {html.escape(classification.file)} are "
+            "copied onto the same track in the album first, so they are kept."
+            if classification.reason in {"lyrics", "compare"}
+            and classification.file else
+            " If a track here has lyrics the album's copy lacks, Remove "
+            "copies them onto it first, so they are kept."
+            if classification.reason == "budget" else "")
         remove_form = (
             f'<form hx-post="/backups/discard" hx-target="#diagnostics-list" data-busy-submit>'
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
             f'<input type="hidden" name="backup" value="{name}">'
             f'<button type="submit" class="ql-btn ql-btn-sm" '
             f'data-confirm="Remove this backup? It is deleted only after '
-            f'{proof}." '
+            f'the app checks that {where} holds every file in it, or a '
+            f'verified copy of each track.{lyrics}" '
             f'data-confirm-action="Remove" data-irreversible>Remove</button>'
             f'</form>'
-        ) if classification.status != "retained" or replaced else ""
+        ) if classification.status != "retained" else ""
         rows.append(
             f'<div class="ql-diagnostic-row" data-backup-status="{classification.status}">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'

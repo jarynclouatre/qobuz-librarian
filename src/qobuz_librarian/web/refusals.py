@@ -100,14 +100,16 @@ def _lock_busy_response(request, *, durable_resume_job_id: str | None = None,
         return None
     unwritable_now = storage._unwritable_volumes()
     if rendering._is_htmx(request):
-        response = HTMLResponse(
+        if request.headers.get("HX-Target") == "diagnostics-list":
+            # The list is the whole Diagnostics panel and stays as it is; the
+            # notice goes to the toast, where its row's user can see it.
+            return HTMLResponse(
+                rendering._ql_toast_html(
+                    "error", html.escape(notice["msg"]), "diagnostics"),
+                headers={"HX-Reswap": "none"})
+        return HTMLResponse(
             rendering._ql_notice_html("error", html.escape(notice["msg"])),
             status_code=200)
-        if request.headers.get("HX-Target") == "diagnostics-list":
-            # The list is the whole Diagnostics panel; the notice goes above
-            # it rather than in its place.
-            response.headers["HX-Reswap"] = "beforebegin"
-        return response
     return rendering._tr(request, "lock_busy.html",
                {"msg": notice["msg"], "reason": notice["reason"],
                 "action": notice["action"],

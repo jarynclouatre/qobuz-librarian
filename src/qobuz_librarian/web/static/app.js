@@ -1545,19 +1545,39 @@
     host.appendChild(el);
     if (persistentKey) {
       el.dataset.flashPersistent = persistentKey;
-      var close = document.createElement("button");
-      close.type = "button";
-      close.className = "ql-icon-button min-h-11 min-w-11 shrink-0";
-      close.setAttribute("aria-label", "Dismiss notice");
-      close.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-width="1.8" d="m6 6 12 12M6 18 18 6"/></svg>';
-      close.addEventListener("click", function () { fade(el); });
-      el.appendChild(close);
+      addToastClose(el);
     } else {
       setTimeout(function () { fade(el); }, 8000);
     }
     return el;
   }
   window.qlShowToast = showToast;
+
+  function addToastClose(el) {
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "ql-icon-button min-h-11 min-w-11 shrink-0";
+    close.setAttribute("aria-label", "Dismiss notice");
+    close.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-width="1.8" d="m6 6 12 12M6 18 18 6"/></svg>';
+    close.addEventListener("click", function () { fade(el); });
+    el.appendChild(close);
+  }
+
+  // A toast the server sent replaces the earlier one of its group, and one
+  // that stays until closed gets its close button.
+  function settleServerToasts() {
+    var host = document.getElementById("download-toast");
+    if (!host) return;
+    var latest = {};
+    host.querySelectorAll("[data-flash-group]").forEach(function (el) {
+      var group = el.dataset.flashGroup;
+      if (latest[group]) latest[group].remove();
+      latest[group] = el;
+    });
+    host.querySelectorAll("[data-flash-group][data-flash-persistent]").forEach(function (el) {
+      if (!el.querySelector(":scope > .ql-icon-button")) addToastClose(el);
+    });
+  }
 
   // Reloading is how the raw fetch() paths recover from a failed action, and
   // with the connection down it is the worst thing they can do: the service
@@ -4025,6 +4045,7 @@
   }
 
   function initAll() {
+    settleServerToasts();
     autoDismissFlashes();
     normalizeFlashAnnouncements();
     initCoverFallbacks();
@@ -4315,6 +4336,11 @@
 
   // Re-scan swapped content for flashes and streams.
   document.addEventListener("htmx:afterSwap", initAll);
+  // A refusal can arrive with nothing else swapped.
+  document.addEventListener("htmx:oobAfterSwap", function () {
+    settleServerToasts();
+    normalizeFlashAnnouncements();
+  });
   document.addEventListener("htmx:afterSwap", rememberSearchSwap);
   document.addEventListener("htmx:afterSwap", restoreSearchFocus);
   document.addEventListener("htmx:afterSwap", revealSearchFeedback);

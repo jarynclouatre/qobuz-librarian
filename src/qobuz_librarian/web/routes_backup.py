@@ -260,11 +260,9 @@ async def collection_restore_upload(request: Request,
 
 
 def _diagnostics_result_notice(kind: str, body: str) -> str:
-    """A Restore/Remove result on the diagnostics list."""
-    if kind in ("success", "info"):
-        return (f'<div id="download-toast" hx-swap-oob="beforeend">'
-                f'{rendering._ql_notice_html(kind, body)}</div>')
-    return rendering._ql_notice_html(kind, body)
+    """A diagnostics button's result. It goes to the toast: the list is long,
+    and its top is off screen from a row further down."""
+    return rendering._ql_toast_html(kind, body, "diagnostics")
 
 
 def _stuck_backup_notice(request: Request, target: Path, headline: str) -> str:
@@ -289,14 +287,19 @@ def _unreadable_record_notice(request: Request, target: Path) -> str:
 
 
 def _restore_refused_notice(request: Request, target: Path, origin, *,
-                            complete=True, replaced=False) -> str:
+                            complete=True, replaced=False,
+                            renamed=False) -> str:
     """Say why an upgrade restore refused, in the figures it refused on."""
     backup_size = backup_mod.album_tree_size(target)
     origin_size = backup_mod.album_tree_size(origin) if origin else None
     origin_display, _is_host = storage._resolve_host_path(str(origin or ""))
     counts = (None if complete or not origin_size
               else backup_mod.files_not_back_in_album(target, compare=True))
-    if replaced:
+    if renamed:
+        headline = (
+            f"{origin_display} already has every file in this backup, some "
+            "under new names. Nothing was put back.")
+    elif replaced:
         headline = (
             f"{origin_display} was replaced by a newer album after this "
             "backup was made. The backup holds the earlier original files, so "
@@ -381,7 +384,7 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
         if refusal:
             return refusal
         location, _is_host = storage._resolve_host_path(str(target))
-        counts = backup_mod.files_not_back_in_album(target)
+        counts = backup_mod.files_not_back_in_album(target, exact=True)
         if counts and counts[0]:
             note = _diagnostics_result_notice(
                 "error", f"This backup holds {plural(counts[0], 'file')} "
@@ -498,7 +501,9 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                 note = _restore_refused_notice(
                     request, target, origin, complete=carried.complete,
                     replaced=not carried.complete
-                    and backup_mod.album_folder_replaced(carried))
+                    and backup_mod.album_folder_replaced(carried),
+                    renamed=not carried.complete
+                    and backup_mod.files_back_under_new_names(target))
         else:
             note = _diagnostics_result_notice(
                 "error", "This backup has an unsupported recovery record, so "
@@ -512,16 +517,17 @@ async def restore_backup(request: Request, backup: str = Form("")):
     return await _run_diagnostics_action(request, _restore_backup_sync, backup)
 
 
-def _discard_replaced_upgrade(carried) -> bool:
-    """Remove an upgrade backup the upgrade verifiably replaced, after
+def _discard_replaced(carried, lyrics) -> bool:
+    """Remove a backup whose album verifiably replaced its tracks, after
     dropping the album's beets entries left behind by a failed catalogue
-    step, so it lists each track once."""
-    if carried.receipt.get("kind") != "upgrade":
+    step, so it lists each track once. The album's tracks that got the
+    backup's lyrics are added to ``lyrics``."""
+    if carried.receipt.get("kind") not in {"upgrade", "gap-fill"}:
         return False
     origin = carried.receipt.get("origin")
     if origin and Path(origin).is_dir():
         beets_mod.forget_replaced_beets_entries(folder=origin)
-    return backup_mod.discard_replaced_upgrade_backup(carried.path)
+    return backup_mod.discard_replaced_backup(carried.path, lyrics)
 
 
 def _discard_backup_sync(request: Request, backup: str) -> str:
@@ -534,6 +540,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
         if refusal:
             return refusal
         carried = backup_mod.load_backup_result(target)
+        lyrics = []
         if carried is None or carried.receipt is None:
             note = _unreadable_record_notice(request, target)
         elif (
@@ -546,26 +553,40 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                 "volume is writable, then try again.")
         elif (
             (identical := backup_mod.discard_redundant_backup(target))
-            or _discard_replaced_upgrade(carried)
+            or _discard_replaced(carried, lyrics)
         ):
             dest = html.escape(storage._resolve_host_path(
                 str(carried.receipt.get("origin", "")))[0])
+            kept = (
+                f" The lyrics of {html.escape(backup_mod.some_names(lyrics))} were "
+                f"copied onto the album's {'track' if len(lyrics) == 1 else 'tracks'} first."
+                if lyrics else "")
             if job_mgr.resolve_recovery_resolution(resolution_plan):
                 note = _diagnostics_result_notice(
                     "success", "Removed the backup. Every file it held is "
                     f"verified present at {dest}." if identical else
                     "Removed the backup. Every track it held has a verified "
-                    f"replacement at {dest}.")
+                    f"replacement at {dest}.{kept}")
             else:
                 note = _diagnostics_result_notice(
                     "error", "The backup was removed, but its saved recovery "
                     "status could not be updated. History may keep flagging "
                     "the recovery until the data volume has been checked.")
         else:
-            note = _diagnostics_result_notice(
-                "error", "Couldn't verify every file is back byte-for-byte, "
-                "so the backup was left untouched. Restore is the safe way "
-                "to bring its files home.")
+            refusal = backup_mod.removal_refusal(target)
+            if not refusal.removable:
+                body = (f"{html.escape(refusal.detail)} The backup was left "
+                        "untouched.")
+            elif refusal.reason == "lyrics":
+                body = (f"Couldn't copy the lyrics of "
+                        f"{html.escape(refusal.file)} onto the same track in the album, "
+                        "so the backup was left untouched. The log says why.")
+            else:
+                body = ("Couldn't verify that the album still holds every "
+                        "file this backup does, so the backup was left "
+                        "untouched. Restore is the safe way to bring its "
+                        "files home.")
+            note = _diagnostics_result_notice("error", body)
     return note + diagnostics._diagnostics_fragment(request)
 
 

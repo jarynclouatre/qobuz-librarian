@@ -109,6 +109,7 @@ from qobuz_librarian.library.post_import_relocation import (
     relocate_post_import_album,
 )
 from qobuz_librarian.library.scanner import cache_album_tags, clear_scan_caches, read_album_dir
+from qobuz_librarian.modes.consolidate import match_sibling_track
 from qobuz_librarian.quality.decision import mark_local_album_capped
 from qobuz_librarian.quality.verify import (
     redownload_with_staged_fallback,
@@ -155,6 +156,24 @@ class PreImportHooksResult:
         """Keep the established two-value unpacking contract."""
         yield self.lyric_sigs
         yield self.resampled
+
+
+def _sibling_tracks_all_kept(sibling, kept):
+    """True when every audio file in ``sibling`` is a recording ``kept`` also
+    holds, so retiring the sibling loses no track. A bonus track only the
+    sibling has, a file that can't be matched, or an unreadable tree keeps it."""
+    errors = []
+    sibling_tracks = read_album_dir(Path(sibling), walk_errors=errors)
+    kept_tracks = read_album_dir(Path(kept), walk_errors=errors)
+    if errors or not kept_tracks:
+        return False
+    claimed = set()
+    for track in sibling_tracks:
+        match = match_sibling_track(track, kept_tracks)
+        if match is None or id(match) in claimed:
+            return False
+        claimed.add(id(match))
+    return True
 
 
 def _seal_queue_item_siblings(item):
@@ -1627,6 +1646,13 @@ def _resolve_queue_item(
                             "before the download.",
                         ))
                         continue
+                    if not _sibling_tracks_all_kept(sibling_path, post_dir):
+                        log.info(fmt(
+                            C.YELLOW,
+                            f"  ⚠  Kept sibling {name}; couldn't confirm "
+                            f"{post_dir.name} has every track it holds.",
+                        ))
+                        continue
                     sibling_backup = backup_album_dir(
                         sibling_path, expected_receipt=receipt)
                     if sibling_backup is None:
@@ -1692,10 +1718,11 @@ def _resolve_queue_item(
                         sibling_backup,
                         replacement_path=post_dir,
                         expected_replacement_receipt=replacement_receipt,
-                        replacement_validator=lambda replacement, _backup: (
+                        replacement_validator=lambda replacement, held: (
                             folder_holds_all_tracks(
                                 replacement, _album_tracks,
                                 destructive=True)
+                            and _sibling_tracks_all_kept(held, replacement)
                         ),
                     )
                     if not retired:
