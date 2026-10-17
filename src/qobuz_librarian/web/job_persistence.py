@@ -1880,6 +1880,10 @@ _HISTORY_SQL = (
 # from a stop or failure of its own.
 RESTART_INTERRUPTED = "Interrupted by a restart."
 
+# Saved with a Search download while it holds a saved queue entry, which the
+# terminal can settle without the web app seeing it.
+SAVED_QUEUE = "saved_queue"
+
 # How many albums an Upgrade, Downsample, Repair or Library download run has
 # finished, and of how many picked, saved with its details so a restart can
 # say what it had already done.

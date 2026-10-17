@@ -133,6 +133,19 @@ def _unsettled_web_job_ids() -> frozenset:
     )
 
 
+def _journaled_web_job_ids() -> frozenset | None:
+    """The web jobs a saved queue names, or None when one cannot be read."""
+    loads = queue_state.list_queue_journals()
+    if any(loaded.status is queue_state.QueueLoadStatus.BLOCKED for loaded in loads):
+        return None
+    prefix = "web-job:"
+    return frozenset(
+        loaded.journal.mode[len(prefix):]
+        for loaded in loads
+        if loaded.journal is not None and loaded.journal.mode.startswith(prefix)
+    )
+
+
 def _await_recovery_refresh(timeout: float = 1.0) -> None:
     """Let a refresh running in another thread finish before its outcome is
     read. One follows every download and is quick; a page drawn in the middle

@@ -48,6 +48,7 @@ def processing_attention(result):
         or result.get("downsample_flush_warnings", 0)
         or result.get("downsample_cancelled")
         or result.get("consolidation_interrupted")
+        or result.get("consolidation_failed")
         or result.get("siblings_preserved")
     )
 

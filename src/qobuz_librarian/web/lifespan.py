@@ -294,6 +294,7 @@ def _restore_jobs_once() -> bool:
                 requeue=job_runs._requeued_download_run,
                 return_picks=flows.return_interrupted_picks,
                 finished_upgrades=finished,
+                journaled=queue_recovery._journaled_web_job_ids(),
             )
         except Exception as exc:
             _log.warning(

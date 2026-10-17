@@ -3825,6 +3825,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         elif args.no_import:
             if summary_n_ok and not summary_n_missing:
                 keep_unimported_download(item)
+            elif retention_exc is None:
+                _retained, retention_exc = _retain_failed_staging(
+                    item, label="incomplete")
             log.info(fmt(C.YELLOW,
                 f"  --no-import: skipping beets. Files in {cfg.STAGING_DIR}/"))
         elif summary_n_ok == 0:

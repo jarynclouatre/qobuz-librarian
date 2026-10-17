@@ -2102,13 +2102,13 @@ def _settle_restarted_download(job: Job, settled, *, was_running: bool,
             job.started_at = None
             job.finished_at = None
             job.push_line(
-                "Interrupted by a restart before anything was imported. The "
-                "partial download was removed and the album was queued again.")
+                "Interrupted by a restart, so it was queued again. Only what "
+                "is still missing is downloaded.")
             return True
         else:
-            job.error = (restart + "It was cut off before import "
-                         f"{plural(count + 1, 'time')}, so it was not queued "
-                         "again. Use Retry to download it again.")
+            job.error = (restart + "It was interrupted "
+                         f"{plural(count + 1, 'time')} in a row, so it was not "
+                         "queued again. Use Retry to download it again.")
             job.attention = "failed"
     elif settled.outcome == "requeue":
         job.error = "This download did not finish. Use Retry to download it again."
@@ -2119,6 +2119,15 @@ def _settle_restarted_download(job: Job, settled, *, was_running: bool,
     job.status = JobStatus.FAILED
     job.finished_at = job.finished_at or time.time()
     return False
+
+
+@dataclass(frozen=True)
+class _RunningDownload:
+    """A download job running at the restart that no saved queue names."""
+
+    album_id: str
+    outcome: str = "requeue"
+    reason: str = ""
 
 
 def settle_restarted_downloads(cut_off: dict) -> None:
@@ -2169,8 +2178,9 @@ def restore_jobs(
     unsettled: frozenset = frozenset(),
     cut_off: dict | None = None,
     requeue: Callable[[Job], Optional[Callable]] | None = None,
-    return_picks: Callable[[Job], None] | None = None,
+    return_picks: Callable[[Job], str] | None = None,
     finished_upgrades=(),
+    journaled: frozenset | None = None,
 ) -> None:
     """Rehydrate the registry from the on-disk job table at app startup.
 
@@ -2194,7 +2204,9 @@ def restore_jobs(
         queue again, in the order it was first queued. ``cut_off`` maps
         a download job's id to what start-up did with its saved queue entry
         (see ``_settle_restarted_download``); ``unsettled`` names the jobs
-        whose entry could not be settled. A review's run that
+        whose entry could not be settled. A download that was running with
+        no saved queue entry, when ``journaled`` names every web job that
+        has one, is settled the same way. A review's run that
         stopped without saving its stop hands its picks to ``return_picks``.
         An Upgrade run counts the album folders in ``finished_upgrades``,
         whose upgrade the start-up finished, as upgraded.
@@ -2210,7 +2222,7 @@ def restore_jobs(
     requeued = []
     pending_reviews = []
     cut_short = []
-    terminal_payloads = []
+    finished_jobs = []
     pending_logs = {
         row["id"]: row["log_lines_json"]
         for row in rows if "log_lines_json" in row
@@ -2239,7 +2251,7 @@ def restore_jobs(
             and previous_status not in TERMINAL
             and job.status in TERMINAL
         ):
-            terminal_payloads.append(_post_job_hook_payload(job))
+            finished_jobs.append(job)
         return saved
 
     for row in rows:
@@ -2270,11 +2282,12 @@ def restore_jobs(
             and job.execute_kind in job_persistence.REVIEW_PICK_KINDS
             and bool(job.candidates or row.get("candidates_unreadable"))
         )
-        if (status == JobStatus.RUNNING
-                and job.execute_kind in job_persistence.REVIEW_PICK_KINDS
-                and job.finished_at is None
-                and not job.recoveries
-                and not job.execute_args_unreadable):
+        returns_picks = (status == JobStatus.RUNNING
+                         and job.execute_kind in job_persistence.REVIEW_PICK_KINDS
+                         and job.finished_at is None
+                         and not job.recoveries
+                         and not job.execute_args_unreadable)
+        if returns_picks:
             # A stop the app saw has already dealt with the picks and saved
             # its stop time; a hard stop did neither.
             cut_short.append(job)
@@ -2290,6 +2303,20 @@ def restore_jobs(
                 is True
             )
         settled = (cut_off or {}).get(job.id)
+        if (
+            settled is None
+            and status == JobStatus.RUNNING
+            and job.kind == "download"
+            and job.album_id
+            and journaled is not None
+            and job.id not in journaled
+            and set(job.single or {}) <= {"album_id", "track_id"}
+            and not (job.execute_args or {}).get("new_edition")
+            and not (job.execute_args or {}).get(job_persistence.SAVED_QUEUE)
+        ):
+            # Its partial download was a run folder no saved queue claimed,
+            # which start-up has already removed.
+            settled = _RunningDownload(album_id=job.album_id)
         if settled is not None and (
             job.id in unsettled
             or job.recoveries
@@ -2389,7 +2416,7 @@ def restore_jobs(
                                f"{plural(max(picked, done), 'album')} downloaded "
                                "before it stopped. The rest did not finish.")
             else:
-                job.summary = restart + "The download did not finish."
+                job.summary = restart.rstrip()
             job.finished_at = job.finished_at or time.time()
             interrupted += 1
             _persist_restored_transition(job, previous_status)
@@ -2446,6 +2473,8 @@ def restore_jobs(
             elif job.execute_kind == "upgrade":
                 job.error = (restart.rstrip() if done and done >= picked
                              else restart + "Start it again from Upgrade.")
+            elif returns_picks and job.execute_kind == "collection_restore":
+                job.error = restart.rstrip()
             else:
                 job.error = restart + "Run it again to retry."
             if job.recoveries:
@@ -2535,16 +2564,26 @@ def restore_jobs(
             job_persistence.persist(job)
     for job in cut_short if return_picks is not None else ():
         try:
-            return_picks(job)
+            outcome = return_picks(job)
         except Exception:
             log.exception("couldn't return the picks of job %s", job.id)
+            continue
+        if not outcome or job.execute_kind not in (
+                "library", "new_releases", "collection_restore"):
+            continue
+        with job._lock:
+            if job.status is JobStatus.CANCELED:
+                job.summary = f"{job.summary} {outcome}"
+            else:
+                job.error = f"{job.error} {outcome}"
+        job_persistence.persist(job)
     # Behind the same pause as any download that arrives while the library is
     # paused, and in the order they were queued.
     requeued.sort(key=lambda pair: pair[0].created_at)
     with _held_downloads_lock:
         _held_downloads.extend(requeued)
-    for payload in terminal_payloads:
-        _start_post_job_hook(payload)
+    for job in finished_jobs:
+        _start_post_job_hook(_post_job_hook_payload(job))
     if interrupted or review or requeued:
         log.info(
             "Restored %s / %s / %s / %s from the previous run.",

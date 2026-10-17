@@ -1146,7 +1146,7 @@ def test_consolidation_never_groups_distinct_years_or_acts_in_a_dry_run(
 
     album = {"id": "x", "title": "Revolver", "artist": {"name": "The Beatles"}}
     assert c.consolidate_albums(album, Namespace(dry_run=True, consolidate=True,
-                                                 yes=False)) == 0
+                                                 yes=False)) == (0, 0)
 
 
 def test_execute_consolidation_backs_up_overlap_and_refuses_a_replacement(

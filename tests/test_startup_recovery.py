@@ -1019,3 +1019,54 @@ def test_boot_retains_a_journal_less_staging_run_instead_of_wedging(
         for group in (tmp_path / "staging" / cfg.BEETS_RETRY_DIR).iterdir()
     ] == ["abandoned"]
     assert retained[0].read_bytes() == b"art"
+
+
+def test_start_up_removes_a_cut_off_download_no_saved_queue_claims(
+    tmp_path,
+    monkeypatch,
+):
+    # A download the older path was running when the app was killed has no
+    # saved queue entry. Start-up removes it, dropping the rows Beets added
+    # for its files first, and leaves a --no-import download alone. A kill
+    # while Beets was moving a track left that track's row pointing into the
+    # removed folder.
+    from qobuz_librarian import download
+    from qobuz_librarian.integrations.staging import create_staging_run
+
+    monkeypatch.setattr(cfg, "LOCK_FILE", tmp_path / "run.lock")
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")
+    cut_off = create_staging_run()
+    (cut_off.path / "Album").mkdir()
+    (cut_off.path / "Album" / "01 Track.flac").write_bytes(b"partial")
+    unimported = create_staging_run()
+    (unimported.path / "Album").mkdir()
+    (unimported.path / "Album" / "01 Track.flac").write_bytes(b"audio")
+    kept = download.keep_unimported_download({"_staging_run": unimported.to_record()})
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
+    rows = {
+        str(cut_off.path / "Album" / "01 Track.flac"),
+        str(cut_off.path / "Album" / "02 Moved.flac"),
+        str(tmp_path / "music" / "Artist" / "Album" / "03 Filed.flac"),
+    }
+
+    def remove_rows(matches, _warn):
+        assert (cut_off.path / "Album" / "01 Track.flac").exists()
+        rows.difference_update({path for path in rows if matches(path)})
+        return beets.ForgetBeetsEntriesResult(True)
+
+    monkeypatch.setattr(beets, "_remove_beets_rows", remove_rows)
+    authority = run_lock.acquire()
+    try:
+        result = startup_recovery.recover_startup_state(
+            authority=authority, settle=True)
+    finally:
+        authority.close()
+
+    assert result.status is startup_recovery.StartupRecoveryStatus.CLEAR
+    assert rows == {str(tmp_path / "music" / "Artist" / "Album" / "03 Filed.flac")}
+    assert not cut_off.path.exists()
+    assert sorted((tmp_path / "staging").glob(".qobuz-run-*")) == [kept]
+    assert (kept / "Album" / "01 Track.flac").read_bytes() == b"audio"
+    retry = tmp_path / "staging" / cfg.BEETS_RETRY_DIR
+    assert not retry.exists() or not any(retry.iterdir())

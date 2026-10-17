@@ -90,11 +90,19 @@ _STAGING_LEFTOVER_KINDS = {
 }
 
 
-# A failed download keeps its audio under the stopped-download kind; the
-# group's name carries the label it was kept with.
+# A failed download, and an incomplete --no-import one, keep their audio under
+# the stopped-download kind; the group's name carries the label it was kept
+# with.
+_FAILED_GROUP = re.compile(r"-failed(?:-[0-9a-f]{24})?$")
 _FAILED_RUN = (
     "Files from a failed download",
     "A download failed before these files were filed into your library.",
+)
+_INCOMPLETE_GROUP = re.compile(r"-incomplete(?:-[0-9a-f]{24})?$")
+_INCOMPLETE_RUN = (
+    "Files kept from a --no-import download",
+    "The download was missing tracks, so these files were kept here for "
+    "you to import or remove.",
 )
 
 
@@ -203,8 +211,11 @@ def _staging_leftovers():
         kind = inspection.kind or "unresolved"
         label, reason = _STAGING_LEFTOVER_KINDS.get(
             kind, _STAGING_LEFTOVER_KINDS["unresolved"])
-        if kind == "interrupted" and inspection.path.name.endswith("-failed"):
+        if kind == "interrupted" and _FAILED_GROUP.search(inspection.path.name):
             label, reason = _FAILED_RUN
+        elif kind == "interrupted" and _INCOMPLETE_GROUP.search(
+                inspection.path.name):
+            label, reason = _INCOMPLETE_RUN
         what = ""
         held = inspection.file_group or inspection.planned_file
         size = (held.retained.identity[3] if held is not None

@@ -652,6 +652,7 @@ def _gap_fill_result_bucket(result):
         or any(result.get(field, 0) for field in partial_fields)
         or result.get("downsample_cancelled", False)
         or result.get("consolidation_interrupted", False)
+        or result.get("consolidation_failed", 0)
         or result.get("upgrade_unverified", False)
         or result.get("catalogue_unverified", False)
         or result.get("recovery_unverified", False)

@@ -2112,12 +2112,13 @@ def test_select_all_and_dismiss_rest_act_only_on_the_rows_in_scope(
         _remove_job(job)
 
 
-def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
+def test_a_restart_requeues_waiting_and_cut_off_downloads(
         client, monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
     from qobuz_librarian.queue import startup_recovery
     from qobuz_librarian.web import (
         job_persistence,
+        job_runs,
         lifespan,
         queue_recovery,
         runtime,
@@ -2128,8 +2129,12 @@ def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
     job_persistence._reset_for_tests()
     monkeypatch.setattr(job_persistence, "_disabled", False)
     job_persistence.init()
+    # Started on the older path, which saves no queue entry.
     started = jm.Job(title="First", album_id="1", created_at=100.0,
                      status=jm.JobStatus.RUNNING)
+    # Still named by a saved queue entry start-up could not settle.
+    named = jm.Job(title="Named", album_id="8", created_at=150.0,
+                   status=jm.JobStatus.RUNNING)
     third = jm.Job(title="Third", album_id="3", created_at=300.0)
     second = jm.Job(title="Second", album_id="2", created_at=200.0)
     finished = jm.Job(title="Finished", album_id="4", created_at=50.0)
@@ -2144,8 +2149,11 @@ def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
                     status=jm.JobStatus.FAILED, attention="failed",
                     error=job_persistence.RESTART_INTERRUPTED + " Downloads and "
                     "scans are paused until it is retried or given up.")
-    for job in (started, third, second, finished, cut_off, capped, paused):
+    for job in (started, named, third, second, finished, cut_off, capped,
+                paused):
         job_persistence.persist(job)
+    monkeypatch.setattr(queue_recovery, "_journaled_web_job_ids",
+                        lambda: frozenset({named.id}))
     for job in (cut_off, capped):
         monkeypatch.setitem(
             queue_recovery._SETTLED_DOWNLOADS, job.id,
@@ -2195,20 +2203,33 @@ def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
     assert lifespan._restore_jobs_once() is True
     assert write_gate._readiness_report()[0] == 200
 
-    assert jm.registry.get(started.id).status == jm.JobStatus.FAILED
+    assert jm.registry.get(named.id).status == jm.JobStatus.FAILED
     assert jm.registry.get(finished.id).status == jm.JobStatus.DONE
-    assert len(jm.registry.all()) == 7
+    assert len(jm.registry.all()) == 8
     assert [job.id for job, _run in jm._held_downloads] == [
-        second.id, third.id, cut_off.id]
+        started.id, second.id, third.id, cut_off.id]
     assert {job.status for job, _run in jm._held_downloads} == {
         jm.JobStatus.PENDING}
-    saved = job_persistence.load_one(cut_off.id)
-    assert saved["status"] == "pending"
-    assert saved["execute_args"]["restart_requeues"] == 1
+    for job in (started, cut_off):
+        saved = job_persistence.load_one(job.id)
+        assert saved["status"] == "pending"
+        assert saved["execute_args"]["restart_requeues"] == 1
     assert jm.registry.get(capped.id).status == jm.JobStatus.FAILED
     assert jm.registry.get(capped.id).attention == "failed"
     assert jm.registry.get(paused.id).error != paused.error
     assert not queue_recovery.settled_downloads()
+
+    # With a saved queue that can't be read, nothing shows which download
+    # it holds.
+    unread = jm.Job(title="Unread", album_id="9", created_at=600.0,
+                    status=jm.JobStatus.RUNNING)
+    job_persistence.persist(unread)
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    monkeypatch.setattr(jm, "_held_downloads", [])
+    jm.restore_jobs(job_runs._RESUME_EXECUTE,
+                    requeue=job_runs._requeued_download_run, journaled=None)
+    assert jm.registry.get(unread.id).status == jm.JobStatus.FAILED
+    assert unread.id not in {job.id for job, _run in jm._held_downloads}
 
 
 def test_a_restart_restores_saved_jobs_past_broken_rows_and_old_schemas(

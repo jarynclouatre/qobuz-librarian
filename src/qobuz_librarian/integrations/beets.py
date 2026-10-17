@@ -7287,22 +7287,26 @@ def forget_deleted_copies(album_dirs):
             ))
 
 
-def forget_staged_beets_rows(paths):
+def forget_staged_beets_rows(paths, *, folder=None):
     """Drop the rows a failed import added for files still in staging.
 
     Beets adds an album's rows before it moves the files, so an import that
-    stopped in between leaves rows pointing into staging. Returns True when
-    none are left.
+    stopped in between leaves rows pointing into staging. With ``folder``,
+    every row under it goes, including one for a file Beets had moved out
+    before it could update the row. Returns True when none are left.
     """
     root = os.path.abspath(os.fspath(cfg.MUSIC_ROOT))
     targets = frozenset(os.path.abspath(os.fspath(path)) for path in paths)
+    prefix = (None if folder is None
+              else os.path.join(os.path.abspath(os.fspath(folder)), ""))
 
     def matches(raw_path):
         if isinstance(raw_path, bytes):
             raw_path = os.fsdecode(raw_path)
         if not isinstance(raw_path, str) or not raw_path:
             return False
-        return os.path.abspath(os.path.join(root, raw_path)) in targets
+        path = os.path.abspath(os.path.join(root, raw_path))
+        return path in targets or (prefix is not None and path.startswith(prefix))
 
     def warn(reason):
         log.info(fmt(

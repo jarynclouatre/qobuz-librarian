@@ -20,6 +20,7 @@ from qobuz_librarian.queue import executor as queue_executor
 from qobuz_librarian.web import (
     download_outcomes,
     flows,
+    job_persistence,
     qobuz_access,
     queue_recovery,
     runtime,
@@ -165,6 +166,18 @@ def _make_download_run(
                 )
                 if not separate and durable_album.plan_durable_new_album(candidate, args) is not None:
                     durable_item = candidate
+            saved_queue = durable_item is not None
+            marker = job_persistence.SAVED_QUEUE
+            if bool((j.execute_args or {}).get(marker)) != saved_queue:
+                with j._lock:
+                    marked = dict(j.execute_args or {})
+                    marked.pop(marker, None)
+                    j.execute_args = (
+                        {**marked, marker: True} if saved_queue else marked)
+                if job_persistence.persist(j) is not True:
+                    raise RuntimeError(
+                        "The download could not be saved to History, so it "
+                        "was not started.")
             if durable_item is None:
                 r = process_mode.process_album(album, args, allow_force=False,
                                   already_confirmed=True, token=active_token,
@@ -330,7 +343,8 @@ def _requeued_download_run(job):
         or job.execute_kind
         or job.recoveries
         or job.execute_args_unreadable
-        or set(args) - {"new_edition", "restart_requeues"}
+        or set(args) - {"new_edition", "restart_requeues",
+                        job_persistence.SAVED_QUEUE}
     ):
         return None
     album_id = str(job.album_id)

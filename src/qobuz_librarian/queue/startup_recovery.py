@@ -249,6 +249,36 @@ def _staging_references(item):
     return _references(item, _STAGING_KINDS)
 
 
+def _unreadable_staged_path(paths):
+    """The first entry under ``paths`` that can't be opened for reading, or
+    the first path when each one opens."""
+    roots = [Path(path) for path in paths if isinstance(path, (str, Path))]
+    for root in roots:
+        folders = [root]
+        while folders:
+            folder = folders.pop()
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                return folder
+            for name in names:
+                path = folder / name
+                if path.is_dir() and not path.is_symlink():
+                    folders.append(path)
+                    continue
+                try:
+                    os.close(os.open(
+                        path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK))
+                except OSError:
+                    return path
+    return roots[0] if roots else None
+
+
+def _check_staged(paths):
+    path = _unreadable_staged_path(paths)
+    return "" if path is None else f" Check {path}."
+
+
 def _pin_library_backup_for_attention(authority, journal, item):
     references = _references(item, _LIBRARY_BACKUP_KINDS)
     if len(references) != 1:
@@ -419,26 +449,43 @@ def saved_queue_operation_ids():
     return {journal.operation_id for journal in _sorted_journals(loads)}
 
 
-def _retain_unclaimed_staging_runs(authority, names) -> bool:
-    """Park run roots no journal claims; the terminal lane leaves them behind.
+def _retain_unclaimed_staging_runs(authority, names, *, discard) -> bool:
+    """Clear run roots no journal claims; the terminal lane leaves them behind.
 
     The boot holder owns the run lock, so no live rip can be writing these.
-    A refusal (a file changed while it was checked) falls back to the
+    With ``discard`` a folder is removed once no Beets row points into it;
+    otherwise, or when those rows can't be dropped, it is moved aside for
+    review. A refusal (a file changed while it was checked) falls back to the
     attention stop instead of touching the tree.
     """
     settled = True
     for name in names:
         _require_authority(authority)
         run = bind_unclaimed_staging_run(name)
+        current = capture_staging_run(run) if run is not None else None
+        # The rows name the files where they are now, so they go first.
+        forgotten = discard and current is not None and forget_staged_beets_rows(
+            (current.path / relative for relative, _identity in current.files),
+            folder=current.path,
+        )
+        _require_authority(authority)
         try:
             group = (
-                retain_staging_run(run, label="abandoned")
-                if run is not None else None
+                retain_staging_run(
+                    run, label="discarded" if forgotten else "abandoned")
+                if current is not None else None
             )
         except OSError:
             group = None
         if group is None:
             settled = False
+            continue
+        if forgotten and discard_group(group):
+            log.warning(
+                "Removed %s, a download folder an interrupted run left in "
+                "staging.",
+                name,
+            )
             continue
         log.warning(
             "An unclaimed download folder %s was left in staging; it was "
@@ -1460,13 +1507,15 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
         run = staging_run_from_record(staging.data)
         current = capture_staging_run(run) if run is not None else None
         if status is not StagingReferenceStatus.MATCH or current is None:
-            return _blocked_settlement(blocked)
+            return _blocked_settlement(
+                blocked + _check_staged([staging.data.get("path")]))
         if not current.files:
             continue
         if retain_staging_run(run, label="stopped-import", release=True) is None:
             return _blocked_settlement(
                 blocked + " The files still in staging could not be set "
                 "aside, so it stays blocked."
+                + _check_staged([staging.data.get("path")])
             )
         set_aside = True
     _require_authority(authority)
@@ -1477,7 +1526,8 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
         # Only an empty run folder can still be there.
         discarded = _discard_parked_item_staging(authority, journal, item)
         if discarded is None:
-            return _blocked_settlement(blocked)
+            return _blocked_settlement(blocked + _check_staged(
+                entry.data.get("path") for entry in _staging_references(item)))
         journal, item = discarded
     settled = _retire_cleared_download(
         authority, journal, item, _single_reference(item, _MANAGED_CARRIER_KIND),
@@ -1621,6 +1671,9 @@ def settle_blocked_item(
                 return _blocked_settlement(
                     "Staged download recovery state is still present or could not "
                     "be proved absent, so this item remains blocked."
+                    + _check_staged(
+                        entry.data.get("path")
+                        for entry in _staging_references(item))
                 )
             journal, item = settled_staging
 
@@ -1910,13 +1963,18 @@ def _recover_startup_state(
             unclaimed = _unclaimed_staging_run_names(journals)
             if unclaimed:
                 _require_authority(authority)
-                if _retain_unclaimed_staging_runs(authority, unclaimed):
+                if _retain_unclaimed_staging_runs(
+                        authority, unclaimed, discard=settle):
                     continue
+                staging = Path(os.path.abspath(os.fspath(cfg.STAGING_DIR)))
+                left = [staging / name for name in unclaimed
+                        if os.path.lexists(staging / name)]
                 log.warning(
                     "%s: a download folder in staging no saved queue claims "
-                    "could not be moved aside: %s",
+                    "could not be cleared: %s.%s",
                     BLOCKED_DOWNLOAD_LOG_ENTRY,
-                    ", ".join(unclaimed),
+                    ", ".join(path.name for path in left),
+                    _check_staged(left),
                 )
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,

@@ -75,6 +75,7 @@ def _one_shot_exit_code(result):
         or result.get("catalogue_unverified")
         or result.get("recovery_unverified")
         or result.get("consolidation_interrupted")
+        or result.get("consolidation_failed")
         or (verdict.get("under") and not verdict.get("recovered"))
     ):
         return EXIT_GENERAL

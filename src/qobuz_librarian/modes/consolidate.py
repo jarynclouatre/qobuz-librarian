@@ -1058,7 +1058,9 @@ def execute_consolidation(summary):
 
 
 def consolidate_albums(album, args):
-    """Top-level consolidation flow. Always interactive - --yes does NOT silence it."""
+    """Top-level consolidation flow. Always interactive - --yes does NOT silence it.
+
+    Returns how many tracks moved to the backup folder and how many were not."""
     section("Consolidate similar album folders")
     # Consolidation deletes overlapping sibling tracks, so it must never run
     # under --dry-run - including on the "already complete" album path, which
@@ -1066,15 +1068,16 @@ def consolidate_albums(album, args):
     if getattr(args, "dry_run", False):
         log.info(fmt(C.GRAY,
             "  --dry-run: skipping consolidation (it would delete overlapping tracks)."))
-        return 0
+        return 0, 0
 
     primary_dir = catalog.find_album_dir_filesystem(album)
     if primary_dir is None:
         log.info(fmt(C.YELLOW, "  ⚠  Couldn't locate primary album folder after import."))
         log.info(fmt(C.GRAY,   "     Skipping consolidation."))
-        return 0
+        return 0, 0
     summaries = []
     n_actioned = 0
+    n_failed = 0
     moving = False
     try:
         try:
@@ -1085,26 +1088,26 @@ def consolidate_albums(album, args):
                 f"  ⚠  Couldn't safely inspect the primary album ({exc}).",
             ))
             log.info(fmt(C.GRAY, "     Skipping consolidation."))
-            return 0
+            return 0, 0
         log.info(fmt(C.GRAY, f"  Primary: {primary.path}"))
         if not primary.tracks:
             log.info(fmt(
                 C.YELLOW,
                 "  ⚠  No tracks read from primary folder. Skipping consolidation.",
             ))
-            return 0
+            return 0, 0
 
         try:
             candidates = _reviewed_sibling_albums(album, primary)
         except OSError as exc:
             log.info(fmt(C.YELLOW, f"  ⚠  Consolidation stopped ({exc})."))
-            return 0
+            return 0, 0
         if not candidates:
             log.info(fmt(
                 C.GREEN,
                 "  ✓  No sibling album folders found. Nothing to consolidate.",
             ))
-            return 0
+            return 0, 0
 
         for sibling, score in candidates:
             summary = _summary_from_tracks(
@@ -1194,7 +1197,7 @@ def consolidate_albums(album, args):
                     break
                 if choice == "q":
                     log.info(fmt(C.GRAY, "    Stopping consolidation."))
-                    return n_actioned
+                    return n_actioned, n_failed
                 if choice == "d":
                     if warning:
                         log.info(fmt(
@@ -1219,6 +1222,7 @@ def consolidate_albums(album, args):
                     deleted, failures = execute_consolidation(summary)
                     deleted_count = len(deleted)
                     n_actioned += deleted_count
+                    n_failed += failures
                     moving = False
                     if deleted_count:
                         log.info(fmt(
@@ -1235,7 +1239,7 @@ def consolidate_albums(album, args):
                     break
                 log.info(fmt(C.GRAY, "    Enter d / s / k / q."))
 
-        return n_actioned
+        return n_actioned, n_failed
     except KeyboardInterrupt:
         if moving:
             raise

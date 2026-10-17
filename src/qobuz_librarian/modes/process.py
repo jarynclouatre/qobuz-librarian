@@ -1366,9 +1366,10 @@ def process_album(album, args, *, allow_force=True, label=None,
             "tracks_unavailable": len(missing),
         })
         consolidation_interrupted = consolidation_cancelled = False
+        consolidation_failed = 0
         if args.consolidate:
             try:
-                consolidate_albums(album, args)
+                _, consolidation_failed = consolidate_albums(album, args)
             except ConsolidationCancelled:
                 consolidation_cancelled = True
             except KeyboardInterrupt:
@@ -1380,6 +1381,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             "unavailable_tracks": [track.get("title") or "?" for track in missing],
             "consolidation_interrupted": consolidation_interrupted,
             "consolidation_cancelled": consolidation_cancelled,
+            "consolidation_failed": consolidation_failed,
         }
 
     # A dry run has already printed the plan above; stop before the download
@@ -1765,6 +1767,8 @@ def process_album(album, args, *, allow_force=True, label=None,
         if args.no_import:
             if n_ok > 0 and not n_fail and not n_lossy:
                 keep_unimported_download(download_result)
+            else:
+                retain_download_staging(download_result, label="incomplete")
             log.info(fmt(C.YELLOW, f"\n  --no-import: skipping beets. Files remain in {cfg.STAGING_DIR}/"))
         elif n_ok == 0:
             log.info(fmt(C.YELLOW, "\n  Skipping beets import: nothing succeeded."))
@@ -2173,7 +2177,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     if imported:
         clear_attempts_after_import(download_result)
 
-    n_consolidated = 0
+    n_consolidated = consolidation_failed = 0
     consolidation_interrupted = consolidation_cancelled = False
     # treat_as_new keeps this download as its own edition; consolidation folds
     # editions together by deleting overlapping sibling tracks, so the two are
@@ -2181,7 +2185,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     if args.consolidate and not treat_as_new and not force_tracks:
         if imported:
             try:
-                n_consolidated = consolidate_albums(album, args)
+                n_consolidated, consolidation_failed = consolidate_albums(album, args)
             except ConsolidationCancelled as cancel:
                 n_consolidated = cancel.moved
                 consolidation_cancelled = True
@@ -2366,6 +2370,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                 log.info(f"  {fmt(C.YELLOW, '⚠ consolidated:')} stopped early")
             else:
                 log.info(f"  {fmt(C.GRAY, '  consolidated:')}   {plural(n_consolidated, 'sibling track')} removed")
+                if consolidation_failed:
+                    log.info(f"  {fmt(C.YELLOW, '⚠ consolidated:')} {plural(consolidation_failed, 'track')} left in place")
         if failed_tracks:
             log.info(fmt(C.RED, "\n  failed tracks:"))
             for t in failed_tracks[:10]:
@@ -2474,6 +2480,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         "consolidation_interrupted": consolidation_interrupted,
         "consolidation_cancelled": consolidation_cancelled,
         "consolidated_tracks_removed": n_consolidated,
+        "consolidation_failed": consolidation_failed,
         "elapsed_s": int(elapsed),
         **downsample_outcome,
     }

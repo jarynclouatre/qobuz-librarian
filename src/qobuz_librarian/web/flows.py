@@ -1152,7 +1152,8 @@ def return_interrupted_picks(job):
     review, ticked. Any of them may already be done, so one whose files no
     longer match the review is left out, and so is its saved results row,
     as the review would only refuse it. A missing album is not left out
-    for a change the run made itself, a download into its artist folder."""
+    for a change the run made itself, a download into its artist folder.
+    Returns a sentence naming where they went, or "" for none."""
     with job._lock:
         picks = [c for c in job.candidates if c.get("selected")]
     written = [Path(p) for p in
@@ -1198,12 +1199,13 @@ def return_interrupted_picks(job):
         n = len(left_out)
         job.push_line(f"{plural(n, 'ticked album')} changed on disk and left "
                       f"the review: {named_albums(left_out)}.")
+    saved = True
     if unfinished:
         saved = _return_picks(
             unfinished, surface,
             execute_args=(None if surface in ("library", "new_releases")
-                          else job.execute_args))
-        if saved is False:
+                          else job.execute_args)) is not False
+        if not saved:
             job.push_line(
                 "Retry choices could not be saved back to their review. "
                 "Check the data folder, then refresh before retrying.")
@@ -1211,6 +1213,15 @@ def return_interrupted_picks(job):
             job.push_line(f"{plural(len(unfinished), 'album')} returned to "
                           "the review, selected for retry.")
     job_persistence.persist(job)
+    if unfinished and saved:
+        return (f"{named_albums(unfinished)} went back to the review, ticked, "
+                "to download again.")
+    if unfinished:
+        return (f"{named_albums(unfinished)} could not be put back in the "
+                "review.")
+    if left_out:
+        return f"{named_albums(left_out)} changed on disk and left the review."
+    return ""
 
 
 def note_upgrades_put_back(origins):

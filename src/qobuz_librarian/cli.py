@@ -95,8 +95,8 @@ def _report_settled_downloads(result):
         label = f"“{settled.label}”"
         if settled.outcome == "requeue" and settled.mode.startswith("web-job:"):
             line = (f"{label} was cut off in the web app before it was "
-                    "imported. Its partial download was removed; Retry there "
-                    "downloads it again.")
+                    "imported. Its partial download was removed; the web app "
+                    "queues it again or offers Retry.")
         elif settled.outcome == "requeue":
             line = (f"{label} was cut off before it was imported. Its partial "
                     "download was removed and it is back in the saved queue.")
@@ -1295,7 +1295,7 @@ def _check_staging_occupied():
         unclaimed = unclaimed_staging_run_names()
         if unclaimed is None:
             return
-        # The next run sets these aside as incomplete or interrupted.
+        # The next run clears these from staging.
         unfinished = album_dirs_in(cfg.STAGING_DIR / name for name in unclaimed)
         album_dirs = album_dirs_in(
             [cfg.STAGING_DIR / name for name in kept_staging_run_names()] + [
@@ -1309,8 +1309,8 @@ def _check_staging_occupied():
             notice = wrap(
                 f"{plural(len(album_dirs), 'album folder')} in "
                 f"{cfg.STAGING_DIR} {'was' if one else 'were'} not imported. "
-                + (f"The next run moves incomplete downloads to "
-                   f"{cfg.BEETS_RETRY_DIR}, so import {them} first{location}:"
+                + (f"The next run clears incomplete downloads from staging, "
+                   f"so import {them} first{location}:"
                    if unfinished else f"Import {them}{location} with:"),
                 indent="  ⚠  ", hanging="     ")
             command = "\n".join(_wrap_shell_command(
