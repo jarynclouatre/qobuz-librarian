@@ -1228,7 +1228,6 @@ def test_web_writes_pause_while_the_terminal_holds_the_library(client, monkeypat
             ("/downsample", {}),
             ("/repair", {}),
             ("/lyrics", {}),
-            ("/lyric-retry", {}),
             ("/jobs/whatever/approve", {}),
         ]:
             r = client.post(path, data=data, follow_redirects=False)
@@ -3243,8 +3242,10 @@ elif album.endswith("Interrupted (2025)"):
     backup_mod._same_filesystem = lambda *_args: False
     unlink = os.unlink
 
-    def unlink_then_interrupt(*args, **kwargs):
-        unlink(*args, **kwargs)
+    def unlink_then_interrupt(path, *args, **kwargs):
+        unlink(path, *args, **kwargs)
+        if os.fspath(path).startswith(".ql-rename-check-"):
+            return
         os.unlink = unlink
         raise KeyboardInterrupt
 

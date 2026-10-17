@@ -600,6 +600,7 @@ def _validated_handoff_consumer(value) -> dict:
             "item_id": value["item_id"],
             "action_id": value["action_id"],
         }
+    # Track downloads of earlier versions sealed this consumer.
     if set(value) != {
         "kind",
         "job_id",
@@ -2758,7 +2759,7 @@ def seal_post_import_relocation_handoff(
     payload,
     authority: RunLockLease,
 ) -> str:
-    """Durably bind one deferred relocation to its exact Web Undo record."""
+    """Durably bind one deferred relocation to its exact queue completion."""
     _require_authority(authority)
     if not _valid_operation_id(operation_id):
         raise ValueError("relocation operation id is invalid")

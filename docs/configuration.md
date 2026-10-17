@@ -72,7 +72,7 @@ Library review picks up the new path.
 | `EXCLUDE_LIVE_ALBUMS` | `false` | Count a release whose title marks it live, on tour, a session or acoustic as a live release in Missing Albums even when Qobuz files it as an album or compilation, so it shows only with **Live** switched on; a studio album whose real title merely contains "Live" is never matched |
 | `CONSOLIDATE` | `false` | Merge sibling/duplicate album folders (CLI-only) |
 
-`MIGRATE_MULTI_ARTIST` affects new imports only, including a gap fill or upgrade of an album already in a combined folder. It never replaces a name that already exists under the primary artist; conflicting files stay in their original folder for review. If Beets splits a gap-filled album between the combined and primary artist folders, Qobuz Librarian safely reunites only the non-conflicting files regardless of this preference. Both operations resume or roll back after a restart before other library work begins.
+`MIGRATE_MULTI_ARTIST` affects new imports only, including a gap fill or upgrade of an album already in a combined folder; a Search **Track** download stays in its album's folder. It never replaces a name that already exists under the primary artist; conflicting files stay in their original folder for review. If Beets splits a gap-filled album between the combined and primary artist folders, Qobuz Librarian safely reunites only the non-conflicting files regardless of this preference. Both operations resume or roll back after a restart before other library work begins.
 
 `DOWNSAMPLE_HIRES_ENABLED` only touches new downloads (88.2 / 176.4 / 352.8 kHz → 44.1; 96 / 192 / 384 → 48; bit depth preserved, originals replaced atomically). To downsample hi-res already in your library, use the on-demand **Downsample** mode instead. While it is on, Upgrade compares your files with what a download keeps once downsampled, so a downsampled album is not offered its hi-res master again; turn it off and Upgrade offers such albums at the full download quality after the next Library refresh.
 
@@ -114,7 +114,7 @@ The bundled tools' full config files live in the persistent `config` volume. The
 
 Each download runs streamrip with a private copy of its config, kept in the app's data folder for that run only. The copy holds the Qobuz credentials in use and sets the staging folder, `Disc N` folders, each single in its own folder, no booklets, no downloads database and no update check. Downloads never change the streamrip config itself, also outside Docker, where it is your own `~/.config/streamrip/config.toml`; only saving credentials on **Settings** writes to it. The app id streamrip fetches is kept in the data folder.
 
-The app reads and writes the beets database in place with SQLite transactions, as beets does, and waits on another program's lock as long as an import does. Keep the database on a local filesystem, such as the default Compose `/config` named volume or a local bind mount. NFS, SMB/CIFS, and other network filesystems are not supported for the database, because SQLite's locking is not reliable there; the music library itself may still live on network storage.
+The app reads and writes the beets database in place with SQLite transactions, as beets does, and waits on another program's lock as long as an import does. Keep the database on a local filesystem, such as the default Compose `/config` named volume or a local bind mount. NFS, SMB/CIFS, and other network filesystems are not supported for the database, because SQLite's locking is not reliable there; the music library itself may still live on network storage, within the limits under [Permissions](#permissions-nas-and-shared-storage).
 
 Set folder and file naming with `BEETS_PATH_DEFAULT` and `BEETS_PATH_COMP` on the **Settings** page or in `.env`. These use beets path syntax, for example `$albumartist/$album ($year)/$track - $title`. Enter that raw template on the Settings page. In `.env`, single-quote the whole assignment so Compose does not consume the beets variables:
 
@@ -160,6 +160,8 @@ PGID=1000   # id -g
 On boot, the container chowns its managed config folders and the `data` and `staging` volumes to that user, and the `upgrade_backups` and `collection_backups` folders themselves but not the music files and collection snapshots kept inside them, and warns if a mounted path is not writable. `/music` is left alone because it is often a large NAS mount; the run user must be able to write to it.
 
 Operations that replace or remove an existing library file also require the share to flush file and directory changes reliably. If the mount cannot do that, Qobuz Librarian stops the destructive step and keeps the original.
+
+Upgrade, Gap Fill, Repair, Re-download and Consolidation move the tracks they replace to a backup and put them back if the step fails, which needs a share that can rename a file without replacing one already there. Local disks can. The Linux NFS client and rclone mounts cannot, so there these steps leave the album as it is and name the folder. SMB/CIFS and other mounts are not checked.
 
 For a read-only music share, append `:ro` to the `/music` bind and set `QL_CHECK_VOLUMES=0` in `.env`; otherwise write endpoints, including scan starts, return 503 while the write check fails. The check is live, so fixing the mount or its ownership takes effect without a restart.
 

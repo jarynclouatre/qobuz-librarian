@@ -62,25 +62,6 @@
     </div>
     {% endif %}
 
-    {% if lyric_retry_count %}
-    <div class="ql-notice ql-notice-info flex items-start flex-wrap gap-3 p-4">
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-info" fill="none"
-           viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
-              d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-      </svg>
-      <span class="min-w-0 flex-1 text-sm">
-        <strong>Lyrics retry pending for {{ lyric_retry_count }} track{{ 's' if lyric_retry_count != 1 }}.</strong>
-        Providers were unavailable or rate-limited during the last import.
-      </span>
-      <form action="/lyric-retry" method="post" class="ml-auto shrink-0">
-        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Retry now</button>
-        {% include "_writes_paused_reason.html" %}
-      </form>
-    </div>
-    {% endif %}
-
     {% if library_scan_state.ready and library_scan_state.message %}
     <div class="ql-notice ql-notice-warning" role="status">
       <span class="ql-notice-copy">{{ library_scan_state.message }}</span>

@@ -1839,11 +1839,8 @@ def prompt_and_migrate_multi_artist_folder(
     album,
     args,
     *,
-    ownership_move_out=None,
-    operation_id_out=None,
     authority=None,
     source_dir=None,
-    await_handoff=False,
 ):
     """Safely move an imported ``Primary, Other/Album`` below ``Primary``.
 
@@ -1858,19 +1855,6 @@ def prompt_and_migrate_multi_artist_folder(
         relocate_post_import_album,
     )
 
-    capture = ownership_move_out if isinstance(ownership_move_out, dict) else None
-    if capture is not None:
-        capture.clear()
-    operation_capture = (
-        operation_id_out if isinstance(operation_id_out, dict) else None
-    )
-    if await_handoff is True and operation_capture is None:
-        raise ValueError("a deferred relocation requires an operation receiver")
-    if type(await_handoff) is not bool:
-        raise ValueError("the relocation handoff option is invalid")
-    if operation_capture is not None:
-        operation_capture.clear()
-
     current = (
         Path(source_dir)
         if source_dir is not None
@@ -1884,16 +1868,11 @@ def prompt_and_migrate_multi_artist_folder(
         return current
     lease = authority if authority is not None else run_lock.current_lease()
     try:
-        relocate_kwargs = {
-            "kind": RelocationKind.WHOLE_ALBUM,
-            "authority": lease,
-        }
-        if await_handoff is True:
-            relocate_kwargs["await_handoff"] = True
         result = relocate_post_import_album(
             current,
             destination,
-            **relocate_kwargs,
+            kind=RelocationKind.WHOLE_ALBUM,
+            authority=lease,
         )
     except PostImportRelocationAttention:
         raise
@@ -1911,10 +1890,6 @@ def prompt_and_migrate_multi_artist_folder(
             log.info(fmt(C.YELLOW, f"  ⚠  Multi-artist folder unchanged: {result.reason}."))
         return current
 
-    if capture is not None and result.ownership_receipt is not None:
-        capture.update(result.ownership_receipt)
-    if operation_capture is not None:
-        operation_capture["operation_id"] = result.operation_id
     message = f"  ✓  Filed imported album under primary artist: {destination}."
     if result.reason:
         message += f" {result.reason.capitalize()}."

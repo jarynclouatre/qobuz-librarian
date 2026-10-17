@@ -76,7 +76,7 @@ def test_forcing_a_mix_never_moves_the_original(tmp_path, monkeypatch, tagged_fl
 
     monkeypatch.setattr(proc, "run_album_download", completed_download)
     monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
-    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
+    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: SimpleNamespace(resampled=0))
     monkeypatch.setattr(proc, "beets_import_paths", import_album)
     monkeypatch.setattr(proc, "retire_backup_beets_entries", lambda *_a, **_kw: True)
     result = proc.process_album(album, _args(force=True),
@@ -149,7 +149,7 @@ def test_partly_owned_edition_fills_a_folder_holding_another_version(
 
     monkeypatch.setattr(proc, "run_album_download", completed_download)
     monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
-    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
+    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: SimpleNamespace(resampled=0))
     monkeypatch.setattr(proc, "beets_import_paths", import_album)
     result = proc.process_album(album, _args(), exact_edition=True, already_confirmed=True)
     assert result["result"] == "downloaded"
@@ -237,7 +237,7 @@ def test_forced_edition_follows_beets_folder_rename(
     monkeypatch.setattr(proc, "retire_replaced_beets_entries", lambda *_a: True)
     monkeypatch.setattr(proc, "run_album_download", download)
     monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
-    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
+    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: SimpleNamespace(resampled=0))
     monkeypatch.setattr(proc, "beets_import_paths", import_album)
     if not verified:
         monkeypatch.setattr(proc, "folder_holds_all_tracks", lambda *_a, **_kw: False)
@@ -323,7 +323,7 @@ def test_failed_upgrade_leaves_the_plain_release_beside_it_alone(
     monkeypatch.setattr(proc, "validated_staged_album_dirs", lambda _r: [staged])
     monkeypatch.setattr(proc, "verify_and_recover", lambda *_a, **_kw: {
         "under": False, "recovered": False, "retried": False})
-    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: ([], 0))
+    monkeypatch.setattr(proc, "_pre_import_staging_hooks", lambda *_a: SimpleNamespace(resampled=0))
     monkeypatch.setattr(proc, "beets_import_paths", import_album)
     marked = []
     restore = proc.restore_upgrade_backup

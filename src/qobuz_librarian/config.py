@@ -273,7 +273,6 @@ LOG_LEVEL            = _env_log_level()
 WALK_SEEN_FILE       = DATA_DIR / ".qobuz_walk_seen.txt"
 ALBUM_WALK_SEEN_FILE = DATA_DIR / ".qobuz_album_walk_seen.txt"
 QUEUE_JOURNAL_DIR    = DATA_DIR / ".qobuz_queue_journals"
-LYRIC_RETRY_FILE     = DATA_DIR / ".qobuz_lyric_retry.json"
 REPAIR_LOG_PATH      = DATA_DIR / ".qobuz_replaced_tracks.log"
 CAPPED_FILE          = DATA_DIR / ".qobuz_upgrade_capped.json"
 UPGRADE_STATE_FILE   = DATA_DIR / ".qobuz_upgrade_state.json"
@@ -504,7 +503,6 @@ WEB_ALLOWED_HOSTS = [
 
 # ── Versioned file schemas ────────────────────────────────────────────────────
 PENDING_QUEUE_VERSION = 2
-LYRIC_RETRY_VERSION   = 1
 
 # ── API ───────────────────────────────────────────────────────────────────────
 QOBUZ_API_BASE = os.environ.get("QOBUZ_API_BASE", "https://www.qobuz.com/api.json/0.2")

@@ -34,18 +34,15 @@ def test_multi_artist_migration_is_fail_closed_and_keeps_a_band_name_whole(
     monkeypatch.setattr(config, "MUSIC_ROOT", music_root)
     monkeypatch.setattr(
         catalog, "find_album_dir_filesystem", lambda _album: source)
-    capture = {"stale": True}
 
     result = catalog.prompt_and_migrate_multi_artist_folder(
         {"artist": {"name": "Artist"}},
         SimpleNamespace(yes=True),
-        ownership_move_out=capture,
     )
 
     assert result == source
     assert source_track.read_bytes() == b"source"
     assert destination_track.read_bytes() == b"destination"
-    assert capture == {}
 
     source = music_root / "Earth, Wind & Fire, The Emotions" / "Boogie Wonderland"
     source.mkdir(parents=True)

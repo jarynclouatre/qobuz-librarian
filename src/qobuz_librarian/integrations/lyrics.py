@@ -1,20 +1,13 @@
-"""Lyric fetch integration - pre-import hook, retry manifest, state pruning."""
+"""Lyric fetch integration - pre-import hook, post-import sidecars, state pruning."""
 
 import os
 import stat
-from collections import Counter
-from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import state_file
-from qobuz_librarian.integrations import lyric_fetch, rip
-from qobuz_librarian.library import candidate_premise, downsample_state
-from qobuz_librarian.quality import upgrade_state
+from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.safefile import identity_record
 from qobuz_librarian.safefile import same_directory as _same_directory
-from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, report_progress, vlog
@@ -67,36 +60,18 @@ def _fetch_outcome_summary(counts, *, expected=None):
     }
 
 
-def summarize_lyric_retry(counts, *, attempted, remaining):
-    """Reconcile retry outcomes without treating dropped errors as success."""
-    outcomes = _fetch_outcome_summary(counts)
-    attempted = max(0, int(attempted))
-    remaining = min(attempted, max(0, int(remaining)))
-    removed = attempted - remaining
-    resolved = min(removed, outcomes["resolved"])
-    failed = max(outcomes["failed"], removed - resolved)
-    return {
-        "resolved": resolved,
-        "failed": failed,
-        "remaining": remaining,
-    }
-
-
 # ── Lyric hook ────────────────────────────────────────────────────────────────
 
 
 def _run_lyric_hook(album_dir):
-    """Pre-import lyric fetch. Returns (counts, transient_signatures);
-    the caller resolves signatures to post-import paths and persists
-    them via _record_post_import_lyric_retry."""
-    empty_result = ({}, [])
+    """Embed lyrics into the staged FLACs under album_dir before import."""
     if not cfg.LYRICS_ENABLED:
-        return empty_result
+        return
     if not lyric_fetch.AVAILABLE:
         log.info(fmt(C.GRAY, "     (lyric provider library not installed; skipping lyrics)"))
-        return empty_result
+        return
     if album_dir is None or not album_dir.exists():
-        return empty_result
+        return
     # When album_dir is STAGING_DIR (the single-album process path) the walk
     # would otherwise descend into albums parked under .beets_retry/ and
     # re-fetch their lyrics on every run; skip them, as beets' tag prep does.
@@ -106,9 +81,9 @@ def _run_lyric_hook(album_dir):
         flacs = sorted(p for p in album_dir.rglob("*.flac") if not _under_retry_dir(p))
     except OSError as e:
         log.info(fmt(C.YELLOW, f"  ⚠  Lyric hook: couldn't list {album_dir}: {e}."))
-        return empty_result
+        return
     if not flacs:
-        return empty_result
+        return
     log.info(fmt(C.CYAN, f"  ⟳  Checking lyrics for {plural(len(flacs), 'track')}…"))
     # lyric_fetch's state writer assumes its parent exists; ensure DATA_DIR is
     # created up-front so first-run (no other writer has touched DATA_DIR
@@ -123,7 +98,7 @@ def _run_lyric_hook(album_dir):
         # staging FLAC is orphaned the moment beets relocates+renames the
         # track (beets moves only the audio).
         # A provider asking to be asked later is not waited for here, where
-        # the download waits too; those tracks are queued for a retry.
+        # the download waits too; the next Lyrics run looks those tracks up.
         counts = lyric_fetch.fetch_for_paths(
             flacs,
             owned_root=cfg.STAGING_DIR,
@@ -136,7 +111,7 @@ def _run_lyric_hook(album_dir):
         )
     except Exception as e:
         log.info(fmt(C.YELLOW, f"  ⚠  Lyric hook failed: {e}."))
-        return empty_result
+        return
     synced = counts.get("wrote-synced", 0)
     plain = counts.get("wrote-plain", 0)
     nofnd = counts.get("not-found", 0)
@@ -147,10 +122,6 @@ def _run_lyric_hook(album_dir):
             "copied-synced", "copied-plain",
         )
     )
-    # Files where a provider was unavailable when their turn came up. The
-    # fetcher tallies these under "providers-unavailable" and marks the file
-    # status="transient" in its state file; we surface the count and queue them
-    # for retry on next launch.
     unavailable = counts.get("providers-unavailable", 0)
 
     outcomes = _fetch_outcome_summary(counts, expected=len(flacs))
@@ -169,75 +140,13 @@ def _run_lyric_hook(album_dir):
     if no_tags:
         msg += f"; {no_tags} skipped (missing tags)"
     if unavailable:
-        msg += f"; {unavailable} provider-unavailable and need retry after import"
+        msg += f"; {unavailable} not answered by a provider, left to the next Lyrics run"
     if failed:
         msg += f"; {failed} failed"
     if failed or unavailable:
         log.info(fmt(C.YELLOW, f"  ⚠  {msg}."))
     else:
         log.info(fmt(C.GREEN, f"  ✓  {msg}."))
-
-    # Capture tag signatures for transient files. The state lookup uses
-    # staging paths (matches what lyric_fetch just wrote); the caller
-    # will use these signatures to find the post-import paths after
-    # beets imports.
-    transient_signatures = []
-    if unavailable:
-        try:
-            state = lyric_fetch.load_state(cfg.LYRIC_FETCH_STATE_FILE)
-        except Exception as e:
-            vlog(f"_run_lyric_hook: state load failed: {e}")
-            state = {}
-        from qobuz_librarian.integrations.rip import _flac_signature
-
-        for fp in flacs:
-            st = state.get(str(fp))
-            if st is None or st.status != "transient":
-                continue
-            sig = _flac_signature(fp)
-            if sig is not None:
-                transient_signatures.append((sig, str(fp)))
-    return counts, transient_signatures
-
-
-def _resolve_signatures_to_paths(signatures, search_dirs):
-    """Walk search_dirs and match each FLAC's tag signature. Returns the list of
-    post-import paths that match.
-    """
-    if not signatures:
-        return []
-    signatures_needed = Counter(sig for sig, _ in signatures)
-    found = []
-    seen = set()
-    for d in search_dirs:
-        if not signatures_needed:
-            break
-        if d is None or not isinstance(d, Path):
-            continue
-        try:
-            key = str(d.resolve())
-        except OSError:
-            key = str(d)
-        if key in seen:
-            continue
-        seen.add(key)
-        if not d.exists():
-            continue
-        try:
-            for fp in d.rglob("*.flac"):
-                if not fp.is_file():
-                    continue
-                sig = rip._flac_signature(fp)
-                if sig is not None and signatures_needed.get(sig, 0) > 0:
-                    found.append(str(fp))
-                    signatures_needed[sig] -= 1
-                    if signatures_needed[sig] <= 0:
-                        del signatures_needed[sig]
-                    if not signatures_needed:
-                        break
-        except OSError as e:
-            vlog(f"_resolve_signatures: rglob failed in {d}: {e}")
-    return found
 
 
 def _regular_file_identity(value):
@@ -921,45 +830,13 @@ def write_post_import_sidecars(
         log.info(fmt(colour, f"  {marker}  lyrics: {'; '.join(actions)}{suffix}."))
 
 
-def _record_post_import_lyric_retry(post_paths):
-    """Update LYRIC_RETRY_FILE with post-import paths of transient files.
-    Replaces the staging-keyed call to `_refresh_lyric_retry` from inside
-    `_run_lyric_hook`.
-    """
-    # Load→modify→save under the manifest lock so a concurrent retry-run prune
-    # in the other worker lane can't clobber the entries we add here.
-    try:
-        with _manifest_lock():
-            existing = load_lyric_retry(fail_closed=True)
-            fresh = [p for p in existing if Path(p).exists()]
-            fresh = sorted(set(fresh) | set(post_paths))
-            saved = _save_lyric_retry_unlocked(fresh)
-            if not saved:
-                log.info(fmt(
-                    C.YELLOW,
-                    "  ⚠  Lyrics retry paths couldn't be saved; the affected "
-                    "tracks were not queued for the next run.",
-                ))
-                return False
-            return True
-    except (OSError, ValueError) as e:
-        vlog(f"_record_post_import_lyric_retry: manifest unchanged ({e})")
-        log.info(fmt(
-            C.YELLOW,
-            "  ⚠  Lyrics retry paths couldn't be saved; the affected tracks "
-            "were not queued for the next run.",
-        ))
-        return False
-
-
 def _prune_lyric_state_orphans():
     """Drop staging-path keys from lyric_fetch's state file -
     they're orphaned the moment beets moves the file out of staging.
 
     Done as one atomic read-modify-write under the state lock: a plain
     load→modify→save here can clobber an entry a concurrent import-hook
-    checkpoint just added (a CLI run and the web worker write the same file),
-    losing that track's lyric-retry bookkeeping."""
+    checkpoint just added (a CLI run and the web worker write the same file)."""
     if not HAVE_LYRIC_FETCH:
         return
     staging_prefix = str(cfg.STAGING_DIR)
@@ -980,300 +857,3 @@ def _prune_lyric_state_orphans():
         return
     if pruned:
         vlog(f"pruned {pruned} orphan lyric-state entry(ies) (staging-keyed)")
-
-
-# ── Lyric retry manifest ──────────────────────────────────────────────────────
-
-
-@contextmanager
-def _manifest_lock():
-    """Exclusive lock for a read-modify-write of the retry manifest. The two web
-    worker lanes (an import-hook recording transient files, a retry run pruning
-    resolved ones) both load→modify→save this file; without serialising, one's
-    save clobbers the other's just-added entry. A lock failure blocks the
-    mutation so the manifest cannot silently lose an entry."""
-    with state_file.store_lock(cfg.LYRIC_RETRY_FILE):
-        yield
-
-
-def load_lyric_retry(*, fail_closed=False):
-    """Return paths queued for retry, optionally blocking on read failure."""
-    try:
-        payload = state_file.load_json_object(
-            cfg.LYRIC_RETRY_FILE,
-            "the saved lyric retry queue",
-            "your queued lyric retries",
-        )
-    except OSError as e:
-        if fail_closed:
-            raise
-        log.info(fmt(
-            C.YELLOW,
-            f"  ⚠  {cfg.LYRIC_RETRY_FILE.name} could not be read ({e}); "
-            "leaving it unchanged.",
-        ))
-        return []
-    if payload is None:
-        return []
-    if payload.get("version") != cfg.LYRIC_RETRY_VERSION:
-        reason = ValueError(
-            f"{cfg.LYRIC_RETRY_FILE.name} version "
-            f"{payload.get('version')!r} is not supported by this build"
-        )
-        if fail_closed:
-            raise reason
-        log.info(fmt(C.YELLOW, f"  ⚠  {reason}; leaving it unchanged."))
-        return []
-    files = payload.get("files") or []
-    if not isinstance(files, list):
-        reason = ValueError(
-            f"{cfg.LYRIC_RETRY_FILE.name} has a malformed files list"
-        )
-        if fail_closed:
-            raise reason
-        log.info(fmt(C.YELLOW, f"  ⚠  {reason}; leaving it unchanged."))
-        return []
-    # Drop anything non-string in case of corruption.
-    return [f for f in files if isinstance(f, str)]
-
-
-def _save_lyric_retry_unlocked(paths):
-    paths = sorted({p for p in paths if isinstance(p, str) and p})
-    if not paths:
-        try:
-            cfg.LYRIC_RETRY_FILE.unlink(missing_ok=True)
-            return True
-        except OSError as e:
-            vlog(f"clear_lyric_retry: {e}")
-            return False
-    try:
-        payload = {
-            "version": cfg.LYRIC_RETRY_VERSION,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-            "files": paths,
-        }
-        state_file.write_json(cfg.LYRIC_RETRY_FILE, payload)
-        return True
-    except OSError as e:
-        vlog(f"save_lyric_retry failed: {e}")
-        return False
-
-
-def save_lyric_retry(paths):
-    """Persist paths under the manifest lock; an empty list clears it."""
-    try:
-        with _manifest_lock():
-            return _save_lyric_retry_unlocked(paths)
-    except OSError as e:
-        vlog(f"save_lyric_retry failed: {e}")
-        return False
-
-
-def _refresh_lyric_retry(flacs_just_processed):
-    """After a lyric_fetch run, reconcile the manifest with current state.
-
-    Reads lyric_fetch's state file directly. The manifest will end up containing
-    exactly those files (from the union of prior-manifest entries and the
-    just-processed flacs) whose state.status is currently "transient" or whose
-    persisted path failed the owned-library boundary. Resolved files (synced,
-    plain, not_found, skipped, error) drop off naturally; unsafe entries stay
-    visible for explicit review instead of being reported as resolved.
-    """
-    if not HAVE_LYRIC_FETCH:
-        return False
-    try:
-        # Late import to avoid pulling lyric helpers in at module load.
-        state = lyric_fetch.load_state(cfg.LYRIC_FETCH_STATE_FILE)
-    except Exception as e:
-        vlog(f"_refresh_lyric_retry: couldn't load lyric state: {e}")
-        return False
-
-    # Read→reconcile→save under the manifest lock so the read here and the save
-    # below can't straddle a concurrent import-hook record (which would drop the
-    # entry that hook just added). The just-processed flacs are merged back in
-    # regardless, so they're never lost.
-    try:
-        with _manifest_lock():
-            candidates = set(load_lyric_retry(fail_closed=True))
-            candidates.update(str(p) for p in (flacs_just_processed or []))
-
-            still_transient = []
-            for p in candidates:
-                st = state.get(p)
-                if st is None:
-                    # File no longer tracked (maybe deleted, maybe state was reset);
-                    # drop it from the manifest.
-                    continue
-                if st.status in ("transient", "unsafe_path"):
-                    still_transient.append(p)
-
-            return _save_lyric_retry_unlocked(still_transient)
-    except (OSError, ValueError) as e:
-        vlog(f"_refresh_lyric_retry: manifest unchanged ({e})")
-        return False
-
-
-def offer_resume_lyric_retry(args):
-    """Startup hook. If files are queued for a lyric retry, prompt to retry
-    now / keep for later / discard. Mirrors offer_resume_pending_queue."""
-    paths = load_lyric_retry()
-    if not paths:
-        return False
-    if not lyric_fetch.AVAILABLE:
-        log.info(
-            fmt(
-                C.YELLOW,
-                f"  ⚠  {plural(len(paths), 'file')} queued for lyric retry but the "
-                f"syncedlyrics provider library isn't installed. Manifest preserved.",
-            )
-        )
-        return False
-
-    # Filter out files that have since vanished (manual move/delete).
-    existing = [p for p in paths if Path(p).exists()]
-    missing = len(paths) - len(existing)
-    if not existing:
-        log.info(
-            fmt(
-                C.GRAY,
-                f"  {'The file' if len(paths) == 1 else f'All {len(paths)} files'} "
-                f"in {cfg.LYRIC_RETRY_FILE.name} "
-                f"{'is' if len(paths) == 1 else 'are'} missing on disk; "
-                "clearing manifest.",
-            )
-        )
-        if save_lyric_retry([]):
-            log.info(fmt(C.GRAY, "  Lyric retry manifest cleared."))
-        else:
-            log.info(fmt(
-                C.YELLOW,
-                "  ⚠  Lyric retry manifest couldn't be cleared; it was left "
-                "unchanged and may be offered again.",
-            ))
-        return False
-
-    print()
-    log.info(
-        fmt(
-            C.BOLD + C.YELLOW,
-            f"  ⚠  Lyric retry pending: {plural(len(existing), 'file')} had providers "
-            f"unavailable last run.",
-        )
-    )
-    if missing:
-        log.info(
-            fmt(
-                C.GRAY,
-                f"     ({missing} more in the manifest no longer exist on disk; will be dropped.)",
-            )
-        )
-    log.info(fmt(C.GRAY, f"     File: {cfg.LYRIC_RETRY_FILE}"))
-    log.info(fmt(C.GRAY, "     These are NOT 'no lyrics exist' - those would already be marked"))
-    log.info(fmt(C.GRAY, "     not-found and skipped here. These are files where every provider"))
-    log.info(fmt(C.GRAY, "     was rate-limited or unreachable when their turn came up."))
-    print()
-
-    while True:
-        ans = ask("  Retry lyrics now? [Y]es / [k]eep for later / [d]iscard: ")
-        if ans is None:
-            return False
-        if ans in ("", "y", "yes"):
-            log.info(fmt(C.CYAN, f"\n  ⟳  Retrying lyrics on {plural(len(existing), 'file')}…"))
-            counts = {}
-            try:
-                paths_obj = [Path(p) for p in existing]
-                with lyric_fetch.recording_writes() as written:
-                    try:
-                        counts = lyric_fetch.fetch_for_paths(
-                            paths_obj,
-                            owned_root=cfg.MUSIC_ROOT,
-                            log=log,
-                            providers=cfg.LYRICS_PROVIDERS or None,
-                            lyrics_format=cfg.LYRICS_FORMAT,
-                            state_path=cfg.LYRIC_FETCH_STATE_FILE,
-                            # Each queued file gets an outcome and a line
-                            # above, even one a later pass settled.
-                            rescan=True,
-                        )
-                    finally:
-                        if written:
-                            seal = candidate_premise.sealer_after_writes(written)
-                            upgrade_state.reseal(seal)
-                            downsample_state.reseal(seal)
-            except KeyboardInterrupt:
-                log.info(
-                    fmt(
-                        C.YELLOW,
-                        "\n  ⚠  Retry interrupted; manifest will be refreshed from current state.",
-                    )
-                )
-            except Exception as e:
-                log.info(fmt(C.YELLOW, f"  ⚠  Retry failed: {e}; manifest preserved."))
-                return False
-            # Reconcile manifest against fresh state - resolved files drop,
-            # still-transient stay.
-            refreshed = _refresh_lyric_retry(paths_obj)
-            remaining = load_lyric_retry()
-            attempted_paths = {str(path) for path in paths_obj}
-            attempted_remaining = sum(
-                1 for path in remaining if path in attempted_paths
-            )
-            outcome = summarize_lyric_retry(
-                counts,
-                attempted=len(existing),
-                remaining=attempted_remaining,
-            )
-            if not refreshed:
-                log.info(fmt(
-                    C.YELLOW,
-                    f"  ⚠  Retry processed {plural(len(existing), 'file')}, but the "
-                    "saved retry queue couldn't be updated; it was left "
-                    "unchanged and will be offered again.",
-                ))
-                return False
-            if outcome["failed"]:
-                log.info(
-                    fmt(
-                        C.YELLOW,
-                        f"  ⚠  Retry finished: {outcome['resolved']} resolved; "
-                        f"{outcome['failed']} failed (the lines above name "
-                        "each file and why); "
-                        f"{outcome['remaining']} still queued for retry.",
-                    )
-                )
-            elif remaining:
-                log.info(
-                    fmt(
-                        C.YELLOW,
-                        f"  ⚠  {plural(len(remaining), 'file')} still "
-                        f"{'needs' if len(remaining) == 1 else 'need'} review or "
-                        "retry. Will prompt next launch.",
-                    )
-                )
-            else:
-                log.info(fmt(C.GREEN, "  ✓  All retried files resolved."))
-            return False  # fall through to menu
-        if ans in ("k", "keep"):
-            log.info(
-                fmt(C.GRAY, "  Keeping the lyrics retry list.")
-            )
-            return False
-        if ans in ("d", "discard"):
-            conf = ask(
-                f"  Really discard {plural(len(existing), 'retry-queued file')}? "
-                "Type DISCARD to confirm: ",
-                colour=C.YELLOW, lower=False,
-            )
-            if conf == "DISCARD":
-                if save_lyric_retry([]):
-                    log.info(fmt(C.GRAY, "  Lyric retry manifest cleared."))
-                else:
-                    log.info(fmt(
-                        C.YELLOW,
-                        "  ⚠  Lyric retry manifest couldn't be cleared; it "
-                        "was left unchanged.",
-                    ))
-            else:
-                log.info(fmt(C.GRAY, "  Discard cancelled."))
-            return False
-        log.info(fmt(C.GRAY, "  Enter Y, k, or d."))

@@ -652,14 +652,11 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
     )
 
     class Prepared:
+        resampled = 1
         errors = 2
         saved_bytes = 512
         flush_warnings = 1
         cancelled = True
-
-        def __iter__(self):
-            yield []
-            yield 1
 
     result = durable_runner.execute_durable_new_album(
         queue,

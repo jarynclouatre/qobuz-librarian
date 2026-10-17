@@ -74,7 +74,6 @@ from qobuz_librarian.queue.post_import_finalizer import (
 )
 from qobuz_librarian.run_lock import RunLockLease
 from qobuz_librarian.ui_cli.errors import plural
-from qobuz_librarian.web import job_persistence
 
 log = logging.getLogger("qobuz_librarian")
 
@@ -189,34 +188,6 @@ class _AuthorityLost(RuntimeError):
 
 class _SettlementJournalFailure(RuntimeError):
     """A committed operator decision could not be written back durably."""
-
-
-def _post_import_relocation_handoff_matches(operation_id, handoff):
-    """Consult jobs.db without making the UI persistence layer a hard import."""
-    try:
-        job_persistence.init()
-        return job_persistence.post_import_relocation_handoff_persisted(
-            operation_id,
-            handoff,
-        )
-    except Exception:
-        return None
-
-
-def _combined_post_import_relocation_handoff_matches(operation_id, handoff):
-    """Accept either durable queue or Web ownership of a relocation handoff."""
-    queue_match = queue_state.post_import_relocation_handoff_matches(
-        operation_id,
-        handoff,
-    )
-    if queue_match is True:
-        return True
-    web_match = _post_import_relocation_handoff_matches(operation_id, handoff)
-    if web_match is True:
-        return True
-    if queue_match is None or web_match is None:
-        return None
-    return False
 
 
 def _require_authority(authority: RunLockLease) -> None:
@@ -1920,7 +1891,7 @@ def _recover_startup_state(
         _require_authority(authority)
         relocation = reconcile_post_import_relocations(
             authority=authority,
-            handoff_matches=_combined_post_import_relocation_handoff_matches,
+            handoff_matches=queue_state.post_import_relocation_handoff_matches,
         )
         _require_authority(authority)
         if relocation.status is not RelocationRecoveryStatus.CLEAR:

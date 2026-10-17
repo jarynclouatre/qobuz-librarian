@@ -50,19 +50,21 @@ def quality_met_line(n_ok, cd_quality_tracks):
     return ""
 
 
-def verify_and_recover(qobuz_album, staged_dirs, *, redownload_at_max,
-                       effective_tier, allow_retry=True, exempt=()):
-    """Verify the staged rip and retry once at the max tier when safe."""
+def verify_and_recover(qobuz_album, staged_dirs, *, effective_tier,
+                       redownload_at_max=None, allow_retry=True, exempt=()):
+    """Verify the staged rip and retry once at the max tier when safe.
+    ``redownload_at_max`` returns the kept staged dirs and their exempt
+    files."""
     sf = rip_shortfall(staged_dirs, qobuz_album, effective_tier=effective_tier,
                        exempt=exempt)
     recovered = retried = False
     if sf["under"] and effective_tier < 4 and allow_retry:
         retried = True
-        fresh_dirs = redownload_at_max()
+        fresh_dirs, exempt = redownload_at_max()
         if fresh_dirs:
             staged_dirs = fresh_dirs
             sf = rip_shortfall(staged_dirs, qobuz_album,
-                               effective_tier=effective_tier)
+                               effective_tier=effective_tier, exempt=exempt)
             recovered = not sf["under"]
     return {
         "under": sf["under"],

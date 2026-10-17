@@ -53,6 +53,26 @@ def test_one_low_track_among_good_is_under(monkeypatch):
         [served], deluxe)["classification"] == "all_equal"
 
 
+def test_cd_fallback_track_stays_exempt_after_quality_retry(monkeypatch):
+    # Track 1 is broken at hi-res and comes at CD on purpose; track 2 has no
+    # readable quality, so a retry runs, fixes it and gives track 1 at CD again.
+    album = {"maximum_bit_depth": 24, "maximum_sampling_rate": 96,
+             "tracks": {"items": [
+                 {"id": 1, "maximum_bit_depth": 24, "maximum_sampling_rate": 96},
+                 {"id": 2, "maximum_bit_depth": 24, "maximum_sampling_rate": 96}]}}
+    dirs = {
+        "/first": [{"path": "/first/a.flac", "bits": 16, "sample_rate": 44100},
+                   {"path": "/first/b.flac", "bits": 0, "sample_rate": 0}],
+        "/retry": [{"path": "/retry/a.flac", "bits": 16, "sample_rate": 44100},
+                   {"path": "/retry/b.flac", "bits": 24, "sample_rate": 96000}],
+    }
+    monkeypatch.setattr(verify, "read_album_dir", lambda d: dirs[str(d)])
+    v = verify.verify_and_recover(
+        album, ["/first"], effective_tier=3, exempt=("/first/a.flac",),
+        redownload_at_max=lambda: (["/retry"], ["/retry/a.flac"]))
+    assert v["retried"] and v["recovered"] and not v["under"]
+
+
 def test_redownload_fallback_restores_first_rip_when_retry_less_complete(
         monkeypatch, tmp_path):
     staging = tmp_path / "staging"

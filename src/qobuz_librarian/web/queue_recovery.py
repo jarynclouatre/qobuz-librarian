@@ -287,13 +287,3 @@ def _reconcile_acknowledged_job(job, summary: str | None = None) -> bool:
         job.cancel_requested = False
         job.finished_at = job.finished_at or time.time()
     return job_persistence.persist(job)
-
-
-def _refresh_post_import_relocation_recovery(authority) -> bool:
-    """Refresh the existing global write gate after a handoff interruption."""
-    try:
-        recovered = _record_startup_recovery(authority)
-    except Exception:
-        _log.exception("couldn't refresh recovery after track relocation")
-        return False
-    return _recovery_status_value(recovered) == "clear"

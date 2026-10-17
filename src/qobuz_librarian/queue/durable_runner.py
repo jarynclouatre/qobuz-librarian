@@ -944,7 +944,6 @@ def execute_durable_new_album(
         quality = verify_and_recover(
             item["album"],
             album_dirs,
-            redownload_at_max=lambda: (),
             effective_tier=plan.effective_tier,
             allow_retry=False,
         )
@@ -1012,11 +1011,9 @@ def execute_durable_new_album(
             _require_authority(authority)
             prepared = prepare_staged(album_dirs, checkpoint_sources)
             _require_authority(authority)
-            try:
-                lyric_sigs, resampled = prepared
-            except (TypeError, ValueError) as exc:
-                raise OSError("staged preparation result is malformed") from exc
-            item["_durable_lyric_sigs"] = lyric_sigs
+            resampled = getattr(prepared, "resampled", None)
+            if not isinstance(resampled, int):
+                raise OSError("staged preparation result is malformed")
             item["resampled_n"] = resampled
             item["downsample_errors"] = getattr(prepared, "errors", 0)
             item["downsample_saved_bytes"] = getattr(

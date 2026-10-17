@@ -33,7 +33,8 @@ BEHAVIOR_FIELDS = [
      "requested."),
     ("MIGRATE_MULTI_ARTIST", "Migrate multi-artist folders",
      "After import, file albums credited to multiple artists under the primary "
-     "album artist instead of a combined artist folder."),
+     "album artist instead of a combined artist folder. A Search Track "
+     "download stays in its album's folder."),
     ("DOWNSAMPLE_HIRES_ENABLED", "Downsample new hi-res downloads",
      "Before import, reduce new downloads above 48 kHz to 44.1 or 48 kHz; the "
      "hi-res files are not kept."),

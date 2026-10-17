@@ -36,6 +36,7 @@ from qobuz_librarian.safefile import (
     fsync_dir,
     fsync_dirs,
     fsync_tree,
+    require_noreplace_rename,
     snapshot_tree,
     stat_identity,
 )
@@ -136,6 +137,8 @@ def _backup_dir_name(album_dir: Path, *, kind: str = "") -> str:
     # files and breaking the 1:1 backup→restore mapping).
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe = re.sub(r"[^\w\-_. ]", "_", album_dir.name)[:80]
+    # Names are limited in bytes; keep room for the stamp and the prefixes.
+    safe = safe.encode()[:150].decode(errors="ignore")
     infix = f"{kind}_" if kind else ""
     return f"{ts}_{infix}{safe}"
 
@@ -2971,18 +2974,10 @@ def backup_keep_markers_present(bp) -> bool:
     return False
 
 
-def _backup_safe_to_reap(bp: Path, refused=None) -> bool:
-    """True ONLY when the backup is provably redundant. The check is added
-    to ``refused``."""
-    if backup_keep_markers_present(bp):
-        return False
-    origin = _read_backup_origin(bp)
-    if origin is None:
-        return False
-    result = _classify_backup_contents(origin, bp, audio_replacement=True)
-    if refused is not None:
-        refused.append(result)
-    return result.removable and result.reason != "lyrics"
+def _backup_safe_to_reap(bp: Path) -> bool:
+    """False when a keep pin holds the backup or its origin is unrecorded."""
+    return (not backup_keep_markers_present(bp)
+            and _read_backup_origin(bp) is not None)
 
 
 def _kept_for_lyrics(refused):
@@ -3539,6 +3534,14 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 f"  ✗  Couldn't back up {public}: the app can't write to "
                 f"{folder}. It was left in place."))
             return None
+        try:
+            require_noreplace_rename(public.parent, bp.parent)
+        except OSError as exc:
+            log.info(fmt(
+                C.RED,
+                f"  ✗  Couldn't back up {public}: {exc.strerror or exc}. It "
+                "was left in place."))
+            return None
         intent = None
         if owner is not None:
             on_intent({
@@ -3878,6 +3881,14 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
             C.YELLOW,
             f"  ⚠  Couldn't prepare a protected {what}backup "
             f"({exc}); leaving every source file in place."))
+        return None
+    try:
+        require_noreplace_rename(public, backup_root)
+    except OSError as exc:
+        log.info(fmt(
+            C.RED,
+            f"  ✗  Couldn't set aside the {what}tracks of {public}: "
+            f"{exc.strerror or exc}. Every track was left in place."))
         return None
     bp = backup_root / _backup_dir_name(public, kind=kind)
     partial = backup_root / (_PARTIAL_COPY_PREFIX + bp.name)
@@ -5879,7 +5890,7 @@ def _dispose_retention_candidate(
     if not isinstance(candidate, BackupResult) or candidate.receipt is None:
         return False
     replacement = Path(replacement or candidate.receipt["origin"])
-    replacement_receipt = capture_album_source_receipt(replacement)
+    replacement_receipt = capture_album_tree_identity(replacement)
     if replacement_receipt is None:
         return False
     preserve_originals = (
@@ -6525,19 +6536,17 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
                     "app-owned recovery record was unavailable."))
                 continue
             refused = []
-            if not _backup_safe_to_reap(entry, refused):
+            if (
+                _backup_safe_to_reap(entry)
+                and _dispose_retention_candidate(candidate, refused=refused)
+            ):
+                n_removed += 1
+            else:
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Keeping backup {entry.name!r} past retention: "
                     + (_kept_for_lyrics(refused)
                        or "it is pinned or its replacement could not be "
                        "verified") + "."))
-                continue
-            if _dispose_retention_candidate(candidate):
-                n_removed += 1
-            else:
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  Keeping backup {entry.name!r}: safe "
-                    "disposal could not be completed."))
     try:
         sweep_stamp.parent.mkdir(parents=True, exist_ok=True)
         sweep_stamp.touch()

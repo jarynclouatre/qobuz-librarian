@@ -717,21 +717,19 @@
     if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
 
-  // Disable a search-result button only after a real queue success. A press
-  // refused because the album is on disk already draws the row owned: a
-  // download that finished while the tab was hidden left it offering one.
+  // Disable a search-result button only once the album is queued, by this
+  // press or an earlier one. A press refused because the album is on disk
+  // already draws the row owned: a download that finished while the tab was
+  // hidden left it offering one.
   document.addEventListener("htmx:afterRequest", function (evt) {
     var form = evt.target;
     if (!form || !form.matches || !form.matches("form[data-queue-button]")) return;
     if (!evt.detail || !evt.detail.successful) return;
     var xhr = evt.detail.xhr;
     if (!xhr) return;
-    if (xhr.getResponseHeader("X-QL-Download-Outcome") === "owned") {
-      markSearchDownloadOwned(form);
-      return;
-    }
-    if (xhr.responseText.indexOf("ql-notice-success") === -1) return;
-    markSearchDownloadQueued(form);
+    var outcome = xhr.getResponseHeader("X-QL-Download-Outcome");
+    if (outcome === "owned") markSearchDownloadOwned(form);
+    else if (outcome === "queued" || outcome === "duplicate") markSearchDownloadQueued(form);
   });
 
   // Requests the page makes on its own, on a timer. They report nothing to the

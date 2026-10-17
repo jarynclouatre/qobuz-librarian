@@ -361,7 +361,7 @@ def test_executor_restores_or_keeps_upgrade_backup_after_import_failure(
         },
     )
     monkeypatch.setattr(
-        executor, "_run_pre_import_hooks_for_dirs", lambda _dirs, _args: ([], 0)
+        executor, "_run_pre_import_hooks_for_dirs", lambda _dirs, _args: executor.PreImportHooksResult(0)
     )
     monkeypatch.setattr(
         executor, "track_signatures_for_album_dirs", lambda _dirs: []
@@ -528,7 +528,7 @@ def test_executor_per_album_isolation_one_album_failure_keeps_others(monkeypatch
         ],
     )
     monkeypatch.setattr(executor, "_run_pre_import_hooks_for_dirs",
-                        lambda _d, _a: ([], 0))
+                        lambda _d, _a: executor.PreImportHooksResult(0))
     # Item B fails beets ("error" = non-retryable); A and C succeed.
     by_label = {"A": "ok", "B": "error", "C": "ok"}
     seen = []
@@ -690,7 +690,7 @@ def test_a_stopped_queue_records_only_the_albums_it_started(
     monkeypatch.setattr(executor, "_staged_album_dirs",
                         lambda item: [staging / item["label"]])
     monkeypatch.setattr(executor, "_run_pre_import_hooks_for_dirs",
-                        lambda _d, _a: ([], 0))
+                        lambda _d, _a: executor.PreImportHooksResult(0))
     monkeypatch.setattr(executor, "verify_and_recover", lambda *_a, **_k: {
         "retried": False, "recovered": False, "under": False})
     monkeypatch.setattr(executor, "retire_download_staging_after_import",

@@ -41,16 +41,12 @@ from qobuz_librarian.integrations.beets import (
     retire_replaced_beets_entries,
     staging_preflight,
 )
-from qobuz_librarian.integrations.lyrics import (
-    _record_post_import_lyric_retry,
-    _resolve_signatures_to_paths,
-    write_post_import_sidecars,
-)
+from qobuz_librarian.integrations.lyrics import write_post_import_sidecars
 from qobuz_librarian.integrations.rip import (
     is_cancel_requested,
     snapshot_staging,
 )
-from qobuz_librarian.library import candidate_premise, catalog, post_import_relocation, tags
+from qobuz_librarian.library import candidate_premise, catalog, tags
 from qobuz_librarian.library.backup import (
     backup_album_dir,
     backup_files_preserved,
@@ -69,7 +65,6 @@ from qobuz_librarian.library.backup import (
 )
 from qobuz_librarian.library.catalog import (
     _disc_scoped_match,
-    _is_split_album_merge,
     album_quality_label,
     compute_missing,
     find_album_dir_by_track_signatures,
@@ -80,11 +75,6 @@ from qobuz_librarian.library.catalog import (
     is_lossless_album,
     prompt_and_migrate_multi_artist_folder,
     track_signatures_for_album_dirs,
-)
-from qobuz_librarian.library.post_import_relocation import (
-    PostImportRelocationAttention,
-    PostImportRelocationUnavailable,
-    RelocationKind,
 )
 from qobuz_librarian.library.scanner import (
     cache_album_tags,
@@ -1541,9 +1531,8 @@ def process_album(album, args, *, allow_force=True, label=None,
     upgrade_set_aside = None
     elapsed = 0.0
     download_phase_completed = False
-    transient_lyric_sigs = []
     resampled_n = 0
-    downsample_outcome = _pre_import_outcome_fields(([], 0))
+    downsample_outcome = _pre_import_outcome_fields(None)
     post_import_signatures = []
     staged_dirs_for_import = []
     download_result = {}
@@ -1678,7 +1667,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                         retire_empty_download_staging(retry_result)
                         download_result.clear()
                         download_result.update(original_result)
-                    return fresh_dirs
+                    return fresh_dirs, download_result.get(
+                        "_cd_quality_paths", ())
 
                 quality_verdict = verify_and_recover(
                     album, staged_dirs,
@@ -1758,7 +1748,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                                       album_title=catalog.edition_album_title(
                                           album, separate=treat_as_new))
             prepared = _pre_import_staging_hooks(args, staged_dirs_for_import)
-            transient_lyric_sigs, resampled_n = prepared
+            resampled_n = prepared.resampled
             downsample_outcome = _pre_import_outcome_fields(prepared)
             post_import_signatures = track_signatures_for_album_dirs(
                 staged_dirs_for_import)
@@ -2198,7 +2188,6 @@ def process_album(album, args, *, allow_force=True, label=None,
 
     if imported:
         strict_success = n_fail == 0 and n_lossy == 0
-        post_dir_exact = False
         if getattr(args, "migrate_multi_artist", False) and strict_success:
             migration_source = (
                 _imported_dir()
@@ -2218,7 +2207,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                     authority=run_lock.current_lease(),
                     source_dir=migration_source,
                 )
-                post_dir_exact = post_dir is not None
         else:
             post_dir = None
         if post_dir is None:
@@ -2226,64 +2214,17 @@ def process_album(album, args, *, allow_force=True, label=None,
                 _imported_dir()
                 if post_import_signatures else None
             )
-            post_dir_exact = post_dir is not None
             if post_dir is None and not exact_edition:
                 post_dir = find_album_dir_filesystem(album)
         # A brand-new album can land in a folder the cached listing predates;
-        # clear the cache and look once more before giving up, or art cleanup
-        # and the lyric-retry queue silently no-op.
+        # clear the cache and look once more before giving up, or the
+        # sidecars and the truncation check silently no-op.
         if post_dir is None and not exact_edition:
             clear_scan_caches()
             post_dir = find_album_dir_filesystem(album)
         if post_dir:
             if resampled_n > 0:
                 mark_local_album_capped(post_dir, qobuz_album=album)
-            split_artist = (album.get("artist") or {}).get("name") or ""
-            if (
-                post_dir_exact
-                and _is_split_album_merge(album_dir, post_dir, split_artist)
-            ):
-                try:
-                    relocation = post_import_relocation.relocate_post_import_album(
-                        album_dir,
-                        post_dir,
-                        kind=RelocationKind.SPLIT_GAP_FILL,
-                        authority=run_lock.current_lease(),
-                    )
-                except PostImportRelocationAttention:
-                    raise
-                except (PostImportRelocationUnavailable, OSError, ValueError) as exc:
-                    log.info(fmt(
-                        C.YELLOW,
-                        "  ⚠  Beets split this album across two artist folders; "
-                        "the safe reunion was refused and both copies were kept.",
-                    ))
-                    vlog(f"split-folder reunion refused: {exc}")
-                else:
-                    if relocation.changed:
-                        message = (
-                            f"  ✓  Reunited "
-                            f"{plural(relocation.published_files, 'existing file')} "
-                            "in the primary-artist folder."
-                        )
-                        if relocation.reason:
-                            message += f" {relocation.reason.capitalize()}."
-                        log.info(fmt(C.GREEN, message))
-                    else:
-                        log.info(fmt(
-                            C.YELLOW,
-                            "  ⚠  Split-folder detected, but every source name "
-                            "already exists at the destination; both were kept.",
-                        ))
-            # Resolve transient-lyric signatures captured pre-beets
-            if transient_lyric_sigs:
-                resolved = _resolve_signatures_to_paths(
-                    transient_lyric_sigs, [post_dir])
-                if resolved:
-                    if _record_post_import_lyric_retry(resolved):
-                        vlog(f"lyric retry: queued "
-                             f"{plural(len(resolved), 'post-import path')} "
-                             "for next-launch retry")
             # Materialise .lrc sidecars next to the final renamed files
             # (no-op unless LYRICS_FORMAT is sidecar/both).
             try:
@@ -2293,16 +2234,6 @@ def process_album(album, args, *, allow_force=True, label=None,
             # After the sidecars, because writing one can rewrite the audio
             # file and leave the rows just cached already stale.
             cache_album_tags([post_dir, album_dir])
-    elif transient_lyric_sigs:
-        # Import didn't succeed (beets failed, silent skip, or n_ok==0): the
-        # files are still in STAGING_DIR.
-        resolved = _resolve_signatures_to_paths(
-            transient_lyric_sigs, [cfg.STAGING_DIR])
-        if resolved:
-            if _record_post_import_lyric_retry(resolved):
-                vlog(f"lyric retry: import unsuccessful; queued "
-                     f"{plural(len(resolved), 'staging path')} for "
-                     "next-launch retry")
 
     n_failed, n_damaged, n_truly_lossy, n_unavailable = track_shortfall(download_result)
     n_retryable = n_failed + n_damaged

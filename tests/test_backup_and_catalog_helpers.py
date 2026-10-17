@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from qobuz_librarian import safefile
 from qobuz_librarian.library.backup import (
     backup_album_dir,
     backup_gap_fill_files,
@@ -65,8 +66,9 @@ def test_backup_refuses_anything_it_cannot_protect_and_leaves_the_album(
         tmp_path, monkeypatch):
     """A cross-filesystem copy corrupted at the same size or left unflushed, a
     symlinked folder, a reserved sidecar name inside the album, an origin
-    that cannot be recorded and a folder the app can't write to each refuse
-    the backup and leave the album as it was; the last copies nothing."""
+    that cannot be recorded, a library whose filesystem refuses no-overwrite
+    renames (NFS) and a folder the app can't write to each refuse the backup
+    and leave the album as it was; the last two copy nothing."""
     import qobuz_librarian.library.backup as bk
 
     def use(root, music=None):
@@ -143,6 +145,31 @@ def test_backup_refuses_anything_it_cannot_protect_and_leaves_the_album(
         before = g1.read_bytes()
         assert bk.backup_gap_fill_files([str(g1)], album) is None
         assert g1.exists() and g1.read_bytes() == before
+
+    # Its copy would land, but nothing could be put back in the library.
+    root = tmp_path / "no-safe-renames"
+    use(root, root / "music")
+    album = root / "music" / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "01.flac").write_bytes(b"audio")
+    rename = safefile.renameat2
+
+    def refused_in_music(source_fd, source, destination_fd, destination,
+                         flags):
+        folder = ("" if destination_fd == safefile.AT_FDCWD
+                  else os.readlink(f"/proc/self/fd/{destination_fd}"))
+        if os.path.join(folder, destination).startswith(str(root / "music")):
+            raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+        rename(source_fd, source, destination_fd, destination, flags)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(bk, "_same_filesystem", lambda a, b: False)
+        patch.setattr(safefile, "renameat2", refused_in_music)
+        assert bk.backup_album_dir(album) is None
+        assert bk.backup_gap_fill_files([str(album / "01.flac")], album) is None
+    assert (album / "01.flac").read_bytes() == b"audio"
+    assert os.listdir(album.parent) == ["Album"]
+    assert not any((root / "backups").iterdir())
 
     if os.geteuid() != 0:
         root = use(tmp_path / "read-only")
@@ -746,7 +773,6 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
     assert 'data-backup-status="retained"' in rendered
     assert result.file in rendered
     assert not result.removable
-    assert bk._backup_safe_to_reap(backup) is False
     assert bk._dispose_retention_candidate(candidate) is False
     assert bk.discard_redundant_backup(backup) is False
     assert (backup / "booklet.pdf").read_bytes() == b"original booklet"

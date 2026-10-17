@@ -56,6 +56,44 @@ def rename_exchange(source_fd, source_name, destination_fd, destination_name):
               RENAME_EXCHANGE)
 
 
+def require_noreplace_rename(*folders) -> None:
+    """Raise OSError unless a no-overwrite rename works in each folder.
+
+    Every put-back of an original needs it, and NFS and rclone mounts
+    refuse it. Each filesystem is tried once: a private file is created,
+    renamed to a second private name and removed."""
+    checked = set()
+    for folder in folders:
+        descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            device = os.fstat(descriptor).st_dev
+            if device not in checked:
+                _try_noreplace_rename(descriptor, folder)
+                checked.add(device)
+        finally:
+            os.close(descriptor)
+
+
+def _try_noreplace_rename(dir_fd, folder) -> None:
+    first, second = (f".ql-rename-check-{secrets.token_hex(16)}"
+                     for _ in range(2))
+    os.close(os.open(first, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dir_fd))
+    try:
+        rename_noreplace(dir_fd, first, dir_fd, second)
+    except OSError as exc:
+        if exc.errno in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+            raise OSError(exc.errno, f"the filesystem of {os.fspath(folder)} "
+                          "does not support safe renames") from None
+        raise
+    finally:
+        for name in (first, second):
+            try:
+                os.unlink(name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
+
 def digest_fd(descriptor) -> str:
     digest = hashlib.sha256()
     offset = 0

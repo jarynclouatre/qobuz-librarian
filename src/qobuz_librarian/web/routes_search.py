@@ -26,7 +26,6 @@ from qobuz_librarian.api.auth import (
     QobuzUnavailable,
 )
 from qobuz_librarian.integrations import lyric_fetch
-from qobuz_librarian.integrations import lyrics as lyrics_mode
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
     catalog,
@@ -44,7 +43,6 @@ from qobuz_librarian.web import (
     diagnostics,
     download_admission,
     download_outcomes,
-    flows,
     job_runs,
     new_release_checks,
     qobuz_access,
@@ -267,8 +265,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
                    if j.status in (job_mgr.JobStatus.RUNNING, job_mgr.JobStatus.SCANNING)]
 
     # These all read the (often NAS / network-mounted) data + music volumes,
-    # the fetch log, the creds file, the lyric-retry file, and a staging
-    # iterdir().
+    # the fetch log, the creds file, and a staging iterdir().
     def _gather_disk_state():
         # These read state files, so they run here (off the event loop)
         # alongside the other disk work; any job they start is submitted from
@@ -298,8 +295,6 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             # Filesystem-only.
             "creds_ok": qobuz_access._creds_ok(),
             "qobuz_ready": qobuz_access._qobuz_ready(),
-            "lyric_retry_count":
-                len(lyrics_mode.load_lyric_retry()) if cfg.LYRIC_RETRY_FILE.exists() else 0,
             "staging_album_count": 0 if active_jobs else _staging_album_count(),
             "albums_in_backups": (
                 [] if active_jobs or not runtime._run_lock_intact()
@@ -338,26 +333,6 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         "page": "dashboard",
         **disk,
     })
-
-
-@router.post("/lyric-retry")
-async def lyric_retry(request: Request):
-    # No credential check: lyric fetching only reads/writes local files and
-    # talks to the lyric providers, never Qobuz.
-    busy = refusals._lock_busy_response(request)
-    if busy is not None:
-        return busy
-    # A retry and a full backfill share the one lyric-state file and must
-    # never run at once, so fold onto whichever lyrics pass is already in flight.
-    existing = scans._active_scan(
-        "lyrics", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING))
-    if existing is not None:
-        return RedirectResponse(url=f"/jobs/{existing.id}", status_code=303)
-    job = job_mgr.Job(title="Lyric retry")
-    job.execute_kind = "lyrics"
-    if job_mgr.submit(job, lambda j: flows.run_lyric_retry(j)) is None:
-        return refusals._job_admission_response(request)
-    return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
 
 
 _SEARCH_SNAPSHOT_RESULT_LIMIT = 150

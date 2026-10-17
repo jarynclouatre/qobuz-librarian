@@ -60,7 +60,7 @@ def stub_download(monkeypatch, tmp_path):
     monkeypatch.setattr(
         executor, "_staged_album_dirs", lambda item: [staging / item["label"]])
     monkeypatch.setattr(
-        executor, "_run_pre_import_hooks_for_dirs", lambda *_a, **_kw: ([], 0))
+        executor, "_run_pre_import_hooks_for_dirs", lambda *_a, **_kw: executor.PreImportHooksResult(0))
     monkeypatch.setattr(executor, "beets_import_albums", lambda _dirs, **_kw: "ok")
     monkeypatch.setattr(executor, "_consolidate_duplicate_albums", lambda: None)
     monkeypatch.setattr(

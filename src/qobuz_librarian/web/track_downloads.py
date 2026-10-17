@@ -1,16 +1,13 @@
 """Single-track downloads and the Undo record each one leaves."""
-import copy
-import logging
 import os
 from pathlib import Path
 
-from qobuz_librarian import completion, redaction, run_lock
 from qobuz_librarian import config as cfg
+from qobuz_librarian import redaction
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.api.auth import CredentialChanged
-from qobuz_librarian.library import catalog, post_import_relocation
+from qobuz_librarian.library import catalog
 from qobuz_librarian.library import hidden as hidden_mod
-from qobuz_librarian.library.post_import_relocation import PostImportRelocationAttention
 from qobuz_librarian.queue import builder as queue_builder
 from qobuz_librarian.queue import executor as queue_executor
 from qobuz_librarian.web import (
@@ -18,12 +15,9 @@ from qobuz_librarian.web import (
     job_persistence,
     owned_paths,
     qobuz_access,
-    queue_recovery,
     storage,
 )
 from qobuz_librarian.web import jobs as job_mgr
-
-_log = logging.getLogger("qobuz_librarian")
 
 
 def _single_ownership_item(payload):
@@ -112,25 +106,12 @@ def _single_ownership_item(payload):
     }
 
 
-def _single_owned_path(
-    payload,
-    landed_dir=None,
-    created_after_import=None,
-    created_files_after_import=None,
-):
+def _single_owned_path(payload, created_files_after_import=None):
     """Bind only the exact destination reported by the one-run beets hook."""
     item = _single_ownership_item(payload)
     if item is None:
         return None
-    created_directories = list(item["created_directories"])
-    for record in created_after_import or ():
-        if not owned_paths._valid_ownership_identity(record):
-            return None
-        relative = record.get("relative")
-        if (not isinstance(relative, str)
-                or owned_paths._strict_ownership_relative(item["root"], relative) is None):
-            return None
-        created_directories.append(record)
+    created_directories = item["created_directories"]
     path = item["path"]
     owned = owned_paths._bind_owned_path(
         item["root"],
@@ -221,11 +202,8 @@ def _single_download_undo_snapshot(
 ):
     """Build one exact single-track Undo record from current ownership."""
     owned_path = None
-    owned_file_path = None
     owned_binding = _single_owned_path(
         queue_item.get("_import_ownership"),
-        landed_dir,
-        queue_item.get("_import_ownership_created_directories"),
         queue_item.get("_import_ownership_created_files"),
     )
     if owned_binding is not None:
@@ -235,7 +213,6 @@ def _single_download_undo_snapshot(
         )
         if actual_album_dir is None:
             owned_path = None
-            owned_file_path = None
         else:
             landed_dir = actual_album_dir
     single = {
@@ -255,171 +232,38 @@ def _single_download_undo_snapshot(
         single["owned_root"] = str(
             Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
         )
-    return single, landed_dir, owned_path, owned_file_path
+    return single, landed_dir, owned_path
 
 
-def _persist_single_download_undo(
-    job,
-    queue_item,
-    *,
-    ownership_valid,
-    source_single=None,
-    destination_single=None,
-) -> None:
-    """Commit a single-track Undo proof before its relocation can be retired."""
-    operation_key = "_post_import_relocation_operation_id"
-    if operation_key not in queue_item:
+def _persist_single_download_undo(job, *, ownership_valid) -> None:
+    """Save the job, failing it when its exact Undo record was not saved."""
+    with job._lock:
+        preserve_existing = (
+            getattr(job, "_preserve_persisted_single", False) is True
+        )
+        if ownership_valid and preserve_existing:
+            job.__dict__.pop("_preserve_persisted_single", None)
+    persisted = job_persistence.persist(job)
+    if ownership_valid and persisted is not True:
         with job._lock:
-            preserve_existing = (
-                getattr(job, "_preserve_persisted_single", False) is True
-            )
-            if ownership_valid and preserve_existing:
-                job.__dict__.pop("_preserve_persisted_single", None)
-        persisted = job_persistence.persist(job)
-        if ownership_valid and persisted is not True:
-            with job._lock:
-                if preserve_existing:
-                    job._preserve_persisted_single = True
-            raise RuntimeError(
-                "The downloaded track's Undo could not be saved to the data "
-                "folder."
-            )
-        if ownership_valid and persisted is True:
-            with job._lock:
-                job.__dict__.pop("_preserve_persisted_single", None)
-        return
-
-    def restore_source(*, clear_preservation=False) -> None:
+            if preserve_existing:
+                job._preserve_persisted_single = True
+        raise RuntimeError(
+            "The downloaded track's Undo could not be saved to the data "
+            "folder."
+        )
+    if ownership_valid and persisted is True:
         with job._lock:
-            if type(source_single) is dict:
-                job.single = source_single
-            if clear_preservation:
-                job.__dict__.pop("_preserve_persisted_single", None)
-
-    def accept_destination(single_snapshot) -> None:
-        with job._lock:
-            job.single = copy.deepcopy(single_snapshot)
-            job.__dict__.pop("_single_undo_unavailable", None)
             job.__dict__.pop("_preserve_persisted_single", None)
 
-    # Engage this before sealing or persisting the destination. Any ordinary
-    # job save that was already waiting must preserve the durable source Undo.
-    with job._lock:
-        job._preserve_persisted_single = True
-        single_snapshot = copy.deepcopy(destination_single)
 
-    authority = run_lock.current_lease()
-    operation_id = queue_item.get(operation_key)
-    album_id = completion.normalise_album_id(job.album_id)
-    planned_album = queue_item.get("album")
-    planned_album_id = completion.normalise_album_id(
-        planned_album.get("id") if isinstance(planned_album, dict) else None
-    )
-    single_album_id = completion.normalise_album_id(
-        single_snapshot.get("album_id")
-        if isinstance(single_snapshot, dict)
-        else None
-    )
-    binding_valid = (
-        ownership_valid is True
-        and album_id == job.album_id
-        and planned_album_id == album_id
-        and single_album_id == album_id
-    )
-    if authority is None or not binding_valid:
-        queue_recovery._refresh_post_import_relocation_recovery(authority)
-        restore_source(clear_preservation=True)
-        raise PostImportRelocationAttention(
-            "The relocated track could not be bound to its exact Undo record."
-        )
-
-    consumer = {
-        "kind": "web-single",
-        "job_id": job.id,
-        "job_created_at": job.created_at,
-        "album_id": album_id,
-    }
+def _folder_label(landed_dir):
     try:
-        handoff_hash = post_import_relocation.seal_post_import_relocation_handoff(
-            operation_id,
-            consumer=consumer,
-            payload=single_snapshot,
-            authority=authority,
-        )
-    except Exception as exc:
-        queue_recovery._refresh_post_import_relocation_recovery(authority)
-        restore_source(clear_preservation=True)
-        raise PostImportRelocationAttention(
-            "The relocated track's Undo could not be saved."
-        ) from exc
-
-    handoff = {"consumer": consumer, "hash": handoff_hash}
-    persistence_error = None
-    try:
-        persisted = job_persistence.persist_post_import_relocation_handoff(
-            job,
-            operation_id=operation_id,
-            handoff_hash=handoff_hash,
-            single=single_snapshot,
-        )
-    except BaseException as exc:
-        persisted = False
-        persistence_error = exc
-    if persisted is not True:
-        # A failed return can still mean SQLite committed before reporting an
-        # I/O error.
-        queue_item["_post_import_relocation_handoff_unknown"] = True
-        try:
-            proof_before = (
-                job_persistence.post_import_relocation_handoff_persisted(
-                    operation_id,
-                    handoff,
-                )
-            )
-        except BaseException:
-            _log.exception("couldn't verify track Undo before recovery")
-            proof_before = None
-        recovered_clear = queue_recovery._refresh_post_import_relocation_recovery(authority)
-        try:
-            proof_after = (
-                job_persistence.post_import_relocation_handoff_persisted(
-                    operation_id,
-                    handoff,
-                )
-            )
-        except BaseException:
-            _log.exception("couldn't verify track Undo after recovery")
-            proof_after = None
-        if proof_before is True or proof_after is True:
-            accept_destination(single_snapshot)
-            queue_item.pop("_post_import_relocation_handoff_unknown", None)
-            queue_item["_post_import_relocation_final_proven"] = True
-            if recovered_clear:
-                return
-        elif proof_before is False or proof_after is False:
-            queue_item.pop("_post_import_relocation_handoff_unknown", None)
-            restore_source(clear_preservation=True)
-        raise PostImportRelocationAttention(
-            "The relocated track's Undo could not be saved to the data "
-            "folder."
-        ) from persistence_error
-
-    accept_destination(single_snapshot)
-    queue_item.pop("_post_import_relocation_handoff_unknown", None)
-    queue_item["_post_import_relocation_final_proven"] = True
-
-    try:
-        post_import_relocation.acknowledge_post_import_relocation(
-            operation_id,
-            handoff_hash,
-            authority=authority,
-        )
-    except Exception as exc:
-        if queue_recovery._refresh_post_import_relocation_recovery(authority):
-            return
-        raise PostImportRelocationAttention(
-            "The relocated track's durable Undo handoff needs recovery."
-        ) from exc
+        relative = Path(landed_dir).relative_to(
+            os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
+    except (TypeError, ValueError):
+        return None
+    return " / ".join(relative.parts) or None
 
 
 _SINGLE_TRACK_FAILURES = {
@@ -473,10 +317,8 @@ def _make_single_track_run(album, track, token):
             exact_edition=True,
         )
         qi["_capture_import_ownership"] = True
-        qi["_defer_post_import_relocation_handoff"] = True
         flows._note_staging_wait(j, "Downloading", 0, 1)
         owned_path = None
-        source_single = None
         with job_mgr.staging_lock():
             with qobuz_access._CREDENTIAL_LOCK:
                 if (active is not None
@@ -485,150 +327,26 @@ def _make_single_track_run(album, track, token):
                     raise CredentialChanged(
                         "Qobuz credentials changed before the download began."
                     )
-            try:
-                queue_executor._execute_download_queue([qi], args, active_token)
-                landed_dir = qi.get("_resolved_post_dir") or album_dir
-                download_succeeded = (
-                    qi.get("n_ok", 0) > 0
-                    and qi.get("imported", False)
-                    and qi.get("n_fail", 0) == 0
+            queue_executor._execute_download_queue([qi], args, active_token)
+            landed_dir = qi.get("_resolved_post_dir") or album_dir
+            download_succeeded = (
+                qi.get("n_ok", 0) > 0
+                and qi.get("imported", False)
+                and qi.get("n_fail", 0) == 0
+            )
+            if download_succeeded:
+                single, landed_dir, owned_path = _single_download_undo_snapshot(
+                    qi,
+                    landed_dir,
+                    album=album,
+                    track=track,
+                    artist=artist,
+                    title=title,
+                    track_title=t_title,
                 )
-                if download_succeeded:
-                    single, landed_dir, owned_path, _owned_file_path = (
-                        _single_download_undo_snapshot(
-                            qi,
-                            landed_dir,
-                            album=album,
-                            track=track,
-                            artist=artist,
-                            title=title,
-                            track_title=t_title,
-                        )
-                    )
-                    j.single = single
-                    _persist_single_download_undo(
-                        j,
-                        qi,
-                        ownership_valid=owned_path is not None,
-                    )
-                    source_single = copy.deepcopy(single)
-
-                    if (
-                        qi.get("_post_import_relocation_pending") is True
-                        and owned_path is not None
-                    ):
-
-                        authority = run_lock.current_lease()
-                        if authority is None:
-                            raise RuntimeError(
-                                "Automatic filing paused because write "
-                                "authority could not be verified."
-                            )
-                        original_landed_dir = landed_dir
-                        ownership_move = {}
-                        operation_capture = {}
-                        split_ownership_advanced = False
-                        try:
-                            migrated = queue_executor._reunite_split_album(
-                                qi,
-                                album_dir,
-                                original_landed_dir,
-                                authority=authority,
-                                await_handoff=True,
-                                operation_id_out=operation_capture,
-                            )
-                            split_ownership_advanced = (
-                                "operation_id" in operation_capture
-                            )
-                            if (
-                                not split_ownership_advanced
-                                and getattr(args, "migrate_multi_artist", False)
-                            ):
-                                migrated = catalog.prompt_and_migrate_multi_artist_folder(
-                                    album,
-                                    args,
-                                    ownership_move_out=ownership_move,
-                                    operation_id_out=operation_capture,
-                                    authority=authority,
-                                    source_dir=original_landed_dir,
-                                    await_handoff=True,
-                                )
-                        finally:
-                            if "operation_id" in operation_capture:
-                                qi["_post_import_relocation_operation_id"] = (
-                                    operation_capture["operation_id"]
-                                )
-
-                        if "_post_import_relocation_operation_id" in qi:
-                            if migrated is None:
-                                raise RuntimeError(
-                                    "The relocated track's destination was lost."
-                                )
-                            landed_dir = migrated
-                            qi["_resolved_post_dir"] = landed_dir
-                            if not split_ownership_advanced:
-                                queue_executor._advance_import_ownership_after_relocation(
-                                    qi,
-                                    ownership_move,
-                                )
-                            single, landed_dir, owned_path, _owned_file_path = (
-                                _single_download_undo_snapshot(
-                                    qi,
-                                    landed_dir,
-                                    album=album,
-                                    track=track,
-                                    artist=artist,
-                                    title=title,
-                                    track_title=t_title,
-                                )
-                            )
-                            with j._lock:
-                                j._preserve_persisted_single = True
-                                j.single = single
-                            _persist_single_download_undo(
-                                j,
-                                qi,
-                                ownership_valid=owned_path is not None,
-                                source_single=source_single,
-                                destination_single=single,
-                            )
-                        elif (
-                            migrated is not None
-                            and os.path.abspath(os.fspath(migrated))
-                            != os.path.abspath(os.fspath(original_landed_dir))
-                        ):
-                            queue_recovery._refresh_post_import_relocation_recovery(authority)
-                            raise RuntimeError(
-                                "The relocated track's recovery record was "
-                                "lost."
-                            )
-                        else:
-                            landed_dir = original_landed_dir
-                    qi.pop("_post_import_relocation_pending", None)
-            except BaseException:
-                if (
-                    qi.get("_post_import_relocation_pending") is True
-                    or "_post_import_relocation_operation_id" in qi
-                ):
-
-                    queue_recovery._refresh_post_import_relocation_recovery(
-                        run_lock.current_lease()
-                    )
-                    with j._lock:
-                        if (
-                            type(source_single) is dict
-                            and qi.get(
-                                "_post_import_relocation_final_proven"
-                            ) is not True
-                            and qi.get(
-                                "_post_import_relocation_handoff_unknown"
-                            ) is not True
-                        ):
-                            j.single = source_single
-                            j.__dict__.pop(
-                                "_preserve_persisted_single", None
-                            )
-                raise
+                j.single = single
+                _persist_single_download_undo(
+                    j, ownership_valid=owned_path is not None)
         if not download_succeeded:
             j.status = job_mgr.JobStatus.FAILED
             broken = qi.get("n_broken") and not qi.get("n_fail")
@@ -644,6 +362,8 @@ def _make_single_track_run(album, track, token):
                 )
             return
         j.landed_complete = True
+        folder = _folder_label(landed_dir)
+        got = f"Got “{t_title}”" + (f", filed under {folder}." if folder else ".")
         # The mark keeps Upgrade off a deliberate single whatever the toggle
         # says; the toggle only decides whether scans read it.
         marked = len(missing) > 1
@@ -652,7 +372,7 @@ def _make_single_track_run(album, track, token):
                 hidden_mod.mark_single(artist, title, catalog.album_year(album),
                                        album.get("id"))
                 j.summary = (
-                    f"Got “{t_title}”, filed under {artist} / {title}. "
+                    f"{got} "
                     + ("The rest of the album stays out of scans."
                        if cfg.SUPPRESS_SINGLE_TRACK_GAPS
                        else "Future scans can still offer the rest of the album.")
@@ -661,7 +381,7 @@ def _make_single_track_run(album, track, token):
                 # The track landed fine, so don't fail the job, but don't claim
                 # the exclusion stuck either.
                 marked = False
-                j.summary = (f"Got “{t_title}”, filed under {artist} / {title}.")
+                j.summary = got
                 if cfg.SUPPRESS_SINGLE_TRACK_GAPS:
                     j.error = redaction.redact(
                         f"{e} The rest of the album may still show in scans.")

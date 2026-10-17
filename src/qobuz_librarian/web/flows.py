@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import redaction, repair_log, state_file
+from qobuz_librarian import repair_log, state_file
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost, QobuzAccess, QobuzUnavailable
 from qobuz_librarian.api.search import get_album
@@ -27,7 +27,6 @@ from qobuz_librarian.download_result import (
 )
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import downsample_engine
-from qobuz_librarian.integrations import lyrics as lyrics_mode
 from qobuz_librarian.integrations.lyrics import lyric_fetch
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
@@ -5108,133 +5107,6 @@ def run_collection_snapshot(job, *, force=False):
     )
     log.info(job.summary)
     _close_completed_job(job)
-
-
-def run_lyric_retry(job):
-    """Retry lyric fetching for tracks queued from a previous failed run."""
-    paths = lyrics_mode.load_lyric_retry()
-    if not paths:
-        job.summary = "No tracks were queued for lyric retry."
-        log.info(job.summary)
-        _close_completed_job(job)
-        return
-
-    if not lyric_fetch.AVAILABLE:
-        job.summary = ("The syncedlyrics library isn't installed; manifest "
-                       "preserved for a later retry.")
-        job.error = job.summary
-        _mark_job_failed(job)
-        log.info(job.summary)
-        return
-
-    existing = [Path(p) for p in paths if Path(p).exists()]
-    dropped = len(paths) - len(existing)
-    if dropped:
-        log.info(f"{plural(dropped, 'queued path')} no longer on disk; skipping.")
-    if not existing:
-        if not lyrics_mode.save_lyric_retry([]):
-            job.summary = (
-                "All queued files are gone from disk, but the retry manifest "
-                "couldn't be cleared and was left unchanged."
-            )
-            job.error = job.summary
-            _mark_job_failed(job)
-            log.info(job.summary)
-            return
-        job.summary = "All queued files are gone from disk; manifest cleared."
-        log.info(job.summary)
-        _close_completed_job(job)
-        return
-
-    log.info(f"Retrying lyrics on {plural(len(existing), 'track')} ...")
-    # Hold the staging lock: fetch_for_paths rewrites library FLACs in place, so
-    # it must not run concurrently with the scan-lane downsample/repair/upgrade
-    # work that mutates the same files (the documented file-mutation mutex).
-    try:
-        with job_mgr.staging_lock():
-            job_mgr.set_staging_holder("Lyrics retry")
-            try:
-                with lyric_fetch.recording_writes() as written:
-                    try:
-                        counts = lyric_fetch.fetch_for_paths(
-                            existing, owned_root=cfg.MUSIC_ROOT, log=log,
-                            providers=cfg.LYRICS_PROVIDERS or None,
-                            lyrics_format=cfg.LYRICS_FORMAT,
-                            state_path=cfg.LYRIC_FETCH_STATE_FILE,
-                            should_stop=lambda: job.cancel_requested,
-                            # Each queued track gets an outcome and a line
-                            # in the log, even one a later pass settled.
-                            rescan=True,
-                        )
-                    finally:
-                        reseal_after_own_writes(written)
-            finally:
-                job_mgr.set_staging_holder(None)
-    except Exception as e:
-        job.error = redaction.redact(
-            f"Lyric retry failed: {e}; manifest preserved.")
-        job.summary = "Lyric retry failed. Manifest preserved, will retry next time."
-        _mark_job_failed(job)
-        log.info(job.error)
-        return
-
-    refreshed = lyrics_mode._refresh_lyric_retry(existing)
-    remaining = lyrics_mode.load_lyric_retry()
-    attempted_paths = {str(path) for path in existing}
-    attempted_remaining = sum(
-        1 for path in remaining if path in attempted_paths
-    )
-    outcome = lyrics_mode.summarize_lyric_retry(
-        counts,
-        attempted=len(existing),
-        remaining=attempted_remaining,
-    )
-    resolved = outcome["resolved"]
-    failed = outcome["failed"]
-    if not refreshed:
-        job.summary = (
-            f"Processed {plural(len(existing), 'track')}, but the saved retry "
-            "queue couldn't be updated and was left unchanged."
-        )
-        job.error = job.summary
-        _mark_job_failed(job)
-        log.info(job.summary)
-        return
-    stopped = bool(counts.get("stopped"))
-    if stopped:
-        job.summary = (
-            f"Stopped. Resolved {resolved}; {failed} failed; "
-            f"{plural(len(remaining), 'track')} still queued for retry."
-        )
-    elif failed:
-        job.summary = f"Resolved {resolved}; {failed} failed."
-        if remaining:
-            job.summary += (
-                f" {plural(len(remaining), 'track')} still queued for retry."
-            )
-        job.error = (f"{plural(failed, 'lyric retry', 'lyric retries')} failed; "
-                     "the activity log names each track and why.")
-        _mark_job_failed(job)
-    elif counts.get("unsafe-path"):
-        outside = counts["unsafe-path"]
-        job.summary = (
-            f"Resolved {resolved}. {plural(outside, 'track')} "
-            f"{'is' if outside == 1 else 'are'} outside the music folder, so "
-            f"{'its' if outside == 1 else 'their'} lyrics were not written.")
-        job.error = job.summary
-        _mark_job_failed(job)
-    elif remaining:
-        job.summary = (
-            f"Resolved {resolved}. Lyrics providers were unavailable for "
-            f"{plural(len(remaining), 'track')}, which "
-            f"{'stays' if len(remaining) == 1 else 'stay'} queued; Retry now "
-            "on Search tries again.")
-    else:
-        job.summary = ("The retried track was resolved." if len(existing) == 1
-                       else f"All {len(existing)} retried tracks were resolved.")
-    log.info(job.summary)
-    if not stopped and not failed and not counts.get("unsafe-path"):
-        _close_completed_job(job)
 
 
 def run_library_lyrics(job, *, rescan=False, synced_only=False):

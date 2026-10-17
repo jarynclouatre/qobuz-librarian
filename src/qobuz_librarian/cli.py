@@ -1049,11 +1049,6 @@ def main():
                     "wait until it is resumed or discarded.")))
         return choice
 
-    if resume_saved_queue:
-        recovery_choice = offer_saved_queue()
-        if recovery_choice is None:
-            raise SystemExit(EXIT_GENERAL)
-
     # An album put back from a copy has new inodes; its saved rows are
     # sealed again so they are not refused for them.
     from qobuz_librarian.library import backup as backup_mod
@@ -1061,10 +1056,7 @@ def main():
     if backup_mod.on_restored is None:
         backup_mod.on_restored = upgrade_mode.reseal_put_back_album
 
-    # Housekeeping deletes expired backups and rewrites state files, so a
-    # dry run skips it. A queue that stopped part way holds all other work
-    # until it is resumed, so this waits for it too.
-    if not args.dry_run and not queue_started:
+    def startup_housekeeping():
         from qobuz_librarian import beets_db
         from qobuz_librarian.integrations import beets as beets_mod
         from qobuz_librarian.integrations import staging as staging_mod
@@ -1132,6 +1124,21 @@ def main():
         except Exception as e:
             vlog(f"repair-cache prune error: {e}")
 
+    # Housekeeping deletes expired backups and rewrites state files, so a
+    # dry run skips it. A queue that stopped part way holds all other work
+    # until it is resumed, so it waits for that; one not yet started is
+    # resumed onto a settled library.
+    housekept = not args.dry_run and not queue_started
+    if housekept:
+        startup_housekeeping()
+    if resume_saved_queue:
+        recovery_choice = offer_saved_queue()
+        if recovery_choice is None:
+            raise SystemExit(EXIT_GENERAL)
+
+    if not args.dry_run and not queue_started and not housekept:
+        startup_housekeeping()
+
     # Library migration is local-only: it reorganises files on disk and never
     # touches Qobuz.
     if args.migrate:
@@ -1194,12 +1201,6 @@ def main():
     # memory, its queue journal is still on disk.
     if not resume_saved_queue:
         offer_resume_pending_queue(args, download_token)
-
-    # Same idea, but for files where every lyric provider was unavailable last
-    # run.
-    from qobuz_librarian.integrations.lyrics import offer_resume_lyric_retry
-    if not queue_started:
-        offer_resume_lyric_retry(args)
 
     # Interactive menu loop. The local tools remain reachable without a Qobuz
     # token or downloader; network-backed choices initialise that stack lazily.
