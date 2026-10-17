@@ -99,6 +99,7 @@ from qobuz_librarian.quality.decision import (
     quality_relation,
 )
 from qobuz_librarian.quality.verify import (
+    quality_below_line,
     quality_met_line,
     redownload_with_staged_fallback,
     retry_preserves_track_coverage,
@@ -1661,6 +1662,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                         n_ok, download_result.get("cd_quality_tracks"))
                     if met:
                         log.info(fmt(C.GRAY, f"  {met}"))
+                else:
+                    log.info(fmt(C.YELLOW,
+                        f"  {quality_below_line(quality_verdict)}"))
 
         # Downsampling and lyric_fetch run on staging BEFORE beets imports.
         if n_ok > 0 and not args.no_import:

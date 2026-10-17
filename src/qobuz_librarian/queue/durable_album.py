@@ -150,9 +150,12 @@ def plan_durable_new_album(
     bits, rate = album_max_quality(album, effective_tier)
     if type(bits) is not int or type(rate) is not int or bits <= 0 or rate <= 0:
         return None
-    # Qobuz rates each track, and its album figure can differ from them.
-    targets = [album_max_quality(track, effective_tier) for track in tracks]
-    targets = [(b, r) if b and r else (bits, rate) for b, r in targets]
+    # The import proves each track lossless at CD quality or better; the
+    # quality check reports anything below the chosen tier, as the standard
+    # path does. Qobuz rates each track, and its album figure can differ.
+    floor = album_max_quality(album, 2)
+    targets = [album_max_quality(track, 2) for track in tracks]
+    targets = [(b, r) if b and r else floor for b, r in targets]
     if check_beets:
         # Late: only an album that qualifies so far needs the Beets
         # integration, whose check runs Beets to read its config.

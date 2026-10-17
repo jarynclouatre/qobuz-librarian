@@ -25,6 +25,7 @@ from qobuz_librarian.api.auth import (
     QobuzError,
     QobuzUnavailable,
 )
+from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
@@ -67,19 +68,13 @@ def _download_fragment(kind: str, body: str, outcome: str) -> HTMLResponse:
     )
 
 
-def _staging_album_count() -> int:
-    """Album folders left in staging by an interrupted import. The CLI warns
-    about these at startup (`_check_staging_occupied`); the web has no such
-    signal, so a crash mid-import leaves web-only users with no idea files are
-    stranded. Only meaningful when nothing is actively writing; the caller
-    suppresses the banner while a job is running."""
+def _staging_blockers() -> list:
+    """Staging entries that keep downloads from starting, by name. Only
+    meaningful while nothing is writing there."""
     try:
-        return sum(
-            1 for d in cfg.STAGING_DIR.iterdir()
-            if d.is_dir() and not d.name.startswith(".")
-        )
+        return beets_mod.staging_leftover_entries()
     except OSError:
-        return 0
+        return []
 
 
 def _albums_in_backups() -> list:
@@ -295,7 +290,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             # Filesystem-only.
             "creds_ok": qobuz_access._creds_ok(),
             "qobuz_ready": qobuz_access._qobuz_ready(),
-            "staging_album_count": 0 if active_jobs else _staging_album_count(),
+            "staging_blockers": [] if active_jobs else _staging_blockers(),
             "albums_in_backups": (
                 [] if active_jobs or not runtime._run_lock_intact()
                 else _albums_in_backups()),

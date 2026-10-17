@@ -50,7 +50,7 @@ from qobuz_librarian.library.backup import (
     pin_unverified_upgrade_backup,
     warn_pin_failed,
 )
-from qobuz_librarian.quality.verify import verify_and_recover
+from qobuz_librarian.quality.verify import rip_shortfall, verify_and_recover
 from qobuz_librarian.queue import journal as queue_state
 from qobuz_librarian.queue import startup_recovery
 from qobuz_librarian.queue.durable_album import (
@@ -531,6 +531,7 @@ def _abandon_blocked_item(
     operation_id: str,
     item_id: str,
     result: dict,
+    reason: str,
     fallback: DurableAlbumResult,
     authority: RunLockLease,
 ) -> DurableAlbumResult:
@@ -541,7 +542,9 @@ def _abandon_blocked_item(
     same request. Throw the partial away and clear the recovery instead of
     waiting for a person to notice. This is the same settlement the interface
     offers by hand, so a library backup that cannot be put back still keeps
-    the item blocked rather than losing what it holds.
+    the item blocked rather than losing what it holds. Once settled, the
+    result gives ``reason``, what stopped the download, even when the block
+    was for a put-back that has since worked.
     """
     try:
         settled = startup_recovery.settle_blocked_item(
@@ -557,7 +560,7 @@ def _abandon_blocked_item(
     result["backup_path"] = result["gap_fill_backup_path"] = None
     return DurableAlbumResult(
         DurableAlbumStatus.INCOMPLETE,
-        fallback.reason,
+        reason,
         operation_id=operation_id,
         item_id=item_id,
     )
@@ -939,6 +942,7 @@ def execute_durable_new_album(
             operation_id=operation_id,
             item_id=item_id,
             result=item,
+            reason="download-incomplete",
             fallback=outcome,
             authority=authority,
         )
@@ -953,14 +957,15 @@ def execute_durable_new_album(
 
     try:
         album_dirs = validated_staged_album_dirs(item)
-        quality = verify_and_recover(
+        if rip_shortfall(album_dirs, item["album"], effective_tier=2)["under"]:
+            raise OSError("the staged album is below CD quality")
+        item["quality_verdict"] = verify_and_recover(
             item["album"],
             album_dirs,
             effective_tier=plan.effective_tier,
             allow_retry=False,
+            exempt=item.get("_cd_quality_paths", ()),
         )
-        if quality["under"]:
-            raise OSError("the staged album is below its selected quality")
         bindings = staged_track_bindings(item)
     except (OSError, TypeError, ValueError):
         return _retry_or_attention_after_download(
@@ -972,6 +977,39 @@ def execute_durable_new_album(
             reason="staged-album-unverified",
             authority=authority,
         )
+    if plan.library_backup_kind is not None:
+        from qobuz_librarian.modes import process
+
+        _require_authority(authority)
+        backup = load_library_backup_record(
+            backup_carrier.data, expected_owner=_owner_record(owner),
+        )
+        # Beets files a copy over the user's tracks only when it holds up
+        # against them, track by track; otherwise they go back.
+        if (
+            backup is not None
+            and len(album_dirs) == 1
+            and not process._upgrade_trees_verified(album_dirs[0], backup.path)
+        ):
+            outcome = _retry_or_attention_after_download(
+                operation_id=operation_id,
+                item_id=item_id,
+                result=item,
+                owner=owner,
+                checkpoint_group=checkpoint_group,
+                reason="upgrade-unverified",
+                authority=authority,
+            )
+            if outcome.status is not DurableAlbumStatus.ATTENTION:
+                return outcome
+            return _abandon_blocked_item(
+                operation_id=operation_id,
+                item_id=item_id,
+                result=item,
+                reason="upgrade-unverified",
+                fallback=outcome,
+                authority=authority,
+            )
     binding_records = managed_binding_records(ready_input)
     if binding_records is None or tuple(bindings) != binding_records:
         return _retry_or_attention_after_download(

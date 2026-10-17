@@ -52,7 +52,7 @@ from qobuz_librarian.modes.process import (
     process_album,
 )
 from qobuz_librarian.quality.decision import compare_album_quality
-from qobuz_librarian.quality.tiers import downsample_target_rate, streamrip_quality_cap
+from qobuz_librarian.quality.tiers import delivered_rate, downsample_target_rate
 from qobuz_librarian.queue.builder import _build_queue_item
 from qobuz_librarian.queue.executor import (
     _admit_new_queue_items,
@@ -87,7 +87,7 @@ def _downsample_note(album):
     # Cap the advertised rate to the active streamrip quality tier first, the
     # same way album_max_quality() does.
     if sr_hz:
-        sr_hz = min(sr_hz, streamrip_quality_cap()[1])
+        sr_hz = delivered_rate(sr_hz)
     target_hz = downsample_target_rate(sr_hz)
     if target_hz < sr_hz:
         return f"  → will downsample to {target_hz / 1000:g}kHz"

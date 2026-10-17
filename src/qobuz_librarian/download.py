@@ -1560,11 +1560,9 @@ def run_album_download(
     # Qobuz serves some tracks broken at a hi-res tier while their CD-quality
     # stream is whole; a track its retry also got broken comes at CD quality
     # rather than missing.
-    # The crash-safe lane's completion proof holds every track to the chosen
-    # quality, so only the standard path does this.
     cd_quality = []
     tier = quality if quality is not None else cfg.STREAMRIP_QUALITY
-    if (broken and tier > 2 and recovery_owner is None and not rate_limited
+    if (broken and tier > 2 and not rate_limited
             and not is_cancel_requested()):
         for rejected, t in _pair_files_to_tracks(
             list(broken), attempted_tracks, file_identities, qobuz_tracks

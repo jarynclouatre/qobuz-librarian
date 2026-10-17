@@ -2888,7 +2888,7 @@ def execute_albums(job, chosen, token):
         if attention_counts["quality"]:
             messages.append(
                 f"{plural(attention_counts['quality'], 'album')} remained "
-                "below the target quality after its automatic retry."
+                "below the target quality."
             )
             if not job.attention:
                 job.attention = "quality"
@@ -3376,9 +3376,10 @@ def execute_upgrades(job, chosen, token):
                     "n_at": 0,
                     "n_above": 0,
                 })
+                retry = " after retry" if verdict["retried"] else ""
                 log.info(
                     f"  upgrade incomplete: {plural(verdict['n_below'], 'track')} "
-                    "still below target after retry. Marked capped."
+                    f"still below target{retry}. Marked capped."
                 )
             elif attention_kind == "processing":
                 processing_attention += 1
@@ -3449,10 +3450,7 @@ def execute_upgrades(job, chosen, token):
             )
         elif quality_attention:
             job.attention = "quality"
-            job.error = (
-                "An album remained below the target quality after its "
-                "automatic retry."
-            )
+            job.error = "An album remained below the target quality."
         elif processing_attention:
             job.attention = "processing"
             job.error = "Post-download work needs attention; see the job log."

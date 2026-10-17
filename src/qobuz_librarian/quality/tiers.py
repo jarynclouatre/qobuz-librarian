@@ -51,6 +51,21 @@ def downsample_target_rate(sr_hz):
     return downsample_engine.target_rate(sr_hz) or sr_hz
 
 
+def delivered_rate(sr_hz, tier=None):
+    """Sample rate (Hz) the tier delivers from a ``sr_hz`` master: the
+    highest rate of the master's own 44.1 or 48 kHz family within the tier
+    cap, so 176.4 kHz comes at 88.2 kHz under a 96 kHz cap."""
+    cap = streamrip_quality_cap(tier)[1]
+    if sr_hz <= cap:
+        return sr_hz
+    rate = downsample_target_rate(sr_hz)
+    if rate > cap:
+        return cap
+    while rate * 2 <= cap:
+        rate *= 2
+    return rate
+
+
 def format_quality(bits, rate):
     if not bits or not rate:
         return "?"

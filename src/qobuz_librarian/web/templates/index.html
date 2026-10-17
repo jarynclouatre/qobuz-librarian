@@ -68,18 +68,20 @@
     </div>
     {% endif %}
 
-    {% if staging_album_count %}
-    <div class="ql-notice ql-notice-warning flex items-start gap-3 p-4">
+    {% if staging_blockers %}
+    {% set _n = staging_blockers | length %}
+    <div class="ql-notice ql-notice-warning flex items-start flex-wrap gap-3 p-4">
       <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-warning" fill="none"
            viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
               d="M12 9v2m0 4h.01M5 19h14a2 2 0 0 0 1.84-2.75L13.74 4a2 2 0 0 0-3.5 0L3.18 16.25A2 2 0 0 0 5 19z"/>
       </svg>
-      <span class="min-w-0 flex-1 text-sm">
-        <strong>{{ staging_album_count }} album folder{{ 's' if staging_album_count != 1 }} left in staging.</strong>
-        Downloads will not start until {{ 'it is' if staging_album_count == 1 else 'they are' }} moved out of staging. Settings &gt; Diagnostics shows where staging is.
+      <span class="min-w-0 flex-1 break-words text-sm">
+        <strong>Staging holds files no download is using:</strong>
+        {{ staging_blockers[:3] | join(', ') }}{% if _n > 3 %} and {{ _n - 3 }} more{% endif %}.
+        Downloads will not start until {{ 'it is' if _n == 1 else 'they are' }} moved out of staging. Settings &gt; Diagnostics shows where staging is.
       </span>
-      <a href="/settings#diagnostics" class="ql-btn ql-btn-secondary ql-btn-sm shrink-0">Open Diagnostics</a>
+      <a href="/settings#diagnostics" class="ql-btn ql-btn-secondary ql-btn-sm w-full shrink-0 sm:ml-auto sm:w-auto">Open Diagnostics</a>
     </div>
     {% endif %}
 

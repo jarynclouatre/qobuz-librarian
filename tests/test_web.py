@@ -385,6 +385,35 @@ def test_a_download_rechecks_the_music_root_and_ownership_before_it_runs(
     assert len(submitted) == 1
 
 
+def test_system_files_in_staging_do_not_hold_downloads_back(
+        monkeypatch, tmp_path):
+    """A Finder .DS_Store in staging made every web download fail with the
+    bare error "1". System files pass untouched; anything else is named."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import beets
+    from qobuz_librarian.web import flows, routes_search
+
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path)
+    system = (".DS_Store", "Thumbs.db", "._x", "@eaDir/x", "Artist/@eaDir/x")
+    for name in system:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_bytes(b"x")
+    beets.staging_preflight(flows.build_args())
+    assert routes_search._staging_blockers() == []
+
+    (tmp_path / "Artist" / "Album").mkdir()
+    (tmp_path / "Artist" / "Album" / "01.flac").write_bytes(b"audio")
+    with pytest.raises(SystemExit) as refused:
+        beets.staging_preflight(flows.build_args())
+    assert refused.value.code == 1
+    assert routes_search._staging_blockers() == ["Artist"]
+    job = jm.Job(title="Album", album_id="1")
+    jm._run_task(job, lambda _job: beets.staging_preflight(flows.build_args()))
+    assert job.status is jm.JobStatus.FAILED
+    assert "Artist" in job.error
+    assert all((tmp_path / name).exists() for name in system)
+
+
 # ── app.py: HTTP routes ───────────────────────────────────────────────────────
 
 
@@ -2227,13 +2256,21 @@ def test_a_restart_requeues_waiting_and_cut_off_downloads(
     capped = jm.Job(title="Capped", album_id="6", created_at=500.0,
                     status=jm.JobStatus.RUNNING,
                     execute_args={"restart_requeues": jm.RESTART_REQUEUE_LIMIT})
+    # A saved queue entry the stop discarded itself and recorded, and one a
+    # hard kill left with nothing to show what happened to it.
+    stopped = jm.Job(title="Stopped", album_id="10", created_at=450.0,
+                     status=jm.JobStatus.RUNNING, finished_at=460.0,
+                     execute_args={job_persistence.SAVED_QUEUE: True})
+    killed = jm.Job(title="Killed", album_id="11", created_at=550.0,
+                    status=jm.JobStatus.RUNNING,
+                    execute_args={job_persistence.SAVED_QUEUE: True})
     # Paused by an older version, whose pause has since cleared.
     paused = jm.Job(title="Paused", album_id="7", created_at=40.0,
                     status=jm.JobStatus.FAILED, attention="failed",
                     error=job_persistence.RESTART_INTERRUPTED + " Downloads and "
                     "scans are paused until it is retried or given up.")
     for job in (started, named, third, second, finished, cut_off, capped,
-                paused):
+                paused, stopped, killed):
         job_persistence.persist(job)
     monkeypatch.setattr(queue_recovery, "_journaled_web_job_ids",
                         lambda: frozenset({named.id}))
@@ -2288,17 +2325,18 @@ def test_a_restart_requeues_waiting_and_cut_off_downloads(
 
     assert jm.registry.get(named.id).status == jm.JobStatus.FAILED
     assert jm.registry.get(finished.id).status == jm.JobStatus.DONE
-    assert len(jm.registry.all()) == 8
+    assert len(jm.registry.all()) == 10
     assert [job.id for job, _run in jm._held_downloads] == [
-        started.id, second.id, third.id, cut_off.id]
+        started.id, second.id, third.id, cut_off.id, stopped.id]
     assert {job.status for job, _run in jm._held_downloads} == {
         jm.JobStatus.PENDING}
-    for job in (started, cut_off):
+    for job in (started, cut_off, stopped):
         saved = job_persistence.load_one(job.id)
         assert saved["status"] == "pending"
         assert saved["execute_args"]["restart_requeues"] == 1
     assert jm.registry.get(capped.id).status == jm.JobStatus.FAILED
     assert jm.registry.get(capped.id).attention == "failed"
+    assert jm.registry.get(killed.id).status == jm.JobStatus.FAILED
     assert jm.registry.get(paused.id).error != paused.error
     assert not queue_recovery.settled_downloads()
 

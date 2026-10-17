@@ -29,6 +29,7 @@ from qobuz_librarian.integrations.staging import (
     StagingReferenceInspection,
     StagingReferenceStatus,
 )
+from qobuz_librarian.quality import verify
 from qobuz_librarian.queue import durable_runner
 from qobuz_librarian.queue import journal as queue_state
 from qobuz_librarian.queue.builder import _build_queue_item
@@ -375,9 +376,12 @@ def test_incomplete_gap_fill_puts_the_owned_tracks_back(
     assert queue_state.list_queue_journals() == ()
 
 
+@pytest.mark.parametrize("served", [(24, 96000), (24, 48000)])
 def test_durable_album_removes_queue_only_under_live_completion_proof(
-    tmp_path, monkeypatch, authority
+    tmp_path, monkeypatch, authority, served
 ):
+    # An album served below its target imports with the quality note. It was
+    # refused, and the web then threw the whole download away.
     staging = tmp_path / "staging"
     beets_dir = tmp_path / "beets"
     monkeypatch.setattr(cfg, "STAGING_DIR", staging)
@@ -440,11 +444,8 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
     monkeypatch.setattr(
         durable_runner, "validated_staged_album_dirs", lambda *_: [staging / "Safe Album"]
     )
-    monkeypatch.setattr(
-        durable_runner,
-        "verify_and_recover",
-        lambda *args, **kwargs: {"under": False},
-    )
+    monkeypatch.setattr(verify, "read_album_dir", lambda _d: [
+        {"path": source_path, "bits": served[0], "sample_rate": served[1]}])
     monkeypatch.setattr(
         durable_runner,
         "staged_track_bindings",
@@ -604,7 +605,6 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
             mapping.destination_identity,
             "e" * 64,
         )
-        target = expectation.quality_targets[0]
         assessment = assess_completion(
             owner=managed.owner,
             expectation=expectation,
@@ -622,8 +622,7 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
                     mapping.destination_path,
                     mapping.destination_identity,
                     landing.sha256,
-                    target.bits,
-                    target.rate,
+                    *served,
                 ),
             ),
         )
@@ -676,6 +675,7 @@ def test_durable_album_removes_queue_only_under_live_completion_proof(
     assert observed["live_queue"] and observed["live_queue"][0] is True
     assert queue == []
     assert queue_state.list_queue_journals() == ()
+    assert item["quality_verdict"]["under"] is (served != (24, 96000))
     assert item["resampled_n"] == 1
     assert item["downsample_errors"] == 2
     assert item["downsample_saved_bytes"] == 512

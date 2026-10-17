@@ -99,8 +99,9 @@ from qobuz_librarian.library.catalog import (
 )
 from qobuz_librarian.library.scanner import cache_album_tags, clear_scan_caches, read_album_dir
 from qobuz_librarian.modes.consolidate import match_sibling_track
-from qobuz_librarian.quality.decision import mark_local_album_capped
+from qobuz_librarian.quality.decision import mark_album_capped, mark_local_album_capped
 from qobuz_librarian.quality.verify import (
+    quality_below_line,
     quality_met_line,
     redownload_with_staged_fallback,
     retry_preserves_track_coverage,
@@ -2312,6 +2313,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         log.info(fmt(*_durable_completion_line(
             result, item.get("elapsed", 0)
         )))
+        verdict = result.get("quality_verdict") or {}
+        if verdict.get("under"):
+            log.info(fmt(C.YELLOW, f"    {quality_below_line(verdict)}"))
         _after_album(item, post_dir, idx)
 
     def _after_album(item, post_dir, idx):
@@ -2635,13 +2639,27 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 and not item.get("rate_limited")
             )
             if outcome.status is DurableAlbumStatus.INCOMPLETE and not refetch:
-                # Qobuz could not serve the whole album. The partial download
-                # is gone and nothing is left waiting on recovery, so the rest
-                # of the queue carries on.
+                # Qobuz could not serve the whole album, or the download did
+                # not hold up against the tracks it would replace. The
+                # download is gone and nothing is left waiting on recovery, so
+                # the rest of the queue carries on.
                 item["result"] = "incomplete"
-                log.info(fmt(C.YELLOW,
-                    "    ⚠  Qobuz didn't deliver every track; nothing was "
-                    "imported and the partial download was discarded."))
+                if outcome.reason == "upgrade-unverified":
+                    # The original stays, and another try would fetch the
+                    # same copy, so nothing is left to retry.
+                    verdict = item.get("quality_verdict") or {}
+                    if verdict.get("under"):
+                        mark_album_capped(item["album"].get("id"), item["album"], {
+                            "n_below": verdict["n_below"], "n_at": 0, "n_above": 0})
+                    _drop(item)
+                    log.info(fmt(C.YELLOW,
+                        "    ⚠  The new copy couldn't be verified against "
+                        "yours, so your original was kept and the download "
+                        "was discarded."))
+                else:
+                    log.info(fmt(C.YELLOW,
+                        "    ⚠  Qobuz didn't deliver every track; nothing was "
+                        "imported and the partial download was discarded."))
                 results.append(_resolve_queue_item(
                     item, args, False, authority=authority))
                 continue
@@ -2824,10 +2842,13 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         item.get("n_ok", 0), item.get("cd_quality_tracks"))
                     if met:
                         log.info(fmt(C.GRAY, f"    {met}"))
-                elif on_quality_shortfall is not None:
-                    # Still under target after the retry: the import proceeds,
-                    # but the owning job must not look like a clean finish.
-                    on_quality_shortfall(item["quality_verdict"])
+                else:
+                    log.info(fmt(C.YELLOW,
+                        f"    {quality_below_line(item['quality_verdict'])}"))
+                    # Still under target: the import proceeds, but the owning
+                    # job must not look like a clean finish.
+                    if on_quality_shortfall is not None:
+                        on_quality_shortfall(item["quality_verdict"])
 
                 # Repair carries a callback that re-tags the staged refills
                 # with the originals' own metadata before beets files them, so

@@ -364,6 +364,75 @@ def _under_isolated_run(p):
     return _is_isolated_run_name(first)
 
 
+def _under_kept_run(p):
+    """True under a finished --no-import download; only the manual import
+    picks it up."""
+    try:
+        first = p.relative_to(cfg.STAGING_DIR).parts[0]
+    except (IndexError, ValueError):
+        return False
+    return staging_mod.is_kept_staging_run_name(first)
+
+
+# Finder, Explorer and Synology write these into folders they browse or index.
+_SYSTEM_FILE_NAMES = frozenset({".DS_Store", "Thumbs.db", "@eaDir"})
+
+
+def is_system_file(name):
+    return name in _SYSTEM_FILE_NAMES or name.startswith("._")
+
+
+def staging_leftovers(first_each=False):
+    """Files in staging outside the retry folder, run roots and kept
+    --no-import downloads, apart from system files: what staging_preflight
+    holds downloads back for. With first_each, one file is enough for each
+    top-level entry."""
+
+    def counted(path):
+        return not (is_system_file(path.name) or _under_retry_dir(path)
+                    or _under_isolated_run(path) or _under_kept_run(path))
+
+    found = []
+    held = set()
+    for parent, dirs, names in os.walk(cfg.STAGING_DIR):
+        entry = Path(parent).relative_to(cfg.STAGING_DIR).parts[:1]
+        if entry and entry[0] in held:
+            dirs[:] = []
+            continue
+        dirs[:] = [name for name in dirs if counted(Path(parent, name))]
+        files = [path for path in (Path(parent, name) for name in names)
+                 if counted(path) and path.is_file()]
+        if first_each and entry and files:
+            held.add(entry[0])
+            dirs[:] = []
+        found.extend(files)
+    return found
+
+
+def staging_leftover_entries(files=None):
+    """Names of the top-level staging entries holding those files."""
+    if files is None:
+        files = staging_leftovers(first_each=True)
+    return sorted({f.relative_to(cfg.STAGING_DIR).parts[0] for f in files})
+
+
+class StagingNotEmpty(SystemExit):
+    """Downloads refused because staging holds files no download is using."""
+
+    def __init__(self, entries):
+        super().__init__(EXIT_GENERAL)
+        self.entries = list(entries)
+
+    def __str__(self):
+        shown = ", ".join(self.entries[:3])
+        if len(self.entries) > 3:
+            shown += f" and {len(self.entries) - 3} more"
+        one = len(self.entries) == 1
+        return (f"Staging holds files no download is using: {shown}. "
+                f"Downloads will not start until {'it is' if one else 'they are'} "
+                "moved out of staging.")
+
+
 def _beets_progress_album(line, staging_root):
     stripped = line.strip()
     prefix = os.fspath(staging_root).rstrip("/") + "/"
@@ -7587,11 +7656,7 @@ def staging_preflight(args):
                 "will not be imported automatically.",
             )
         )
-    files = [
-        f
-        for f in cfg.STAGING_DIR.rglob("*")
-        if (f.is_file() and not _under_retry_dir(f) and not _under_isolated_run(f))
-    ]
+    files = staging_leftovers()
     if not files:
         return
 
@@ -7613,7 +7678,7 @@ def staging_preflight(args):
                 "Review or import them explicitly first.",
             )
         )
-        sys.exit(EXIT_GENERAL)
+        raise StagingNotEmpty(staging_leftover_entries(files))
 
     print()
     log.info(fmt(C.CYAN, "  Options:"))
@@ -7701,9 +7766,7 @@ def staging_preflight(args):
                 quarantined += 1
                 if not result.durable:
                     uncertain_quarantines += 1
-        leftover = [
-            f for f in cfg.STAGING_DIR.rglob("*") if f.is_file() and not _under_retry_dir(f)
-        ]
+        leftover = staging_leftovers()
         if quarantined:
             log.info(
                 fmt(

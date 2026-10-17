@@ -39,6 +39,13 @@ def test_one_low_track_among_good_is_under(monkeypatch):
     _patch(monkeypatch, [{"bits": 24, "sample_rate": 96000}], tier=3)
     top = {"maximum_bit_depth": 24, "maximum_sampling_rate": 192.0}
     assert verify.rip_shortfall([_FakeDir()], top)["under"] is False
+    # A 176.4 kHz master comes at 88.2 kHz under that cap.
+    family = {"maximum_bit_depth": 24, "maximum_sampling_rate": 176.4}
+    at_cap = [{"bits": 24, "sample_rate": 88200}]
+    _patch(monkeypatch, at_cap, tier=3)
+    assert verify.rip_shortfall([_FakeDir()], family)["under"] is False
+    assert decision.compare_album_quality(
+        at_cap, family)["classification"] == "all_equal"
     # A bonus disc that tops out below its album is held to its own best:
     # the album's would mark it short, and Upgrade offer it, for ever.
     live = {"title": "Song (Live)", "isrc": "US0000000002",

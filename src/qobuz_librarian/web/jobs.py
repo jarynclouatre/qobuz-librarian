@@ -540,6 +540,11 @@ class Job:
             if self.importing == bool(active):
                 return
             self.importing = bool(active)
+            scope = self._progress_scope
+            # The stop holds back the albums a run has yet to start.
+            if (not active and self.stopping_for_restart and scope
+                    and scope[0] + 1 < scope[1]):
+                self.cancel_requested = True
             snapshot = self._progress_snapshot()
         self._fan_out(snapshot)
 
@@ -1472,16 +1477,22 @@ def stop_for_restart() -> None:
     """Start winding down because the app is stopping.
 
     Nothing more leaves the queues, and each running job stops as it would
-    for a cancel. An album already importing finishes first.
+    for a cancel. A run importing an album stops once that import ends, or
+    finishes if it was the last album; a single download already importing
+    finishes and is recorded as it ends.
     """
     _restart_stop.set()
     _stop_event.set()
     for job in registry.executing():
         with job._lock:
-            # A cancel already asked for stays a cancel, and an import under
-            # way finishes and is recorded as it ends.
+            # A cancel already asked for stays a cancel, and a run already
+            # set to stop after its import keeps to that.
             if (job.status in TERMINAL or job.cancel_requested
-                    or job.importing):
+                    or job.stopping_for_restart):
+                continue
+            if job.importing:
+                if not job.album_id:
+                    job.stopping_for_restart = True
                 continue
             job.stopping_for_restart = True
             job.cancel_requested = True
@@ -2011,7 +2022,7 @@ def approve(
                 ) from e
             message = (
                 str(e)
-                if isinstance(e, CandidateStale)
+                if isinstance(e, (CandidateStale, beets.StagingNotEmpty))
                 else qobuz_action_error_message(e)
                      + " Your review and picks are untouched."
             )
@@ -2321,10 +2332,12 @@ def restore_jobs(
             and job.id not in journaled
             and set(job.single or {}) <= {"album_id", "track_id"}
             and not (job.execute_args or {}).get("new_edition")
-            and not (job.execute_args or {}).get(job_persistence.SAVED_QUEUE)
+            and (job.finished_at is not None
+                 or not (job.execute_args or {}).get(job_persistence.SAVED_QUEUE))
         ):
             # Its partial download was a run folder no saved queue claimed,
-            # which start-up has already removed.
+            # which start-up has already removed, or a saved one the stop
+            # discarded itself.
             settled = _RunningDownload(album_id=job.album_id)
         if settled is not None and (
             job.id in unsettled

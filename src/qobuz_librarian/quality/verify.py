@@ -9,6 +9,8 @@ from qobuz_librarian.integrations.staging import (
 )
 from qobuz_librarian.library.catalog import read_album_dir
 from qobuz_librarian.quality.decision import album_max_quality, track_targets
+from qobuz_librarian.quality.tiers import format_quality
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log
 
 
@@ -19,7 +21,7 @@ def rip_shortfall(staged_dirs, qobuz_album, *, effective_tier=None, exempt=()):
     target = album_max_quality(qobuz_album, tier=effective_tier)
     staged = [t for d in staged_dirs for t in read_album_dir(d)
               if t.get("path") not in exempt]
-    quals, n_unknown, n_below = [], 0, 0
+    quals, below, n_unknown = [], [], 0
     for t, (bits_wanted, rate_wanted) in zip(
             staged, track_targets(staged, qobuz_album, effective_tier)):
         bits = t.get("bits") or 0
@@ -29,12 +31,12 @@ def rip_shortfall(staged_dirs, qobuz_album, *, effective_tier=None, exempt=()):
             continue
         quals.append((int(bits), int(rate)))
         if bits < bits_wanted or rate < rate_wanted:
-            n_below += 1
+            below.append(quals[-1])
     return {
-        "under": n_below > 0 or n_unknown > 0,
-        "n_below": n_below,
+        "under": bool(below) or n_unknown > 0,
+        "n_below": len(below),
         "target": target,
-        "worst": min(quals) if quals else None,
+        "worst": min(below or quals) if quals else None,
         "n_unknown": n_unknown,
     }
 
@@ -48,6 +50,24 @@ def quality_met_line(n_ok, cd_quality_tracks):
     if n_ok > len(cd_quality_tracks):
         return "Quality check: the other tracks meet the selected quality."
     return ""
+
+
+def quality_below_line(verdict):
+    """What the quality check says when the download stays below the
+    selected quality."""
+    parts = []
+    if verdict["n_below"]:
+        part = f"{plural(verdict['n_below'], 'track')} came below the selected quality"
+        if verdict["served"]:
+            part += (f" (lowest {format_quality(*verdict['served'])}, "
+                     f"target {format_quality(*verdict['target'])})")
+        parts.append(part)
+    if verdict["n_unknown"]:
+        parts.append(f"{plural(verdict['n_unknown'], 'track')} could not be measured")
+    line = f"Quality check: {' and '.join(parts)}."
+    if verdict["retried"]:
+        line += " The retry at the highest quality finished below target too."
+    return line
 
 
 def verify_and_recover(qobuz_album, staged_dirs, *, effective_tier,

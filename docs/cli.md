@@ -125,7 +125,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--force` | Download every track of the album again (search or album URL only) |
 | `--yes` | Answer yes to the confirmations; choices still ask |
 | `--auto-safe` | With `--upgrade-walk`, confirm only the upgrades it can classify as safe |
-| `--no-import` | Download without importing; a complete download stays in staging for the `beet import` command `--help` prints |
+| `--no-import` | Download without importing; a complete download stays in staging for the `beet import` command `--help` prints, and other downloads, in the terminal or the web app, go ahead beside it and leave it there |
 | `--no-upgrade` | Turn off quality upgrades for this run |
 | `--no-downsample` | Skip downsampling new downloads for this run |
 | `--[no-]consolidate` | After import, look at sibling folders and offer to merge them |

@@ -73,6 +73,10 @@ def kept_staging_run_names() -> tuple[str, ...]:
     return _staging_names(_KEPT_RUN_RE)
 
 
+def is_kept_staging_run_name(name) -> bool:
+    return _KEPT_RUN_RE.fullmatch(name) is not None
+
+
 def _same_node(left, right):
     return left[:2] == right[:2]
 
@@ -621,7 +625,8 @@ def bind_unclaimed_staging_run(name):
 def keep_staging_run(run):
     """Rename one finished run so restart recovery leaves it in staging.
 
-    The new name still matches the .qobuz-run-* a manual beet import names.
+    The new name matches the .qobuz-run-*-no-import a manual beet import
+    names.
     Returns the new path, or None when the run is no longer the exact root
     that was created.
     """

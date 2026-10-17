@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import shutil
+import threading
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -637,6 +638,11 @@ def _mode_refused(text):
         status_code=303)
 
 
+# Held for a whole Resume web app, so a second click, or one from another
+# tab, is told the library is already being taken back.
+_TAKING_BACK = threading.Lock()
+
+
 @router.post("/settings/mode")
 async def set_mode(request: Request, target: str = Form("")):
     """Hand the run-lock to the terminal (CLI), or take it back for the web.
@@ -688,6 +694,9 @@ async def set_mode(request: Request, target: str = Form("")):
             try:
                 lease = run_lock.acquire("web")
             except run_lock.LockBusy:
+                with runtime._auto_check_lock:
+                    if runtime._run_lock_intact() and not runtime.cli_mode():
+                        return "held"
                 return "busy"
             if lease is None:
                 # Can't enforce the lock, same stance as startup: pause
@@ -717,8 +726,20 @@ async def set_mode(request: Request, target: str = Form("")):
                 return "failed"
             return "resumed"
 
+        def _take_back_once():
+            if not _TAKING_BACK.acquire(blocking=False):
+                return "taking"
+            try:
+                return _take_back()
+            finally:
+                _TAKING_BACK.release()
+
         outcome = await asyncio.get_running_loop().run_in_executor(
-            None, _take_back)
+            None, _take_back_once)
+        if outcome == "taking":
+            return _mode_refused(
+                "The web app is already taking the library back. Give it a "
+                "moment, then reload this page.")
         if outcome == "busy":
             # A CLI session still holds the lock, so we can't take it back yet.
             return _mode_refused(

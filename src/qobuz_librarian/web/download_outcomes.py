@@ -117,7 +117,9 @@ def _download_summary(r):
         else:
             verdict = r.get("quality_verdict") or {}
             if verdict.get("under") and not verdict.get("recovered"):
-                parts.append("highest-source retry remained below target quality")
+                parts.append(
+                    "highest-source retry remained below target quality"
+                    if verdict.get("retried") else "below target quality")
             if r.get("downsample_errors"):
                 parts.append(
                     f"{plural(r['downsample_errors'], 'file')} could not be "
@@ -230,10 +232,12 @@ def download_error(result, *, job_controls=True):
             "> Diagnostics before downloading this album again."
         )
     if kind == "quality":
-        return (
-            "The album downloaded, but it still finished below the target "
-            "quality after the automatic retry."
-        )
+        if (result.get("quality_verdict") or {}).get("retried"):
+            return (
+                "The album downloaded, but it still finished below the target "
+                "quality after the automatic retry."
+            )
+        return "The album downloaded, but it finished below the target quality."
     if kind == "processing":
         messages = []
         if result.get("downsample_errors"):

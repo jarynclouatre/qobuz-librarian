@@ -157,24 +157,34 @@ async def queue_history(
 async def queue_clear(request: Request):
     """Clear the History: drop finished/canceled/failed jobs from the registry
     and the full on-disk archive. In-flight jobs are untouched."""
-    with queue_recovery._STARTUP_RECOVERY_LOCK:
-        if (queue_recovery._startup_recovery_status_value() != "clear"
-                and not queue_recovery._terminal_queue_waiting()):
-            return refusals._durable_recovery_response(
-                request,
-                "History cannot be cleared while an interrupted download still "
-                "has saved recovery state.",
-            )
-        if not job_persistence.clear_history():
-            message = (
-                "History couldn't be cleared from the data folder. Nothing "
-                "was removed; check the data volume and try again."
-            )
-            return RedirectResponse(
-                url="/queue/history?error=" + rendering._notice_key(message),
-                status_code=303,
-            )
-        job_mgr.registry.clear_finished()
+    def _clear():
+        # Settling saved recovery holds this lock for as long as it takes;
+        # wait for it off the event loop.
+        with queue_recovery._STARTUP_RECOVERY_LOCK:
+            if (queue_recovery._startup_recovery_status_value() != "clear"
+                    and not queue_recovery._terminal_queue_waiting()):
+                return "recovery"
+            if not job_persistence.clear_history():
+                return "unsaved"
+            job_mgr.registry.clear_finished()
+        return None
+
+    refused = await asyncio.get_running_loop().run_in_executor(None, _clear)
+    if refused == "recovery":
+        return refusals._durable_recovery_response(
+            request,
+            "History cannot be cleared while an interrupted download still "
+            "has saved recovery state.",
+        )
+    if refused == "unsaved":
+        message = (
+            "History couldn't be cleared from the data folder. Nothing "
+            "was removed; check the data volume and try again."
+        )
+        return RedirectResponse(
+            url="/queue/history?error=" + rendering._notice_key(message),
+            status_code=303,
+        )
     return RedirectResponse(url="/queue/history", status_code=303)
 
 

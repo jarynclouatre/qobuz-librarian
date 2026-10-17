@@ -363,10 +363,11 @@ def run_upgrade_walk_mode(args, token):
                         "n_at": 0,
                         "n_above": 0,
                     })
+                    retry = " after retry" if verdict["retried"] else ""
                     log.info(fmt(C.YELLOW,
                         f"     ⚠  Upgrade incomplete: "
-                        f"{plural(verdict['n_below'], 'track')} still below target "
-                        f"after retry. Marked capped."))
+                        f"{plural(verdict['n_below'], 'track')} still below target"
+                        f"{retry}. Marked capped."))
                 elif attention_kind == "processing":
                     n_attention_albums += 1
                     n_upgraded_albums += 1

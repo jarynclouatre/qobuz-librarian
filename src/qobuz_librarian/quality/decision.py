@@ -26,7 +26,11 @@ from qobuz_librarian.library.scanner import (
     list_artist_album_dirs,
 )
 from qobuz_librarian.library.tags import similarity, strip_album_decorations
-from qobuz_librarian.quality.tiers import downsample_target_rate, streamrip_quality_cap
+from qobuz_librarian.quality.tiers import (
+    delivered_rate,
+    downsample_target_rate,
+    streamrip_quality_cap,
+)
 from qobuz_librarian.ui_cli.logging import vlog
 
 
@@ -45,8 +49,8 @@ def _quality_number(value) -> float:
 
 
 def album_max_quality(qobuz_album, tier=None):
-    """Return the (bit_depth, sample_rate_hz) Qobuz can provide, capped to the
-    streamrip quality tier.
+    """Return the (bit_depth, sample_rate_hz) Qobuz can provide, as the
+    streamrip quality tier delivers it.
 
     Qobuz reports sample rate in kHz (e.g. 96.0); values >= 1000 are treated
     as already-Hz so an API change to Hz can't make every album read as
@@ -55,9 +59,9 @@ def album_max_quality(qobuz_album, tier=None):
     bd = int(_quality_number(qobuz_album.get("maximum_bit_depth")))
     sr = _quality_number(qobuz_album.get("maximum_sampling_rate"))
     sr_hz = int(round(sr)) if sr >= 1000 else int(round(sr * 1000))
-    cap_bd, cap_sr = streamrip_quality_cap(tier)
+    cap_bd = streamrip_quality_cap(tier)[0]
     bd = min(bd, cap_bd) if bd else 0
-    sr_hz = min(sr_hz, cap_sr) if sr_hz else 0
+    sr_hz = delivered_rate(sr_hz, tier) if sr_hz else 0
     return (bd, sr_hz)
 
 

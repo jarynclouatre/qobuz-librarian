@@ -162,8 +162,9 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
             "\n✗  A download the web app finished is waiting for the web app "
             "to record it.\n"
             "   The album is in your library, and no work was started here. "
-            "Let the web app take the library once: start it, or choose "
-            "Resume web app in Settings → Mode. Then run this again.\n"
+            "Let the web app take the library once: start it if it is "
+            "stopped, and if Settings → Mode shows terminal mode, choose "
+            "Resume web app. Then run this again.\n"
         )
     else:
         from qobuz_librarian.queue.startup_recovery import (
@@ -485,13 +486,14 @@ def _help_description():
 
 def _beets_recovery_command(album_dirs=()):
     """The manual import for staged albums: the given folders, or every
-    download run folder."""
+    download --no-import kept."""
     if album_dirs:
         targets = " ".join(shlex.quote(str(path)) for path in album_dirs)
     else:
         # Beets skips names starting with a dot, so a run folder has to be
-        # named itself; importing the staging folder finds nothing.
-        targets = f"{shlex.quote(str(cfg.STAGING_DIR))}/.qobuz-run-*"
+        # named itself; importing the staging folder finds nothing. Only the
+        # kept ones: a download in progress beside them has its own folder.
+        targets = f"{shlex.quote(str(cfg.STAGING_DIR))}/.qobuz-run-*-no-import"
     command = f"beet import {targets}"
     if _in_container():
         service = shlex.quote(_compose_service_name())
@@ -514,7 +516,7 @@ def _help_epilog():
         if _in_container() else "After --no-import:")
     lines.extend(("", recovery_heading))
     lines.extend(_help_example(
-        _beets_recovery_command(), "finish importing staged albums", width))
+        _beets_recovery_command(), "import the albums it kept in staging", width))
 
     lines.extend(("", *textwrap.wrap(
         "Credentials: set them on the web UI Settings page first, or use "

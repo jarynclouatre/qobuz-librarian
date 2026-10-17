@@ -384,13 +384,27 @@ def _diagnostics():
                 diagnostic=True,
             ),
         })
+    try:
+        blocking = beets_mod.staging_leftover_entries()
+        kept = staging_mod.kept_staging_run_names()
+        idle = set(os.listdir(cfg.STAGING_DIR)).difference(blocking, kept)
+    except OSError:
+        blocking, kept = [], ()
+        idle = set()
+    kept_shown = ", ".join(kept[:3]) + (
+        f" and {len(kept) - 3} more" if len(kept) > 3 else "")
     # The app's own recovery folder is not a staging entry; counting it made a
     # pile of kept files read as one healthy item. It gets its own check below,
     # so this row says what it counted rather than "0 entries", which read as
     # an empty staging folder next to a warning about the files kept in it.
     _dir_check("Staging area", cfg.STAGING_DIR, want_writable=True,
-               skip_names={cfg.BEETS_RETRY_DIR}, show_size=True,
-               unit=("album waiting to import", "albums waiting to import"))
+               skip_names={cfg.BEETS_RETRY_DIR, *idle}, show_size=True,
+               unit=("album waiting to import", "albums waiting to import"),
+               note=(f" · kept by --no-import for a manual beet import: "
+                     f"{kept_shown}" if kept else ""))
+    if blocking:
+        checks.append({"label": "Staging files", "ok": False,
+                       "detail": str(beets_mod.StagingNotEmpty(blocking))})
     _dir_check("Data folder", cfg.DATA_DIR, want_writable=True)
     # A single file left owned by another user, as a command run as root or a
     # PUID change leaves behind, passes the folder check above.

@@ -4,7 +4,8 @@ services:
     container_name: qobuz-librarian
     restart: unless-stopped
     # On stop, a running download ends and a scan saves where it got to,
-    # within seconds. An album already being imported finishes first.
+    # within seconds. An album already being imported finishes first, and a
+    # run stops after it.
     stop_grace_period: 1m
     # Run tini as PID 1 so cancelled streamrip children are reaped cleanly.
     init: true
