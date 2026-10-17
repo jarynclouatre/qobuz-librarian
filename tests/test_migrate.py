@@ -236,7 +236,9 @@ def test_execute_never_clobbers_a_destination_or_moves_a_changed_source(
     replaced after the preview and a destination parent turned into a symlink
     are refused, and an interrupt right after publishing keeps the exact
     source, takes the published copy back and records the run as
-    cancelled."""
+    cancelled. A source rewritten after its copy was published is kept with
+    its new bytes and the copy taken back, and an interrupt right after the
+    original is deleted keeps the copy."""
     def case(name, **kwargs):
         (tmp_path / name).mkdir()
         return _placed_plan(tmp_path / name, **kwargs)
@@ -306,7 +308,6 @@ def test_execute_never_clobbers_a_destination_or_moves_a_changed_source(
     assert result.cancelled and result.interrupted and result.failed == 0
     assert plan.placed[0].source.read_bytes().startswith(b"audio-bytes-")
     assert not destination.exists()
-    assert result.recoveries == []
     assert not list(destination.parent.glob(".qobuz-migrate-copy-*"))
 
     monkeypatch.setattr(m, "_rename_noreplace_at", rename_noreplace)
@@ -321,6 +322,34 @@ def test_execute_never_clobbers_a_destination_or_moves_a_changed_source(
     assert counters["pruned"] == 0
     track = next(row for row in rows if row["record"] == "track")
     assert track["status"] == m.INTERRUPTED
+
+    plan = case("rewritten after publishing")
+    source = plan.placed[0].source
+    retire_source = m._retire_source
+
+    def rewrite_before_delete(*args):
+        source.write_bytes(b"edited by a tagger")
+        return retire_source(*args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(m, "_retire_source", rewrite_before_delete)
+        result = m.execute_plan(plan, in_place=True)
+    assert result.failed == 1 and result.lingered == 0
+    assert source.read_bytes() == b"edited by a tagger"
+    assert not (plan.dest_root / plan.placed[0].dest_rel).exists()
+
+    plan = case("interrupted after the delete")
+
+    def interrupt_after_delete(*args):
+        assert retire_source(*args)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(m, "_retire_source", interrupt_after_delete)
+    result = m.execute_plan(plan, in_place=True)
+    assert result.interrupted
+    assert not plan.placed[0].source.exists()
+    assert (plan.dest_root / plan.placed[0].dest_rel).read_bytes() \
+        == b"audio-bytes-0"
 
 
 # ── web flow (scan → review candidates → execute copy) ─────────────────────────
@@ -476,7 +505,7 @@ def test_terminal_migration_gates_a_short_move_and_leaves_a_dry_run_untouched(
         return SimpleNamespace(copied=1, skipped=0, lingered=0, failed=0,
                                cancelled=False, interrupted=False,
                                failures=[], outcomes=[],
-                               companion_outcomes=[], recoveries=[])
+                               companion_outcomes=[])
     monkeypatch.setattr(migrate_mode.engine, "execute_plan", _fake_execute)
     monkeypatch.setattr(
         migrate_mode.engine,

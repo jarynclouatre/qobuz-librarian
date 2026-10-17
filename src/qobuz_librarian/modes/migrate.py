@@ -81,7 +81,10 @@ def _print_preview(plan, verbose: bool, in_place: bool,
     if resume_entries:
         log.info(fmt(C.WHITE,
             f"    {plural(len(resume_entries), 'existing file')} verified; "
-            "cover art and sidecars can be resumed"))
+            + (f"{'its original' if len(resume_entries) == 1 else 'their originals'} "
+               "will be deleted and cover art and sidecars carried"
+               if in_place else
+               "cover art and sidecars can be resumed")))
     if s["unplaceable"]:
         log.info(fmt(C.YELLOW,
             f"    {s['unplaceable']} couldn't be identified; left where they are"))
@@ -110,6 +113,22 @@ def _print_preview(plan, verbose: bool, in_place: bool,
         for e in plan.collisions[:50]:
             log.info(fmt(C.GRAY,
                 f"      ! {truncate(str(e.source), 55)}: {e.reason}"))
+
+
+def _print_leftovers(leftovers) -> None:
+    if not leftovers:
+        return
+    log.info(fmt(C.YELLOW,
+        f"    ⚠  An earlier migration was cut off and left "
+        f"{plural(len(leftovers), 'hidden item')}. Ones named "
+        ".qobuz-migrate-copy-, -dir- or -name-probe- are unfinished copies "
+        "you can delete. The others may hold a track that was being moved: "
+        "check it is in the new library before you delete one. This run "
+        "leaves them alone."))
+    for path in leftovers[:20]:
+        log.info(fmt(C.YELLOW, f"      {path}"))
+    if len(leftovers) > 20:
+        log.info(fmt(C.YELLOW, f"      … and {len(leftovers) - 20} more"))
 
 
 def run_migrate_mode(args):
@@ -158,6 +177,7 @@ def run_migrate_mode(args):
 
     _print_preview(plan, bool(getattr(args, "verbose", False)), in_place,
                    resume_entries)
+    _print_leftovers(engine.interrupted_migration_leftovers(src, dest))
 
     if getattr(args, "dry_run", False):
         log.info(fmt(C.CYAN,
@@ -215,37 +235,21 @@ def run_migrate_mode(args):
             f"was copied ({e})."))
         return EXIT_GENERAL
 
-    execution_abort = None
-    try:
-        result = engine.execute_plan(
-            plan, in_place=in_place, progress=progress,
-            resume_entries=resume_entries)
-    except engine.MigrationExecutionAbort as exc:
-        result = exc.result
-        execution_abort = exc
+    result = engine.execute_plan(
+        plan, in_place=in_place, progress=progress,
+        resume_entries=resume_entries)
 
     try:
         results_manifest = engine.write_results_manifest(result, plan=plan)
         log.info(fmt(C.GRAY, f"  · Results manifest: {results_manifest}"))
     except BaseException as e:
-        try:
-            log.warning(fmt(C.RED,
-                "  ✗  The migration ran, but its durable results record could "
-                f"not be written ({e}). Do not start another migration until "
-                "the destination and its audit files have been checked."))
-            for recovery in getattr(result, "recoveries", ()):
-                log.info(fmt(C.RED,
-                    "     Recovery retained at: "
-                    f"{recovery.get('location', 'unknown location')}"))
-        finally:
-            if execution_abort is not None:
-                execution_abort.reraise(publication_error=e)
+        log.warning(fmt(C.RED,
+            "  ✗  The migration ran, but its durable results record could "
+            f"not be written ({e}). Do not start another migration until "
+            "the destination and its audit files have been checked."))
         if not isinstance(e, Exception):
             raise
         return EXIT_GENERAL
-
-    if execution_abort is not None:
-        execution_abort.reraise()
 
     pruned = getattr(result, "pruned", 0)
     companion_outcomes = getattr(result, "companion_outcomes", ())
@@ -255,8 +259,7 @@ def run_migrate_mode(args):
     companion_failed = sum(
         status == engine.FAILED
         for _source, _destination, status, _reason in companion_outcomes)
-    recoveries = tuple(getattr(result, "recoveries", ()))
-    has_problem = bool(result.failed or companion_failed or recoveries)
+    has_problem = bool(result.failed or companion_failed)
 
     log.info("")
     if has_problem or result.cancelled:
@@ -328,11 +331,6 @@ def run_migrate_mode(args):
             "  ⚠  Stopped early; the library is partly moved."
             if in_place else
             "  ⚠  Stopped early; the destination holds a partial copy."))
-    for recovery in recoveries:
-        log.info(fmt(C.RED,
-            "  ⚠  Recovery retained at "
-            f"{recovery.get('location', 'an unknown location')}. "
-            f"{recovery.get('restart', '')}"))
     log.info(fmt(C.GRAY,
         f"  New library: {dest}\n"
         f"  Plan:        {manifest}\n"
@@ -343,16 +341,12 @@ def run_migrate_mode(args):
         log.info(fmt(C.GRAY, "  Interrupted."))
     elif n_errors:
         log.warning(fmt(C.RED, f"  ✗  Finished with {plural(n_errors, 'error')}."))
-    elif recoveries:
-        clause = f"{plural(len(recoveries), 'recovery', 'recoveries')} retained (see above)"
-        log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))
-    # A run that lost files, stopped early, or left a recovery behind is not a
-    # success, however much of it landed. A script chaining off this must see
-    # the difference.
+    # A run with failures or one that stopped early is not a success, however
+    # much of it landed. A script chaining off this must see the difference.
     if result.interrupted:
         return EXIT_INTERRUPT
-    if result.failed or companion_failed or result.cancelled or recoveries:
+    if result.failed or companion_failed or result.cancelled:
         return EXIT_GENERAL
     return 0

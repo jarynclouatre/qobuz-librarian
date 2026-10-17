@@ -5418,13 +5418,18 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
             for entry in entries + resumes
             if entry.source_receipt is not None
         }
+        resumed = (f"{plural(len(resumes), 'track')} already copied, "
+                   f"{'original' if len(resumes) == 1 else 'originals'} to "
+                   "delete" if in_place else
+                   f"{plural(len(resumes), 'track')} already verified")
         if entries and resumes:
             detail = (f"{plural(len(entries), 'track')} to "
-                      f"{'move' if in_place else 'copy'} · "
-                      f"{plural(len(resumes), 'track')} already verified")
+                      f"{'move' if in_place else 'copy'} · {resumed}")
         elif entries:
             detail = (f"{plural(len(entries), 'track')} → "
                       f"{artist}/{album}")
+        elif in_place:
+            detail = f"{resumed} · finish cover art and sidecars"
         else:
             detail = (f"{plural(len(resumes), 'track')} already copied · "
                       "finish cover art and sidecars")
@@ -5461,8 +5466,11 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
     if s["place"]:
         parts.append(f"{plural(s['place'], 'file')} ready to {verb}")
     if resume_entries:
+        deleted = ("; its original will be deleted" if len(resume_entries) == 1
+                   else "; their originals will be deleted")
         parts.append(
-            f"{plural(len(resume_entries), 'existing file')} verified to resume")
+            f"{plural(len(resume_entries), 'existing file')} verified to "
+            f"resume{deleted if in_place else ''}")
     if not parts:
         parts.append("No files ready")
     if s["unplaceable"]:
@@ -5483,6 +5491,22 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
                      f"The {'in-place move' if in_place else 'copy'} stays "
                      "blocked until you confirm the low-space risk below")
         parts.append(space)
+    leftovers = engine.interrupted_migration_leftovers(src, dest)
+    if leftovers:
+        parts.append(
+            "an earlier migration was cut off and left "
+            f"{plural(len(leftovers), 'hidden item')}, listed in the activity "
+            "log; this run leaves them alone")
+        job.push_line(
+            "Hidden items named .qobuz-migrate-copy-, -dir- or -name-probe- "
+            "are unfinished copies you can delete. The others may hold a "
+            "track that was being moved: check it is in the new library "
+            "before you delete one.")
+        for path in leftovers[:50]:
+            shown, _ = storage._resolve_host_path(str(path))
+            job.push_line(f"left by an interrupted migration: {shown}")
+        if len(leftovers) > 50:
+            job.push_line(f"… and {len(leftovers) - 50} more")
     # Show the manifest where the user can actually find it, the container
     # path means nothing from a phone. Settings does the same for every path
     # it displays.
@@ -5602,7 +5626,6 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     result = None
     results_manifest = None
     results_error = None
-    execution_abort = None
     with job_mgr.staging_lock():
         job_mgr.set_staging_holder("Library migration")
         try:
@@ -5626,67 +5649,20 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
                 _mark_job_failed(job)
                 log.info(job.summary)
                 return
-            try:
-                result = migrate_engine.execute_plan(
-                    plan, in_place=in_place,
-                    cancel_check=lambda: job.cancel_requested,
-                    progress=job.push_progress,
-                    resume_entries=resume_entries)
-            except migrate_engine.MigrationExecutionAbort as exc:
-                result = exc.result
-                execution_abort = exc
-            recoveries = tuple(getattr(result, "recoveries", ()))
-            if recoveries:
-                with job._lock:
-                    for recovery in recoveries:
-                        job.recoveries.append({
-                            "version": 1,
-                            "kind": "migration",
-                            "status": "retained",
-                            "location": recovery["location"],
-                            "album_dir": str((dest / recovery["destination"]).parent),
-                            "stage": recovery.get("state", ""),
-                            "reason": recovery.get("reason", ""),
-                            "complete": False,
-                            "requested": 1,
-                            "backed_up": 1,
-                            "receipt": dict(recovery),
-                        })
-                    job.attention = "recovery"
-                job_persistence.persist_recoveries(job)
-                for recovery in recoveries:
-                    location = recovery.get("location", "unknown location")
-                    restart = recovery.get("restart", "Inspect it before another migration.")
-                    job.push_line(f"kept for recovery: {location} - {restart}")
+            result = migrate_engine.execute_plan(
+                plan, in_place=in_place,
+                cancel_check=lambda: job.cancel_requested,
+                progress=job.push_progress,
+                resume_entries=resume_entries)
             pruned = getattr(result, "pruned", 0)
             try:
                 results_manifest = migrate_engine.write_results_manifest(
                     result, plan=plan)
             except BaseException as exc:
                 results_error = exc
-                if execution_abort is not None:
-                    try:
-                        job.push_line(
-                            "partial migration report could not be saved: "
-                            f"{exc}"
-                        )
-                    finally:
-                        execution_abort.reraise(publication_error=exc)
                 if not isinstance(exc, Exception):
-                    try:
-                        job.push_line(
-                            "migration report could not be saved: "
-                            f"{exc}"
-                        )
-                    finally:
-                        raise exc.with_traceback(exc.__traceback__)
-            if execution_abort is not None:
-                try:
-                    job.push_line(
-                        f"partial migration report saved at {results_manifest}"
-                    )
-                finally:
-                    execution_abort.reraise()
+                    job.push_line(f"migration report could not be saved: {exc}")
+                    raise
         finally:
             job_mgr.set_staging_holder(None)
     interrupted = [
@@ -5710,9 +5686,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         if status in {migrate_engine.FAILED, migrate_engine.INTERRUPTED}:
             job.push_line(f"sidecar failed: {source} - {reason}")
     verb = "moved" if in_place else "copied"
-    has_problem = bool(
-        failed or companion_failed or recoveries or results_error
-    )
+    has_problem = bool(failed or companion_failed or results_error)
     if has_problem:
         lead = (
             "Migration stopped with problems"
@@ -5764,10 +5738,6 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
             "sidecars, which were copied")
     if result.cancelled:
         parts.append("the destination may contain a partial migration")
-    if recoveries:
-        parts.append(
-            f"{plural(len(recoveries), 'file')} kept for recovery; see the details"
-        )
     if results_error is not None:
         parts.append("the migration report could not be saved")
         job.error = (
@@ -5776,16 +5746,8 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
             "again.")
     else:
         parts.append(f"report saved at {results_manifest}")
-    if companion_failed or recoveries:
-        recovery_attention = (
-            f"{plural(len(recoveries), 'file')} kept for recovery"
-            if recoveries else ""
-        )
-        attention = (
-            f"{plural(companion_failed, 'sidecar failure') if companion_failed else ''}"
-            f"{' and ' if companion_failed and recoveries else ''}"
-            f"{recovery_attention}"
-        )
+    if companion_failed:
+        attention = plural(companion_failed, "sidecar failure")
         if job.error:
             job.error = f"{job.error} Also: {attention}; see the migration details."
         else:

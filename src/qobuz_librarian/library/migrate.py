@@ -37,7 +37,6 @@ import secrets
 import shutil
 import stat
 import subprocess
-import sys
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
@@ -45,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
-from qobuz_librarian import config, file_exclusion
+from qobuz_librarian import config
 from qobuz_librarian.library.tags import (
     VA_NORMALIZED,
     beets_sanitize,
@@ -54,7 +53,7 @@ from qobuz_librarian.library.tags import (
     strip_year_decoration,
 )
 from qobuz_librarian.safefile import digest_fd as _digest_fd
-from qobuz_librarian.safefile import fsync_dirs
+from qobuz_librarian.safefile import fsync_dirs, stat_identity
 from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
 from qobuz_librarian.safefile import named_entry_missing as _named_entry_missing
 from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace_at
@@ -177,104 +176,11 @@ class ExecResult:
     # Companion work has its own count and must not distort the track summary,
     # but every attempt still belongs in the durable results evidence.
     companion_outcomes: list = field(default_factory=list)
-    # Exact private locations retained after an uncertain namespace outcome.
-    # Each record is deliberately serializable for CLI/Web persistence.
-    recoveries: list = field(default_factory=list)
-    # Teardown happens after file outcomes may already be committed. Keep any
-    # uncertainty in the same durable result instead of letting a later close
-    # failure erase the evidence for those files.
-    cleanup_failures: list = field(default_factory=list)
 
     @property
     def failures(self) -> list:
         return [(src, reason) for src, _, status, reason in self.outcomes
                 if status == FAILED]
-
-
-class MigrationExecutionAbort(BaseException):
-    """Carry a reconciled partial result to its durable publication boundary."""
-
-    def __init__(self, result: ExecResult, cause: BaseException):
-        super().__init__(str(cause) or type(cause).__name__)
-        self.result = result
-        self.cause = cause
-
-    def note_cleanup_failure(self, boundary: str, failure: BaseException) -> None:
-        record = _record_cleanup_failure(self.result, boundary, failure)
-        BaseException.add_note(
-            self.cause,
-            "Migration cleanup was uncertain at "
-            f"{record['boundary']}: {record['error']}. "
-            "Inspect the partial results report before another migration."
-        )
-
-    def reraise(self, publication_error: BaseException | None = None):
-        """Restore the original failure after the partial-result write."""
-        traceback = self.cause.__traceback__
-        if publication_error is not None:
-            BaseException.add_note(
-                self.cause,
-                "The partial migration result also could not be published: "
-                f"{publication_error}"
-            )
-            raise self.cause.with_traceback(traceback) from publication_error
-        raise self.cause.with_traceback(traceback)
-
-
-def _cleanup_failure_record(boundary: str, failure: BaseException) -> dict:
-    message = str(failure)
-    error = type(failure).__name__
-    if message:
-        error = f"{error}: {message}"
-    return {
-        "boundary": str(boundary),
-        "error": error,
-    }
-
-
-def _record_cleanup_failure(result: ExecResult, boundary: str,
-                            failure: BaseException) -> dict:
-    record = _cleanup_failure_record(boundary, failure)
-    if record not in result.cleanup_failures:
-        result.cleanup_failures.append(record)
-    result.cancelled = True
-    return record
-
-
-def _raise_cleanup_abort(result: ExecResult, failures, *, primary=None) -> None:
-    """Publish every cleanup failure without replacing the primary failure."""
-    if not failures:
-        return
-    abort = MigrationExecutionAbort(
-        result,
-        primary if primary is not None else failures[0][1],
-    )
-    for boundary, failure in failures:
-        abort.note_cleanup_failure(boundary, failure)
-    raise abort from abort.cause
-
-
-def _capture_cleanup(failures, boundary: str, cleanup) -> None:
-    try:
-        cleanup()
-    except BaseException as exc:
-        failures.append((boundary, exc))
-
-
-def _migration_abort_in_chain(failure: BaseException | None):
-    pending = [failure] if failure is not None else []
-    seen = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, MigrationExecutionAbort):
-            return current
-        for linked in (current.__cause__, current.__context__):
-            if isinstance(linked, BaseException):
-                pending.append(linked)
-    return None
 
 
 def _first(tags: Mapping, *keys) -> str:
@@ -682,124 +588,6 @@ def _open_regular_file(name, *, dir_fd) -> int:
     except BaseException:
         os.close(descriptor)
         raise
-
-
-def _open_entry_handle(name, *, dir_fd) -> int:
-    descriptor = os.open(
-        os.fspath(name),
-        os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
-        dir_fd=dir_fd,
-    )
-    if not _named_entry_matches(dir_fd, name, descriptor):
-        os.close(descriptor)
-        raise OSError("migration entry changed while it was opened")
-    return descriptor
-
-
-def _descriptor_path(descriptor) -> Path:
-    """Current concrete Linux path for a held, still-linked descriptor."""
-    try:
-        value = os.readlink(f"/proc/self/fd/{int(descriptor)}")
-    except (OSError, TypeError, ValueError) as exc:
-        raise OSError("held recovery path could not be resolved") from exc
-    if value.endswith(" (deleted)") or not Path(value).is_absolute():
-        raise OSError("held recovery directory has no stable public path")
-    return Path(value)
-
-
-class _MigrationEntryPreserved(OSError):
-    """Report an exact private entry that could not be restored safely."""
-
-    def __init__(self, location, message):
-        self.location = os.fspath(location)
-        super().__init__(errno.EBUSY, message)
-
-
-def _preserved_entry_error(parent_fd, name, message):
-    return _MigrationEntryPreserved(
-        _descriptor_path(parent_fd) / name,
-        message,
-    )
-
-
-def _rename_exact_noreplace_at(source_fd, source_name, destination_fd,
-                               destination_name, expected_fd):
-    """Move one held inode, restoring a late source replacement."""
-    if (
-        not _named_entry_matches(source_fd, source_name, expected_fd)
-        or not _named_entry_missing(destination_fd, destination_name)
-    ):
-        raise OSError("exact no-replace rename precondition changed")
-    deferred = None
-    try:
-        _rename_noreplace_at(
-            source_fd, source_name, destination_fd, destination_name)
-    except BaseException as exc:
-        deferred = exc
-    if (
-        _named_entry_missing(source_fd, source_name)
-        and _named_entry_matches(
-            destination_fd, destination_name, expected_fd)
-    ):
-        sync_error = None
-        try:
-            fsync_dirs(source_fd, destination_fd)
-        except BaseException as exc:
-            sync_error = exc
-        return deferred or sync_error
-
-    # renameat2 operates on a name, not the descriptor checked above.  If the
-    # public name was swapped at that boundary, put the exact unexpected entry
-    # back without overwriting anything instead of absorbing it into cleanup.
-    if _named_entry_missing(source_fd, source_name):
-        unexpected_fd = None
-        try:
-            unexpected_fd = _open_entry_handle(
-                destination_name, dir_fd=destination_fd)
-            rollback_error = None
-            try:
-                _rename_noreplace_at(
-                    destination_fd,
-                    destination_name,
-                    source_fd,
-                    source_name,
-                )
-            except BaseException as exc:
-                rollback_error = exc
-            if (
-                _named_entry_missing(destination_fd, destination_name)
-                and _named_entry_matches(
-                    source_fd, source_name, unexpected_fd)
-            ):
-                try:
-                    fsync_dirs(source_fd, destination_fd)
-                except BaseException as exc:
-                    rollback_error = rollback_error or exc
-                raise OSError(
-                    "publication was replaced during cleanup; the "
-                    "replacement was restored"
-                ) from (deferred or rollback_error)
-            if _named_entry_matches(
-                    destination_fd, destination_name, unexpected_fd):
-                raise _preserved_entry_error(
-                    destination_fd,
-                    destination_name,
-                    "a second arrival blocked restoration of the first "
-                    "replacement",
-                ) from (deferred or rollback_error)
-        except FileNotFoundError:
-            pass
-        finally:
-            if unexpected_fd is not None:
-                os.close(unexpected_fd)
-    if (
-        deferred is not None
-        and _named_entry_matches(source_fd, source_name, expected_fd)
-        and _named_entry_missing(destination_fd, destination_name)
-    ):
-        raise deferred
-    raise OSError("exact no-replace rename outcome could not be reconciled") \
-        from deferred
 
 
 def _file_receipt(descriptor, digest=None) -> dict:
@@ -1300,14 +1088,13 @@ def _same_file_snapshot(left, right) -> bool:
 
 class _OpenedFile:
     def __init__(self, root, parents, parent_names, parent_fd, name,
-                 descriptor, exclusion, verified_digest):
+                 descriptor, verified_digest):
         self.root = root
         self.parents = parents
         self.parent_names = parent_names
         self.parent_fd = parent_fd
         self.name = name
         self.descriptor = descriptor
-        self.exclusion = exclusion
         self.verified_digest = verified_digest
 
     def parent_chain_exact(self) -> bool:
@@ -1340,8 +1127,6 @@ class _OpenedFile:
     def still_exact(self, receipt) -> bool:
         return (
             self.namespace_exact()
-            and self.exclusion is not None
-            and self.exclusion.intact()
             and _file_receipt_matches(
                 self.descriptor,
                 receipt.get("file"),
@@ -1350,9 +1135,6 @@ class _OpenedFile:
         )
 
     def close(self) -> None:
-        if self.exclusion is not None:
-            self.exclusion.close()
-            self.exclusion = None
         try:
             os.close(self.descriptor)
         except OSError:
@@ -1384,7 +1166,6 @@ def _open_file_receipt(binding: _RootBinding, receipt) -> _OpenedFile:
 
     descriptors = []
     file_fd = None
-    exclusion = None
     parent_fd = binding.root_fd
     prefix = []
     try:
@@ -1407,27 +1188,20 @@ def _open_file_receipt(binding: _RootBinding, receipt) -> _OpenedFile:
         file_fd = _open_regular_file(parts[-1], dir_fd=parent_fd)
         if not binding.entry_is_on_root_mount(file_fd):
             raise OSError("migration path crosses a nested filesystem mount")
-        exclusion = file_exclusion.acquire_inode_write_exclusion(file_fd)
-        if exclusion is None:
-            raise OSError("migration source is not a regular file")
         verified_digest = _digest_fd(file_fd)
         if (
             not binding.matches_public()
             or not _file_receipt_matches(
                 file_fd, file_receipt, digest=verified_digest)
-            or not exclusion.intact()
         ):
             raise OSError("migration source changed after preview")
         opened = _OpenedFile(
             binding, descriptors, list(parts[:-1]), parent_fd, parts[-1],
-            file_fd, exclusion, verified_digest)
+            file_fd, verified_digest)
         descriptors = []
         file_fd = None
-        exclusion = None
         return opened
     finally:
-        if exclusion is not None:
-            exclusion.close()
         if file_fd is not None:
             try:
                 os.close(file_fd)
@@ -2077,6 +1851,31 @@ def existing_ancestor(path: Path) -> Optional[Path]:
         p = p.parent
 
 
+# Hidden names earlier versions used while copying and moving. A migration
+# cut off part way could leave them behind.
+_LEFTOVER_NAME = re.compile(
+    r"\.qobuz-migrate-(copy|dir|name-probe|source|destination|publication"
+    r"|discard|empty)-[0-9a-f]{32}"
+)
+
+
+def interrupted_migration_leftovers(*roots) -> list:
+    """Hidden items an interrupted migration left under ``roots``.
+
+    They are only named for the user, never moved or deleted: some may hold
+    the bytes of a track that was being moved."""
+    found = []
+    for root in roots:
+        for folder, folders, files in os.walk(root):
+            matched = sorted(
+                name for name in folders + files
+                if _LEFTOVER_NAME.fullmatch(name))
+            folders[:] = sorted(
+                name for name in folders if name not in matched)
+            found.extend(Path(folder, name) for name in matched)
+    return found
+
+
 def space_estimate(plan: MigrationPlan, *, in_place: bool = False,
                    resume_entries=None) -> tuple:
     """``(bytes_to_write, free_bytes_at_dest)`` for carrying out ``plan``.
@@ -2163,14 +1962,10 @@ def _scan_file_from_descriptor(binding, parent_fd, parent_receipts,
     """Seal one named regular file and optionally read tags from its exact fd."""
     name = relative[-1]
     descriptor = None
-    exclusion = None
     try:
         descriptor = _open_regular_file(name, dir_fd=parent_fd)
         if not binding.entry_is_on_root_mount(descriptor):
             raise OSError("migration source crosses a nested filesystem mount")
-        exclusion = file_exclusion.acquire_inode_write_exclusion(descriptor)
-        if exclusion is None or not exclusion.intact():
-            raise OSError("migration source changed while it was opened")
         before = {
             "relative": list(relative),
             "parents": list(parent_receipts),
@@ -2188,14 +1983,11 @@ def _scan_file_from_descriptor(binding, parent_fd, parent_receipts,
         if (
             not _same_file_snapshot(before, after)
             or not _named_entry_matches(parent_fd, name, descriptor)
-            or not exclusion.intact()
             or not binding.matches_public()
         ):
             raise OSError("migration source changed while it was reviewed")
         return display_path, metadata, after
     finally:
-        if exclusion is not None:
-            exclusion.close()
         if descriptor is not None:
             try:
                 os.close(descriptor)
@@ -2327,6 +2119,7 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
                            destination_root_binding=None,
                            copied_companions,
                            lyric_conflicts,
+                           retired=None,
                            ) -> None:
     """Copy each migrated album folder's non-audio companions into the
     destination folder(s) that received its audio. Always a copy (never a
@@ -2336,6 +2129,10 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
     cover image is harmless.
 
     ``copied_companions`` records copies completed as in-place tracks landed.
+
+    With ``retired`` (a list, in-place runs), the original of each verified
+    existing copy is deleted, finishing a move an earlier run was cut off
+    from, and its receipt is added to the list.
     """
     folder_map: dict = {}
     landed = []
@@ -2388,11 +2185,9 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
             )
         if _cancelled():
             return
-        remembered = False
+        remembered = finished = False
+        kept = ""
         opened_source = opened_destination = None
-        fatal_exception = None
-        cleanup_primary = None
-        cleanup_failures = []
         outcome_recorded = False
         try:
             if (
@@ -2419,10 +2214,41 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
             ):
                 raise OSError("existing destination changed after preview")
             remembered = _remember(entry)
-        except KeyboardInterrupt as exc:
+            if remembered and retired is not None:
+                source_stat = os.fstat(opened_source.descriptor)
+                destination_stat = os.fstat(opened_destination.descriptor)
+                published = (
+                    opened_destination.descriptor,
+                    opened_destination.parents,
+                    opened_destination.parent_fd,
+                    opened_destination.name,
+                    Path(entry.dest_rel),
+                    destination_root_binding,
+                )
+                # Two network or FUSE mounts of one share show the same file
+                # under different device numbers. Deleting the "original"
+                # there would delete the only copy.
+                if (
+                    source_stat.st_ino == destination_stat.st_ino
+                    and source_stat.st_size == destination_stat.st_size
+                ):
+                    kept = ("the existing copy may be the original itself, "
+                            "seen through another folder, so the original "
+                            "was kept")
+                else:
+                    finished = _retire_source(
+                        opened_source, entry.source_receipt, published,
+                        stat_identity(destination_stat))
+                    if not finished:
+                        kept = ("the original or the existing copy changed, "
+                                "so the original was kept")
+                if finished:
+                    retired.append(entry.source_receipt)
+                else:
+                    result.lingered += 1
+        except KeyboardInterrupt:
             result.cancelled = True
             result.interrupted = True
-            cleanup_primary = exc
             result.outcomes.append((
                 entry.source,
                 entry.dest_rel,
@@ -2432,9 +2258,9 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
             outcome_recorded = True
         except OSError:
             remembered = False
-        except BaseException as exc:
+        except Exception as exc:
+            log.exception("Migration stopped at %s", entry.source)
             result.cancelled = True
-            fatal_exception = exc
             result.failed += 1
             result.outcomes.append((
                 entry.source,
@@ -2445,40 +2271,26 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
             outcome_recorded = True
         finally:
             if opened_destination is not None:
-                _capture_cleanup(
-                    cleanup_failures,
-                    "existing-copy destination teardown",
-                    opened_destination.close,
-                )
+                opened_destination.close()
             if opened_source is not None:
-                _capture_cleanup(
-                    cleanup_failures,
-                    "existing-copy source teardown",
-                    opened_source.close,
-                )
+                opened_source.close()
         if not outcome_recorded:
-            if remembered:
+            if finished:
+                result.copied += 1
+                result.outcomes.append((
+                    entry.source, entry.dest_rel, COPIED,
+                    "finished an earlier move"))
+            elif remembered:
                 result.skipped += 1
                 result.outcomes.append((
                     entry.source, entry.dest_rel, SKIPPED,
-                    "verified existing copy"))
+                    f"verified existing copy; {kept}" if kept
+                    else "verified existing copy"))
             else:
                 result.failed += 1
                 result.outcomes.append((
                     entry.source, entry.dest_rel, FAILED,
                     "existing destination could not be reverified"))
-        _raise_cleanup_abort(
-            result,
-            cleanup_failures,
-            primary=(
-                fatal_exception
-                if fatal_exception is not None
-                else cleanup_primary
-            ),
-        )
-        if fatal_exception is not None:
-            raise MigrationExecutionAbort(
-                result, fatal_exception) from fatal_exception
         if _cancelled():
             return
 
@@ -2522,9 +2334,6 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
             opened = None
             published = None
             discard_publication = False
-            fatal_exception = None
-            cleanup_primary = None
-            cleanup_failures = []
             name = Path(receipt["relative"][-1]).name
             source_path = source_root_binding.path.joinpath(
                 *receipt["relative"])
@@ -2547,25 +2356,6 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
                 result.companions += 1
                 result.companion_outcomes.append((
                     source_path, destination_path, COPIED, ""))
-            except _PublishedCopyFailure as exc:
-                published = exc.published
-                discard_publication = True
-                interrupted = isinstance(exc.cause, KeyboardInterrupt)
-                result.interrupted |= interrupted
-                result.companion_outcomes.append((
-                    source_path,
-                    destination_path,
-                    INTERRUPTED if interrupted else FAILED,
-                    "migration was interrupted" if interrupted else str(exc.cause),
-                ))
-                if exc.interrupted:
-                    result.cancelled = True
-                    cleanup_primary = exc.cause
-                elif exc.errno == errno.ENOSPC:
-                    result.cancelled = True
-                elif not isinstance(exc.cause, Exception):
-                    result.cancelled = True
-                    fatal_exception = exc.cause
             except FileExistsError:
                 result.companion_outcomes.append((
                     source_path,
@@ -2573,11 +2363,10 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
                     SKIPPED,
                     "destination already exists",
                 ))
-            except KeyboardInterrupt as exc:
+            except KeyboardInterrupt:
                 discard_publication = published is not None
                 result.cancelled = True
                 result.interrupted = True
-                cleanup_primary = exc
                 result.companion_outcomes.append((
                     source_path,
                     destination_path,
@@ -2594,7 +2383,8 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
                     FAILED,
                     str(exc),
                 ))
-            except BaseException as exc:
+            except Exception as exc:
+                log.exception("Migration stopped at %s", source_path)
                 discard_publication = published is not None
                 result.cancelled = True
                 result.companion_outcomes.append((
@@ -2603,57 +2393,17 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
                     FAILED,
                     str(exc) or type(exc).__name__,
                 ))
-                fatal_exception = exc
             finally:
-                if discard_publication and published is not None:
-                    discarded = False
-                    try:
-                        discarded = _discard_owned_publication(
-                            published,
-                            receipt["file"],
-                            recoveries=result.recoveries,
-                        )
-                    except BaseException as exc:
-                        cleanup_failures.append((
-                            "companion publication rollback", exc))
-                    if not discarded:
-                        try:
-                            recovery = _owned_publication_recovery(
-                                published,
-                                source_path,
-                                receipt,
-                                "companion publication was interrupted and "
-                                "the exact same-run destination could not be "
-                                "removed safely",
-                            )
-                            if recovery not in result.recoveries:
-                                result.recoveries.append(recovery)
-                        except BaseException as exc:
-                            cleanup_failures.append((
-                                "companion recovery recording", exc))
-                _capture_cleanup(
-                    cleanup_failures,
-                    "companion destination teardown",
-                    lambda: _close_published_file(published),
-                )
+                if (
+                    discard_publication
+                    and published is not None
+                    and not _take_back(published, opened, receipt)
+                ):
+                    _note_kept_copy(
+                        result.companion_outcomes, destination_root_binding)
+                _close_published_file(published)
                 if opened is not None:
-                    _capture_cleanup(
-                        cleanup_failures,
-                        "companion source teardown",
-                        opened.close,
-                    )
-            _raise_cleanup_abort(
-                result,
-                cleanup_failures,
-                primary=(
-                    fatal_exception
-                    if fatal_exception is not None
-                    else cleanup_primary
-                ),
-            )
-            if fatal_exception is not None:
-                raise MigrationExecutionAbort(
-                    result, fatal_exception) from fatal_exception
+                    opened.close()
 
     return True
 
@@ -2953,6 +2703,34 @@ def _published_file_still_exact(published) -> bool:
     )
 
 
+def _retire_source(source: _OpenedFile, receipt, published,
+                   published_identity) -> bool:
+    """Delete the reviewed original once its checked copy is on disk.
+
+    The copy and its folder are already flushed. Both are checked once more
+    first: the copy is still the file this run published, unchanged, and the
+    original still matches its preview receipt. The original is removed
+    through its held folder, so a renamed or swapped folder above it is
+    never followed."""
+    descriptor = published[0]
+    try:
+        if (
+            not _published_file_still_exact(published)
+            or stat_identity(os.fstat(descriptor)) != published_identity
+            or not _file_fidelity_matches(descriptor, receipt["file"])
+            or not source.still_exact(receipt)
+        ):
+            return False
+        os.unlink(source.name, dir_fd=source.parent_fd)
+    except OSError:
+        return False
+    try:
+        fsync_dirs(source.parent_fd)
+    except OSError:
+        pass
+    return True
+
+
 def _remove_exact_named_file(parent_fd, name, descriptor) -> bool:
     if not _named_entry_matches(parent_fd, name, descriptor):
         return False
@@ -2961,104 +2739,6 @@ def _remove_exact_named_file(parent_fd, name, descriptor) -> bool:
     except OSError:
         return False
     return _named_entry_missing(parent_fd, name)
-
-
-def _remove_exact_named_file_privately(parent_fd, name, descriptor) -> bool:
-    """Retire an exact file behind a fresh private namespace boundary.
-
-    The public quarantine name is never passed to ``unlink``.  A late entry at
-    that exposed name is instead restored by the exact no-overwrite handoff, or
-    retained at a concrete recovery path when restoration is obstructed.
-    """
-    private_name = None
-    private_fd = None
-    moved = False
-
-    def restore_exact() -> bool:
-        nonlocal moved
-        if private_fd is None:
-            return False
-        restored = _restore_private_exact(
-            private_fd, "candidate", parent_fd, name, descriptor)
-        if restored:
-            moved = False
-        return restored
-
-    try:
-        private_name, private_fd = _reserve_private_directory(
-            parent_fd, prefix="qobuz-migrate-discard")
-        deferred = _rename_exact_noreplace_at(
-            parent_fd, name, private_fd, "candidate", descriptor)
-        moved = _named_entry_matches(private_fd, "candidate", descriptor)
-        if not moved:
-            return False
-        if deferred is not None:
-            if not restore_exact():
-                raise _preserved_entry_error(
-                    private_fd,
-                    "candidate",
-                    "exact publication cleanup could not be restored",
-                ) from deferred
-            if isinstance(deferred, OSError):
-                return False
-            raise deferred
-        try:
-            fsync_dirs(parent_fd, private_fd)
-        except BaseException:
-            restore_exact()
-            return False
-        if not _remove_exact_named_file(
-                private_fd, "candidate", descriptor):
-            if not restore_exact():
-                raise _preserved_entry_error(
-                    private_fd,
-                    "candidate",
-                    "exact publication cleanup could not be restored",
-                )
-            return False
-        moved = False
-        try:
-            fsync_dirs(parent_fd, private_fd)
-        except BaseException:
-            return False
-        return True
-    finally:
-        preserved = None
-        if moved:
-            try:
-                if not restore_exact():
-                    if _named_entry_matches(
-                            private_fd, "candidate", descriptor):
-                        preserved = _preserved_entry_error(
-                            private_fd,
-                            "candidate",
-                            "exact publication cleanup could not be restored",
-                        )
-                    else:
-                        preserved = _MigrationEntryPreserved(
-                            _descriptor_path(descriptor),
-                            "exact publication cleanup changed unexpectedly",
-                        )
-            except _MigrationEntryPreserved as exc:
-                preserved = exc
-        if private_fd is not None:
-            try:
-                if (
-                    not os.listdir(private_fd)
-                    and private_name is not None
-                    and _named_entry_matches(
-                        parent_fd, private_name, private_fd)
-                ):
-                    os.rmdir(private_name, dir_fd=parent_fd)
-                    if _named_entry_missing(parent_fd, private_name):
-                        fsync_dirs(parent_fd)
-            except BaseException:
-                # Once the exact candidate is gone, an empty private directory
-                # is harmless residue.  If it is still present, leave it alone.
-                pass
-            os.close(private_fd)
-        if preserved is not None:
-            raise preserved
 
 
 def _file_fidelity_matches(descriptor, receipt, *, digest=None) -> bool:
@@ -3075,21 +2755,6 @@ def _file_fidelity_matches(descriptor, receipt, *, digest=None) -> bool:
         return digest is None or digest == receipt["sha256"]
     except (KeyError, OSError, TypeError, ValueError):
         return False
-
-
-class _PublishedCopyFailure(OSError):
-    """Carry the exact same-run publication across an exceptional boundary."""
-
-    def __init__(self, cause, published):
-        message = str(cause) or type(cause).__name__
-        error_number = getattr(cause, "errno", None) or errno.EIO
-        super().__init__(error_number, message)
-        self.cause = cause
-        self.published = published
-        self.interrupted = (
-            isinstance(cause, KeyboardInterrupt)
-            or getattr(cause, "errno", None) == errno.EINTR
-        )
 
 
 def _apply_file_metadata(destination_fd, source_receipt) -> None:
@@ -3172,81 +2837,28 @@ def _stream_copy_noreplace(source: _OpenedFile, source_receipt,
         ):
             raise OSError("migration publication could not be proven")
         fsync_dirs(parent_fd)
-
-        # Do not carry the writable staging descriptor into source
-        # retirement.  Reopen the published inode read-only and watch it for
-        # writes while the source's last link is retired.
-        read_fd = _open_regular_file(destination_name, dir_fd=parent_fd)
-        if (
-            not _same_entry(os.fstat(read_fd), os.fstat(temporary_fd))
-            or not _named_entry_matches(
-                parent_fd, destination_name, read_fd)
-            or not _destination_chain_matches(
-                destination, dest_rel, parents)
-        ):
-            os.close(read_fd)
-            raise OSError("migration publication changed after copy")
-        writable_fd = temporary_fd
-        temporary_fd = read_fd
-        os.close(writable_fd)
         return (
             temporary_fd, parents, parent_fd, destination_name,
             Path(dest_rel), destination,
         )
-    except BaseException as exc:
-        if (
-            published
-            and temporary_fd is not None
-            and _named_entry_matches(
-                parent_fd, destination_name, temporary_fd)
-        ):
-            # An exception may land before the normal writable-to-read-only
-            # descriptor handoff. Best-effort normalise here; if this proof
-            # fails the writable descriptor is kept, and rollback still
-            # removes the app's own copy only while its identity matches.
-            replacement_fd = None
-            try:
-                replacement_fd = _open_regular_file(
-                    destination_name, dir_fd=parent_fd)
-                if (
-                    not _same_entry(
-                        os.fstat(replacement_fd), os.fstat(temporary_fd))
-                    or not _named_entry_matches(
-                        parent_fd, destination_name, replacement_fd)
-                ):
-                    os.close(replacement_fd)
-                    replacement_fd = None
-                else:
-                    previous_fd = temporary_fd
-                    temporary_fd = replacement_fd
-                    replacement_fd = None
-                    os.close(previous_fd)
-            except BaseException:
-                if replacement_fd is not None:
-                    try:
-                        os.close(replacement_fd)
-                    except OSError:
-                        pass
-            owned_publication = (
-                temporary_fd,
-                parents,
-                parent_fd,
-                destination_name,
-                Path(dest_rel),
-                destination,
+    except BaseException:
+        if published and temporary_fd is not None:
+            publication = (
+                temporary_fd, parents, parent_fd, destination_name,
+                Path(dest_rel), destination,
             )
-            temporary_fd = None
-            parents = []
-            raise _PublishedCopyFailure(
-                exc, owned_publication) from exc
+            if not _take_back(publication, source, source_receipt):
+                log.warning(
+                    "Migration kept the new copy at %s",
+                    destination.path / Path(dest_rel),
+                )
+        elif (
+            temporary_fd is not None
+            and temporary_name is not None
+            and _named_entry_matches(parent_fd, temporary_name, temporary_fd)
+        ):
+            _remove_exact_named_file(parent_fd, temporary_name, temporary_fd)
         if temporary_fd is not None:
-            if (
-                not published
-                and temporary_name is not None
-                and _named_entry_matches(
-                    parent_fd, temporary_name, temporary_fd)
-            ):
-                _remove_exact_named_file(parent_fd, temporary_name, temporary_fd)
             try:
                 os.close(temporary_fd)
             except OSError:
@@ -3259,173 +2871,40 @@ def _stream_copy_noreplace(source: _OpenedFile, source_receipt,
         raise
 
 
-def _discard_owned_publication(
-        published, expected_receipt, *, recoveries=None) -> bool:
-    """Remove only the exact destination inode this invocation published."""
-    if not _published_file_still_exact(published):
-        return False
+def _take_back(published, source: _OpenedFile, receipt) -> bool:
+    """Remove a copy this run published while its original is still there.
+
+    Nothing is removed when the original's name no longer holds the original
+    file, or when the copy was moved, replaced or changed since it was
+    published."""
     descriptor, _parents, parent_fd, name, _dest_rel, _binding = published
-    exclusion = file_exclusion.acquire_inode_write_exclusion(descriptor)
-    if exclusion is None:
-        return False
-    quarantine_name = None
-    quarantine_fd = None
-    moved = False
-
-    def restore_exact() -> bool:
-        nonlocal moved
-        if quarantine_fd is None:
-            return False
-        restored = _restore_private_exact(
-            quarantine_fd, "held", parent_fd, name, descriptor)
-        if restored:
-            moved = False
-        return restored
-
-    def clear_quarantine() -> bool:
-        nonlocal quarantine_name
-        if quarantine_name is None or quarantine_fd is None:
-            return True
-        try:
-            if os.listdir(quarantine_fd):
-                return False
-            if not _named_entry_matches(
-                    parent_fd, quarantine_name, quarantine_fd):
-                return False
-            os.rmdir(quarantine_name, dir_fd=parent_fd)
-            if not _named_entry_missing(parent_fd, quarantine_name):
-                return False
-            quarantine_name = None
-            fsync_dirs(parent_fd)
-            return True
-        except BaseException:
-            return False
-
-    def record_preserved_replacement(exc) -> None:
-        if recoveries is None:
-            return
-        _descriptor, _parents, _parent_fd, _name, dest_rel, binding = published
-        location = Path(exc.location)
-        try:
-            relative = location.relative_to(binding.path)
-        except ValueError:
-            relative = location
-        record = {
-            "state": "replacement-guarded",
-            "location": os.fspath(location),
-            "relative": os.fspath(relative),
-            "destination": os.fspath(Path(dest_rel)),
-            "reason": (
-                "a second destination arrival prevented safe restoration "
-                "of the first replacement"
-            ),
-            "restart": (
-                "Keep both files. Move the recorded recovery file only after "
-                "reviewing the occupied destination path."
-            ),
-        }
-        if record not in recoveries:
-            recoveries.append(record)
-
     try:
-        verified_digest = _digest_fd(descriptor)
         if (
-            not exclusion.intact()
-            or not _file_fidelity_matches(
-                descriptor,
-                expected_receipt,
-                digest=verified_digest,
-            )
+            not _named_entry_matches(
+                source.parent_fd, source.name, source.descriptor)
             or not _published_file_still_exact(published)
-        ):
-            return False
-        try:
-            quarantine_name, quarantine_fd = _reserve_private_directory(
-                parent_fd, prefix="qobuz-migrate-publication")
-            deferred = _rename_exact_noreplace_at(
-                parent_fd, name, quarantine_fd, "held", descriptor)
-        except _MigrationEntryPreserved as exc:
-            record_preserved_replacement(exc)
-            return False
-        except (OSError, TypeError, ValueError):
-            return False
-        moved = _named_entry_matches(quarantine_fd, "held", descriptor)
-        if not moved:
-            return False
-        if (
-            not _named_entry_missing(parent_fd, name)
-            or not exclusion.intact()
             or not _file_fidelity_matches(
-                descriptor,
-                expected_receipt,
-                digest=verified_digest,
-            )
-            or not _destination_chain_matches(
-                published[5], published[4], published[1])
+                descriptor, receipt["file"], digest=_digest_fd(descriptor))
+            or not _remove_exact_named_file(parent_fd, name, descriptor)
         ):
-            restore_exact()
             return False
-        if deferred is not None and not isinstance(deferred, OSError):
-            restore_exact()
-            raise deferred
-        try:
-            fsync_dirs(parent_fd, quarantine_fd)
-        except BaseException:
-            restore_exact()
-            return False
-        try:
-            removed = _remove_exact_named_file_privately(
-                quarantine_fd, "held", descriptor)
-        except _MigrationEntryPreserved as exc:
-            record_preserved_replacement(exc)
-            return False
-        if not removed:
-            restore_exact()
-            return False
-        moved = False
-        try:
-            fsync_dirs(parent_fd, quarantine_fd)
-        except BaseException:
-            return False
-        if not clear_quarantine():
-            return False
-        return (
-            exclusion.intact()
-            and not _named_entry_matches(parent_fd, name, descriptor)
-        )
-    finally:
-        if moved:
-            restore_exact()
-        clear_quarantine()
-        if quarantine_fd is not None:
-            try:
-                os.close(quarantine_fd)
-            except OSError:
-                pass
-        exclusion.close()
-
-
-def _owned_publication_recovery(published, source, source_receipt,
-                                reason) -> dict:
-    descriptor, _parents, _parent_fd, _name, dest_rel, binding = published
-    try:
-        location = _descriptor_path(descriptor)
     except OSError:
-        location = binding.path / Path(dest_rel)
-    return {
-        "state": "duplicate-publication",
-        "location": os.fspath(location),
-        "relative": os.fspath(Path(dest_rel)),
-        "destination": os.fspath(Path(dest_rel)),
-        "source": os.fspath(Path(source)),
-        "file_receipt": source_receipt.get("file"),
-        "reason": reason,
-        "restart": (
-            "This exact destination was created by the interrupted migration "
-            "while the source was retained. Do not delete either file until "
-            "the recorded source and destination have been reviewed."
-        ),
-    }
+        return False
+    try:
+        fsync_dirs(parent_fd)
+    except OSError:
+        pass
+    return True
+
+
+def _note_kept_copy(outcomes, destination_root) -> None:
+    """Name the kept copy in the reason of the latest outcome."""
+    source, destination, status, reason = outcomes[-1]
+    outcomes[-1] = (
+        source, destination, status,
+        f"{reason}; the new copy was kept at "
+        f"{destination_root.path / destination}",
+    )
 
 
 def _reserve_private_directory(parent_fd, *, prefix):
@@ -3438,746 +2917,9 @@ def _reserve_private_directory(parent_fd, *, prefix):
         descriptor = _open_directory(name, dir_fd=parent_fd)
         if not _named_entry_matches(parent_fd, name, descriptor):
             os.close(descriptor)
-            raise OSError("private source quarantine changed")
+            raise OSError("private migration directory changed")
         return name, descriptor
     raise OSError("could not reserve a private migration directory")
-
-
-def _restore_private_exact(private_fd, private_name, public_fd, public_name,
-                           expected_fd) -> bool:
-    """Restore one held exact entry without allowing an overwrite.
-
-    The no-replace rename is an uncertain commit boundary.  Inspect both names
-    after every exceptional exit so an interrupt that landed the rename still
-    counts as a successful rollback.
-    """
-    if (
-        _named_entry_matches(public_fd, public_name, expected_fd)
-        and _named_entry_missing(private_fd, private_name)
-    ):
-        return True
-    if (
-        not _named_entry_missing(public_fd, public_name)
-        or not _named_entry_matches(private_fd, private_name, expected_fd)
-    ):
-        return False
-    try:
-        _rename_noreplace_at(
-            private_fd, private_name, public_fd, public_name)
-    except BaseException:
-        pass
-    return (
-        _named_entry_matches(public_fd, public_name, expected_fd)
-        and _named_entry_missing(private_fd, private_name)
-    )
-
-
-class _DestinationSafety:
-    """Keep the exact durable destination recoverable during retirement."""
-
-    def __init__(self, published, expected_receipt, verified_digest,
-                 private_name, private_fd, exclusion):
-        self.published = published
-        self.expected_receipt = expected_receipt
-        self.verified_digest = verified_digest
-        self.private_name = private_name
-        self.private_fd = private_fd
-        self.exclusion = exclusion
-        self.released = False
-        self.release_attempted = False
-        self.recovery = None
-        self.interrupted = False
-        self.keyboard_interrupt = None
-
-    def _note_exception(self, exc) -> None:
-        if isinstance(exc, KeyboardInterrupt):
-            self.keyboard_interrupt = exc
-        if (
-            not isinstance(exc, OSError)
-            or getattr(exc, "errno", None) == errno.EINTR
-        ):
-            self.interrupted = True
-
-    @property
-    def descriptor(self):
-        return self.published[0]
-
-    @property
-    def parent_fd(self):
-        return self.published[2]
-
-    @property
-    def destination_name(self):
-        return self.published[3]
-
-    def _chain_exact(self) -> bool:
-        _descriptor, parents, _parent_fd, _name, dest_rel, binding = \
-            self.published
-        return _destination_chain_matches(binding, dest_rel, parents)
-
-    def _private_directory_exact(self) -> bool:
-        return _named_entry_matches(
-            self.parent_fd, self.private_name, self.private_fd)
-
-    def _anchor_exact(self) -> bool:
-        return _named_entry_matches(
-            self.private_fd, "anchor", self.descriptor)
-
-    def _recovery_exact(self) -> bool:
-        return _named_entry_matches(
-            self.private_fd, "recovery", self.descriptor)
-
-    def _fidelity_exact(self) -> bool:
-        return (
-            self.exclusion is not None
-            and self.exclusion.intact()
-            and _file_fidelity_matches(
-                self.descriptor,
-                self.expected_receipt,
-                digest=self.verified_digest,
-            )
-        )
-
-    def _record_recovery(self, state, reason) -> None:
-        _descriptor, _parents, _parent_fd, _name, dest_rel, binding = \
-            self.published
-        if self._recovery_exact():
-            private_link = "recovery"
-        elif self._anchor_exact():
-            private_link = "anchor"
-        else:
-            return
-        relative = Path(dest_rel).parent / self.private_name / private_link
-        try:
-            location = _descriptor_path(self.private_fd) / private_link
-        except OSError:
-            location = binding.path / relative
-        self.recovery = {
-            "state": state,
-            "location": os.fspath(location),
-            "relative": os.fspath(relative),
-            "destination": os.fspath(Path(dest_rel)),
-            "reason": reason,
-            "restart": (
-                "Do not delete the recovery file. Re-run migration after "
-                "restoring the recorded destination path, or move this exact "
-                "file there only when the destination name is absent."
-            ),
-        }
-
-    def intact(self) -> bool:
-        return (
-            not self.released
-            and self.exclusion is not None
-            and self.exclusion.intact()
-            and self._private_directory_exact()
-            and self._anchor_exact()
-            and self._recovery_exact()
-            and _published_file_still_exact(self.published)
-            and self._fidelity_exact()
-        )
-
-    def _remove_empty_private_directory(self) -> None:
-        if not self._private_directory_exact():
-            return
-        try:
-            if os.listdir(self.private_fd):
-                return
-            os.rmdir(self.private_name, dir_fd=self.parent_fd)
-            if _named_entry_missing(self.parent_fd, self.private_name):
-                fsync_dirs(self.parent_fd)
-        except BaseException as exc:
-            self._note_exception(exc)
-            # Once an exact public destination is proved, an empty private
-            # directory is harmless residue.  Never broaden cleanup after an
-            # uncertain interruption.
-            pass
-
-    def release(self) -> bool:
-        """Restore a missing public name or drop the exact private guard."""
-        if self.released:
-            return True
-        self.release_attempted = True
-        if (
-            self.exclusion is None
-            or not self.exclusion.intact()
-            or not self._private_directory_exact()
-        ):
-            if self._recovery_exact() or self._anchor_exact():
-                self._record_recovery(
-                    "guarded",
-                    "destination safety could not be reverified",
-                )
-            return False
-        if not self._fidelity_exact():
-            try:
-                _apply_file_metadata(
-                    self.descriptor,
-                    {"file": self.expected_receipt},
-                )
-                os.fsync(self.descriptor)
-            except BaseException as exc:
-                self._note_exception(exc)
-            if not self._fidelity_exact():
-                if self._recovery_exact() or self._anchor_exact():
-                    self._record_recovery(
-                        "guarded",
-                        "destination metadata could not be restored",
-                    )
-                return False
-
-        public_exact = (
-            self._chain_exact()
-            and _named_entry_matches(
-                self.parent_fd, self.destination_name, self.descriptor)
-        )
-        anchor_exact = self._anchor_exact()
-        recovery_exact = self._recovery_exact()
-        if not public_exact:
-            if (
-                not self._chain_exact()
-                or not _named_entry_missing(
-                    self.parent_fd, self.destination_name)
-                or not anchor_exact
-                or not recovery_exact
-                or not _restore_private_exact(
-                    self.private_fd,
-                    "anchor",
-                    self.parent_fd,
-                    self.destination_name,
-                    self.descriptor,
-                )
-            ):
-                # A replacement or changed parent is never overwritten.  The
-                # exact bytes remain under the private random safety name.
-                if recovery_exact or anchor_exact:
-                    self._record_recovery(
-                        "sole-copy-possible",
-                        "public destination could not be restored safely",
-                    )
-                return False
-            try:
-                fsync_dirs(self.parent_fd, self.private_fd)
-            except BaseException as exc:
-                self._note_exception(exc)
-                if self._recovery_exact() or self._anchor_exact():
-                    self._record_recovery(
-                        "guarded",
-                        "restored destination could not be flushed",
-                    )
-                return False
-            public_exact = _published_file_still_exact(self.published)
-            anchor_exact = self._anchor_exact()
-            recovery_exact = self._recovery_exact()
-
-        if not public_exact or not recovery_exact or not self._fidelity_exact():
-            if recovery_exact or anchor_exact:
-                self._record_recovery(
-                    "sole-copy-possible",
-                    "public destination disappeared during recovery",
-                )
-            return False
-        if anchor_exact:
-            interrupted = None
-            try:
-                os.unlink("anchor", dir_fd=self.private_fd)
-            except BaseException as exc:
-                interrupted = exc
-                self._note_exception(exc)
-            if not _named_entry_missing(self.private_fd, "anchor"):
-                if self._recovery_exact() or self._anchor_exact():
-                    self._record_recovery(
-                        "redundant-guard",
-                        "private destination guard cleanup was interrupted",
-                    )
-                return False
-            try:
-                fsync_dirs(self.private_fd)
-            except BaseException as exc:
-                self._note_exception(exc)
-                if self._recovery_exact() or self._anchor_exact():
-                    self._record_recovery(
-                        "guarded",
-                        "private destination guard cleanup could not be "
-                        "flushed",
-                    )
-                return False
-            if interrupted is not None:
-                if not isinstance(interrupted, OSError):
-                    if self._recovery_exact() or self._anchor_exact():
-                        self._record_recovery(
-                            "redundant-guard",
-                            "public destination is complete; private guard "
-                            "cleanup can be retried",
-                        )
-                    return False
-
-        # The independent recovery link remains throughout the anchor cleanup.
-        # This is the coherent completion proof: exact durable public bytes and
-        # an exact durable private recovery link are simultaneously present.
-        if (
-            not _published_file_still_exact(self.published)
-            or not self._recovery_exact()
-            or not self._fidelity_exact()
-        ):
-            if self._recovery_exact() or self._anchor_exact():
-                self._record_recovery(
-                    "sole-copy-possible",
-                    "public destination disappeared before completion",
-                )
-            return False
-        try:
-            fsync_dirs(self.parent_fd, self.private_fd)
-        except BaseException as exc:
-            self._note_exception(exc)
-            self._record_recovery(
-                "guarded", "completion proof could not be flushed")
-            return False
-
-        if not self._fidelity_exact():
-            self._record_recovery(
-                "guarded", "destination metadata changed before completion")
-            return False
-
-        try:
-            os.unlink("recovery", dir_fd=self.private_fd)
-        except BaseException as exc:
-            self._note_exception(exc)
-        if not _named_entry_missing(self.private_fd, "recovery"):
-            if self._recovery_exact():
-                self._record_recovery(
-                    "redundant-guard",
-                    "public destination is complete; private guard cleanup "
-                    "can be retried",
-                )
-                self.released = True
-                return True
-            return False
-        # The final fidelity and change check immediately above authorises
-        # removing the redundant link.
-        self.released = True
-        try:
-            fsync_dirs(self.private_fd)
-        except BaseException as exc:
-            self._note_exception(exc)
-            pass
-        self._remove_empty_private_directory()
-        return True
-
-    def close(self) -> None:
-        if not self.released and not self.release_attempted:
-            try:
-                self.release()
-            except BaseException:
-                pass
-        if self.exclusion is not None:
-            self.exclusion.close()
-            self.exclusion = None
-        try:
-            os.close(self.private_fd)
-        except OSError:
-            pass
-
-
-def _hold_published_destination(published, expected_receipt):
-    """Seal a random exact safety link before destructive source work."""
-    if not _published_file_still_exact(published):
-        raise OSError("migration destination changed before source retirement")
-    descriptor, _parents, parent_fd, destination_name, _dest_rel, _binding = \
-        published
-    exclusion = file_exclusion.acquire_inode_write_exclusion(descriptor)
-    if exclusion is None:
-        raise OSError("migration destination is not a regular file")
-    private_name = None
-    private_fd = None
-    try:
-        verified_digest = _digest_fd(descriptor)
-        if (
-            not exclusion.intact()
-            or not _file_fidelity_matches(
-                descriptor,
-                expected_receipt,
-                digest=verified_digest,
-            )
-            or not _published_file_still_exact(published)
-        ):
-            raise OSError("migration destination changed before source retirement")
-        private_name, private_fd = _reserve_private_directory(
-            parent_fd, prefix="qobuz-migrate-destination")
-        try:
-            os.link(
-                destination_name,
-                "anchor",
-                src_dir_fd=parent_fd,
-                dst_dir_fd=private_fd,
-                follow_symlinks=False,
-            )
-            os.link(
-                destination_name,
-                "recovery",
-                src_dir_fd=parent_fd,
-                dst_dir_fd=private_fd,
-                follow_symlinks=False,
-            )
-        except BaseException:
-            for private_link in ("recovery", "anchor"):
-                if _named_entry_matches(
-                        private_fd, private_link, descriptor):
-                    try:
-                        os.unlink(private_link, dir_fd=private_fd)
-                    except BaseException:
-                        pass
-            raise
-        safety = _DestinationSafety(
-            published,
-            expected_receipt,
-            verified_digest,
-            private_name,
-            private_fd,
-            exclusion,
-        )
-        if not safety.intact():
-            raise OSError("migration destination changed while it was sealed")
-        fsync_dirs(parent_fd, private_fd)
-        if not safety.intact():
-            raise OSError("migration destination changed while it was sealed")
-        private_fd = None
-        exclusion = None
-        return safety
-    finally:
-        if private_fd is not None:
-            for private_link in ("recovery", "anchor"):
-                if _named_entry_matches(
-                        private_fd, private_link, descriptor):
-                    try:
-                        os.unlink(private_link, dir_fd=private_fd)
-                    except BaseException:
-                        pass
-            try:
-                if (
-                    private_name is not None
-                    and not os.listdir(private_fd)
-                    and _named_entry_matches(
-                        parent_fd, private_name, private_fd)
-                ):
-                    os.rmdir(private_name, dir_fd=parent_fd)
-                    fsync_dirs(parent_fd)
-            except BaseException:
-                pass
-            try:
-                os.close(private_fd)
-            except OSError:
-                pass
-        if exclusion is not None:
-            exclusion.close()
-
-
-def _remove_sealed_source(source: _OpenedFile, receipt,
-                          destination_intact=None, recoveries=None) -> bool:
-    """Remove only the exact reviewed source after its destination is durable."""
-    if not source.still_exact(receipt):
-        return False
-    quarantine_name = None
-    quarantine_fd = None
-    anchor_fd = None
-    moved_exact = False
-    committed = False
-
-    def _require_destination() -> None:
-        if destination_intact is not None and not destination_intact():
-            raise OSError(
-                "migration destination changed during source retirement")
-
-    def _require_private_source_state() -> None:
-        if (
-            not source.parent_chain_exact()
-            or not _named_entry_missing(source.parent_fd, source.name)
-            or source.exclusion is None
-            or not source.exclusion.intact()
-            or not _anchor_exact()
-            or not _file_receipt_matches(
-                source.descriptor,
-                receipt["file"],
-                digest=source.verified_digest,
-                allow_changed_time=True,
-            )
-        ):
-            raise OSError(
-                "migration source changed during source retirement")
-
-    def _public_exact() -> bool:
-        return _named_entry_matches(
-            source.parent_fd, source.name, source.descriptor)
-
-    def _held_exact() -> bool:
-        return (
-            quarantine_fd is not None
-            and _named_entry_matches(
-                quarantine_fd, "held", source.descriptor)
-        )
-
-    def _anchor_exact() -> bool:
-        return (
-            quarantine_fd is not None
-            and anchor_fd is not None
-            and _named_entry_matches(quarantine_fd, "anchor", anchor_fd)
-        )
-
-    def _restore_exact() -> bool:
-        if _public_exact():
-            return True
-        if _held_exact() and _restore_private_exact(
-                quarantine_fd, "held", source.parent_fd, source.name,
-                source.descriptor):
-            return True
-        if _anchor_exact() and _restore_private_exact(
-                quarantine_fd, "anchor", source.parent_fd, source.name,
-                anchor_fd):
-            return True
-        return _public_exact()
-
-    def _clear_private_link(name, descriptor) -> None:
-        if descriptor is None or quarantine_fd is None:
-            return
-        try:
-            _remove_exact_named_file(quarantine_fd, name, descriptor)
-        except BaseException:
-            pass
-
-    def _clear_empty_quarantine() -> None:
-        nonlocal quarantine_name
-        if quarantine_name is None or quarantine_fd is None:
-            return
-        try:
-            if (
-                not os.listdir(quarantine_fd)
-                and _named_entry_matches(
-                    source.parent_fd, quarantine_name, quarantine_fd)
-            ):
-                os.rmdir(quarantine_name, dir_fd=source.parent_fd)
-                if _named_entry_missing(source.parent_fd, quarantine_name):
-                    quarantine_name = None
-                fsync_dirs(source.parent_fd)
-        except BaseException:
-            pass
-
-    def _record_source_recovery(reason) -> None:
-        if recoveries is None or quarantine_name is None:
-            return
-        if _held_exact():
-            private_link = "held"
-        elif _anchor_exact():
-            private_link = "anchor"
-        else:
-            return
-        original_relative = Path(*receipt["relative"])
-        recovery_relative = Path(
-            *receipt["relative"][:-1],
-            quarantine_name,
-            private_link,
-        )
-        try:
-            location = _descriptor_path(quarantine_fd) / private_link
-        except OSError:
-            location = source.root.path / recovery_relative
-        record = {
-            "state": "source-guarded",
-            "location": os.fspath(location),
-            "relative": os.fspath(recovery_relative),
-            "destination": os.fspath(original_relative),
-            "reason": reason,
-            "restart": (
-                "Do not delete the recorded recovery file. Restore it to "
-                "the recorded source path only when that name is absent, "
-                "then re-run migration."
-            ),
-        }
-        if record not in recoveries:
-            recoveries.append(record)
-        log.error(
-            "Migration retained exact source recovery at %s",
-            record["location"],
-        )
-
-    try:
-        _require_destination()
-        quarantine_name, quarantine_fd = _reserve_private_directory(
-            source.parent_fd, prefix="qobuz-migrate-source")
-        try:
-            os.link(
-                source.name,
-                "anchor",
-                src_dir_fd=source.parent_fd,
-                dst_dir_fd=quarantine_fd,
-                follow_symlinks=False,
-            )
-        except BaseException:
-            # ``link`` may have committed before an injected interrupt.  An
-            # exact app-created link is safe to remove; anything ambiguous is
-            # retained in the private directory.
-            try:
-                anchor_fd = _open_regular_file(
-                    "anchor", dir_fd=quarantine_fd)
-            except OSError:
-                anchor_fd = None
-            if (
-                anchor_fd is not None
-                and _same_entry(
-                    os.fstat(anchor_fd), os.fstat(source.descriptor))
-            ):
-                _clear_private_link("anchor", anchor_fd)
-            _clear_empty_quarantine()
-            raise
-        anchor_fd = _open_regular_file("anchor", dir_fd=quarantine_fd)
-        if (
-            not _same_entry(
-                os.fstat(anchor_fd), os.fstat(source.descriptor))
-            or not source.namespace_exact()
-            or source.exclusion is None
-            or not source.exclusion.intact()
-            or not _file_receipt_matches(
-                source.descriptor, receipt["file"],
-                digest=source.verified_digest,
-                allow_changed_time=True)
-        ):
-            raise OSError("migration source changed before retirement")
-        _require_destination()
-        try:
-            _rename_noreplace_at(
-                source.parent_fd, source.name, quarantine_fd, "held")
-        except BaseException:
-            moved_exact = (
-                _named_entry_missing(source.parent_fd, source.name)
-                and _named_entry_matches(
-                    quarantine_fd, "held", source.descriptor)
-            )
-            if moved_exact:
-                _restore_exact()
-                moved_exact = False
-            elif (
-                _named_entry_missing(source.parent_fd, source.name)
-                and not _named_entry_missing(quarantine_fd, "held")
-            ):
-                held_fd = None
-                try:
-                    held_fd = _open_entry_handle(
-                        "held", dir_fd=quarantine_fd)
-                    _restore_private_exact(
-                        quarantine_fd, "held",
-                        source.parent_fd, source.name, held_fd)
-                except OSError:
-                    pass
-                finally:
-                    if held_fd is not None:
-                        os.close(held_fd)
-            raise
-        moved_exact = (
-            _named_entry_missing(source.parent_fd, source.name)
-            and _named_entry_matches(quarantine_fd, "held", source.descriptor)
-        )
-        if not moved_exact:
-            # A same-name replacement may have been moved into the private
-            # directory.  Put that unowned object back and preserve our anchor.
-            if (
-                not _named_entry_missing(quarantine_fd, "held")
-                and _named_entry_missing(source.parent_fd, source.name)
-            ):
-                held_fd = _open_entry_handle("held", dir_fd=quarantine_fd)
-                try:
-                    _restore_private_exact(
-                        quarantine_fd, "held",
-                        source.parent_fd, source.name, held_fd)
-                finally:
-                    os.close(held_fd)
-            raise OSError("migration source changed during retirement")
-        _require_private_source_state()
-        try:
-            fsync_dirs(source.parent_fd, quarantine_fd)
-        except BaseException:
-            _restore_exact()
-            moved_exact = False
-            raise
-
-        _require_private_source_state()
-        _require_destination()
-
-        # Retire the held public link while the exact private safety link keeps
-        # the bytes recoverable.  If the unlink is interrupted after commit,
-        # roll the anchor back to the absent public name.
-        try:
-            os.unlink("held", dir_fd=quarantine_fd)
-        except BaseException:
-            if _held_exact():
-                _restore_exact()
-            elif _named_entry_missing(quarantine_fd, "held"):
-                _restore_exact()
-            moved_exact = False
-            raise
-        moved_exact = False
-        if (
-            not _named_entry_missing(quarantine_fd, "held")
-            or not _anchor_exact()
-        ):
-            _restore_exact()
-            raise OSError("exact migration source retirement was ambiguous")
-
-        _require_private_source_state()
-        _require_destination()
-
-        # This unlink is the sole forward commit: the destination is already
-        # data-fsynced and namespace-fsynced, and ``source.descriptor`` still
-        # identifies the reviewed inode while the syscall is reconciled.
-        try:
-            os.unlink("anchor", dir_fd=quarantine_fd)
-        except BaseException:
-            if _anchor_exact():
-                _restore_exact()
-                raise
-            if not _named_entry_missing(quarantine_fd, "anchor"):
-                raise
-            committed = True
-        else:
-            if not _named_entry_missing(quarantine_fd, "anchor"):
-                _restore_exact()
-                raise OSError("migration source commit was ambiguous")
-            committed = True
-
-        # Once the final exact link is gone, a post-commit flush or cleanup
-        # error cannot be rolled back.  The durable destination is the coherent
-        # forward state, so classify the item as moved and leave only possible
-        # app-owned empty residue.
-        try:
-            fsync_dirs(source.parent_fd, quarantine_fd)
-        except BaseException:
-            pass
-        _clear_empty_quarantine()
-        return True
-    except BaseException:
-        if not committed:
-            if moved_exact or not _public_exact():
-                _restore_exact()
-            if _public_exact():
-                _clear_private_link("held", source.descriptor)
-                _clear_private_link("anchor", anchor_fd)
-                _clear_empty_quarantine()
-            if not _public_exact():
-                _record_source_recovery(
-                    "exact source could not be restored without overwrite")
-            elif _held_exact() or _anchor_exact():
-                _record_source_recovery(
-                    "redundant private source guard could not be removed")
-        raise
-    finally:
-        if anchor_fd is not None:
-            try:
-                os.close(anchor_fd)
-            except OSError:
-                pass
-        if quarantine_fd is not None:
-            try:
-                os.close(quarantine_fd)
-            except OSError:
-                pass
 
 
 def _open_sealed_directory_chain(binding, chain):
@@ -4649,8 +3391,9 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
     """Carry out placements and finish verified existing-file resumes.
 
     Audio is written only for ``PLACE`` entries. Existing-destination
-    collisions are read solely to re-prove identity before companion files are
-    copied; unplaceable and unresolved collisions stay untouched.
+    collisions are read to re-prove identity before companion files are
+    copied, and an in-place run then deletes their originals; unplaceable and
+    unresolved collisions stay untouched.
 
     Copy mode never alters the source. A destination that turns up after
     planning is skipped (not overwritten), and a per-file failure is recorded
@@ -4742,15 +3485,10 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                 progress("Copying into the new library", i, total, src.name)
             opened_source = None
             published = None
-            destination_safety = None
             stop_after_item = False
             discard_publication = False
             source_retired = False
             moved = False
-            fatal_exception = None
-            cleanup_primary = None
-            cleanup_failures = []
-            recoveries_before_item = len(result.recoveries)
             try:
                 if entry.source_receipt is None:
                     raise OSError(
@@ -4771,78 +3509,34 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                     entry.destination_path_receipt,
                 )
                 if in_place:
-                    destination_safety = _hold_published_destination(
-                        published,
-                        entry.source_receipt["file"],
-                    )
-                    if _remove_sealed_source(
+                    published_identity = stat_identity(
+                        os.fstat(published[0]))
+                    if not _retire_source(
                             opened_source,
                             entry.source_receipt,
-                            destination_safety.intact,
-                            result.recoveries):
-                        source_retired = True
-                        if not destination_safety.release():
-                            if destination_safety.keyboard_interrupt is not None:
-                                raise destination_safety.keyboard_interrupt
-                            stop_after_item = destination_safety.interrupted
-                            recovery = destination_safety.recovery or {}
-                            location = recovery.get("location")
-                            location_note = (
-                                f" Recovery file: {location}."
-                                if location else ""
-                            )
-                            raise OSError(
-                                "migration destination could not be restored "
-                                "after source retirement; the exact copy was "
-                                "preserved under a private safety name."
-                                + location_note
-                            )
-                        stop_after_item = destination_safety.interrupted
-                        if destination_safety.keyboard_interrupt is not None:
-                            result.interrupted = True
-                        retired_receipts.append(entry.source_receipt)
-                        result.copied += 1
-                        result.outcomes.append(
-                            (src, entry.dest_rel, COPIED, ""))
-                        moved = True
-                    else:
+                            published,
+                            published_identity):
                         discard_publication = True
                         raise OSError(
-                            "source could not be removed; the same-run "
-                            "destination must be rolled back")
+                            "the original or its new copy changed during the "
+                            "move, so the original was not removed")
+                    source_retired = True
+                    retired_receipts.append(entry.source_receipt)
+                    result.copied += 1
+                    result.outcomes.append(
+                        (src, entry.dest_rel, COPIED, ""))
+                    moved = True
                 else:
                     result.copied += 1
                     result.outcomes.append(
                         (src, entry.dest_rel, COPIED, ""))
-            except _PublishedCopyFailure as exc:
-                published = exc.published
-                discard_publication = True
-                interrupted = isinstance(exc.cause, KeyboardInterrupt)
-                result.interrupted |= interrupted
-                if not interrupted:
-                    result.failed += 1
-                result.outcomes.append((
-                    src, entry.dest_rel,
-                    INTERRUPTED if interrupted else FAILED,
-                    "migration was interrupted" if interrupted else str(exc.cause),
-                ))
-                if exc.interrupted:
-                    result.cancelled = True
-                    stop_after_item = True
-                    cleanup_primary = exc.cause
-                elif exc.errno == errno.ENOSPC:
-                    result.cancelled = True
-                    stop_after_item = True
-                elif not isinstance(exc.cause, Exception):
-                    result.cancelled = True
-                    fatal_exception = exc.cause
             except FileExistsError:
                 result.skipped += 1
                 result.outcomes.append((
                     src, entry.dest_rel, SKIPPED,
                     "destination appeared after preview",
                 ))
-            except KeyboardInterrupt as exc:
+            except KeyboardInterrupt:
                 discard_publication = (
                     published is not None and not source_retired)
                 result.interrupted = True
@@ -4854,7 +3548,6 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                 ))
                 result.cancelled = True
                 stop_after_item = True
-                cleanup_primary = exc
             except (OSError, shutil.Error) as exc:
                 discard_publication = (
                     discard_publication
@@ -4866,7 +3559,8 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                 if getattr(exc, "errno", None) == errno.ENOSPC:
                     result.cancelled = True
                     stop_after_item = True
-            except BaseException as exc:
+            except Exception as exc:
+                log.exception("Migration stopped at %s", src)
                 discard_publication = (
                     published is not None and not source_retired)
                 result.failed += 1
@@ -4877,89 +3571,23 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                     str(exc) or type(exc).__name__,
                 ))
                 result.cancelled = True
-                fatal_exception = exc
+                stop_after_item = True
             finally:
-                if destination_safety is not None:
-                    _capture_cleanup(
-                        cleanup_failures,
-                        "track destination safety teardown",
-                        destination_safety.close,
-                    )
-                    stop_after_item = (
-                        stop_after_item or destination_safety.interrupted)
-                    if (
-                        destination_safety.recovery is not None
-                        and destination_safety.recovery
-                        not in result.recoveries
-                    ):
-                        result.recoveries.append(
-                            destination_safety.recovery)
                 if (
                     discard_publication
-                    and not source_retired
                     and published is not None
+                    and not source_retired
+                    and not _take_back(
+                        published, opened_source, entry.source_receipt)
                 ):
-                    safe_to_discard = (
-                        len(result.recoveries) == recoveries_before_item
-                        and (
-                            destination_safety is None
-                            or (
-                                destination_safety.released
-                                and destination_safety.recovery is None
-                            )
-                        )
-                    )
-                    discarded = False
-                    if safe_to_discard:
-                        try:
-                            discarded = _discard_owned_publication(
-                                published,
-                                (entry.source_receipt or {}).get("file", {}),
-                                recoveries=result.recoveries,
-                            )
-                        except BaseException as exc:
-                            cleanup_failures.append((
-                                "track publication rollback", exc))
-                    if not discarded:
-                        try:
-                            recovery = _owned_publication_recovery(
-                                published,
-                                src,
-                                entry.source_receipt or {},
-                                "source retirement or publication completion "
-                                "failed and the exact same-run destination could "
-                                "not be removed safely",
-                            )
-                            if recovery not in result.recoveries:
-                                result.recoveries.append(recovery)
-                        except BaseException as exc:
-                            cleanup_failures.append((
-                                "track recovery recording", exc))
-                        if in_place:
-                            result.lingered += 1
-                _capture_cleanup(
-                    cleanup_failures,
-                    "track destination teardown",
-                    lambda: _close_published_file(published),
-                )
+                    _note_kept_copy(result.outcomes, destination_root)
+                    if in_place and _named_entry_matches(
+                            opened_source.parent_fd, opened_source.name,
+                            opened_source.descriptor):
+                        result.lingered += 1
+                _close_published_file(published)
                 if opened_source is not None:
-                    _capture_cleanup(
-                        cleanup_failures,
-                        "track source teardown",
-                        opened_source.close,
-                    )
-            _raise_cleanup_abort(
-                result,
-                cleanup_failures,
-                primary=(
-                    fatal_exception
-                    if fatal_exception is not None
-                    else cleanup_primary
-                ),
-            )
-            if fatal_exception is not None:
-                raise MigrationExecutionAbort(
-                    result, fatal_exception) from fatal_exception
+                    opened_source.close()
             if stop_after_item:
                 result.cancelled = True
                 break
@@ -4989,15 +3617,24 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                     )
                 if result.cancelled:
                     break
-        if not result.cancelled and plan.companion_receipts:
-            _carry_companion_files(
-                plan, result, entry_map=entry_map,
-                resume_entries=resume_entries,
-                progress=progress, cancel_check=cancel_check,
-                source_root_binding=source_root,
-                destination_root_binding=destination_root,
-                copied_companions=copied_companions,
-                lyric_conflicts=lyric_conflicts)
+        if not result.cancelled and (
+                plan.companion_receipts or (in_place and resume_entries)):
+            finished_moves = [] if in_place else None
+            try:
+                _carry_companion_files(
+                    plan, result, entry_map=entry_map,
+                    resume_entries=resume_entries,
+                    progress=progress, cancel_check=cancel_check,
+                    source_root_binding=source_root,
+                    destination_root_binding=destination_root,
+                    copied_companions=copied_companions,
+                    lyric_conflicts=lyric_conflicts,
+                    retired=finished_moves)
+            finally:
+                for receipt in finished_moves or ():
+                    retired_receipts.append(receipt)
+                    folder_chains[tuple(receipt["relative"][:-1])] = \
+                        receipt["parents"]
         if in_place and not result.cancelled:
             _prune_retired_source_parents(
                 source_root,
@@ -5008,43 +3645,25 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
         if in_place:
             result.left_in_source = finished_folders_left()
         return result
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, Exception) as exc:
+        # The run stops here, but returns its result so the report is
+        # written: originals may already have been deleted.
+        if isinstance(exc, KeyboardInterrupt):
+            result.interrupted = True
+        else:
+            log.exception("Migration stopped by an unexpected error")
         result.cancelled = True
-        result.interrupted = True
         if in_place and folder_chains:
             try:
                 result.left_in_source = finished_folders_left()
             except BaseException:
                 pass
         return result
-    except MigrationExecutionAbort:
-        raise
-    except BaseException as exc:
-        result.cancelled = True
-        raise MigrationExecutionAbort(result, exc) from exc
     finally:
-        active_abort = _migration_abort_in_chain(sys.exception())
-        cleanup_failures = []
-        for boundary, binding in (
-            ("destination root teardown", destination_root),
-            ("source root teardown", source_root),
-        ):
-            if binding is None:
-                continue
-            try:
-                binding.close()
-            except BaseException as exc:
-                cleanup_failures.append((boundary, exc))
-        if cleanup_failures:
-            if active_abort is not None:
-                for boundary, exc in cleanup_failures:
-                    active_abort.note_cleanup_failure(boundary, exc)
-            else:
-                cleanup_abort = MigrationExecutionAbort(
-                    result, cleanup_failures[0][1])
-                for boundary, exc in cleanup_failures:
-                    cleanup_abort.note_cleanup_failure(boundary, exc)
-                raise cleanup_abort from cleanup_abort.cause
+        if destination_root is not None:
+            destination_root.close()
+        if source_root is not None:
+            source_root.close()
 
 
 _CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
@@ -5156,9 +3775,7 @@ def _results_rows(result) -> list:
     )
     state = (
         "cancelled" if result.cancelled
-        else "failed" if (
-            result.failed or companion_failures or result.recoveries
-            or result.cleanup_failures)
+        else "failed" if result.failed or companion_failures
         else "completed"
     )
     summary = {
@@ -5173,8 +3790,6 @@ def _results_rows(result) -> list:
         "companion_failures": int(companion_failures),
         "pruned": int(result.pruned),
         "track_attempts": len(result.outcomes),
-        "recoveries": len(result.recoveries),
-        "cleanup_failures": len(result.cleanup_failures),
     }
     rows = [[
         "summary",
@@ -5205,33 +3820,11 @@ def _results_rows(result) -> list:
                 "",
                 "",
             ])
-    for recovery in result.recoveries:
-        rows.append([
-            "recovery",
-            "retained",
-            _csv_safe_cell(recovery.get("location", ""), path=True),
-            _csv_safe_cell(recovery.get("destination", ""), path=True),
-            recovery.get("reason", ""),
-            recovery.get("state", ""),
-            recovery.get("restart", ""),
-        ])
-    for failure in result.cleanup_failures:
-        rows.append([
-            "cleanup",
-            FAILED,
-            "",
-            "",
-            failure.get("error", "migration cleanup was uncertain"),
-            failure.get("boundary", "migration teardown"),
-            "Inspect the partial result and both migration roots before "
-            "starting another migration.",
-        ])
     return rows
 
 
 def write_results_manifest(result: ExecResult, *, plan: MigrationPlan) -> Path:
-    """Write every track, companion, and recovery outcome beside the
-    destination."""
+    """Write every track and companion outcome beside the destination."""
     return _write_csv_for_plan(
         plan,
         "migration-results",
