@@ -398,6 +398,10 @@ def remove_album(album_id) -> bool:
             ]
             if len(candidates) != len(cleaned["candidates"]):
                 changed = True
+                # These rows no longer describe the folder they were found
+                # in, so a refresh derives the artist again even when the
+                # folder reads as it did before, as after an Undo.
+                cleaned["fingerprint"] = ""
             cleaned["candidates"] = candidates
             rebuilt[name] = candidate_premise.compact_artist(cleaned)
         if not changed:

@@ -303,6 +303,53 @@ def test_saved_artist_pick_stays_when_the_search_offers_only_a_lesser_match(
     assert discovery.resolve_artist("Craft", "tok", owned) == ("band", "Craft")
 
 
+def test_folder_named_for_two_artists_matches_under_the_first_one_listing_it(
+        monkeypatch, tmp_path):
+    # No Qobuz artist is called "Daisy the Great, Audiotree" and the library
+    # has no Daisy the Great folder. That artist's catalog lists the session,
+    # so it is matched there and its gap offered; the studio album is not
+    # this folder's to list. Galantis lists nothing in its shared folder.
+    session = _album("dtg", "Audiotree Live", "Daisy the Great", 2019,
+                     [_qt(f"d{i}", f"ISRCD{i}") for i in range(5)])
+    studio = _album("dts", "Liar", "Daisy the Great", 2022,
+                    [_qt(f"s{i}", f"ISRCS{i}") for i in range(9)])
+    church = _album("gal", "Church", "Galantis", 2020,
+                    [_qt(f"g{i}", f"ISRCG{i}") for i in range(10)])
+
+    class ByArtist(FakeQobuz):
+        def search_artists(self, query, token, limit=5):
+            return [a for a in self._artists if a["name"] in query]
+
+        def get_artist_albums(self, artist_id, token, limit=500, fresh=False):
+            listed = [a for a in self._catalog if a["artist"]["id"] == artist_id]
+            return listed, len(listed)
+
+    _library(monkeypatch, tmp_path, {
+        "Daisy the Great, Audiotree": {"Audiotree Live (2019)":
+                                       [_et(f"d{i}", f"ISRCD{i}") for i in range(2)]},
+        "Galantis, OneRepublic": {"Bones (2019)": [_et("Bones", "ISRCB")]},
+    })
+    ByArtist(artists=[{"name": "Daisy the Great", "id": "art-Daisy the Great"},
+                      {"name": "Galantis", "id": "art-Galantis"}],
+             catalog=[session, studio, church]).install(monkeypatch)
+    monkeypatch.setattr(discovery, "_resolve_cache", {})
+    opts = DiscoveryOpts(prefer_hires=True)
+
+    daisy = find_missing_for_artist(
+        "Daisy the Great, Audiotree", token="tok", opts=opts,
+        artist_dir=tmp_path / "Daisy the Great, Audiotree", hidden={})
+    assert daisy.artist_id == "art-Daisy the Great"
+    assert [(g.qobuz_album["id"], len(g.missing), g.on_disk_dir)
+            for g in daisy.gaps] == [
+        ("dtg", 3, tmp_path / "Daisy the Great, Audiotree" / "Audiotree Live (2019)")]
+
+    shared = find_missing_for_artist(
+        "Galantis, OneRepublic", token="tok", opts=opts,
+        artist_dir=tmp_path / "Galantis, OneRepublic", hidden={})
+    assert shared.artist_id is None
+    assert shared.gaps == []
+
+
 def test_missing_albums_are_what_qobuz_files_as_the_artists_albums(
         monkeypatch, tmp_path):
     # What Qobuz files as the artist's albums lists as albums, except that a
@@ -358,6 +405,57 @@ def test_zero_overlap_match_is_skipped_as_false_match(monkeypatch, tmp_path, bea
     assert [(g.qobuz_album["id"], len(g.missing)) for g in res.gaps] == [("a1", 9)]
     assert res.gaps[0].on_disk_dir == tmp_path / "The Beatles" / "Help (1965)"
     assert res.on_disk == {"a1"}
+
+
+def test_gap_fill_offers_the_edition_the_folder_holds_not_a_remaster(
+        monkeypatch, tmp_path):
+    # One track grabbed from the CD edition. The hi-res remaster, with its own
+    # recording IDs, sorts first, but filling from it would put two masters in
+    # the folder. With only the remaster listed, nothing is offered.
+    def remastered(title, isrc):
+        return {**_qt(title, isrc), "version": "2021 Remaster"}
+
+    remaster = {**_album("rm", "Deja Vu", "CSNY", 1970,
+                         [remastered(f"d{i}", f"ISRCRM{i}") for i in range(10)],
+                         bd=24, sr=192),
+                "version": "2021 Remaster"}
+    cd = _album("cd", "Deja Vu", "CSNY", 1970,
+                [_qt(f"d{i}", f"ISRCCD{i}") for i in range(10)])
+    layout = {"CSNY": {"Deja Vu (1970)": [_et("d1", "ISRCCD1")]}}
+    artists = [{"name": "CSNY", "id": "csny", "albums_count": 20}]
+
+    res = _run(monkeypatch, tmp_path, query="CSNY", artist_folder="CSNY",
+               layout=layout, catalog=[remaster, cd], artists=artists,
+               want_missing=False)
+    assert [(g.qobuz_album["id"], len(g.missing)) for g in res.gaps] == [("cd", 9)]
+
+    res = _run(monkeypatch, tmp_path / "only", query="CSNY", artist_folder="CSNY",
+               layout=layout, catalog=[remaster], artists=artists,
+               want_missing=False)
+    assert res.gaps == []
+
+
+def test_remix_album_holding_none_of_the_folders_tracks_is_no_gap(
+        monkeypatch, tmp_path):
+    # The folder holds the original single, which Qobuz files under the
+    # featured artist. The remix collection resolves to the folder and its
+    # first remix shares the song's title, but none of its six tracks is the
+    # folder's, so it is not a gap, bonus versions or not.
+    def remix(name, isrc):
+        return {**_qt("Bones", isrc), "version": name}
+
+    one = {**_album("one", "Bones", "Galantis", 2019, [remix("B-Sights Remix", "ISRCB1")]),
+           "version": "B-Sights Remix"}
+    remixes = {**_album("rmx", "Bones", "Galantis", 2019,
+                        [remix("VIP Mix", "ISRCV")]
+                        + [remix(f"Remix {i}", f"ISRCR{i}") for i in range(5)]),
+               "version": "Remixes"}
+    res = _run(monkeypatch, tmp_path, query="Galantis", artist_folder="Galantis",
+               layout={"Galantis": {"Bones (2019)": [_et("Bones", "ISRCORIG")]}},
+               catalog=[one, remixes],
+               artists=[{"name": "Galantis", "id": "galantis", "albums_count": 200}])
+
+    assert res.partials == []
 
 
 def test_transient_api_error_aborts_the_scan_instead_of_burying_a_folder(

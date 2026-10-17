@@ -190,12 +190,12 @@ def record_album_walk_seen(artist_name, album_dir, seen=None):
 
 
 # Outcomes that settle an album for the album-fill walk: it's done, or the
-# user said no, or Qobuz couldn't place the folder (recorded so it stops
-# nagging on every walk).
+# user said no, or Qobuz couldn't place the folder or has nothing to fill it
+# from (recorded so it stops nagging on every walk).
 _ALBUM_WALK_DECIDED = {
     "already_complete", "user_skipped",
     "no_qobuz_match", "no_tracks", "false_match", "predicted_path_mismatch",
-    "sibling_skipped",
+    "other_edition", "sibling_skipped",
 }
 
 # Folder names shown in a leftover category before it falls back to a count.
@@ -312,8 +312,10 @@ def run_album_walk_mode(args, token):
     n_albums_skipped = 0
     n_albums_unmatched = 0
     n_albums_unplaced = 0
+    n_albums_unavailable = 0
     unmatched_names = []
     unplaced_names = []
+    unavailable_names = []
     n_albums_filled = 0
     n_albums_left_out = 0
     interrupted = False
@@ -405,6 +407,9 @@ def run_album_walk_mode(args, token):
                         unmatched_names.append(_ad.name)
                     elif _result == "sibling_skipped":
                         pass  # a folded duplicate folder; recorded seen, not summarized
+                    elif _result == "other_edition":
+                        n_albums_unavailable += 1
+                        unavailable_names.append(_ad.name)
                     else:
                         # Matched a candidate then rejected it (false_match,
                         # low_overlap, predicted_path_mismatch) or it had no
@@ -464,11 +469,14 @@ def run_album_walk_mode(args, token):
         leftovers.append(f"no Qobuz match: {n_albums_unmatched}")
     if n_albums_unplaced:
         leftovers.append(f"couldn't place: {n_albums_unplaced}")
+    if n_albums_unavailable:
+        leftovers.append(f"nothing available on Qobuz: {n_albums_unavailable}")
     if leftovers:
         log.info(fmt(C.GRAY, "    " + " · ".join(leftovers)))
     for label, names in (
         ("No Qobuz match", unmatched_names),
         ("Couldn't place", unplaced_names),
+        ("Nothing available on Qobuz", unavailable_names),
     ):
         note = _leftover_folder_note(label, names)
         if note:
@@ -663,6 +671,7 @@ def run_walk_queued_mode(args, token):
                                 prefetched_catalog=prefetched_catalog,
                                 shared_queue=shared_queue,
                                 hidden=hidden,
+                                artist_dir=d,
                             )
                             partial_completion = (
                                 partial_completion or step_two_attention

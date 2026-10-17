@@ -887,7 +887,7 @@ def _shows_edition_tracks(album, existing, pairs, token=None):
     return bool(editions) and not any(held <= count < len(tracks) for count in editions)
 
 
-def same_edition(album, existing, folder, token=None):
+def same_edition(album, existing, folder, token=None, *, fill=False):
     """Whether the files are this release rather than another mix or master
     of it: some of its tracks pair with them as the same edition, none of
     the rest is a song they hold as another version, and the labels a
@@ -898,13 +898,19 @@ def same_edition(album, existing, folder, token=None):
     tag or folder names an edition, so that version is checked only then.
     A deluxe, expanded or other edition label the files lack still counts
     when they hold its track list (_shows_edition_tracks, which may ask
-    Qobuz for the artist's catalogue with ``token``). Wording and word
-    order may differ: "Remastered" is the files' "2015 Remaster", but "2009
-    Remaster" is not their "Remastered"."""
+    Qobuz for the artist's catalogue with ``token``). With ``fill``, for a
+    gap fill that brings the rest of that list, such a label counts without
+    it, and up to one in ten of the release's songs on the files may be
+    another version, which the fill leaves out. Wording and word order may
+    differ: "Remastered" is the files' "2015 Remaster", but "2009 Remaster"
+    is not their "Remastered"."""
     tracks = (album.get("tracks") or {}).get("items") or []
     pairs = _edition_pairs(album, existing, folder)
     missing = [t for i, t in enumerate(tracks) if i not in pairs]
-    if not pairs or held_by_other_versions(album, existing, folder, missing):
+    if not pairs:
+        return False
+    others = held_by_other_versions(album, existing, folder, missing)
+    if others and (not fill or len(others) * 9 > len(pairs)):
         return False
     title_labels = _edition_title_parts(album.get("title"))[1]
     album_labels = _edition_title_parts(_release_title(album), album.get("version") or "")[1]
@@ -940,7 +946,7 @@ def same_edition(album, existing, folder, token=None):
     if not all(_PACKAGING_LABEL_RE.fullmatch(label) for label in lacking):
         return False
     expanded = [label for label in unheld(album_labels) if _EXPANDED_LABEL_RE.search(label)]
-    return not (lacking or expanded) or _shows_edition_tracks(
+    return not (lacking or expanded) or fill or _shows_edition_tracks(
         album, existing, pairs, token)
 
 

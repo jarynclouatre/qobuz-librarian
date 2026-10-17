@@ -37,9 +37,12 @@ from qobuz_librarian.api.search import (
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import missing_types, tags
 from qobuz_librarian.library.catalog import (
+    _catalog_candidates_for_dir,
     _count_audio_files_in,
     _dir_year,
     _paths_equal,
+    _pick_best_target_dir_match,
+    _primary_artist_of,
     album_released_within,
     album_year,
     album_year_int,
@@ -47,14 +50,17 @@ from qobuz_librarian.library.catalog import (
     bonus_versions,
     compute_missing,
     dedup_album_versions,
+    edition_missing,
     filter_compilation_albums,
     filter_owned_albums,
     filter_short_releases,
     find_album_dir_filesystem,
     find_existing_tracks,
     find_qobuz_album_for_dir,
+    held_by_other_versions,
     holds_recordings,
     is_lossless_album,
+    same_edition,
     unstreamable,
 )
 from qobuz_librarian.library.scanner import (
@@ -303,6 +309,34 @@ def resolve_artist(query, token, owned_titles=None):
     return aid, aname
 
 
+def resolve_folder_artist(name, token, album_dirs):
+    """resolve_artist for an artist folder holding ``album_dirs``, plus
+    whether the folder's first-named artist stands in for it.
+
+    A folder named for several artists ("A, B") finds no Qobuz artist of
+    that name. The first artist it names stands in when that artist's
+    catalog lists one of the folder's albums.
+    """
+    artist_id, artist_name = resolve_artist(
+        name, token, owned_album_titles(album_dirs))
+    lead = _primary_artist_of(name)
+    if artist_id or not album_dirs or lead == name.strip():
+        return artist_id, artist_name, False
+    lead_id, lead_name = resolve_artist(lead, token)
+    if not lead_id:
+        return artist_id, artist_name, False
+    try:
+        albums, _total = get_artist_albums(lead_id, token,
+                                           limit=cfg.ARTIST_CATALOG_LIMIT)
+    except QobuzError as e:
+        raise ArtistSearchUnavailable(str(e)) from e
+    if any(_pick_best_target_dir_match(
+            _catalog_candidates_for_dir(ad, albums, lead_name), ad)
+           for ad in album_dirs):
+        return lead_id, lead_name, True
+    return artist_id, artist_name, False
+
+
 def resolve_artist_dir(artist_query, candidates=None):
     """Fuzzy-find an artist's directory in MUSIC_ROOT. Returns Path or None.
     Handles 'The X' / 'X' equivalence.
@@ -438,7 +472,9 @@ class DiscoveryResult:
     catalog: list = field(default_factory=list)       # the fetched catalog (callers may reuse)
     on_disk: set = field(default_factory=set)         # catalog ids found in a folder
     # The catalog fetch was a transient SHORT page (a partial 200), NOT a
-    # legitimate cap - so it's not the whole discography.
+    # legitimate cap - so it's not the whole discography - or Qobuz didn't
+    # return a release a folder's edition check needed. Either way this
+    # isn't the artist's whole picture.
     catalog_incomplete: bool = False
 
     @property
@@ -467,6 +503,10 @@ class NewReleaseResult:
     # compilation, an artist Qobuz doesn't carry. Checking again returns the
     # same answer, so callers must not count these as unchecked.
     unresolved: bool = False
+    # True for a folder named for several artists that the first one named
+    # stands in for. It holds a few of that artist's albums, so nothing new
+    # is listed for it, and it is neither unchecked nor unknown to Qobuz.
+    by_lead: bool = False
 
 
 def owned_title_key(name):
@@ -579,11 +619,65 @@ def _materialize_tracks(album, token):
     return (full or album), tracks
 
 
+def _held_edition(album, existing, album_dir, artist_name, token, catalog,
+                  prefer_hires):
+    """The release filed in ``album_dir`` that the files there are the same
+    edition of (same_edition), or None; and whether Qobuz left a release
+    that could be it unchecked. ``album`` stands when none of its songs is
+    on the files as another version; otherwise, of it and the other
+    releases in ``catalog`` filed there, the one that pairs with the most
+    files, the first on a tie. A gap is filled from that edition only, so a
+    folder never mixes two masters."""
+    def fit(release):
+        if not same_edition(release, existing, album_dir, token, fill=True):
+            return None
+        missing, present = edition_missing(release, existing, album_dir)
+        return len(present), not held_by_other_versions(
+            release, existing, album_dir, missing)
+
+    best, best_fit = album, fit(album)
+    if best_fit is not None and best_fit[1]:
+        return album, False
+    unchecked = False
+    for other in _catalog_candidates_for_dir(
+            album_dir, catalog, artist_name, prefer_hires):
+        if str(other.get("id")) == str(album.get("id")):
+            continue
+        predicted = find_album_dir_filesystem(other)
+        if predicted is None or not _paths_equal(predicted, album_dir):
+            continue
+        try:
+            full = get_album(other["id"], token)
+        except QobuzError:
+            unchecked = True
+            continue
+        if not (full.get("tracks") or {}).get("items"):
+            continue
+        other_fit = fit(full)
+        if other_fit is not None and (best_fit is None or other_fit[0] > best_fit[0]):
+            best, best_fit = full, other_fit
+    if best_fit is None or (unchecked and not best_fit[1]):
+        return None, unchecked
+    return best, False
+
+
+def _edition_gap(album, existing, album_dir):
+    """compute_missing for a gap fill from ``album``, counting a song the
+    folder holds as another version as present, so the fill leaves it out."""
+    tracks = album["tracks"]["items"]
+    missing, _present = compute_missing(tracks, existing)
+    others = {id(t) for t in held_by_other_versions(album, existing, album_dir, missing)}
+    missing = [t for t in missing if id(t) not in others]
+    left = {id(t) for t in missing}
+    return missing, [t for t in tracks if id(t) not in left]
+
+
 @dataclass
 class DirMatch:
     """How one owned folder matched the catalog. status is one of: partial,
     complete, false_match, low_overlap, predicted_path_mismatch, no_tracks,
-    no_match."""
+    other_edition (no listed release is the edition the folder holds),
+    unchecked (Qobuz did not return a release that could be it), no_match."""
     status: str
     album_dir: Path
     qobuz_album: dict | None = None
@@ -622,6 +716,14 @@ def match_album_dir(album_dir, artist_name, token, *, catalog, prefer_hires):
     # album.
     if missing and len(present) * 2 < len(existing):
         return DirMatch("low_overlap", album_dir, album, existing=existing)
+    if missing:
+        held, unchecked = _held_edition(album, existing, album_dir, artist_name,
+                                        token, catalog, prefer_hires)
+        if held is None:
+            return DirMatch("unchecked" if unchecked else "other_edition",
+                            album_dir, album, existing=existing)
+        album = held
+        missing, present = _edition_gap(album, existing, album_dir)
     status = "partial" if missing else "complete"
     return DirMatch(status, album_dir, album,
                     list(missing), list(present), existing)
@@ -718,12 +820,13 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
                            handled_ids=frozenset(), resolved_dirs=frozenset(),
                            owned_titles=None, token=None, quick=False,
                            single_store=None, include_hidden=False,
-                           release_types=None, on_disk=None):
+                           release_types=None, on_disk=None, unchecked=None):
     """Catalog albums the owned-album pass didn't account for: fully-missing
     releases, plus a collaboration filed under another artist's folder that
-    still has track gaps. Shared by the CLI missing-albums step and the web
-    scan. handled_ids / resolved_dirs / owned_titles come from the owned pass so
-    an album already matched to a folder isn't re-offered as missing.
+    still has track gaps in the edition that folder holds. Shared by the CLI
+    missing-albums step and the web scan. handled_ids / resolved_dirs /
+    owned_titles come from the owned pass so an album already matched to a
+    folder isn't re-offered as missing.
 
     release_types (artist_release_types) decides what counts as missing: only
     albums Qobuz files as the artist's albums, live releases, compilations or
@@ -740,7 +843,8 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
     snapshot can record the whole truth and filter when it displays.
 
     ``on_disk`` collects the ids of the albums left out because a folder
-    holds them.
+    holds them, and ``unchecked`` the folders whose edition Qobuz left
+    unchecked by not returning a release.
     """
     def held(album):
         if on_disk is not None and album.get("id") is not None:
@@ -805,8 +909,22 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
             if (len(present) * 2 >= len(existing)
                     or holds_recordings(tracks, existing)):
                 if key in fill_keys and missing and present and not resolved:
-                    gaps.append(AlbumGap(album, album_dir,
-                                         list(missing), list(present)))
+                    edition, missed = _held_edition(
+                        album, existing, album_dir, artist_name, token, catalog,
+                        opts.prefer_hires)
+                    if missed and unchecked is not None:
+                        unchecked.add(str(album_dir))
+                    if edition is not None:
+                        missing, present = _edition_gap(edition, existing, album_dir)
+                        missing = [t for t in missing if not unstreamable(t)]
+                    if (edition is not None and missing
+                            and str(edition.get("id")) not in handled_id_keys
+                            and not _is_single(single_store, artist_name, edition)
+                            and (include_hidden
+                                 or not _is_hidden(hidden, artist_name, edition))):
+                        handled_id_keys.add(str(edition.get("id")))
+                        gaps.append(AlbumGap(edition, album_dir,
+                                             list(missing), list(present)))
                 held(album)
                 continue
         # Not resolved, or resolved to a wrong folder.
@@ -861,7 +979,8 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
         artist_dir = resolve_artist_dir(query)
     album_dirs = list_artist_album_dirs(artist_dir) if artist_dir else []
     owned_titles = owned_album_titles(album_dirs)
-    artist_id, artist_name = resolve_artist(query, token, owned_titles)
+    artist_id, artist_name, by_lead = resolve_folder_artist(
+        query, token, album_dirs)
     if not artist_id:
         return DiscoveryResult(None, None)
 
@@ -898,6 +1017,8 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
                              handled_ids, resolved_dirs,
                              include_hidden=include_hidden)
     result.on_disk.update(str(album_id) for album_id in handled_ids)
+    if any(m.status == "unchecked" for m in matches):
+        result.catalog_incomplete = True
 
     # Skip the catalog walk for an artist you own only downloaded singles by - they
     # aren't one you're collecting, so their back catalogue shouldn't surface.
@@ -907,20 +1028,60 @@ def find_missing_for_artist(query, *, token, opts=None, artist_dir=None,
                          or _collecting(single_store, artist_name, album_dirs,
                                         complete_dirs)):
         handled_keys = {str(album_id) for album_id in handled_ids}
-        release_types = artist_release_types(
+        # A folder its first-named artist stands in for holds a few of that
+        # artist's albums: it offers their gaps and lists nothing missing.
+        release_types = None if by_lead else artist_release_types(
             artist_id, artist_name, token,
             [a for a in catalog if str(a.get("id")) not in handled_keys])
-        result.gaps.extend(discover_fully_missing(
+        unchecked = set()
+        gaps = discover_fully_missing(
             artist_name, catalog, opts, hidden=hidden, handled_ids=handled_ids,
             resolved_dirs=resolved_dirs, owned_titles=owned_titles, token=token,
             single_store=single_store, include_hidden=include_hidden,
-            release_types=release_types, on_disk=result.on_disk))
+            release_types=release_types, on_disk=result.on_disk,
+            unchecked=unchecked)
+        if unchecked:
+            result.catalog_incomplete = True
+        if by_lead:
+            result.gaps.extend(
+                gap for gap in gaps if gap.on_disk_dir is not None
+                and _paths_equal(gap.on_disk_dir.parent, artist_dir))
+        else:
+            result.gaps.extend(
+                gaps_this_folder_offers(gaps, artist_id, artist_dir, token))
 
     vlog(f"  discovery({artist_name!r}): {len(result.partials)} partial, "
          f"{len(result.fully_missing)} fully-missing, "
          f"{len(result.complete)} complete, {len(result.unmatched_dirs)} unmatched, "
          f"{len(result.skipped)} skipped")
     return result
+
+
+def gaps_this_folder_offers(gaps, artist_id, artist_dir, token):
+    """``gaps`` found from ``artist_dir`` less the albums another artist
+    folder offers: one whose own scan resolves to ``artist_id`` too. An album
+    in a folder that can't be read stays here, as that folder can't offer
+    it. A failed artist search raises ArtistSearchUnavailable, as it does
+    for the folder's own artist.
+    """
+    owners = {}
+    kept = []
+    for gap in gaps:
+        folder = gap.on_disk_dir.parent if gap.on_disk_dir else None
+        if (folder is None or normalize(folder.name) in tags.VA_NORMALIZED
+                or (artist_dir is not None and _paths_equal(folder, artist_dir))):
+            kept.append(gap)
+            continue
+        if folder not in owners:
+            try:
+                owners[folder] = resolve_folder_artist(
+                    folder.name, token, list_artist_album_dirs(folder))[0]
+            except OSError as e:
+                vlog(f"  couldn't read {folder.name!r}: {e}")
+                owners[folder] = None
+        if owners[folder] is None or str(owners[folder]) != str(artist_id):
+            kept.append(gap)
+    return kept
 
 
 def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
@@ -944,8 +1105,10 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     if artist_dir is None:
         artist_dir = resolve_artist_dir(query)
     album_dirs = list_artist_album_dirs(artist_dir) if artist_dir else []
-    artist_id, artist_name = resolve_artist(query, token,
-                                            owned_album_titles(album_dirs))
+    artist_id, artist_name, by_lead = resolve_folder_artist(
+        query, token, album_dirs)
+    if by_lead:
+        return NewReleaseResult(None, artist_name, by_lead=True)
     if not artist_id:
         # No id and no name is Qobuz answering "no such artist"; an id-less
         # name is a partial response the next check may well resolve, so only
@@ -1020,9 +1183,11 @@ def classify_owned_match(result, m, hidden, single_store, artist_name,
                          handled_ids, resolved_dirs, include_hidden=False):
     """Fold one DirMatch into the running DiscoveryResult, recording which
     catalog ids and folders the owned pass has now accounted for. A track-less
-    match still counts as accounted-for (its folder fuzz-resolved there), so
-    the missing pass won't re-offer that album; a false match, a predicted-path
-    mismatch, a low-overlap wrong-album match, or no-match does not."""
+    match, or one where no listed release is the folder's edition or Qobuz
+    left one that could be unchecked, still counts as accounted-for (its
+    folder fuzz-resolved there), so the missing pass won't re-offer that
+    album; a false match, a predicted-path mismatch, a low-overlap
+    wrong-album match, or no-match does not."""
     ad = m.album_dir
     if m.status == "no_match":
         result.unmatched_dirs.append(ad)
@@ -1051,8 +1216,8 @@ def classify_owned_match(result, m, hidden, single_store, artist_name,
     if m.qobuz_album and m.qobuz_album.get("id") is not None:
         handled_ids.add(m.qobuz_album["id"])
     resolved_dirs.add(str(ad))
-    if m.status == "no_tracks":
-        result.skipped.append({"dir": ad, "reason": "no_tracks",
+    if m.status in ("no_tracks", "other_edition", "unchecked"):
+        result.skipped.append({"dir": ad, "reason": m.status,
                                "qobuz_title": (m.qobuz_album or {}).get("title") or "?"})
         return
     if m.status == "partial":

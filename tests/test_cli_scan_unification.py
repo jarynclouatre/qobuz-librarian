@@ -120,7 +120,8 @@ def _album_gaps_over_one_album(monkeypatch, tmp_path, status, answers):
                             lambda _d: [album_dir])
         monkeypatch.setattr(module, "_flush_stdin", lambda: None)
     monkeypatch.setattr(walk, "clear_scan_caches", lambda: None)
-    monkeypatch.setattr(artist, "resolve_artist", lambda *_a: (None, None))
+    monkeypatch.setattr(artist, "resolve_folder_artist",
+                        lambda *_a: (None, None, False))
     monkeypatch.setattr(artist, "match_album_dir", lambda *_a, **_k: match)
     monkeypatch.setattr(artist.time, "sleep", lambda *_a: None)
     replies = iter(answers)
@@ -248,7 +249,8 @@ def test_ctrl_c_in_a_second_artist_run_keeps_both_runs_approvals(
     journal.save_pending_queue([queued(dirs[0])], mode="artist")
 
     monkeypatch.setattr(artist, "list_artist_album_dirs", lambda _d: dirs)
-    monkeypatch.setattr(artist, "resolve_artist", lambda *_a: (None, None))
+    monkeypatch.setattr(artist, "resolve_folder_artist",
+                        lambda *_a: (None, None, False))
     monkeypatch.setattr(artist, "_admit_new_queue_items", lambda *_a: None)
     monkeypatch.setattr(artist, "_flush_stdin", lambda: None)
     monkeypatch.setattr(artist, "match_album_dir", lambda d, *_a, **_k:
@@ -292,7 +294,8 @@ def test_switching_to_a_sibling_keeps_the_folder_the_user_picked(
     monkeypatch.setattr(cfg, "ARTIST_API_DELAY", 0)
     monkeypatch.setattr(artist, "list_artist_album_dirs",
                         lambda _d: [picked, other, third])
-    monkeypatch.setattr(artist, "resolve_artist", lambda *_a: (None, None))
+    monkeypatch.setattr(artist, "resolve_folder_artist",
+                        lambda *_a: (None, None, False))
     monkeypatch.setattr(artist, "_flush_stdin", lambda: None)
     album = {"id": "q1", "title": "Masterpiece",
              "tracks": {"items": [{"id": 1}, {"id": 2}]}}

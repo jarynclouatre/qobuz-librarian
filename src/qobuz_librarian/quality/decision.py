@@ -499,11 +499,14 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
     # Pre-fetch artist catalog once so per-folder matching stays local. The
     # artist is the one the Library pass resolves, so both passes of a scan
     # read the same catalog. Failure here is non-fatal;
-    # find_qobuz_album_for_dir falls back to search.
+    # find_qobuz_album_for_dir falls back to search. A folder named for
+    # several artists is matched under the first-named one standing in.
     catalog = []
     try:
-        artist_id, _name = discovery.resolve_artist(
-            artist_name, token, discovery.owned_album_titles(album_dirs))
+        artist_id, resolved_name, by_lead = discovery.resolve_folder_artist(
+            artist_name, token, album_dirs)
+        if by_lead:
+            artist_name = resolved_name
         if artist_id:
             catalog, _ = get_artist_albums(artist_id, token, limit=cfg.ARTIST_CATALOG_LIMIT)
     except (QobuzError, discovery.ArtistSearchUnavailable):

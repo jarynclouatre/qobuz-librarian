@@ -21,6 +21,7 @@ from qobuz_librarian.library import missing_types, scanner
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
     _count_audio_files_in,
+    _release_title,
     album_quality_label,
     album_year,
     bonus_versions,
@@ -33,10 +34,12 @@ from qobuz_librarian.library.discovery import (
     DiscoveryOpts,
     artist_release_types,
     discover_fully_missing,
+    gaps_this_folder_offers,
     match_album_dir,
     owned_album_titles,
     resolve_artist,
     resolve_artist_dir,
+    resolve_folder_artist,
 )
 from qobuz_librarian.library.scanner import (
     clear_scan_caches,
@@ -174,9 +177,10 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     # Resolve the artist + pre-fetch the catalog.
     vlog("  Resolving artist + pre-fetching catalog …")
     artist_search_failed = False
+    by_lead = False
     try:
-        artist_id, resolved_name = resolve_artist(
-            artist_name, token, owned_album_titles(album_dirs))
+        artist_id, resolved_name, by_lead = resolve_folder_artist(
+            artist_name, token, album_dirs)
     except ArtistSearchUnavailable:
         artist_id, resolved_name = None, None
         artist_search_failed = True
@@ -426,6 +430,23 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             results.append({"dir": ad, "result": "no_tracks"})
             continue
 
+        if m.status == "other_edition":
+            log.info(fmt(C.YELLOW,
+                "    ⚠  This folder doesn't hold a single version of the album "
+                f"that Qobuz lists (closest: {_release_title(album)}), so "
+                "filling it would mix versions. Skipping."))
+            results.append({"dir": ad, "result": "other_edition",
+                            "qobuz_title": album.get("title") or "?"})
+            continue
+
+        if m.status == "unchecked":
+            log.info(fmt(C.YELLOW,
+                "    ⚠  Qobuz didn't return every version of this album, so "
+                "this folder's version couldn't be checked. Skipping for now."))
+            results.append({"dir": ad, "result": "unchecked",
+                            "qobuz_title": album.get("title") or "?"})
+            continue
+
         existing, missing, present = m.existing, m.missing, m.present
 
         # Artist mode: complete is complete.
@@ -620,7 +641,11 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
 
     # catalog is None when the pre-fetch didn't land (no artist match, or a
     # failed fetch) so the missing-albums step re-fetches instead of trusting
-    # an empty list as "nothing on Qobuz".
+    # an empty list as "nothing on Qobuz". A folder its first-named artist
+    # stands in for holds a few of that artist's albums and lists nothing
+    # missing.
+    if by_lead:
+        catalog = []
     return (results, owned_titles, handled_ids, resolved_dirs, artist_id,
             catalog if catalog_fetched else None)
 
@@ -670,7 +695,7 @@ def _gap_fill_result_bucket(result):
         return "false_match"
     if status == "dry_run":
         return "dry_run"
-    if status in {"no_tracks", "lossy_only"}:
+    if status in {"no_tracks", "lossy_only", "other_edition"}:
         return "nothing_available"
     if status in {"low_overlap", "sibling_skipped"}:
         return "held"
@@ -706,7 +731,7 @@ def _unlisted_types_note(release_types):
 def run_artist_missing_albums(artist_name, owned_titles, args, token,
                       artist_id=None, handled_ids=None, resolved_dirs=None,
                       prefetched_catalog=None, *, shared_queue=None, fresh=False,
-                      hidden=None):
+                      hidden=None, artist_dir=None):
     """List the artist's Qobuz albums with already-owned ones filtered out,
     prompt to download some. The matching is discovery.discover_fully_missing;
     this is the numbered-list presentation around it. Returns
@@ -715,6 +740,10 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     ``hidden`` is a loaded hidden-store from a whole-library walk, so albums
     dismissed in the web review stay dismissed here. Asking for one artist by
     name leaves it None and sees the whole catalogue.
+
+    ``artist_dir`` is the folder a whole-library walk is on. An album in
+    another folder that resolves to the same artist is left to that folder,
+    where the walk offers it.
     """
     section(f"Step 2: Missing albums by {artist_name}, not yet in your library")
 
@@ -768,6 +797,14 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         resolved_dirs=resolved_dirs or set(),
         owned_titles=owned_titles or {}, token=token,
         release_types=release_types)
+    if artist_dir is not None:
+        try:
+            gaps = gaps_this_folder_offers(gaps, artist_id, artist_dir, token)
+        except ArtistSearchUnavailable:
+            log.info(fmt(C.YELLOW,
+                "  ⚠  Qobuz couldn't complete the artist lookup. "
+                "Try this step again."))
+            return 0, True
 
     # Partially-present albums (a collaboration filed elsewhere) list first.
     partials = [g for g in gaps if g.on_disk_dir is not None]

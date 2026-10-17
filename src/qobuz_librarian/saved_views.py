@@ -134,11 +134,12 @@ def refresh_after_changes(changes, token, args, *, upgrade=True,
     or other album result with its ``album``. With ``claims_album``, an
     imported album also loses its single-track mark.
 
-    Only views that are current are touched. Library and New releases drop
-    each exact album; Upgrade and Downsample scan each changed artist again,
-    Upgrade only when ``upgrade`` is set and a token is at hand. A view that
-    cannot be brought up to date is marked for a refresh instead, and nothing
-    here raises.
+    Only views that are current are touched, except that the saved Library
+    results always drop each exact album, so a refresh derives its artist
+    again rather than reuse them. New releases drops each exact album too;
+    Upgrade and Downsample scan each changed artist again, Upgrade only when
+    ``upgrade`` is set and a token is at hand. A view that cannot be brought
+    up to date is marked for a refresh instead, and nothing here raises.
     """
     if not changes:
         return
@@ -182,14 +183,13 @@ def refresh_after_changes(changes, token, args, *, upgrade=True,
         artist_id = str((album.get("artist") or {}).get("id") or "").strip()
         if (album_id, artist_id) not in seen_albums:
             seen_albums.add((album_id, artist_id))
-            if was_current["library"]:
-                try:
-                    updated = library_scan_state.remove_album(album_id)
-                except Exception as exc:
-                    updated = False
-                    vlog(f"saved Library update failed: {exc}")
-                if not updated:
-                    stale.add("library")
+            try:
+                updated = library_scan_state.remove_album(album_id)
+            except Exception as exc:
+                updated = False
+                vlog(f"saved Library update failed: {exc}")
+            if not updated and was_current["library"]:
+                stale.add("library")
             if was_current["new_releases"]:
                 try:
                     updated = new_releases.note_owned_album(album)

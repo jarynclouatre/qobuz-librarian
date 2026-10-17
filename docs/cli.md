@@ -31,8 +31,8 @@ docker compose run --rm -it qobuz-librarian cli --repair
 
 The walks remember what you answered, yes or no, and leave it out next time:
 the Library walk those artists, and Gap Fill those albums along with the ones
-it found complete or could not match, until the album's folder gains or loses
-tracks. Each says how many it left out.
+it found complete, could not match, or had nothing on Qobuz to fill from, until
+the album's folder gains or loses tracks. Each says how many it left out.
 `--reset-walk-seen` brings them all back.
 
 A real Library walk or Gap Fill run refreshes the collection backup after it

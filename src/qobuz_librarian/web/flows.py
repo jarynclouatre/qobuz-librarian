@@ -1568,9 +1568,10 @@ def _scan_library_artist(artist_dir, token, partial_only, hidden):
         single_store=hidden if cfg.SUPPRESS_SINGLE_TRACK_GAPS else None,
         want_missing=not partial_only, include_hidden=True)
     artist_id = str(result.artist_id) if result.artist_id else None
-    # None signals "don't seed a baseline", a transient short-page fetch
-    # isn't the whole discography, so seeding it would later dump the dropped
-    # albums as "new".
+    # None signals "don't seed a baseline" or save the artist: a transient
+    # short-page fetch isn't the whole discography, so seeding it would later
+    # dump the dropped albums as "new", and a folder Qobuz left unchecked is
+    # checked again on the next refresh.
     catalog_ids = None if result.catalog_incomplete else [
         str(a["id"]) for a in result.catalog
         if is_lossless_album(a) and a.get("id") is not None]
@@ -1745,6 +1746,11 @@ def scan_library(job, token, partial_only=False, force_full=False):
     if not _apply_saved_refresh_settings(job):
         job.summary = "Stopped before anything turned up."
         return
+    # Albums downloaded before this scan reads the library leave the parked
+    # review now. Left for the next page load, they would also take away
+    # what the scan finds for them again, such as the Gap Fill a one-track
+    # download leaves.
+    apply_pending_review_removals()
     previous_generation = generation_state.load()
     previous_attempt_status = str(
         (previous_generation.get("latest_attempt") or {}).get("status")
@@ -2585,7 +2591,7 @@ def scan_new_releases(job, token):
                 current_seen[result.artist_id] = result.current_ids
             elif getattr(result, "unresolved", False):
                 unresolved_names.append(futures[fut].name)
-            else:
+            elif not getattr(result, "by_lead", False):
                 # A short or failed catalogue fetch is unchecked, not a clean
                 # zero-release result.
                 failed_count += 1
