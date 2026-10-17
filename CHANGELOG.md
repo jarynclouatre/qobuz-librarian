@@ -2,6 +2,19 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.4.0] - 2026-10-17
+
+A download cut off by a restart settles itself, busy pages open at once, and storage folders are given as real folders.
+
+- A download cut off by a crash or restart is cleared at the next start and queued again, fetching only what is still missing; after a third cut-off in a row it waits for **Retry**. Tracks beets had already filed stay in your library and the job says so. A download kept as a separate copy waits for **Retry**. The Retry and Give up choices for interrupted downloads are gone: downloads pause only when a staged file cannot be checked, and the log names it.
+- An interrupted Library, New releases or Restore from backup run puts its albums back in the review, ticked, and names them. An incomplete `--no-import` download is kept for you to import, and Diagnostics lists it, and the files of a failed download, under their own names.
+- Storage folders (`MUSIC_ROOT`, `STAGING_DIR`, `UPGRADE_BACKUP_DIR`, `DATA_DIR` and the beets folders) must be real folders. If a symlink sits anywhere on one's path, the app does not start and prints the real path to set instead; see the configuration guide. The beets database works on any local filesystem.
+- Home, Settings and Diagnostics open in a fraction of a second even with large backups, a whole-album backup to another drive takes seconds, and Repair scans and beets writes are lighter.
+- Repair fetches a damaged track at its album's own quality. Upgrade and Gap Fill check that the folders they write to are writable before copying anything and name the one that is not, albums with thousands of files back up normally, restoring a backup marks Upgrade for a refresh, and an upgrade finished at start-up leaves the Upgrade list.
+- A backup holding lyrics the album lacks is kept past its retention, and Remove or Delete originals copies those lyrics onto the album first. Diagnostics names the album a consolidation merged into and the album of an unfinished copy, says when a backup's track is missing before you press Remove, and offers Remove for an interrupted backup deletion. Leftovers from 1.3.x are tidied at start-up.
+- Migrate finishes an interrupted in-place move when run again, removing the originals it has checked were copied, and its preview says so. It carries lyrics of tracks moved earlier and cover art above CD1 and CD2 folders, always writes its report, and shows the same paths in the preview and the result.
+- In the terminal, Ctrl-C at a consolidation prompt cancels with nothing changed and exit status 130, a consolidation that leaves tracks in place ends with "Needs attention" and status 1, and a move refused after a retag says why in plain words.
+
 ## [1.3.4] - 2026-10-16
 
 Search and Library recognise what you own from its recordings, Upgrade offers only the version you have, lyrics follow a few simple rules, and interrupted work picks up cleanly after a restart.
