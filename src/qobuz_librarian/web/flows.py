@@ -5414,9 +5414,11 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
         entries = group["entries"]
         resumes = group["resume_entries"]
         source_folders = {
-            tuple(entry.source_receipt.get("relative", ())[:-1])
+            folder
             for entry in entries + resumes
             if entry.source_receipt is not None
+            for folder in engine.companion_folders(
+                entry.source_receipt.get("relative", ())[:-1])
         }
         resumed = (f"{plural(len(resumes), 'track')} already copied, "
                    f"{'original' if len(resumes) == 1 else 'originals'} to "
@@ -5521,6 +5523,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
                       allow_low_space=False):
     """Copy (or move) the files behind the approved albums into the layout."""
     dest = Path(dest)
+    dest_display, _ = storage._resolve_host_path(str(dest))
     entries = []
     source_root = None
     source_root_receipt = None
@@ -5639,7 +5642,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
                         "A copy that runs out stops partway, with the new "
                         "library incomplete.")
                 job.error = (
-                    f"Not enough free space at {dest}: the "
+                    f"Not enough free space at {dest_display}: the "
                     f"{'move' if in_place else 'copy'} needs about "
                     f"{format_size(need)} but only {format_size(free)} is free. "
                     f"{risk} Free up space, choose another destination, or "
@@ -5695,10 +5698,10 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     elif result.cancelled:
         lead = "Migration stopped early"
     else:
-        lead = f"{plural(result.copied, 'file')} {verb} into {dest}"
+        lead = f"{plural(result.copied, 'file')} {verb} into {dest_display}"
     parts = [lead]
     if has_problem or result.cancelled:
-        parts.append(f"{plural(result.copied, 'file')} {verb} into {dest}")
+        parts.append(f"{plural(result.copied, 'file')} {verb} into {dest_display}")
     if result.skipped:
         parts.append(f"{result.skipped} skipped (already present)")
     if result.companions:
@@ -5745,7 +5748,8 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
             f"{results_error}. Check the migration details before running it "
             "again.")
     else:
-        parts.append(f"report saved at {results_manifest}")
+        report_display, _ = storage._resolve_host_path(str(results_manifest))
+        parts.append(f"report saved at {report_display}")
     if companion_failed:
         attention = plural(companion_failed, "sidecar failure")
         if job.error:

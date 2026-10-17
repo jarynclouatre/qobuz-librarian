@@ -366,6 +366,11 @@ async def _lifespan(_app: FastAPI):
         runtime._JOBS_RESTORED = False
     queue_recovery._STARTUP_RECOVERY_RESULT = None
     queue_recovery._STARTUP_RECOVERY_UNKNOWN = False
+    settings_store.load()
+    try:
+        cfg.validate_storage_roots()
+    except ValueError as exc:
+        raise StartupRefused(f"invalid storage paths: {exc}") from None
     qobuz_access._scrub_stored_credentials(_log)
     cli_logging.attach_file_handler(cfg.APP_LOG_FILE, cfg.LOG_LEVEL)
     if web_auth.auth_disabled():
@@ -418,11 +423,6 @@ async def _lifespan(_app: FastAPI):
                 "account. Seed WEB_AUTH_USER / WEB_AUTH_PASSWORD (compose) to "
                 "close this window, and complete setup promptly on a trusted "
                 "network.")
-    settings_store.load()
-    try:
-        cfg.validate_storage_roots()
-    except ValueError as exc:
-        raise StartupRefused(f"invalid storage paths: {exc}") from None
     api_auth.check_env_credentials()
     api_auth.sweep_streamrip_run_copies()
     # Acquire the shared run lock so separate CLI runs cannot overlap Web work.

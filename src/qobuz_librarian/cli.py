@@ -827,9 +827,6 @@ def main():
     args = parse_args()
     set_verbose(args.verbose)
     set_quiet(args.quiet)
-    # role="cli" → a separate log file so a `docker exec` CLI run sharing the
-    # container with the long-lived web server can't race it on log rollover.
-    attach_file_handler(cfg.APP_LOG_FILE, cfg.LOG_LEVEL, role="cli")
     try:
         cfg.validate_storage_roots()
     except ValueError as exc:
@@ -838,6 +835,9 @@ def main():
             f"\n✗  Invalid storage paths: {exc}\n"
             "   Refusing to proceed.\n",
         ), EXIT_CONFIG)
+    # role="cli" → a separate log file so a `docker exec` CLI run sharing the
+    # container with the long-lived web server can't race it on log rollover.
+    attach_file_handler(cfg.APP_LOG_FILE, cfg.LOG_LEVEL, role="cli")
     if args.quiet:
         set_color_enabled(False)
 

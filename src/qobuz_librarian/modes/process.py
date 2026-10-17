@@ -99,7 +99,10 @@ from qobuz_librarian.library.tags import (
     normalize,
     strip_edition_suffix,
 )
-from qobuz_librarian.modes.consolidate import consolidate_albums
+from qobuz_librarian.modes.consolidate import (
+    ConsolidationCancelled,
+    consolidate_albums,
+)
 from qobuz_librarian.quality.decision import (
     compare_album_quality,
     existing_track_quality,
@@ -1362,10 +1365,12 @@ def process_album(album, args, *, allow_force=True, label=None,
             "tracks_downloaded": 0,
             "tracks_unavailable": len(missing),
         })
-        consolidation_interrupted = False
+        consolidation_interrupted = consolidation_cancelled = False
         if args.consolidate:
             try:
                 consolidate_albums(album, args)
+            except ConsolidationCancelled:
+                consolidation_cancelled = True
             except KeyboardInterrupt:
                 consolidation_interrupted = True
                 log.info(fmt(C.GRAY, "\n  Consolidation interrupted."))
@@ -1374,6 +1379,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             "n_total": len(qobuz_tracks),
             "unavailable_tracks": [track.get("title") or "?" for track in missing],
             "consolidation_interrupted": consolidation_interrupted,
+            "consolidation_cancelled": consolidation_cancelled,
         }
 
     # A dry run has already printed the plan above; stop before the download
@@ -2168,7 +2174,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         clear_attempts_after_import(download_result)
 
     n_consolidated = 0
-    consolidation_interrupted = False
+    consolidation_interrupted = consolidation_cancelled = False
     # treat_as_new keeps this download as its own edition; consolidation folds
     # editions together by deleting overlapping sibling tracks, so the two are
     # mutually exclusive. Never consolidate a deliberately separate edition.
@@ -2176,6 +2182,9 @@ def process_album(album, args, *, allow_force=True, label=None,
         if imported:
             try:
                 n_consolidated = consolidate_albums(album, args)
+            except ConsolidationCancelled as cancel:
+                n_consolidated = cancel.moved
+                consolidation_cancelled = True
             except KeyboardInterrupt:
                 consolidation_interrupted = True
                 log.info(fmt(C.GRAY, "\n  Consolidation interrupted."))
@@ -2463,6 +2472,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         "auto_upgrade": bool(auto_upgrade_active),
         "quality_verdict": quality_verdict,
         "consolidation_interrupted": consolidation_interrupted,
+        "consolidation_cancelled": consolidation_cancelled,
         "consolidated_tracks_removed": n_consolidated,
         "elapsed_s": int(elapsed),
         **downsample_outcome,

@@ -352,6 +352,47 @@ def test_execute_never_clobbers_a_destination_or_moves_a_changed_source(
         == b"audio-bytes-0"
 
 
+def test_rerun_carries_lyrics_of_a_track_the_stopped_move_already_moved(
+        tmp_path, monkeypatch):
+    plan = _placed_plan(tmp_path, n=2)
+    for entry in plan.placed:
+        entry.source.with_suffix(".lrc").write_text(entry.source.name)
+    first, second = [(e.source, e.meta, "tags") for e in plan.placed]
+    plan = m.build_plan([first, second], plan.dest_root)
+    m.write_manifest(plan)
+    retire_source = m._retire_source
+
+    def interrupt_after_delete(*args):
+        assert retire_source(*args)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(m, "_retire_source", interrupt_after_delete)
+    assert m.execute_plan(plan, in_place=True).interrupted
+    monkeypatch.setattr(m, "_retire_source", retire_source)
+    moved = plan.dest_root / plan.placed[0].dest_rel
+    assert not moved.with_suffix(".lrc").exists()
+
+    rerun = m.build_plan([second], plan.dest_root)
+    m.write_manifest(rerun)
+    m.execute_plan(rerun, in_place=True)
+    assert moved.with_suffix(".lrc").read_text() == "track0.flac"
+
+
+def test_move_carries_the_cover_above_disc_folders(tmp_path):
+    album = tmp_path / "src" / "Album"
+    items = []
+    for disc in (1, 2):
+        (album / f"CD{disc}").mkdir(parents=True)
+        track = album / f"CD{disc}" / "01.flac"
+        track.write_bytes(b"disc-%d" % disc)
+        items.append((track, _meta(disc=disc, disctotal=2), "tags"))
+    (album / "cover.jpg").write_bytes(b"cover")
+    plan = m.build_plan(items, tmp_path / "dest")
+    assert m.execute_plan(plan, in_place=True).companions == 1
+    assert (plan.dest_root / "Artist/Album (2017)/cover.jpg").read_bytes() \
+        == b"cover"
+
+
 # ── web flow (scan → review candidates → execute copy) ─────────────────────────
 
 def _sealed_web_choice(files, dest):

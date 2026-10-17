@@ -40,6 +40,7 @@ from qobuz_librarian.ui_cli.colors import C, banner, fmt
 from qobuz_librarian.ui_cli.errors import (
     EXIT_AUTH,
     EXIT_GENERAL,
+    EXIT_INTERRUPT,
     auth_lost_msg,
     die,
     plural,
@@ -503,6 +504,8 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 if exit_code:
                     clause = "review the result above and retry if needed"
                     log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+                elif result.get("consolidation_cancelled"):
+                    return EXIT_INTERRUPT
                 else:
                     log.info(fmt(C.GREEN, "  ✓  Done."))
                 return exit_code

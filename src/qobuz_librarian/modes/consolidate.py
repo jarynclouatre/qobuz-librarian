@@ -31,6 +31,19 @@ from qobuz_librarian.ui_cli.prompts import (
     print_per_track_consolidation,
 )
 
+
+class ConsolidationCancelled(Exception):
+    """Ctrl-C at a consolidation prompt, after ``moved`` tracks went to the
+    backup folder."""
+
+    def __init__(self, moved):
+        super().__init__(moved)
+        self.moved = moved
+
+
+_CHANGED_SINCE_REVIEW = (
+    "a track or its library entry changed after the review. Run the "
+    "consolidation again to review them as they are now")
 _YEAR_RE = re.compile(r"(?<!\d)(19\d\d|20\d\d)(?!\d)")
 
 
@@ -591,7 +604,7 @@ class _BeetsItemSeal:
             return False, None, "the reviewed database binding was closed"
         if self.database is None:
             if not _no_database() or not before_matches():
-                return False, None, "the reviewed files or database changed"
+                return False, None, _CHANGED_SINCE_REVIEW
             result = mutate()
             if result is None:
                 return False, None, "the protected backup could not be made"
@@ -603,7 +616,7 @@ class _BeetsItemSeal:
         try:
             with beets_db.transaction(self.database) as connection:
                 if not self._matches(connection, before_matches):
-                    raise OSError("the reviewed files or beets rows changed")
+                    raise OSError(_CHANGED_SINCE_REVIEW)
                 # The recoverable copy must exist before database rows are
                 # removed.
                 result = mutate()
@@ -1019,14 +1032,13 @@ def execute_consolidation(summary):
                 "         The live track names and Beets rows may now "
                 "disagree; restore from that retained backup before retrying.",
             ))
+            if reason:
+                log.info(fmt(C.GRAY, f"         {reason}."))
+        elif reason == _CHANGED_SINCE_REVIEW:
+            log.info(fmt(C.RED, f"      ✗  Nothing was moved: {reason}."))
         else:
             log.info(fmt(
-                C.RED,
-                "      ✗  consolidation stopped before an exact backup was "
-                "committed; the reviewed files were left in place.",
-            ))
-        if reason:
-            log.info(fmt(C.GRAY, f"         {reason}."))
+                C.RED, f"      ✗  Consolidation stopped: {reason or 'an unexpected error'}."))
         return [], attempted
 
     if binding.database.tracked:
@@ -1062,6 +1074,8 @@ def consolidate_albums(album, args):
         log.info(fmt(C.GRAY,   "     Skipping consolidation."))
         return 0
     summaries = []
+    n_actioned = 0
+    moving = False
     try:
         try:
             primary = _review_album(primary_dir)
@@ -1115,7 +1129,6 @@ def consolidate_albums(album, args):
         print_consolidation_overview(summaries)
         print()
         log.info(fmt(C.BOLD + C.CYAN, "  Per-sibling actions:"))
-        n_actioned = 0
 
         for summary in summaries:
             sibling_dir = summary["dir"]
@@ -1202,8 +1215,11 @@ def consolidate_albums(album, args):
                     ):
                         log.info(fmt(C.GRAY, "    Skipped."))
                         break
+                    moving = True
                     deleted, failures = execute_consolidation(summary)
                     deleted_count = len(deleted)
+                    n_actioned += deleted_count
+                    moving = False
                     if deleted_count:
                         log.info(fmt(
                             C.GREEN,
@@ -1216,11 +1232,17 @@ def consolidate_albums(album, args):
                             f"    ✗  {plural(failures, 'track')} not "
                             "consolidated; see above.",
                         ))
-                    n_actioned += deleted_count
                     break
                 log.info(fmt(C.GRAY, "    Enter d / s / k / q."))
 
         return n_actioned
+    except KeyboardInterrupt:
+        if moving:
+            raise
+        log.info(fmt(C.GRAY, "\n  Consolidation cancelled. " + (
+            f"{plural(n_actioned, 'track')} had already moved to the backup "
+            "folder." if n_actioned else "Nothing changed.")))
+        raise ConsolidationCancelled(n_actioned) from None
     finally:
         for summary in summaries:
             binding = summary.get("_binding")
