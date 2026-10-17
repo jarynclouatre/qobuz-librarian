@@ -2121,10 +2121,14 @@ def library_backup_record_absent(value, *, expected_owner=None) -> bool:
     )
     if canonical is None:
         return False
+    return _backup_entry_absent(canonical["path"])
+
+
+def _backup_entry_absent(path) -> bool:
     root_fd = None
     try:
         backup_root = Path(os.path.abspath(os.fspath(cfg.UPGRADE_BACKUP_DIR)))
-        backup_path = Path(canonical["path"])
+        backup_path = Path(path)
         if backup_path.parent != backup_root:
             return False
         root_fd = _open_backup_directory(backup_root)
@@ -4597,6 +4601,12 @@ def _library_path(path, *, create_parents=False):
     return public
 
 
+def library_parents_present(path) -> bool:
+    """Whether every folder from MUSIC_ROOT to the parent of ``path`` is a
+    real folder, without making any."""
+    return _library_path(path) is not None
+
+
 def _plain_tree(root):
     """snapshot_tree of ``root``, or None when anything in it is neither a
     file nor a folder."""
@@ -5371,6 +5381,39 @@ def _put_back_interrupted_backup(root_fd, intent_name):
         return None
     _drop_backup_intent(root_fd, intent_name)
     return origin
+
+
+def settle_library_backup_intent(value, *, expected_owner) -> bool:
+    """Settle a backup a download planned but never sealed; True once
+    nothing is left at its path.
+
+    An album folder a stop left renamed there unsealed goes back while it
+    is untouched beneath unchanged parent folders, and an unfinished copy
+    of an album still whole in its place is removed. A sealed backup, or
+    anything else there, is left alone.
+    """
+    intent = canonical_library_backup_intent(
+        value, expected_owner=expected_owner)
+    if intent is None:
+        return False
+    path = Path(intent["path"])
+    origin = Path(intent["origin"])
+    source_receipt = intent.get("source_receipt")
+    if (
+        source_receipt is not None
+        and os.path.lexists(path)
+        and load_backup_result(path) is None
+        and _library_path(origin) is not None
+        and _album_parents_unchanged(
+            {"origin": intent["origin"], "source_receipt": source_receipt})
+        and _moved_album(path, source_receipt) is True
+    ):
+        _rename_backup_home(path, origin)
+    if not _backup_entry_absent(path):
+        return False
+    if source_receipt is not None:
+        _partial_copy_settled(path.name, origin, source_receipt)
+    return True
 
 
 def _moved_album(path, source_receipt):

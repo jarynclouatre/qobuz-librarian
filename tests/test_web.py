@@ -1251,6 +1251,90 @@ def test_web_writes_pause_while_the_terminal_holds_the_library(client, monkeypat
     assert runtime._CLI_MODE is False
 
 
+def test_resume_web_app_puts_back_an_upgrade_the_terminal_left_cut_short(
+        client, monkeypatch, tmp_path, tagged_flac):
+    """A terminal Upgrade killed part way through its import left the album
+    half replaced after Resume web app, which settled only the saved queue."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.integrations import beets
+    from qobuz_librarian.library import backup as backup_mod
+    from qobuz_librarian.modes import process as proc
+    from qobuz_librarian.web import runtime
+
+    music = tmp_path / "music"
+    album = music / "Feist" / "Multi (2023)"
+    database = tmp_path / "beets.db"
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", database)
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(cfg, "LOCK_FILE", tmp_path / "run.lock")
+    old = [tagged_flac(album / f"0{n}.flac", 200, TITLE=f"Song {n}",
+                       ALBUM="Multi", TRACKNUMBER=str(n)) for n in (1, 2)]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, added REAL)")
+        connection.execute(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB NOT NULL, "
+            "album_id INTEGER, added REAL, disc INTEGER, track INTEGER)")
+        for table in ("album_attributes", "item_attributes"):
+            connection.execute(
+                f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, "
+                "entity_id INTEGER NOT NULL, key TEXT, value TEXT)")
+        connection.execute("INSERT INTO albums VALUES (10, 'Multi', 1000.0)")
+        connection.executemany(
+            "INSERT INTO items VALUES (?, ?, 10, 1000.0, 1, ?)",
+            [(n, os.fsencode(path), n) for n, path in enumerate(old, 1)])
+    connection.close()
+    original = {path.name: path.read_bytes() for path in album.iterdir()}
+    entries = beets.capture_beets_album_entries(album)
+    backup = backup_mod.backup_album_dir(album)
+    tagged_flac(album / "01.flac", 100, TITLE="Song 1", ALBUM="Multi",
+                TRACKNUMBER="1")
+    assert proc.mark_pending_upgrade(backup, entries, [tmp_path / "staging"])
+    monkeypatch.setattr(runtime, "_CLI_MODE", True)
+    monkeypatch.setattr(runtime, "_RUN_LOCK_HANDLE", None)
+
+    try:
+        back = client.post("/settings/mode", data={"target": "web"},
+                           follow_redirects=False)
+        assert back.headers["location"] == "/settings?mode=web#mode"
+        assert {path.name: path.read_bytes()
+                for path in album.iterdir()} == original
+        assert not backup.path.exists()
+    finally:
+        if runtime._RUN_LOCK_HANDLE is not None:
+            runtime._RUN_LOCK_HANDLE.close()
+
+
+def test_a_failed_recovery_read_is_read_again_without_a_restart(
+        client, monkeypatch):
+    """One read error as a download started kept downloads and scans paused
+    until a restart, since the lock retry read nothing while it held the
+    lock."""
+    from qobuz_librarian.queue.startup_recovery import (
+        StartupRecoveryResult,
+        StartupRecoveryStatus,
+    )
+    from qobuz_librarian.web import lifespan, queue_recovery, write_gate
+
+    monkeypatch.setattr(queue_recovery, "_STARTUP_RECOVERY_UNKNOWN", True)
+    monkeypatch.setattr(jm.registry, "pending_and_running", lambda: [])
+    reads = []
+
+    def record(_authority, *, settle=False):
+        reads.append(settle)
+        queue_recovery._STARTUP_RECOVERY_UNKNOWN = False
+        queue_recovery._STARTUP_RECOVERY_RESULT = StartupRecoveryResult(
+            StartupRecoveryStatus.CLEAR)
+        return queue_recovery._STARTUP_RECOVERY_RESULT
+
+    monkeypatch.setattr(queue_recovery, "_record_startup_recovery", record)
+    assert write_gate._web_writes_paused()
+    lifespan._retry_web_run_lock_once(lifespan._log)
+    assert reads == [True]
+    assert not write_gate._web_writes_paused()
+
+
 @pytest.mark.parametrize(
     ("execute_kind", "path"),
     [

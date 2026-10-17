@@ -659,6 +659,21 @@ def _needs_cli_completion_caller(
     return completion_input.origin.kind is CompletionOriginKind.CLI
 
 
+def _waits_for_web_app(journal, retirement, acknowledge_completion):
+    """Whether this finished download waits for the web app to record it in
+    its job, which a run with no acknowledger cannot do."""
+    if acknowledge_completion is not None or retirement.completion_acknowledged:
+        return False
+    completion_input = parse_completion_input_record(
+        retirement.completion_input,
+        expected_owner=RecoveryOwner(journal.operation_id, retirement.item_id),
+    )
+    return (
+        completion_input is not None
+        and completion_input.origin.kind is CompletionOriginKind.WEB_JOB
+    )
+
+
 @contextmanager
 def _capture_live_completion(journal, item, *, expected_manifest_hash=None):
     owner, completion_input, download = _completion_input(journal, item)
@@ -687,35 +702,48 @@ def _block_resolving(authority, journal, item, reason):
         item.item_id,
         queue_state.QueuePhase.BLOCKED,
         block_reason=reason,
+        completion_evidence=None,
     )
     _require_authority(authority)
 
 
 def _recover_complete(authority, journal, item, _acknowledge_completion):
-    with _capture_live_completion(journal, item) as (
-        _managed_lease,
-        live_lease,
-        evidence,
-    ):
-        _require_authority(authority)
-        post_dir = Path(evidence.library_root) / evidence.album_path
-        post_import_action = plan_post_import_action(
+    saved = None
+    try:
+        with _capture_live_completion(journal, item) as (
+            _managed_lease,
+            live_lease,
+            evidence,
+        ):
+            _require_authority(authority)
+            post_dir = Path(evidence.library_root) / evidence.album_path
+            post_import_action = plan_post_import_action(
+                journal,
+                item.item_id,
+                post_dir,
+                authority=authority,
+            )
+            _require_authority(authority)
+            live_lease.revalidate()
+            saved = queue_state.commit_recovered_completed_item_removal(
+                journal,
+                item_id=item.item_id,
+                live_evidence=evidence,
+                post_import_action=post_import_action,
+            )
+            live_lease.revalidate()
+            _require_authority(authority)
+            return saved
+    except (LiveCompletionUnavailable, ManagedEvidenceUnavailable):
+        if saved is not None:
+            raise
+        _block_resolving(
+            authority,
             journal,
-            item.item_id,
-            post_dir,
-            authority=authority,
+            item,
+            "completed-item-proof-unavailable",
         )
-        _require_authority(authority)
-        live_lease.revalidate()
-        saved = queue_state.commit_recovered_completed_item_removal(
-            journal,
-            item_id=item.item_id,
-            live_evidence=evidence,
-            post_import_action=post_import_action,
-        )
-        live_lease.revalidate()
-        _require_authority(authority)
-        return saved
+        return None
 
 
 def _recover_resolving(authority, journal, item, _acknowledge_completion):
@@ -1151,6 +1179,22 @@ def _put_back_library_backup(authority, journal, item):
             f"backed up to {paths['path']} were not put back and this item "
             "remains blocked. Move that file out of the album folder, then "
             "try again."
+        )
+    if reason.startswith("library-backup-origin-missing:"):
+        return _blocked_settlement(
+            f"{Path(paths['origin']).parent} is missing, so this item remains "
+            f"blocked and anything it set aside stays in {paths['path']}. "
+            "Check that the music folder is mounted; if it is and that "
+            "folder was removed, create it again. Then restart Qobuz "
+            "Librarian."
+        )
+    if reason == "library-backup-intent-unsettled":
+        return _blocked_settlement(
+            f"The backup this item began at {paths['path']} was not "
+            "finished and could not be cleared, so this item remains "
+            "blocked. Check that the backup folder is mounted; anything of "
+            f"the album missing from {paths['origin']} is at that path. "
+            "Then restart Qobuz Librarian."
         )
     return _blocked_settlement(
         f"The tracks backed up to {paths['path']} could not be put back into "
@@ -1753,16 +1797,20 @@ def _settle_choice(journal, item, tried):
     """The settlement a blocked download gets on its own, and its outcome.
 
     One Beets stopped part way through keeps what it moved. One Beets filed
-    is checked again first and kept as it is if that fails. Anything else
-    never reached the library, so its partial download goes: a terminal
-    queue keeps the album to resume, and a web job's entry is dropped so
-    the job can be queued again with a fresh plan.
+    is checked again first and kept as it is if that fails, and one whose
+    album changed after it was recorded as finished is kept at once.
+    Anything else never reached the library, so its partial download goes:
+    a terminal queue keeps the album to resume, and a web job's entry is
+    dropped so the job can be queued again with a fresh plan.
     """
     launched = _launched_import(journal.operation_id, item)
     if launched is not None and launched[0] == _IMPORT_PARTIAL:
         return BlockedItemSettlementAction.DISCARD, "set-aside"
     if launched is not None and launched[0] == _IMPORT_FILED:
-        if BlockedItemSettlementAction.RETRY in tried:
+        if (
+            BlockedItemSettlementAction.RETRY in tried
+            or item.block_reason == "completed-item-proof-unavailable"
+        ):
             return BlockedItemSettlementAction.DISCARD, "kept"
         return BlockedItemSettlementAction.RETRY, "checked"
     if journal.mode.startswith("web-job:"):
@@ -2015,6 +2063,12 @@ def _recover_startup_state(
             )
             if retirement is not None:
                 journal, item = retirement
+                if _waits_for_web_app(journal, item, acknowledge_completion):
+                    return StartupRecoveryResult(
+                        StartupRecoveryStatus.ATTENTION_REQUIRED,
+                        classified,
+                        "web-completion-unacknowledged",
+                    )
                 _require_authority(authority)
                 _saved, _final_path, result = finalize_carrier_retirement(
                     journal,

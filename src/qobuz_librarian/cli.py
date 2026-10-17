@@ -157,6 +157,14 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
             "then run Qobuz Librarian again.\n"
         )), file=sys.stderr)
         raise SystemExit(EXIT_GENERAL)
+    elif getattr(result, "reason", None) == "web-completion-unacknowledged":
+        message = (
+            "\n✗  A download the web app finished is waiting for the web app "
+            "to record it.\n"
+            "   The album is in your library, and no work was started here. "
+            "Let the web app take the library once: start it, or choose "
+            "Resume web app in Settings → Mode. Then run this again.\n"
+        )
     else:
         from qobuz_librarian.queue.startup_recovery import (
             BLOCKED_DOWNLOAD_LOG_ENTRY,
@@ -646,7 +654,10 @@ def parse_args():
                    default=cfg.PREFER_HIRES,
                    help="sort 24-bit / higher sample rate results first")
 
-    getting.add_argument("--dry-run",      action="store_true", help="show the plan and change nothing")
+    getting.add_argument("--dry-run",      action="store_true",
+                   help="show the plan and change nothing; a download a "
+                        "restart cut off is still settled first, as at every "
+                        "start")
     getting.add_argument("--force",        action="store_true",
                    help="download every track of the album again (search or "
                         "album URL only)")

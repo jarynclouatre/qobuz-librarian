@@ -78,9 +78,14 @@ def _same_node(left, right):
 
 
 def _same_file_after_move(before, after):
-    # rename(2) changes ctime on the same inode. Everything else remains part
-    # of the sealed file identity and must still agree.
-    return before[:5] == after[:5]
+    # rename(2) changes ctime on the same inode, and a remount can give the
+    # disk another device number. Everything else remains part of the sealed
+    # file identity and must still agree.
+    return before[1:5] == after[1:5]
+
+
+def _without_device(identities):
+    return {relative: identity[1:] for relative, identity in identities}
 
 
 def _absolute_staging_path(path):
@@ -300,14 +305,16 @@ class TreeReceipt:
             return False
         left_dirs = dict(self.directories)
         right_dirs = dict(other.directories)
-        if set(left_dirs) != set(right_dirs) or self.files != other.files:
+        if set(left_dirs) != set(right_dirs) or _without_device(
+                self.files) != _without_device(other.files):
             return False
         if moved:
             if not _same_file_after_move(left_dirs[""], right_dirs[""]):
                 return False
             left_dirs.pop("")
             right_dirs.pop("")
-        return left_dirs == right_dirs
+        return _without_device(left_dirs.items()) == _without_device(
+            right_dirs.items())
 
 
 @dataclass(frozen=True)
@@ -640,9 +647,9 @@ def capture_staging_run(run):
     if (
         current is None
         # A rip necessarily changes the directory's size and timestamps.
-        # Its device, inode, type, and permissions must remain the exact
-        # run root that we created; the populated tree is sealed below.
-        or run.root_identity[:3] != current.root_identity[:3]
+        # Its inode, type, and permissions must remain the exact run root
+        # that we created; the populated tree is sealed below.
+        or run.root_identity[1:3] != current.root_identity[1:3]
     ):
         return None
     return current
@@ -678,7 +685,7 @@ def inspect_staging_run_reference(reference, expected_owner):
     if status is StagingReferenceStatus.CHANGED:
         return StagingReferenceInspection(status, reason="identity")
     if status is StagingReferenceStatus.MATCH:
-        if identity is None or run.root_identity[:3] != identity[:3]:
+        if identity is None or run.root_identity[1:3] != identity[1:3]:
             return StagingReferenceInspection(StagingReferenceStatus.CHANGED, reason="identity")
         return StagingReferenceInspection(StagingReferenceStatus.UNAVAILABLE, reason="inspection")
     return StagingReferenceInspection(status, reason="inspection")
@@ -1582,7 +1589,10 @@ def inspect_staging_group_reference(reference, expected_owner):
     manifest_status, payload, sealed_manifest, reason = _inspect_group_manifest_payload(group)
     if manifest_status is not StagingReferenceStatus.MATCH:
         return StagingReferenceInspection(manifest_status, reason=reason)
-    if sealed_manifest != expected_manifest:
+    if (
+        sealed_manifest["sha256"] != expected_manifest["sha256"]
+        or sealed_manifest["identity"][1:] != expected_manifest["identity"][1:]
+    ):
         return StagingReferenceInspection(StagingReferenceStatus.CHANGED, reason="manifest")
     try:
         tree_plan = _tree_plan_from_payload(group, payload)
@@ -2068,8 +2078,11 @@ def reconcile_imported_group(group, *, expected_owner=None):
     """Reconcile one sealed retry tree after beets returns.
 
     Only exact recorded audio is allowed to disappear. Replacements, unknown
-    additions, missing companions, and partially moved albums are retained as
-    manual recovery state; an exact empty husk is reclaimed without recursion.
+    additions, and partially moved albums are retained as manual recovery
+    state, as are missing companions while any audio is left. Once the audio
+    is gone, beets may have taken the cover with it; the exact companions it
+    left go as after any import, and the empty husk is reclaimed without
+    recursion.
     """
     if not isinstance(group, ParkedGroup) or len(group.trees) != 1:
         return {"moved_audio": False, "cleared": False, "reason": "invalid"}
@@ -2099,6 +2112,7 @@ def reconcile_imported_group(group, *, expected_owner=None):
     changed = bool(unknown)
     missing_audio = []
     remaining_audio = []
+    missing_companion = False
     for relative, identity in expected.items():
         path = tree.path / relative
         current_identity = present.get(relative)
@@ -2107,14 +2121,14 @@ def reconcile_imported_group(group, *, expected_owner=None):
             if is_audio:
                 missing_audio.append(relative)
             else:
-                changed = True
-        elif current_identity != identity:
+                missing_companion = True
+        elif current_identity[1:] != identity[1:]:
             changed = True
         elif is_audio:
             remaining_audio.append(relative)
 
     moved_audio = bool(missing_audio)
-    if changed:
+    if changed or missing_companion and (remaining_audio or not moved_audio):
         return {
             "moved_audio": moved_audio,
             "cleared": False,
@@ -2126,7 +2140,7 @@ def reconcile_imported_group(group, *, expected_owner=None):
             "cleared": False,
             "reason": "tracks",
         }
-    if current.files:
+    if current.files and not moved_audio:
         return {
             "moved_audio": moved_audio,
             "cleared": False,
@@ -2144,6 +2158,14 @@ def reconcile_imported_group(group, *, expected_owner=None):
             "cleared": False,
             "reason": "changed",
         }
+    for relative, identity in current.files:
+        receipt = capture_file(tree.path / relative, expected=identity)
+        if receipt is None or not remove_file(receipt):
+            return {
+                "moved_audio": True,
+                "cleared": False,
+                "reason": "changed",
+            }
     if not moved_audio or not _prune_tree_directories(current):
         return {
             "moved_audio": moved_audio,

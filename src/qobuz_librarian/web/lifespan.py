@@ -188,18 +188,15 @@ def _close_web_run_lock(lease) -> None:
 
 
 def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
-    """Publish a lease only while recovery and saved jobs are reconciled."""
+    """Publish a lease only while recovery, the upgrades a hard stop cut
+    short and saved jobs are reconciled."""
     runtime._RUN_LOCK_HANDLE = lease
     try:
         settings_store.reload_from_disk()
         result = queue_recovery._record_startup_recovery(lease, settle=True)
         if restore_jobs and runtime._JOBS_RESTORED:
-            unsettled = queue_recovery._unsettled_web_job_ids()
-            job_mgr.settle_restarted_downloads({
-                job_id: settled
-                for job_id, settled in queue_recovery.take_settled_downloads().items()
-                if job_id not in unsettled
-            })
+            _settle_interrupted_upgrades()
+            _settle_restarted_web_jobs()
         elif restore_jobs:
             _restore_jobs_once()
         return result
@@ -209,9 +206,20 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
         raise
 
 
+def _settle_restarted_web_jobs() -> None:
+    """Apply what settling did to the web jobs already restored."""
+    unsettled = queue_recovery._unsettled_web_job_ids()
+    job_mgr.settle_restarted_downloads({
+        job_id: settled
+        for job_id, settled in queue_recovery.take_settled_downloads().items()
+        if job_id not in unsettled
+    })
+
+
 async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
     """Retry lock acquisition and saved-job restoration while Web is active,
-    and run the start-up clean-up once they succeed."""
+    read the saved recovery state again after a read of it failed, and run
+    the start-up clean-up once they succeed."""
     while True:
         await asyncio.sleep(delay)
         if not _startup_maintained and not runtime._SHUTTING_DOWN:
@@ -220,60 +228,92 @@ async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
         elif _put_back_pending and not runtime._SHUTTING_DOWN:
             await asyncio.get_running_loop().run_in_executor(
                 None, _put_back_albums_left_in_backups)
-        with runtime._auto_check_lock:
-            if runtime._SHUTTING_DOWN:
-                return
-            if runtime._CLI_MODE:
-                continue
-            if runtime._run_lock_intact():
-                if not runtime._JOBS_RESTORED:
-                    _restore_jobs_once()
-                continue
-            if (runtime._LOCK_BUSY_PID is None
-                    and not queue_recovery._STARTUP_RECOVERY_UNKNOWN):
-                continue
-        try:
-            lease = run_lock.acquire("web")
-        except run_lock.LockBusy as busy:
-            with runtime._auto_check_lock:
-                if runtime._CLI_MODE:
-                    continue
-                runtime._LOCK_BUSY_PID = busy.pid
-            continue
+        if runtime._SHUTTING_DOWN:
+            return
+        if await asyncio.get_running_loop().run_in_executor(
+                None, _retry_web_run_lock_once, log):
+            await asyncio.get_running_loop().run_in_executor(
+                None, _put_back_albums_left_in_backups)
 
+
+def _retry_web_run_lock_once(log) -> bool:
+    """One try of the lock retry, off the event loop. True once it took the
+    lock back."""
+    with runtime._auto_check_lock:
+        if runtime._SHUTTING_DOWN:
+            return False
+        if runtime._CLI_MODE:
+            return False
+        if runtime._run_lock_intact():
+            _recheck_recovery()
+            if not runtime._JOBS_RESTORED:
+                _restore_jobs_once()
+            return False
+        if (runtime._LOCK_BUSY_PID is None
+                and not queue_recovery._STARTUP_RECOVERY_UNKNOWN):
+            return False
+    try:
+        lease = run_lock.acquire("web")
+    except run_lock.LockBusy as busy:
         with runtime._auto_check_lock:
-            if runtime._CLI_MODE:
-                if lease is not None:
-                    _close_web_run_lock(lease)
-                continue
-            if lease is None:
-                runtime._RUN_LOCK_HANDLE = None
-                runtime._LOCK_BUSY_PID = None
-                runtime._LOCK_UNENFORCEABLE = True
-                log.error(
-                    "Run-lock became unenforceable; download/scan endpoints "
-                    "paused until a lock-capable data folder is available "
-                    "and the app is restarted."
-                )
-                continue
-            try:
-                result = _recover_under_web_run_lock(lease)
-            except Exception:
-                runtime._LOCK_BUSY_PID = None
-                runtime._LOCK_UNENFORCEABLE = False
-                log.exception(
-                    "Lock acquired, but durable recovery could not be read; "
-                    "the lease was released and Web will retry."
-                )
-                continue
-            runtime._LOCK_UNENFORCEABLE = False
+            if runtime._CLI_MODE or runtime._run_lock_intact():
+                return False
+            runtime._LOCK_BUSY_PID = busy.pid
+        return False
+
+    with runtime._auto_check_lock:
+        if runtime._CLI_MODE or runtime._SHUTTING_DOWN:
+            if lease is not None:
+                _close_web_run_lock(lease)
+            return False
+        if lease is None:
+            runtime._RUN_LOCK_HANDLE = None
             runtime._LOCK_BUSY_PID = None
-        log.info(
-            "Lock acquired; durable queue startup state: %s.",
-            result.status.value,
+            runtime._LOCK_UNENFORCEABLE = True
+            log.error(
+                "Run-lock became unenforceable; download/scan endpoints "
+                "paused until a lock-capable data folder is available "
+                "and the app is restarted."
+            )
+            return False
+        try:
+            result = _recover_under_web_run_lock(lease)
+        except Exception:
+            runtime._LOCK_BUSY_PID = None
+            runtime._LOCK_UNENFORCEABLE = False
+            log.exception(
+                "Lock acquired, but durable recovery could not be read; "
+                "the lease was released and Web will retry."
+            )
+            return False
+        runtime._LOCK_UNENFORCEABLE = False
+        runtime._LOCK_BUSY_PID = None
+    log.info(
+        "Lock acquired; durable queue startup state: %s.",
+        result.status.value,
+    )
+    return True
+
+
+def _recheck_recovery() -> None:
+    """Read the saved recovery state again, settling as a start does, after
+    a read of it failed with the lock kept. Waits while work here is running
+    or queued to run."""
+    if (not queue_recovery._recovery_read_failed()
+            or job_mgr.work_in_flight()):
+        return
+    try:
+        queue_recovery._record_startup_recovery(
+            runtime._RUN_LOCK_HANDLE, settle=True)
+    except Exception as exc:
+        _log.warning(
+            "couldn't read the saved recovery state again; downloads and "
+            "scans stay paused: %s",
+            exc,
         )
-        await asyncio.get_running_loop().run_in_executor(
-            None, _put_back_albums_left_in_backups)
+        return
+    if runtime._JOBS_RESTORED:
+        _settle_restarted_web_jobs()
 
 
 def _restore_jobs_once() -> bool:

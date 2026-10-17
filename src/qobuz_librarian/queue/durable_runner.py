@@ -738,26 +738,38 @@ def execute_durable_new_album(
         )
         _require_authority(authority)
         if backup is None:
-            reason = (
-                "library-backup-intent-unsettled"
-                if backup_intent is not None
-                else "library-backup-unavailable"
+            reason = "library-backup-unavailable"
+            if backup_intent is not None:
+                # The album was left in place, so once its planned backup is
+                # settled this is an ordinary retry.
+                try:
+                    restored = _restore_library_backup(
+                        operation_id, item_id, owner, item,
+                        authority=authority)
+                except (OSError, ValueError, queue_state.QueueJournalError):
+                    restored = None
+                if (
+                    restored is None
+                    or restored.status
+                    is not LibraryBackupResolutionStatus.SETTLED
+                ):
+                    reason = "library-backup-intent-unsettled"
+                    if restored is not None and restored.reason:
+                        reason = restored.reason
+                    _block(operation_id, item_id, reason, authority=authority)
+                    return DurableAlbumResult(
+                        DurableAlbumStatus.ATTENTION,
+                        reason,
+                        operation_id=operation_id,
+                        item_id=item_id,
+                    )
+            _reset_unstarted(
+                operation_id,
+                item_id,
+                authority=authority,
             )
-            if backup_intent is None:
-                _reset_unstarted(
-                    operation_id,
-                    item_id,
-                    authority=authority,
-                )
-                return DurableAlbumResult(
-                    DurableAlbumStatus.RETRY,
-                    reason,
-                    operation_id=operation_id,
-                    item_id=item_id,
-                )
-            _block(operation_id, item_id, reason, authority=authority)
             return DurableAlbumResult(
-                DurableAlbumStatus.ATTENTION,
+                DurableAlbumStatus.RETRY,
                 reason,
                 operation_id=operation_id,
                 item_id=item_id,

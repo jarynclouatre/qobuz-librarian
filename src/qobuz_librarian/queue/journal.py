@@ -1998,7 +1998,7 @@ def transition_journal_item(
             QueuePhase.BLOCKED,
             QueuePhase.RESOLVING,
         },
-        QueuePhase.COMPLETE: set(),
+        QueuePhase.COMPLETE: {QueuePhase.BLOCKED},
     }
     if phase not in allowed[target.phase]:
         raise QueueJournalBlocked(
@@ -2696,10 +2696,27 @@ def forget_restored_library_backup(
     carrier: RecoveryReference,
 ) -> QueueJournal:
     """Forget only the exact carrier whose files are proved back at origin."""
-    return _forget_library_backup_carrier(journal, item_id, carrier)
+    return _forget_library_backup_reference(
+        journal, item_id, carrier, "backup_carriers",
+        _strict_library_backup_carrier,
+    )
 
 
-def _forget_library_backup_carrier(journal, item_id, carrier):
+@_locked_transaction
+def forget_unused_library_backup_intent(
+    journal: QueueJournal,
+    item_id: str,
+    intent: RecoveryReference,
+) -> QueueJournal:
+    """Forget only the exact intent proved to have left nothing at its path."""
+    return _forget_library_backup_reference(
+        journal, item_id, intent, "backup_intents",
+        _strict_library_backup_intent,
+    )
+
+
+def _forget_library_backup_reference(journal, item_id, reference, listed,
+                                     strict):
     previous = _reload_matching_journal(journal)
     target_index = next(
         (index for index, item in enumerate(previous.items) if item.item_id == item_id),
@@ -2713,18 +2730,18 @@ def _forget_library_backup_carrier(journal, item_id, carrier):
         expected_operation_id=previous.operation_id,
         expected_item_id=item_id,
     )
-    canonical = _parse_reference(_reference_payload(carrier))
+    canonical = _parse_reference(_reference_payload(reference))
     if (
         target.phase not in {QueuePhase.ACTIVE, QueuePhase.BLOCKED}
-        or inventory["backup_carriers"] != (canonical,)
-        or not _strict_library_backup_carrier(
+        or inventory[listed] != (canonical,)
+        or not strict(
             canonical,
             expected_operation_id=previous.operation_id,
             expected_item_id=item_id,
         )
     ):
         raise QueueJournalBlocked(
-            "library backup carrier changed before it was forgotten"
+            "library backup reference changed before it was forgotten"
         )
     updated = replace(
         target,

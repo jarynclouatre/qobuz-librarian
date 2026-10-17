@@ -71,10 +71,10 @@ docker compose run --rm -it qobuz-librarian cli --artist "Paysage d'Hiver"
 # Sweep every artist for quality upgrades, auto-confirming upgrades the scanner can classify safely
 docker compose run --rm qobuz-librarian cli --upgrade-walk --auto-safe
 
-# List every upgrade candidate without asking (changes nothing)
+# Preview every upgrade candidate without asking
 docker compose run --rm qobuz-librarian cli --upgrade-walk --dry-run
 
-# Preview which hi-res library files would downsample to 44.1/48 kHz (changes nothing)
+# Preview which hi-res library files would downsample to 44.1/48 kHz
 docker compose run --rm qobuz-librarian cli --downsample-walk --dry-run
 
 # Fetch lyrics for tracks missing them (--lyrics-synced-only for timed
@@ -121,7 +121,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--[no-]include-live`, `--[no-]include-comps`, `--[no-]include-singles` | List live releases, compilations, or EPs and singles among missing albums (default: the Library review's switches) |
 | `--[no-]include-bonus` | Offer to fill albums whose only missing tracks are other versions of songs they have, in Artist mode, the Library walk and Gap fill (default: the Library review's Bonus versions switch) |
 | `--[no-]prefer-hires` | Sort 24-bit and higher sample rate results first (default: the Prefer hi-res setting) |
-| `--dry-run` | Show the plan and change nothing |
+| `--dry-run` | Show the plan and change nothing; a download a restart cut off is still settled first, as at every start |
 | `--force` | Download every track of the album again (search or album URL only) |
 | `--yes` | Answer yes to the confirmations; choices still ask |
 | `--auto-safe` | With `--upgrade-walk`, confirm only the upgrades it can classify as safe |

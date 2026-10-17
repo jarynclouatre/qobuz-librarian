@@ -87,7 +87,8 @@ def test_post_import_relocation_recovery_precedes_queue_recovery(
     assert all(str(path) in recovery_log for path in affected_paths)
 
 
-def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch):
+def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch, *,
+                                     stop_after_intent=False):
     from qobuz_librarian.library import backup as backup_module
     from qobuz_librarian.queue import builder, durable_album
 
@@ -165,7 +166,15 @@ def _gap_fill_carrier_left_by_a_crash(tmp_path, monkeypatch):
         assert current.items[0].recovery_references[0].kind == (
             "library-backup-intent"
         )
+        if stop_after_intent:
+            raise KeyboardInterrupt
 
+    if stop_after_intent:
+        with pytest.raises(KeyboardInterrupt):
+            backup_module.backup_gap_fill_files(
+                [owned], album_dir, owner=owner_record,
+                on_intent=commit_intent)
+        return owned, None, current
     backup = backup_module.backup_gap_fill_files(
         [owned],
         album_dir,
@@ -231,6 +240,66 @@ def test_a_restart_mid_gap_fill_puts_the_owned_tracks_back_on_its_own(
     assert not backup.path.exists()
     assert [entry.outcome for entry in result.settled] == ["requeue"]
     assert result.status is startup_recovery.StartupRecoveryStatus.RESUME_REQUIRED
+    saved = journal.load_queue_journal(current.operation_id).journal
+    assert [item.phase for item in saved.items] == [journal.QueuePhase.PENDING]
+
+
+def test_a_stop_right_after_a_gap_fill_planned_its_backup_settles(
+    tmp_path,
+    monkeypatch,
+):
+    owned, _backup, current = _gap_fill_carrier_left_by_a_crash(
+        tmp_path, monkeypatch, stop_after_intent=True)
+
+    authority = run_lock.acquire()
+    try:
+        result = startup_recovery.recover_startup_state(
+            authority=authority, settle=True)
+    finally:
+        authority.close()
+
+    assert owned.read_bytes() == b"owned original"
+    assert os.listdir(tmp_path / "backups") == []
+    assert result.status is startup_recovery.StartupRecoveryStatus.RESUME_REQUIRED
+    saved = journal.load_queue_journal(current.operation_id).journal
+    assert [item.phase for item in saved.items] == [journal.QueuePhase.PENDING]
+
+
+def test_a_restart_before_the_music_share_is_mounted_keeps_the_backup(
+    tmp_path,
+    monkeypatch,
+):
+    # An unmounted share leaves an empty mount point. Anything put back there
+    # would end up hidden under the share once it mounts.
+    owned, backup, current = _gap_fill_carrier_left_by_a_crash(
+        tmp_path, monkeypatch)
+    music = tmp_path / "music"
+    share = tmp_path / "share"
+    music.rename(share)
+    music.mkdir()
+
+    authority = run_lock.acquire()
+    try:
+        result = startup_recovery.recover_startup_state(
+            authority=authority, settle=True)
+    finally:
+        authority.close()
+
+    assert result.status is startup_recovery.StartupRecoveryStatus.ATTENTION_REQUIRED
+    assert os.listdir(music) == []
+    assert (backup.path / "01.flac").read_bytes() == b"owned original"
+
+    music.rmdir()
+    share.rename(music)
+    authority = run_lock.acquire()
+    try:
+        result = startup_recovery.recover_startup_state(
+            authority=authority, settle=True)
+    finally:
+        authority.close()
+
+    assert owned.read_bytes() == b"owned original"
+    assert not backup.path.exists()
     saved = journal.load_queue_journal(current.operation_id).journal
     assert [item.phase for item in saved.items] == [journal.QueuePhase.PENDING]
 

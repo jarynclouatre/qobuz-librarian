@@ -43,7 +43,8 @@ def _writes_paused_notice(*, log_details: bool = False,
     a request that downloads albums, the only work a queue saved in the
     terminal holds.
     """
-    queue_recovery._await_recovery_refresh()
+    if not (runtime._CLI_MODE or runtime._LOCK_BUSY_PID is not None):
+        queue_recovery._await_recovery_refresh()
     reason = ""
     action = None
     if runtime._CLI_MODE:
@@ -93,11 +94,9 @@ def _writes_paused_notice(*, log_details: bool = False,
     elif queue_recovery._STARTUP_RECOVERY_UNKNOWN:
         reason = "Interrupted work could not be checked safely."
         msg = (
-            "Qobuz Librarian took the run lock but could not read its saved "
-            "recovery state. The lock was released, downloads and scans stay "
-            "paused, and the app tries again on its own. If this notice "
-            "remains, the “Lock acquired, but durable recovery could not be "
-            "read” entry in the container log says why."
+            "Qobuz Librarian could not read its saved recovery state, so "
+            "downloads and scans are paused. It tries again on its own; if "
+            "this notice remains, the application log says why."
         )
     elif not runtime._run_lock_intact():
         reason = "The run lock was lost."
@@ -169,8 +168,9 @@ def _writes_paused_notice(*, log_details: bool = False,
             if getattr(queue_recovery._STARTUP_RECOVERY_RESULT, "reason",
                        None) == "startup-recovery-unsettled":
                 msg = ("Interrupted work could not be checked safely, so "
-                       "downloads and scans are paused and nothing was "
-                       "changed. The “" + startup_recovery.BLOCKED_DOWNLOAD_LOG_ENTRY
+                       "downloads and scans are paused. Qobuz Librarian "
+                       "checks again on its own; the “"
+                       + startup_recovery.BLOCKED_DOWNLOAD_LOG_ENTRY
                        + "” entry in the application log says why.")
             else:
                 msg = (f"An interrupted download{of_album} could not be "
@@ -198,12 +198,12 @@ def _web_writes_paused() -> bool:
     triggers (dashboard new-release check, library-scan resume) that have no
     request to bounce. Any trigger checking only part of this list quietly
     re-opens the hole the pause exists to close."""
+    if (runtime._SHUTTING_DOWN or runtime._CLI_MODE
+            or runtime._LOCK_BUSY_PID is not None):
+        return True
     queue_recovery._await_recovery_refresh()
     return (
-        runtime._SHUTTING_DOWN
-        or runtime._CLI_MODE
-        or runtime._LOCK_BUSY_PID is not None
-        or bool(storage._unwritable_volumes())
+        bool(storage._unwritable_volumes())
         or not storage._data_dir_available()
         or not job_mgr.job_persistence.ready_for_admission()
         or not runtime._JOBS_RESTORED

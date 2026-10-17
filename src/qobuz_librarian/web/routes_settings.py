@@ -301,8 +301,9 @@ async def save_settings(
             return RedirectResponse(url="/settings?error=envrejected#qobuz",
                                     status_code=303)
         if verdict in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
-            qobuz_access._on_auth_state(
-                AuthEvidence(qobuz_access._credentials_snapshot().generation, verdict))
+            evidence = AuthEvidence(
+                qobuz_access._credentials_snapshot().generation, verdict)
+            await loop.run_in_executor(None, qobuz_access._on_auth_state, evidence)
             return RedirectResponse(url="/settings?envchecked=1#qobuz",
                                     status_code=303)
         return RedirectResponse(url="/settings?error=envunreachable#qobuz",
@@ -343,66 +344,63 @@ async def save_settings(
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),
                                   diagnostics=diags)
-    with runtime._auto_check_lock, qobuz_access._CREDENTIAL_LOCK:
-        active_credentials = qobuz_access._credentials_snapshot()
-        candidate_credentials = credentials_from_values(
-            new_uid,
-            new_token,
-            source="env" if env_owned else "streamrip",
-        )
-        if active_credentials.generation != submitted_generation:
-            return _settings_response(
-                request,
-                error="credschanged",
-                diagnostics=diags,
+
+    def _save():
+        with runtime._auto_check_lock, qobuz_access._CREDENTIAL_LOCK:
+            active_credentials = qobuz_access._credentials_snapshot()
+            candidate_credentials = credentials_from_values(
+                new_uid,
+                new_token,
+                source="env" if env_owned else "streamrip",
             )
-        credential_changed = (
-            candidate_credentials.generation
-            != active_credentials.generation
-        )
-        if credential_changed and (
-            runtime.shutting_down()
-            or runtime.cli_mode()
-            or runtime.lock_busy_pid() is not None
-            or runtime.lock_unenforceable()
-            or not runtime._run_lock_intact()
-        ):
-            return _settings_response(
-                request,
-                error="credsmode",
-                user_id=user_id.strip(),
-                auth_token_prefill=auth_token.strip(),
-                diagnostics=diags,
+            if active_credentials.generation != submitted_generation:
+                return "credschanged"
+            credential_changed = (
+                candidate_credentials.generation
+                != active_credentials.generation
             )
-        credential_work_running = any(
-            (job.execute_kind or "download")
-            not in {"downsample", "lyrics", "migration", "collection_snapshot"}
-            and job.status != job_mgr.JobStatus.AWAITING_REVIEW
-            and not job_mgr.waiting_for_qobuz(job)
-            for job in job_mgr.registry.pending_and_running()
-        )
-        if (
-            credential_changed
-            and credential_work_running
-        ):
-            return _settings_response(
-                request,
-                error="credsbusy",
-                user_id=user_id.strip(),
-                auth_token_prefill=auth_token.strip(),
-                diagnostics=diags,
+            if credential_changed and (
+                runtime.shutting_down()
+                or runtime.cli_mode()
+                or runtime.lock_busy_pid() is not None
+                or runtime.lock_unenforceable()
+                or not runtime._run_lock_intact()
+            ):
+                return "credsmode"
+            credential_work_running = any(
+                (job.execute_kind or "download")
+                not in {"downsample", "lyrics", "migration", "collection_snapshot"}
+                and job.status != job_mgr.JobStatus.AWAITING_REVIEW
+                and not job_mgr.waiting_for_qobuz(job)
+                for job in job_mgr.registry.pending_and_running()
             )
-        ok = qobuz_access._write_creds(new_uid, new_token)
-        if not ok:
-            return _settings_response(request, error="creds",
-                                      user_id=user_id.strip(),
-                                      auth_token_prefill=auth_token.strip(),
-                                      diagnostics=diags)
-        saved_credentials = qobuz_access._credentials_snapshot()
-        if verdict not in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
-            qobuz_access.set_token_state(None, saved_credentials.generation)
-    if verdict in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
-        qobuz_access._on_auth_state(AuthEvidence(saved_credentials.generation, verdict))
+            if (
+                credential_changed
+                and credential_work_running
+            ):
+                return "credsbusy"
+            ok = qobuz_access._write_creds(new_uid, new_token)
+            if not ok:
+                return "creds"
+            saved_credentials = qobuz_access._credentials_snapshot()
+            if verdict not in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
+                qobuz_access.set_token_state(None, saved_credentials.generation)
+        if verdict in {AuthOutcome.ACCEPTED, AuthOutcome.ENTITLEMENT}:
+            qobuz_access._on_auth_state(AuthEvidence(saved_credentials.generation, verdict))
+        return None
+
+    error = await loop.run_in_executor(None, _save)
+    if error == "credschanged":
+        return _settings_response(
+            request,
+            error=error,
+            diagnostics=diags,
+        )
+    if error is not None:
+        return _settings_response(request, error=error,
+                                  user_id=user_id.strip(),
+                                  auth_token_prefill=auth_token.strip(),
+                                  diagnostics=diags)
     suffix = (
         "&unverified=1"
         if verdict in {AuthOutcome.TEMPORARY, AuthOutcome.INCONCLUSIVE}
@@ -648,23 +646,18 @@ async def set_mode(request: Request, target: str = Form("")):
     """
     want = (target or "").strip().lower()
     if want == "cli":
-        # Flip to CLI mode first so a /download or scan POST landing during
-        # the handoff is refused (503) instead of slipping past the check and
-        # racing the CLI over /staging once we release the lock below.
-        with runtime._auto_check_lock:
-            runtime.set_cli_mode(True)
-
         def _handoff():
+            # Flip to CLI mode first so a /download or scan POST landing
+            # during the handoff is refused (503) instead of slipping past the
+            # check and racing the CLI over /staging once we release the lock
+            # below.
+            with runtime._auto_check_lock:
+                runtime.set_cli_mode(True)
             with runtime._auto_check_lock:
                 # Only work in flight blocks the handoff; the race this
                 # guards against is the CLI and a running worker sharing
                 # /staging.
-                jobs_active = any(
-                    j.status != job_mgr.JobStatus.AWAITING_REVIEW
-                    and not job_mgr.is_held(j)
-                    for j in job_mgr.registry.pending_and_running()
-                )
-                if jobs_active or job_mgr.active_library_operations():
+                if job_mgr.work_in_flight():
                     runtime.set_cli_mode(False)
                     return False
                 if runtime.run_lock_handle() is not None:
@@ -689,10 +682,13 @@ async def set_mode(request: Request, target: str = Form("")):
             "The run lock is required. Fix the data-folder filesystem or "
             "permissions, then restart Qobuz Librarian.")
     if want == "web":
-        with runtime._auto_check_lock:
-            prior_cli_mode = runtime.cli_mode()
-        try:
-            lease = run_lock.acquire("web")
+        def _take_back():
+            with runtime._auto_check_lock:
+                prior_cli_mode = runtime.cli_mode()
+            try:
+                lease = run_lock.acquire("web")
+            except run_lock.LockBusy:
+                return "busy"
             if lease is None:
                 # Can't enforce the lock, same stance as startup: pause
                 # destructive routes until the filesystem can enforce it.
@@ -701,34 +697,41 @@ async def set_mode(request: Request, target: str = Form("")):
                     runtime.set_lock_busy_pid(None)
                     runtime.set_lock_unenforceable(True)
                     runtime.set_cli_mode(False)
-            else:
-                try:
-                    with runtime._auto_check_lock:
-                        lifespan._recover_under_web_run_lock(lease)
-                        runtime.set_lock_busy_pid(None)
-                        runtime.set_lock_unenforceable(False)
-                        runtime.set_cli_mode(False)
-                except Exception:
-                    with runtime._auto_check_lock:
-                        runtime.set_run_lock_handle(None)
-                        runtime.set_lock_busy_pid(None)
-                        runtime.set_lock_unenforceable(False)
-                        runtime.set_cli_mode(prior_cli_mode)
-                    _log.exception(
-                        "couldn't resume Web mode because durable recovery "
-                        "could not be read"
-                    )
-                    return _mode_refused(
-                        "Saved recovery state could not be checked. Web "
-                        "mode stayed paused and its run lock was "
-                        "released; check the data-folder permissions, "
-                        "then try again.")
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lifespan._put_back_albums_left_in_backups)
-            return RedirectResponse(url="/settings?mode=web#mode", status_code=303)
-        except run_lock.LockBusy:
+                return "unenforceable"
+            try:
+                with runtime._auto_check_lock:
+                    lifespan._recover_under_web_run_lock(lease)
+                    runtime.set_lock_busy_pid(None)
+                    runtime.set_lock_unenforceable(False)
+                    runtime.set_cli_mode(False)
+            except Exception:
+                with runtime._auto_check_lock:
+                    runtime.set_run_lock_handle(None)
+                    runtime.set_lock_busy_pid(None)
+                    runtime.set_lock_unenforceable(False)
+                    runtime.set_cli_mode(prior_cli_mode)
+                _log.exception(
+                    "couldn't resume Web mode because durable recovery "
+                    "could not be read"
+                )
+                return "failed"
+            return "resumed"
+
+        outcome = await asyncio.get_running_loop().run_in_executor(
+            None, _take_back)
+        if outcome == "busy":
             # A CLI session still holds the lock, so we can't take it back yet.
             return _mode_refused(
                 "The terminal is still using it. Finish your CLI command, then "
                 "resume.")
+        if outcome == "failed":
+            return _mode_refused(
+                "Saved recovery state could not be checked. Web "
+                "mode stayed paused and its run lock was "
+                "released; check the data-folder permissions, "
+                "then try again.")
+        if outcome == "resumed":
+            await asyncio.get_running_loop().run_in_executor(
+                None, lifespan._put_back_albums_left_in_backups)
+        return RedirectResponse(url="/settings?mode=web#mode", status_code=303)
     return RedirectResponse(url="/settings", status_code=303)

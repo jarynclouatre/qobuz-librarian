@@ -20,11 +20,13 @@ from qobuz_librarian.library.backup import (
     library_backup_disposal_record,
     library_backup_origin_state,
     library_backup_record_absent,
+    library_parents_present,
     load_library_backup_record,
     pin_unverified_upgrade_backup,
     reconcile_library_backup_disposal,
     restore_gap_fill_backup,
     restore_upgrade_backup,
+    settle_library_backup_intent,
     warn_pin_failed,
 )
 from qobuz_librarian.library.catalog import folder_holds_all_tracks
@@ -500,7 +502,10 @@ def restore_library_backup(
     The carrier is forgotten only once its backup is gone and every file it
     held is back at the origin with its receipt bytes, so a restore that
     stops part way is finished by the next attempt. Nothing already at the
-    origin is replaced.
+    origin is replaced, and nothing is put back while a folder above it is
+    missing. A backup that was planned but never sealed is forgotten once
+    nothing is left at its path, and an unfinished upgrade backup goes
+    once its album is whole in its place.
     """
     if not callable(authority_check):
         raise ValueError("authority_check must be callable")
@@ -512,10 +517,37 @@ def restore_library_backup(
             LibraryBackupResolutionStatus.NONE,
         )
     reference = references[0]
-    if len(references) != 1 or reference.kind != _BACKUP_CARRIER:
+    if len(references) != 1 or reference.kind not in {
+        _BACKUP_INTENT,
+        _BACKUP_CARRIER,
+    }:
         return _attention(journal, "library-backup-restore-unavailable")
     record = reference.data
     origin = Path(record["origin"])
+    if not library_parents_present(origin):
+        return _attention(journal, f"library-backup-origin-missing:{origin}")
+    if reference.kind == _BACKUP_INTENT:
+        authority_check()
+        settled = settle_library_backup_intent(
+            record, expected_owner=owner_data)
+        authority_check()
+        if not settled:
+            return _attention(journal, "library-backup-intent-unsettled")
+        try:
+            saved = queue_state.forget_unused_library_backup_intent(
+                journal,
+                item_id,
+                reference,
+            )
+        except (OSError, queue_state.QueueJournalError) as exc:
+            raise LibraryBackupPersistenceError(
+                "unused library backup intent could not be forgotten"
+            ) from exc
+        authority_check()
+        return LibraryBackupResolution(
+            saved,
+            LibraryBackupResolutionStatus.SETTLED,
+        )
     authority_check()
     backup = load_library_backup_record(record, expected_owner=owner_data)
     authority_check()
@@ -533,7 +565,10 @@ def restore_library_backup(
                 replace_dst=False,
                 expected_owner=owner_data,
             )
-        elif record["kind"] == "upgrade" and state == "clear":
+        elif record["kind"] == "upgrade" and (
+            state == "clear"
+            or state == "restored" and backup.complete is not True
+        ):
             restore_upgrade_backup(backup, origin, expected_owner=owner_data)
         authority_check()
         state = library_backup_origin_state(record, expected_owner=owner_data)

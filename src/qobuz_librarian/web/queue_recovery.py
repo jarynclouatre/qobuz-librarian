@@ -26,6 +26,11 @@ _STARTUP_RECOVERY_UNKNOWN = False
 _STARTUP_RECOVERY_REFRESHING = False
 
 
+# Whether the running refresh began after a read had failed. Downloads and
+# scans were paused before it began, so pages do not wait for it.
+_STARTUP_RECOVERY_REREADING = False
+
+
 _STARTUP_RECOVERY_LOCK = threading.RLock()
 
 
@@ -89,8 +94,9 @@ def _recover_startup_queue(authority, *, settle=False):
 
 def _record_startup_recovery(authority, *, settle=False):
     global _STARTUP_RECOVERY_RESULT, _STARTUP_RECOVERY_UNKNOWN
-    global _STARTUP_RECOVERY_REFRESHING
+    global _STARTUP_RECOVERY_REFRESHING, _STARTUP_RECOVERY_REREADING
     with _STARTUP_RECOVERY_LOCK:
+        _STARTUP_RECOVERY_REREADING = _recovery_read_failed()
         _STARTUP_RECOVERY_UNKNOWN = True
         _STARTUP_RECOVERY_REFRESHING = True
         try:
@@ -149,10 +155,21 @@ def _journaled_web_job_ids() -> frozenset | None:
 def _await_recovery_refresh(timeout: float = 1.0) -> None:
     """Let a refresh running in another thread finish before its outcome is
     read. One follows every download and is quick; a page drawn in the middle
-    of it reported a failed read."""
-    if _STARTUP_RECOVERY_REFRESHING and _STARTUP_RECOVERY_LOCK.acquire(
-            timeout=timeout):
+    of it reported a failed read. One that reads again after a failed read
+    can settle as much as a start does, and is not waited for."""
+    if (_STARTUP_RECOVERY_REFRESHING and not _STARTUP_RECOVERY_REREADING
+            and _STARTUP_RECOVERY_LOCK.acquire(timeout=timeout)):
         _STARTUP_RECOVERY_LOCK.release()
+
+
+def _recovery_read_failed() -> bool:
+    """Whether the last read of the saved recovery state failed, rather than
+    finding work that waits."""
+    if _STARTUP_RECOVERY_REFRESHING:
+        return False
+    return _STARTUP_RECOVERY_UNKNOWN or getattr(
+        _STARTUP_RECOVERY_RESULT, "reason", None
+    ) == "startup-recovery-unsettled"
 
 
 def _startup_recovery_status_value() -> str | None:

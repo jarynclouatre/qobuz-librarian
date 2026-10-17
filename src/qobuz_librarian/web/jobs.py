@@ -905,6 +905,15 @@ def active_library_operations() -> list[str]:
     with _library_operations_condition:
         return list(_library_operations.values())
 
+
+def work_in_flight() -> bool:
+    """Whether a job is running or queued to run, other than a review or a
+    held download, or a library operation is open."""
+    return any(
+        job.status != JobStatus.AWAITING_REVIEW and not is_held(job)
+        for job in registry.pending_and_running()
+    ) or bool(active_library_operations())
+
 # Review ticks save the whole candidate list, and on a big library that list
 # runs to tens of megabytes. Written per checkbox, each tap waited on a
 # multi-hundred-ms serialize+write. A save that took a while waits this many
