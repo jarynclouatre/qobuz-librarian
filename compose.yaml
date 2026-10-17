@@ -253,7 +253,7 @@ services:
       - ${QL_STAGING_DIR:-./staging}:/staging
       # Persistent config: beets db, streamrip config, app state
       - qobuz-librarian-config:/config
-      # App data: fetch log, queue persistence, repair log
+      # App data: job history, queue persistence, repair log
       - qobuz-librarian-data:/data
       # Upgrade backups
       - ${QL_UPGRADE_BACKUPS:-./upgrade_backups}:/upgrade_backups

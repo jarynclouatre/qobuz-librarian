@@ -418,7 +418,5 @@ def _make_single_track_run(album, track, token):
             fallback_artist=artist,
             token=active_token,
             args=args,
-            upgrade=True,
-            downsample=True,
         )
     return run

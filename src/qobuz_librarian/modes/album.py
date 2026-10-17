@@ -31,10 +31,7 @@ from qobuz_librarian.queue.executor import (
     _refresh_review_state_after_downloads,
     _validate_queue_item_premise,
 )
-from qobuz_librarian.queue.persistence import (
-    clear_pending_queue,
-    save_pending_queue,
-)
+from qobuz_librarian.queue.journal import clear_queue_journal, save_pending_queue
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt
 from qobuz_librarian.ui_cli.errors import (
@@ -186,7 +183,7 @@ def _download_album_now(
                 raise
             if not getattr(args, "dry_run", False):
                 if drained:
-                    clear_pending_queue()
+                    clear_queue_journal()
                 else:
                     log.info(fmt(
                         C.YELLOW,

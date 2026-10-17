@@ -283,7 +283,6 @@ def test_failed_upgrade_leaves_the_plain_release_beside_it_alone(
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(cfg, "STAGING_DIR", staged.parent)
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
-    monkeypatch.setattr(cfg, "FETCH_LOG_FILE", tmp_path / "fetch.jsonl")
     staged.parent.mkdir()
     scanner.clear_scan_caches()
     album = {"id": "acoustic", "title": "Lost Boys", "version": "Acoustic",
@@ -390,7 +389,6 @@ def test_direct_download_refuses_files_changed_after_confirmation(
     monkeypatch.setattr(proc, "confirm", confirm)
     monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
     monkeypatch.setattr(proc, "snapshot_staging", lambda: set())
-    monkeypatch.setattr(proc, "log_fetch", lambda _row: None)
     monkeypatch.setattr(
         proc,
         "run_album_download",
@@ -456,7 +454,6 @@ def test_download_where_nothing_arrives_leaves_no_run_behind(monkeypatch, tmp_pa
     monkeypatch.setattr(proc, "is_lossless_album", lambda _a: True)
     monkeypatch.setattr(proc.catalog, "find_album_folder", lambda _a: ([], None))
     monkeypatch.setattr(proc, "staging_preflight", lambda _args: None)
-    monkeypatch.setattr(proc, "log_fetch", lambda _row: None)
     tracks = [{"id": i, "title": f"T{i}", "track_number": i} for i in (1, 2)]
     album = {"id": "gone", "title": "Gone", "artist": {"name": "Band"},
              "tracks": {"items": tracks}}

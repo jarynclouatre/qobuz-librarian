@@ -5,11 +5,10 @@ import stat
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import download_result, post_job_hook, run_lock
+from qobuz_librarian import download_result, post_job_hook, run_lock, saved_views
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost
 from qobuz_librarian.completion import (
@@ -126,7 +125,6 @@ from qobuz_librarian.repair_log import warn_if_download_truncated
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
-from qobuz_librarian.ui_cli.prompts import log_fetch
 
 # Installed by the web layer (web/jobs): called when a staged download stays
 # under the quality target after the recovery attempt, so the owning job can
@@ -964,7 +962,6 @@ def _resolve_queue_item(
     imported_globally,
     *,
     authority=None,
-    record_fetch=True,
 ):
     """Resolve backup and compute result for one completed queue item.
 
@@ -1560,7 +1557,7 @@ def _resolve_queue_item(
     # A stop marker (cancel or an undeliverable album discarded the staged
     # files; disk-full / I/O / auth stopped the batch) must keep its label.
     # n_ok still counts the tracks that briefly landed, so the n_ok branch
-    # below would mislabel a discarded cancel as "downloaded" in the fetch log.
+    # below would mislabel a discarded cancel as "downloaded" in its result.
     _stop = item.get("result")
     if _stop in (
             "cancelled", "incomplete", "interrupted", "disk_full", "io_error",
@@ -1576,44 +1573,6 @@ def _resolve_queue_item(
     else:
         status = "nothing_landed"
 
-    if record_fetch:
-        log_fetch({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "album_id": item["album"].get("id"),
-            "artist": (item["album"].get("artist") or {}).get("name"),
-            "title": item["album"].get("title"),
-            "result": status,
-            "tracks_total": len(
-                (item["album"].get("tracks") or {}).get("items") or []
-            ),
-            "tracks_downloaded": n_ok,
-            "tracks_failed": n_fail,
-            "tracks_lossy_deleted": item.get("n_lossy", 0),
-            "failed_titles": item.get("failed_tracks", []),
-            "lossy_titles": item.get("lossy_tracks", []),
-            "broken_titles": item.get("broken_tracks", []),
-            "unavailable_titles": item.get("unavailable_tracks", []),
-            "downsample_errors": item.get("downsample_errors", 0),
-            "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
-            "downsample_flush_warnings": item.get(
-                "downsample_flush_warnings", 0
-            ),
-            "downsample_cancelled": bool(
-                item.get("downsample_cancelled", False)
-            ),
-            "upgrade_unverified": bool(item.get("upgrade_unverified", False)),
-            "catalogue_unverified": bool(
-                item.get("catalogue_unverified", False)
-            ),
-            "recovery_unverified": bool(
-                item.get("recovery_unverified", False)
-            ),
-            "siblings_preserved": item.get("_siblings_preserved", []),
-            "imported": imported_globally,
-            "auto_upgrade": item["auto_upgrade"],
-            "elapsed_s": int(item.get("elapsed", 0)),
-            "queued": True,
-        })
     return {
         "dir": album_dir,
         "result": status,
@@ -1732,14 +1691,9 @@ def _refresh_review_state_after_downloads(
     *,
     allow_upgrade_refresh=True,
 ):
-    """Keep every Library-derived saved view truthful after CLI file changes.
-
-    Exact album ids can be folded into Library and New Releases. Upgrade and
-    Downsample are re-derived once per changed artist. If identity, discovery,
-    or persistence is uncertain, the corresponding generation output is marked
-    stale instead of leaving its older snapshot current. A bookkeeping failure
-    never changes the already-completed download result.
-    """
+    """Record finished terminal downloads in History and bring the saved
+    Library views up to date with the albums that landed. A bookkeeping
+    failure never changes the already-completed download result."""
     successful = [
         change
         for change in changes
@@ -1750,213 +1704,9 @@ def _refresh_review_state_after_downloads(
         if change in successful or change.get("result") == "interrupted"
         or download_job_outcome(change)[0] == "failed"
     ], no_import=getattr(args, "no_import", False))
-    if not successful:
-        return
-
-    try:
-        from qobuz_librarian.library import generation_state
-
-        authority = generation_state.load()
-        was_current = {
-            surface: generation_state.output_is_current(
-                surface,
-                state=authority,
-            )
-            for surface in generation_state.SURFACES
-        }
-        if generation_state.reserve_revision() is None:
-            log.warning(
-                "  The Library change revision could not be saved after files "
-                "changed. Run a Library refresh before using saved results."
-            )
-    except Exception as exc:
-        log.warning(
-            "  Saved Library state could not be refreshed after files "
-            "changed. Run a Library refresh before using saved results."
-        )
-        vlog(f"post-download generation-state refresh unavailable: {exc}")
-        return
-
-    stale = set()
-
-    def mark_stale(reason):
-        if not stale:
-            return
-        try:
-            saved = generation_state.invalidate(sorted(stale), reason)
-        except Exception as exc:
-            saved = False
-            vlog(f"post-download stale marker failed: {exc}")
-        if not saved:
-            log.warning(
-                "  Saved Library state could not be marked stale after files "
-                "changed. Run a Library refresh before using saved results."
-            )
-        else:
-            log.warning(
-                "  Some saved Library views need a refresh after this file "
-                "change. The completed download is unchanged."
-            )
-
-    try:
-        from qobuz_librarian.library import (
-            downsample_state,
-            library_scan_state,
-            new_releases,
-        )
-        from qobuz_librarian.library import hidden as hidden_mod
-        from qobuz_librarian.quality import upgrade_state
-        from qobuz_librarian.quality.decision import load_capped
-        from qobuz_librarian.web import review_badges
-    except Exception as exc:
-        stale.update(
-            surface for surface, current in was_current.items() if current
-        )
-        mark_stale(
-            "CLI file changes could not update the affected saved views."
-        )
-        vlog(f"post-download saved-state refresh unavailable: {exc}")
-        return
-
-    artist_dirs = []
-    seen_artists = set()
-    artist_unknown = False
-    seen_albums = set()
-    for change in successful:
-        album = change.get("album")
-        album_id = str((album or {}).get("id") or "").strip()
-        artist_id = str(
-            ((album or {}).get("artist") or {}).get("id") or ""
-        ).strip()
-        album_key = (album_id, artist_id)
-        if album_key not in seen_albums:
-            seen_albums.add(album_key)
-            if was_current["library"]:
-                try:
-                    updated = (
-                        bool(album_id)
-                        and library_scan_state.remove_album(album_id)
-                    )
-                except Exception as exc:
-                    updated = False
-                    vlog(f"post-download Library refresh failed: {exc}")
-                if not updated:
-                    stale.add("library")
-            if was_current["new_releases"]:
-                try:
-                    updated = (
-                        bool(album_id)
-                        and bool(artist_id)
-                        and new_releases.note_owned_album(album)
-                    )
-                except Exception as exc:
-                    updated = False
-                    vlog(f"post-download New Releases refresh failed: {exc}")
-                if not updated:
-                    stale.add("new_releases")
-
-        changed_path = change.get("_resolved_post_dir") or change.get("dir")
-        try:
-            album_path = Path(changed_path) if changed_path else None
-            if album_path is None or not album_path.exists():
-                artist_unknown = True
-                continue
-            artist_dir = (
-                album_path.parent
-                if album_path.is_dir()
-                else album_path.parent.parent
-            )
-        except (OSError, TypeError, ValueError):
-            artist_unknown = True
-            continue
-        key = str(artist_dir)
-        if key not in seen_artists:
-            seen_artists.add(key)
-            artist_dirs.append(artist_dir)
-
-    # Only the review dots below need the dismissed list; the saved snapshots
-    # keep every candidate and filter when they are shown.
-    try:
-        hidden = hidden_mod.load()
-    except Exception as exc:
-        hidden = None
-        stale.update(
-            surface
-            for surface in ("upgrade", "downsample")
-            if was_current[surface]
-        )
-        vlog(f"post-download hidden-state input unavailable: {exc}")
-
-    capped = None
-    upgrade_inputs_ready = True
-    if was_current["upgrade"] and allow_upgrade_refresh:
-        try:
-            capped = load_capped()
-        except Exception as exc:
-            upgrade_inputs_ready = False
-            stale.add("upgrade")
-            vlog(f"post-download Upgrade policy input unavailable: {exc}")
-
-    for artist_dir in artist_dirs:
-        if was_current["upgrade"]:
-            if not allow_upgrade_refresh:
-                stale.add("upgrade")
-            elif upgrade_inputs_ready:
-                try:
-                    result = upgrade_state.update_artist(
-                        artist_dir,
-                        token=token,
-                        args=args,
-                        capped=capped,
-                    )
-                    if not result.complete:
-                        stale.add("upgrade")
-                except Exception as exc:
-                    stale.add("upgrade")
-                    vlog(
-                        f"post-download Upgrade refresh failed for "
-                        f"{artist_dir}: {exc}"
-                    )
-        if was_current["downsample"]:
-            try:
-                result = downsample_state.update_artist(artist_dir)
-                if not result.complete:
-                    stale.add("downsample")
-            except Exception as exc:
-                stale.add("downsample")
-                vlog(
-                    f"post-download Downsample refresh failed for "
-                    f"{artist_dir}: {exc}"
-                )
-
-    if artist_unknown:
-        stale.update(
-            surface
-            for surface in ("upgrade", "downsample")
-            if was_current[surface]
-        )
-    mark_stale(
-        "CLI file changes could not update every affected saved view."
-    )
-
-    try:
-        for surface, state_module in (
-            ("upgrade", upgrade_state),
-            ("downsample", downsample_state),
-        ):
-            if not generation_state.output_is_current(surface):
-                # A stale view shows nothing, so its dot goes out even when the
-                # hidden list is what went missing.
-                review_badges.set_ready(surface, False)
-            elif hidden is not None:
-                saved = state_module.load()
-                review_badges.sync_candidates(
-                    surface,
-                    saved,
-                    state_module.visible_candidates(saved, hidden),
-                )
-    except Exception as exc:
-        vlog(f"post-download review-badge refresh failed: {exc}")
+    saved_views.refresh_after_changes(
+        successful, token, args, upgrade=allow_upgrade_refresh,
+        claims_album=True)
 
 
 def _require_executor_authority(authority):
@@ -2243,7 +1993,7 @@ def _release_unplannable_claim(owner, action, *, authority):
 
 
 def _durable_completed_result(item, post_dir):
-    """Publish the ordinary queue/log shape without heuristic resolution."""
+    """Publish the ordinary queue result shape without heuristic resolution."""
     item["imported"] = True
     item["_resolved_post_dir"] = post_dir
     item["_resolved_post_dir_from_import_ownership"] = False
@@ -2258,37 +2008,6 @@ def _durable_completed_result(item, post_dir):
         status = "failed"
     else:
         status = "downloaded"
-    log_fetch({
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "album_id": item["album"].get("id"),
-        "artist": (item["album"].get("artist") or {}).get("name"),
-        "title": item["album"].get("title"),
-        "result": status,
-        "tracks_total": len(
-            (item["album"].get("tracks") or {}).get("items") or []
-        ),
-        "tracks_downloaded": n_ok,
-        "tracks_failed": n_fail,
-        "tracks_lossy_deleted": item.get("n_lossy", 0),
-        "failed_titles": item.get("failed_tracks", []),
-        "lossy_titles": item.get("lossy_tracks", []),
-        "broken_titles": item.get("broken_tracks", []),
-        "unavailable_titles": item.get("unavailable_tracks", []),
-        "downsample_errors": item.get("downsample_errors", 0),
-        "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
-        "downsample_flush_warnings": item.get(
-            "downsample_flush_warnings", 0
-        ),
-        "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
-        "upgrade_unverified": bool(item.get("upgrade_unverified", False)),
-        "catalogue_unverified": bool(item.get("catalogue_unverified", False)),
-        "recovery_unverified": bool(item.get("recovery_unverified", False)),
-        "siblings_preserved": [],
-        "imported": True,
-        "auto_upgrade": bool(item.get("auto_upgrade")),
-        "elapsed_s": int(item.get("elapsed", 0)),
-        "queued": True,
-    })
     return {
         "dir": post_dir,
         "result": status,
@@ -2499,9 +2218,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         # NB: _build_queue_item always seeds these keys with None, so setdefault()
         # is a no-op here (the key is present). It would leave result=None and
         # _resolve_queue_item would then mislabel the stop as "nothing_landed"
-        # (and write that to the fetch log) instead of the true reason. Assign
-        # explicitly, overriding None while preserving a real result a prior
-        # run's flush already recorded.
+        # instead of the true reason. Assign explicitly, overriding None while
+        # preserving a real result a prior run's flush already recorded.
         if item.get("snapshot_before") is None:
             item["snapshot_before"] = set()
         if not item.get("result"):
@@ -2515,7 +2233,6 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             args,
             False,
             authority=authority,
-            record_fetch=False,
         )
         results.append(result)
         never_started.append(result)
@@ -2796,7 +2513,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             try:
                 token = _admit_new_queue_items([item], token)
             except CandidateStale as exc:
-                log.info(fmt(C.YELLOW, f"    ⚠  {exc}"))
+                log.info(fmt(C.YELLOW,
+                    f"    ⚠  {truncate(item['album'].get('title') or '?', 55)}: {exc}"))
                 item["result"] = "stale_candidate"
                 _drop(item)
                 results.append(_resolve_queue_item(
@@ -3154,8 +2872,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         "for this album; stopping the queue."))
                     interrupted = True
                     # Mark interrupted so _resolve_queue_item labels it as such
-                    # in the fetch log instead of falling through to "downloaded"
-                    # (the album did not import).
+                    # instead of falling through to "downloaded" (the album did
+                    # not import).
                     item["result"] = "interrupted"
                     results.append(_resolve_queue_item(
                         item, args, False, authority=authority))

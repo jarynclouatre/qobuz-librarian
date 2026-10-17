@@ -265,7 +265,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
                    if j.status in (job_mgr.JobStatus.RUNNING, job_mgr.JobStatus.SCANNING)]
 
     # These all read the (often NAS / network-mounted) data + music volumes,
-    # the fetch log, the creds file, and a staging iterdir().
+    # the creds file, and a staging iterdir().
     def _gather_disk_state():
         # These read state files, so they run here (off the event loop)
         # alongside the other disk work; any job they start is submitted from
@@ -369,8 +369,7 @@ def _qobuz_quality_short_label(primary: dict | None,
 
 def _filter_artist_only_albums(albums, query):
     def words(text):
-        # normalize() drops what has no ASCII form, such as a CJK title.
-        return {tags.normalize(word) or word
+        return {tags.normalize(word)
                 for word in re.findall(r"[^\W_]+", text.casefold())}
 
     query_words = words(query) - {"", "the", "a", "an", "and"}

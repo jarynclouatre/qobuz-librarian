@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 
 from qobuz_librarian.queue.builder import _build_queue_item
-from qobuz_librarian.queue.persistence import (
+from qobuz_librarian.queue.journal import (
     QueueLoadStatus,
     _deserialize_queue_item,
     _serialize_queue_item,
-    clear_pending_queue,
-    load_pending_queue,
-    offer_resume_pending_queue,
+    clear_queue_journal,
+    load_queue_journal,
     save_pending_queue,
 )
+from qobuz_librarian.queue.persistence import offer_resume_startup_recovery
 
 
 def _qitem(title="Test", **overrides):
@@ -156,12 +156,21 @@ def test_executor_refuses_changed_queued_album_before_download(
 def test_pending_queue_round_trips_and_clears(tmp_path, monkeypatch):
     monkeypatch.setattr("qobuz_librarian.config.QUEUE_JOURNAL_DIR", tmp_path / "journals")
     save_pending_queue([_qitem(title="Album A")], mode="album_walk")
-    items, mode, saved_at = load_pending_queue()
+    loaded = load_queue_journal()
+    items, mode = loaded.pending_items()
     assert len(items) == 1 and items[0]["album"]["title"] == "Album A"
     assert mode == "album_walk"
-    datetime.fromisoformat(saved_at)        # saved_at is valid ISO
-    clear_pending_queue(explicit_discard=True)
-    assert load_pending_queue().status is QueueLoadStatus.ABSENT
+    datetime.fromisoformat(loaded.journal.saved_at)
+    clear_queue_journal(explicit_discard=True)
+    assert load_queue_journal().status is QueueLoadStatus.ABSENT
+
+
+def _saved_queue_recovery():
+    from qobuz_librarian import run_lock
+    from qobuz_librarian.queue import startup_recovery
+
+    return startup_recovery.recover_startup_state(
+        authority=run_lock.current_lease())
 
 
 def test_resume_keeps_pending_file_when_not_drained(tmp_path, monkeypatch):
@@ -170,8 +179,8 @@ def test_resume_keeps_pending_file_when_not_drained(tmp_path, monkeypatch):
     monkeypatch.setattr("qobuz_librarian.queue.executor._execute_download_queue",
                         lambda items, args, token, **kw: ([], False))
     monkeypatch.setattr("builtins.input", lambda _prompt: "y")
-    offer_resume_pending_queue(Namespace(), "tok")
-    assert load_pending_queue()[0]  # albums left to retry must survive the resume
+    offer_resume_startup_recovery(Namespace(), "tok", _saved_queue_recovery())
+    assert load_queue_journal().pending_items()[0]
 
 
 def test_a_closed_input_does_not_resume_the_saved_queue(tmp_path, monkeypatch):
@@ -188,9 +197,10 @@ def test_a_closed_input_does_not_resume_the_saved_queue(tmp_path, monkeypatch):
         raise EOFError
 
     monkeypatch.setattr("builtins.input", _closed)
-    assert offer_resume_pending_queue(Namespace(), "tok") is False
+    assert offer_resume_startup_recovery(
+        Namespace(), "tok", _saved_queue_recovery()) is None
     assert started == []
-    assert load_pending_queue()[0]
+    assert load_queue_journal().pending_items()[0]
 
 
 def test_executor_gap_fill_backup_restored_when_track_returns_lossy(monkeypatch, tmp_path):
@@ -309,7 +319,6 @@ def test_executor_restores_or_keeps_upgrade_backup_after_import_failure(
     monkeypatch.setattr(cfg, "MUSIC_ROOT", music)
     monkeypatch.setattr(cfg, "STAGING_DIR", staging)
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
-    monkeypatch.setattr(cfg, "FETCH_LOG_FILE", tmp_path / "fetch.jsonl")
     item = _qitem(
         album={
             "id": "A",

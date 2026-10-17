@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import state_file
 from qobuz_librarian.library import (
     artist_scan_store,
     candidate_premise,
@@ -130,45 +129,9 @@ def update_artist(
     scan_artist: Callable[[Path], list[DownsampleCandidate]] | None = None,
 ):
     """Re-scan one artist and merge it into the saved downsample snapshot."""
-    if scan_artist is None:
-        scan_artist = downsample.scan_artist_for_downsample
-
-    name = artist_dir.name
-    fingerprints: dict[str, str] = {}
-    try:
-        fingerprint = artist_fingerprint(artist_dir)
-        fingerprints[name] = fingerprint
-        filtered = list(scan_artist(artist_dir))
-    except Exception as exc:
-        return RefreshResult([], [name], {name: str(exc)}, False, fingerprints)
-
-    with _STATE_LOCK, state_file.store_lock(cfg.DOWNSAMPLE_STATE_FILE):
-        state = load()
-        now = time.time()
-        target_generation = generation_state.current_generation()
-        state_revision = generation_state.reserve_revision()
-        if state_revision is None:
-            return RefreshResult(
-                [], [name], {name: "saved state revision could not be written"},
-                False, {name: fingerprint},
-            )
-        saved = _write_state(_store.state_with_artist(
-            state, name, fingerprint, filtered,
-            now=now, generation=target_generation, revision=state_revision,
-        ))
-        authority_saved = saved and generation_state.mark_output_current(
-            "downsample",
-            generation=target_generation,
-            revision=state_revision,
-            complete=bool(state.get("complete", True)),
-            preserve_noncurrent=True,
-        )
-    if not authority_saved:
-        return RefreshResult(
-            [], [name], {name: "saved Downsample view needs refresh"}, False,
-            {name: fingerprint},
-        )
-    return RefreshResult(filtered, [name], {}, True, {name: fingerprint})
+    return _store.update_artist(
+        artist_dir, scan_artist or downsample.scan_artist_for_downsample,
+        load=load, write_state=_write_state)
 
 
 def remove_album_dir(album_dir) -> bool:
@@ -196,56 +159,7 @@ def reseal(resealed) -> bool:
 
 def remove_artist(name: str):
     """Remove one artist from the saved downsample snapshot."""
-    with _STATE_LOCK, state_file.store_lock(cfg.DOWNSAMPLE_STATE_FILE):
-        state = load()
-        now = time.time()
-        target_generation = generation_state.current_generation()
-        state_revision = generation_state.reserve_revision()
-        if state_revision is None:
-            return RefreshResult(
-                [], [name], {name: "saved state revision could not be written"},
-                False, {},
-            )
-        artists_scanned = [
-            artist for artist in state.get("artists_scanned") or []
-            if artist != name
-        ]
-        errors = dict(state.get("errors") or {})
-        errors.pop(name, None)
-        fingerprints = dict(state.get("fingerprints") or {})
-        fingerprints.pop(name, None)
-        artist_updated_at = dict(state.get("artist_updated_at") or {})
-        artist_updated_at.pop(name, None)
-        artist_revision = dict(state.get("artist_revision") or {})
-        artist_revision.pop(name, None)
-        saved = _write_state({
-            "version": STATE_VERSION,
-            "updated_at": now,
-            "generation": target_generation,
-            "revision": state_revision,
-            "complete": bool(state.get("complete", True)),
-            "artists_scanned": artists_scanned,
-            "errors": errors,
-            "fingerprints": fingerprints,
-            "artist_updated_at": artist_updated_at,
-            "artist_revision": artist_revision,
-            "candidates": [
-                c for c in state.get("candidates") or []
-                if c.get("artist") != name
-            ],
-        })
-        authority_saved = saved and generation_state.mark_output_current(
-            "downsample",
-            generation=target_generation,
-            revision=state_revision,
-            complete=bool(state.get("complete", True)),
-            preserve_noncurrent=True,
-        )
-    if not authority_saved:
-        return RefreshResult(
-            [], [name], {name: "saved Downsample view needs refresh"}, False, {}
-        )
-    return RefreshResult([], [name], {}, True, {})
+    return _store.remove_artist(name, load=load, write_state=_write_state)
 
 
 def refresh_for_artists(

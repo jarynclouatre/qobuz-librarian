@@ -3,7 +3,6 @@ import json
 import math
 import os
 import stat
-from datetime import datetime, timezone
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
@@ -116,7 +115,6 @@ from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import (
     confirm,
     download_question,
-    log_fetch,
     print_album_summary,
     prompt_edition_pick,
 )
@@ -803,7 +801,7 @@ def finish_interrupted_upgrades():
     dropped. An album still in its backup is left to the start-up put-back,
     and one whose parent folder is gone, as an unmounted library reads, is
     left alone. Returns the album folders upgraded and those put back."""
-    from qobuz_librarian.modes.upgrade import _forget_upgraded_album
+    from qobuz_librarian import saved_views
 
     finished, put_back = [], []
     for backup, note in interrupted_upgrades():
@@ -824,7 +822,7 @@ def finish_interrupted_upgrades():
             log.info(fmt(C.GRAY,
                 f"  ✓  Finished the upgrade of {album_dir} that an earlier "
                 "run left unfinished."))
-            _forget_upgraded_album(None, album_dir)
+            saved_views.forget_upgraded_album(None, album_dir)
             finished.append(album_dir)
             continue
         try:
@@ -1039,15 +1037,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                 f"\n  ✓  Already higher quality than Qobuz "
                 f"({plural(qual['n_above'], 'track')} above target)."))
             if not missing:
-                log_fetch({
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "album_id": album.get("id"),
-                    "artist": (album.get("artist") or {}).get("name"),
-                    "title": album.get("title"),
-                    "result": "skipped_already_higher_quality",
-                    "tracks_total": len(qobuz_tracks),
-                    "qobuz_quality": f"{qbits}-bit/{qrate}Hz",
-                })
                 return {"result": "skipped_already_higher_quality",
                         "n_total": len(qobuz_tracks)}
             # Has missing tracks. Will fall through to gap-fill prompt with
@@ -1140,18 +1129,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                             f"       ... and {len(extras) - 5} more"))
                     log.info(fmt(C.GRAY,
                         "     If these look like normal album tracks, your tags"
-                        " differ from Qobuz's. Skipping (logged)."))
-                    log_fetch({
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "album_id": album.get("id"),
-                        "artist": (album.get("artist") or {}).get("name"),
-                        "title": album.get("title"),
-                        "result": "skipped_has_extras",
-                        "tracks_total": len(qobuz_tracks),
-                        "qobuz_quality": f"{qbits}-bit/{qrate}Hz",
-                        "n_extras": len(extras),
-                        "extra_titles": [t.get("title") or "?" for t in extras[:20]],
-                    })
+                        " differ from Qobuz's. Skipping."))
                     return {"result": "skipped_has_extras",
                             "n_total": len(qobuz_tracks),
                             "n_extras": len(extras)}
@@ -1240,14 +1218,6 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(C.GREEN,
                 "\n  ✓  No upgrade available (some tracks already above target)."))
             if not missing:
-                log_fetch({
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "album_id": album.get("id"),
-                    "artist": (album.get("artist") or {}).get("name"),
-                    "title": album.get("title"),
-                    "result": "skipped_already_higher_quality",
-                    "tracks_total": len(qobuz_tracks),
-                })
                 return {"result": "skipped_already_higher_quality",
                         "n_total": len(qobuz_tracks)}
             # Has missing tracks.
@@ -1345,16 +1315,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                 f"{plural(len(missing), 'track')} not available on Qobuz.\n"))
         else:
             log.info(fmt(C.GREEN, "\n  ✓  Already complete. Nothing to download.\n"))
-        log_fetch({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "album_id": album.get("id"),
-            "artist": (album.get("artist") or {}).get("name"),
-            "title": album.get("title"),
-            "result": "already_complete",
-            "tracks_total": len(qobuz_tracks),
-            "tracks_downloaded": 0,
-            "tracks_unavailable": len(missing),
-        })
         consolidation_interrupted = consolidation_cancelled = False
         consolidation_failed = 0
         if args.consolidate:
@@ -1440,13 +1400,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                 "  ✗  Couldn't safely identify this album's Beets entries; "
                 "refusing to replace its folder.",
             ))
-            log_fetch({
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "album_id": album.get("id"),
-                "artist": (album.get("artist") or {}).get("name"),
-                "title": album.get("title"),
-                "result": "replacement_aborted_catalogue_failed",
-            })
             return {"result": "replacement_aborted_catalogue_failed"}
 
     # Same-filesystem move, so this is fast (rename, not copy). The backup
@@ -1469,13 +1422,6 @@ def process_album(album, args, *, allow_force=True, label=None,
                 album_dir,
                 operation="upgrade backup",
             )
-            log_fetch({
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "album_id": album.get("id"),
-                "artist": (album.get("artist") or {}).get("name"),
-                "title": album.get("title"),
-                "result": "upgrade_aborted_backup_failed",
-            })
             return {"result": "upgrade_aborted_backup_failed"}
         if (
             upgrade_backup_path is None
@@ -1483,13 +1429,6 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(C.RED,
                 "  ✗  Could not back up the existing folder; refusing to "
                 "wipe without a backup. Skipping this album."))
-            log_fetch({
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "album_id": album.get("id"),
-                "artist": (album.get("artist") or {}).get("name"),
-                "title": album.get("title"),
-                "result": "upgrade_aborted_backup_failed",
-            })
             return {"result": "upgrade_aborted_backup_failed"}
         log.info(fmt(C.GRAY,
             "  ⤷  Backed up existing folder (auto-restore on failure)"))
@@ -1826,7 +1765,6 @@ def process_album(album, args, *, allow_force=True, label=None,
 
     finally:
         # Always resolve upgrade backup, including on exception.
-        upgrade_restored = False
         if upgrade_backup_path is not None:
             # Require zero failures AND zero lossy-deletes.
             upgrade_succeeded = (download_phase_completed
@@ -1937,7 +1875,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 # back and move the replacement out of the library.
                 put_back = _put_original_back(upgrade_backup_path, album_dir)
                 if put_back is not None:
-                    upgrade_restored = upgrade_put_back = True
+                    upgrade_put_back = True
                     imported = False
                     upgrade_set_aside = put_back if put_back is not True else None
                     log.info(fmt(C.YELLOW,
@@ -1986,8 +1924,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 log.info(fmt(C.YELLOW,
                     f"\n  ⚠  {op_label} did not succeed (no successful import); "
                     "restoring backup …"))
-                upgrade_restored = restore_upgrade_backup(upgrade_backup_path, album_dir)
-                if upgrade_restored:
+                if restore_upgrade_backup(upgrade_backup_path, album_dir):
                     log.info(fmt(C.GREEN,
                         f"  ✓  Restored original folder to {album_dir}."))
                 else:
@@ -2340,7 +2277,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     elif n_ok and not imported and not args.no_import:
         # Tracks ripped but didn't make it into the library (a beets failure, or
         # an upgrade/--force the finally block rolled back to the original), the
-        # library is unchanged, so don't log this as a completed "downloaded".
+        # library is unchanged, so don't report this as a completed "downloaded".
         result_status = "not_imported"
     elif n_ok:
         result_status = "downloaded"
@@ -2348,38 +2285,6 @@ def process_album(album, args, *, allow_force=True, label=None,
         result_status = "failed"
     else:
         result_status = "nothing_landed"
-
-    log_fetch({
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "album_id": album.get("id"),
-        "artist": (album.get("artist") or {}).get("name"),
-        "title": album.get("title"),
-        "result": result_status,
-        "tracks_total": len(qobuz_tracks),
-        "tracks_already_present": len(present),
-        "tracks_attempted": len(missing),
-        "tracks_downloaded": n_ok,
-        "tracks_lossy_deleted": n_lossy,
-        "tracks_failed": n_fail,
-        "tracks_unavailable": n_unavailable,
-        "failed_titles": failed_tracks,
-        "lossy_titles": lossy_tracks,
-        "broken_titles": broken_tracks,
-        "unavailable_titles": unavailable_tracks,
-        **downsample_outcome,
-        "imported": imported,
-        "force": bool(use_force),
-        "auto_upgrade": bool(auto_upgrade_active),
-        "upgrade_backup_path": str(upgrade_backup_path) if upgrade_backup_path else None,
-        "upgrade_restored": upgrade_restored,
-        "catalogue_unverified": catalogue_unverified,
-        "recovery_unverified": recovery_unverified,
-        "consolidated": bool(
-            args.consolidate and imported and not consolidation_interrupted),
-        "consolidation_interrupted": consolidation_interrupted,
-        "consolidated_tracks_removed": n_consolidated,
-        "elapsed_s": int(elapsed),
-    })
 
     # A clean import can still hide a truncated track: the download drops
     # files that won't decode, but one cut at a frame boundary with its FLAC

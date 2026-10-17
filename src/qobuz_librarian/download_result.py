@@ -8,11 +8,7 @@ def track_shortfall(result):
     Qobuz sent at the chosen quality, which another try may get again. Qobuz
     has lossy-only tracks only in a lossy format and does not stream the
     others at all."""
-    n_broken = result.get("n_broken")
-    if n_broken is None:
-        # Results saved before damaged tracks were counted on their own.
-        n_broken = min(len(result.get("broken_tracks") or []),
-                       result.get("n_lossy", 0))
+    n_broken = result.get("n_broken", 0)
     n_lossy_only = result.get("n_lossy_only")
     if n_lossy_only is None:
         n_lossy_only = max(result.get("n_lossy", 0) - n_broken, 0)

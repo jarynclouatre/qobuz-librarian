@@ -8,7 +8,7 @@ Open an issue with:
 
 - What you ran (CLI flags, the URL/album you fed it, or which web page).
 - What happened, what you expected.
-- A relevant chunk of the log. The fetch log lives at `/data/.qobuz_librarian_log.json` inside the container; the Docker log (`docker compose logs qobuz-librarian`) is also useful.
+- A relevant chunk of the log (`docker compose logs qobuz-librarian`).
 - Container or pipx install, and your `docker compose version` / Python version.
 
 Do not paste your `password_or_token`. It is in `/config/streamrip/config.toml`; redact it before sharing logs.

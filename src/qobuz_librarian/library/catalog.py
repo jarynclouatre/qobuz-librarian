@@ -1701,9 +1701,9 @@ def edition_group_key(album):
     without edition labels or a leading article, and its year. None for an
     album without a title."""
     bare = strip_leading_article(strip_album_decorations(album.get("title") or ""))
-    # Pure-CJK / emoji titles normalize to '' (ASCII-fold drops them); fall
-    # back to the raw title so they aren't silently dropped from the missing
-    # list. Only a genuinely empty title is skipped.
+    # An emoji title normalizes to ''; fall back to the raw title so it isn't
+    # silently dropped from the missing list. Only a genuinely empty title is
+    # skipped.
     key_title = normalize(bare) or bare.strip().casefold()
     if not key_title:
         return None

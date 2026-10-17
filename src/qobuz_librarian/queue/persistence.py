@@ -1,4 +1,4 @@
-"""Compatibility entry points and the CLI resume prompt for queue journals."""
+"""The terminal's resume prompt for a saved queue, and saving a run's queue."""
 
 from datetime import datetime
 
@@ -7,59 +7,18 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost
 from qobuz_librarian.completion import CompletionOriginKind, RecoveryOwner
 from qobuz_librarian.queue.journal import (
-    JournalItem,
-    QueueJournal,
     QueueJournalBlocked,
-    QueueJournalError,
-    QueueLoad,
     QueueLoadStatus,
     QueuePhase,
-    RecoveryReference,
     _deserialize_queue_item,
-    _serialize_queue_item,
-    clear_pending_queue,
     clear_queue_journal,
-    commit_completed_item_removal,
-    commit_recovered_completed_item_removal,
-    create_queue_journal,
-    list_queue_journals,
     load_queue_journal,
-    process_carrier_retirement,
     save_pending_queue,
-    save_queue_journal,
-    transition_journal_item,
 )
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, truncate, wrap
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
-
-__all__ = [
-    "JournalItem",
-    "QueueJournal",
-    "QueueJournalBlocked",
-    "QueueJournalError",
-    "QueueLoad",
-    "QueueLoadStatus",
-    "QueuePhase",
-    "RecoveryReference",
-    "_deserialize_queue_item",
-    "_serialize_queue_item",
-    "clear_pending_queue",
-    "clear_queue_journal",
-    "commit_completed_item_removal",
-    "commit_recovered_completed_item_removal",
-    "create_queue_journal",
-    "load_pending_queue",
-    "load_queue_journal",
-    "list_queue_journals",
-    "offer_resume_pending_queue",
-    "offer_resume_startup_recovery",
-    "process_carrier_retirement",
-    "save_pending_queue",
-    "save_queue_journal",
-    "transition_journal_item",
-]
 
 
 def _queue_heading(kind, items, mode, saved_at):
@@ -135,19 +94,6 @@ def _queued_album_lines(items):
         lines.append(fmt(C.GRAY,
             f"     … and {len(items) - _QUEUE_ALBUMS_SHOWN} more"))
     return "\n".join(lines)
-
-
-def load_pending_queue():
-    """Load typed v2 state while preserving tuple unpacking for old callers."""
-    loaded = load_queue_journal()
-    if loaded.status is QueueLoadStatus.BLOCKED:
-        location = loaded.paths[0] if len(loaded.paths) == 1 else cfg.QUEUE_JOURNAL_DIR
-        log.info(fmt(
-            C.YELLOW,
-            f"  ⚠  Saved queue state at {location} needs attention "
-            f"({loaded.reason or 'invalid journal'}); it was left unchanged.",
-        ))
-    return loaded
 
 
 def _load_startup_recovery_queue(recovery):
@@ -372,88 +318,3 @@ def offer_resume_startup_recovery(args, token_source, recovery):
         allowed = "Y or k" if recovery_bearing else "Y, k, or d"
         log.info(fmt(C.GRAY, f"  Enter {allowed}."))
 
-
-def offer_resume_pending_queue(args, token_source):
-    """Startup hook. If a pending queue is present, prompt to resume / keep
-    / discard. ``token_source`` may be a token or a lazy callable; the latter
-    keeps local keep/discard choices reachable without download preflight."""
-    loaded = load_pending_queue()
-    items, mode, saved_at = loaded
-    if not items:
-        return False
-
-    print()
-    log.info(_queue_heading("Saved", items, mode, saved_at))
-    log.info(_queued_album_lines(items))
-    queue_path = loaded.paths[0] if len(loaded.paths) == 1 else cfg.QUEUE_JOURNAL_DIR
-    vlog(f"resume queue file: {queue_path}")
-    log.info(fmt(C.GRAY,
-        "     Resuming downloads only the albums in it."))
-    print()
-
-    while True:
-        ans = ask("  Resume now? [Y]es / [k]eep for later / [d]iscard: ")
-        if ans is None:
-            return False
-        if ans in ("", "y", "yes"):
-            log.info(fmt(C.CYAN,
-                f"\n  ⟳  Resuming {plural(len(items), 'saved album')}…"))
-            try:
-                token = token_source() if callable(token_source) else token_source
-                # Lazy import to avoid a circular dependency at module load:
-                # executor imports several names from this module.
-                from qobuz_librarian.queue.executor import _execute_download_queue
-
-                def _save_progress():
-                    save_pending_queue(items, mode=mode)
-
-                _, drained = _execute_download_queue(
-                    items, args, token, on_progress=_save_progress,
-                    refresh_review=True,
-                    consolidate_duplicates=mode != "album-now",
-                )
-                if getattr(args, "dry_run", False):
-                    pass  # preview only; leave the pending file untouched
-                elif drained:
-                    clear_pending_queue()
-                    log.info(fmt(C.GREEN, "  ✓ Resume complete; saved queue cleared."))
-                else:
-                    try:
-                        save_pending_queue(items, mode=mode)
-                        log.info(fmt(C.YELLOW,
-                            f"  ⚠  {plural(len(items), 'album')} couldn't be "
-                            "downloaded - saved queue kept for next launch."))
-                    except QueueJournalBlocked:
-                        # An album parked for attention during the flush; the
-                        # journal holds it and must not be rewritten as pending.
-                        log.info(fmt(C.YELLOW,
-                            "  ⚠  The saved queue is not fully settled; its "
-                            "durable recovery was kept for next launch."))
-            except KeyboardInterrupt:
-                log.info(fmt(C.YELLOW,
-                    "\n  ⚠  Resume interrupted; saved queue kept for next launch."))
-            except AuthLost:
-                log.info(fmt(C.RED,
-                    "  ✗ Qobuz rejected the token during the resume; the "
-                    "saved queue was kept for the next launch."))
-                raise
-            except Exception as e:
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  Resume failed: {e}. Saved queue kept for next launch."))
-            return False  # fall through to menu
-        if ans in ("k", "keep"):
-            log.info(fmt(C.GRAY, "  Keeping the pending queue."))
-            return False
-        if ans in ("d", "discard"):
-            conf = ask(
-                f"  Really discard {plural(len(items), 'queued album')}? "
-                "Type DISCARD to confirm: ",
-                colour=C.YELLOW, lower=False,
-            )
-            if conf == "DISCARD":
-                clear_pending_queue(explicit_discard=True)
-                log.info(fmt(C.GRAY, "  Pending queue cleared."))
-            else:
-                log.info(fmt(C.GRAY, "  Discard cancelled."))
-            return False
-        log.info(fmt(C.GRAY, "  Enter Y, k, or d."))

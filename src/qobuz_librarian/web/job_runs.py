@@ -12,7 +12,6 @@ from qobuz_librarian.api.auth import (
     QobuzUnavailable,
 )
 from qobuz_librarian.library import candidate_premise, catalog
-from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.modes import process as process_mode
 from qobuz_librarian.queue import builder as queue_builder
 from qobuz_librarian.queue import durable_album
@@ -296,8 +295,7 @@ def _make_download_run(
                 fallback_artist=(album.get("artist") or {}).get("name"),
                 token=active_token,
                 args=args,
-                upgrade=True,
-                downsample=True,
+                claims_album=True,
             )
             # A parked library review may still offer this album, so drop it
             # there so the stale review can't download it a second time.
@@ -312,11 +310,6 @@ def _make_download_run(
                 flows._fold_partial_gap_fill(
                     album, (album.get("artist") or {}).get("name") or "",
                     retryable, album_dir=r.get("dir"))
-            hidden_mod.unmark_single(
-                (album.get("artist") or {}).get("name") or "?",
-                album.get("title") or "?",
-                album_id=album.get("id"),
-            )
         if durable_completion_settled:
             # Exact completion, external acknowledgement, carrier retirement,
             # and journal cleanup all finished before the executor returned.

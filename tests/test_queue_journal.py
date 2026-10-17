@@ -26,7 +26,7 @@ from qobuz_librarian.completion import (
 )
 from qobuz_librarian.queue import journal as journal_module
 from qobuz_librarian.queue.builder import _build_queue_item
-from qobuz_librarian.queue.persistence import (
+from qobuz_librarian.queue.journal import (
     QueueJournalBlocked,
     QueueLoadStatus,
     QueuePhase,
@@ -36,7 +36,6 @@ from qobuz_librarian.queue.persistence import (
     commit_recovered_completed_item_removal,
     create_queue_journal,
     list_queue_journals,
-    load_pending_queue,
     load_queue_journal,
     process_carrier_retirement,
     save_queue_journal,
@@ -259,8 +258,8 @@ def test_malformed_v2_blocks_replay_and_requires_explicit_discard(queue_paths):
 def test_completed_removal_commits_first(queue_paths, monkeypatch):
     monkeypatch.setattr(cfg, "MUSIC_ROOT", Path("/music"))
     save_queue_journal(create_queue_journal([_queue_item("Saved")], mode="walk_queue"))
-    loaded = load_pending_queue()
-    caller_items, _mode, _saved_at = loaded
+    loaded = load_queue_journal()
+    caller_items, _mode = loaded.pending_items()
 
     item_id = loaded.journal.items[0].item_id
     active = transition_journal_item(
@@ -345,7 +344,7 @@ def test_completed_removal_commits_first(queue_paths, monkeypatch):
     assert len(caller_items) == 1
     reloaded_retirement = load_queue_journal(emptied.operation_id)
     assert reloaded_retirement.journal.retirements == (retirement,)
-    assert reloaded_retirement.as_legacy_tuple() == (None, None, None)
+    assert reloaded_retirement.pending_items() == ([], None)
     with pytest.raises(
         QueueJournalBlocked,
         match="retirement cannot be discarded",

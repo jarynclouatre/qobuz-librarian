@@ -268,40 +268,18 @@ class QueueLoad:
     reason: str | None = None
     paths: tuple[Path, ...] = ()
 
-    def as_legacy_tuple(self):
-        """Keep tuple-unpacking callers safe until executor integration lands."""
+    def pending_items(self):
+        """The queued albums and their mode when every item is still pending,
+        else ``([], None)``."""
         if (
             self.status is not QueueLoadStatus.READY
             or self.journal is None
             or self.journal.retirements
             or any(item.phase is not QueuePhase.PENDING for item in self.journal.items)
         ):
-            return None, None, None
+            return [], None
         items = [_deserialize_queue_item(item.planned) for item in self.journal.items]
-        return items, self.journal.mode, self.journal.saved_at
-
-    def __iter__(self):
-        return iter(self.as_legacy_tuple())
-
-    def __getitem__(self, index):
-        return self.as_legacy_tuple()[index]
-
-    def __eq__(self, other):
-        if isinstance(other, tuple):
-            return self.as_legacy_tuple() == other
-        if not isinstance(other, QueueLoad):
-            return NotImplemented
-        return (
-            self.status,
-            self.journal,
-            self.reason,
-            self.paths,
-        ) == (
-            other.status,
-            other.journal,
-            other.reason,
-            other.paths,
-        )
+        return items, self.journal.mode
 
 
 def _new_id() -> str:
@@ -3786,7 +3764,3 @@ def clear_queue_journal(
     _unlink_and_sync(_journal_path(journal.operation_id))
     return True
 
-
-def clear_pending_queue(*, explicit_discard: bool = False) -> bool:
-    """Compatibility clear for the sole pending queue operation."""
-    return clear_queue_journal(explicit_discard=explicit_discard)

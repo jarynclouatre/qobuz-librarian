@@ -53,8 +53,9 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "incomplete": "Qobuz couldn't deliver the whole album. Nothing was imported.",
     "upgrade_aborted_backup_failed": "Upgrade aborted: couldn't back up the original.",
     "stale_candidate": (
-        "The album's local files changed or could not be read before the "
-        "download started, so nothing was downloaded. Try again."
+        "Left as it is: the album's files changed after it was queued, or "
+        "could not be read. A run that stopped part way may already have "
+        "added tracks. Check the album again to see what it still needs."
     ),
     "replacement_aborted_catalogue_failed": (
         "The album's Beets entries could not be read, so the replacement "

@@ -20,11 +20,8 @@ from qobuz_librarian.modes.artist import (
     run_artist_missing_albums,
 )
 from qobuz_librarian.queue.executor import _execute_download_queue
-from qobuz_librarian.queue.persistence import (
-    clear_pending_queue,
-    kept_queue_note,
-    queue_saver,
-)
+from qobuz_librarian.queue.journal import clear_queue_journal
+from qobuz_librarian.queue.persistence import kept_queue_note, queue_saver
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate, wrap
 from qobuz_librarian.ui_cli.errors import (
@@ -245,6 +242,25 @@ def _leftover_folder_note(label, names) -> str:
     return f"{label}: {shown}"
 
 
+def _download_queue(queue, args, token, save, results_out=None):
+    """Download a walk's queue and return its results and whether it drained.
+    A queue that drains is cleared; one that does not stays saved."""
+    save(queue)
+    log.info(fmt(C.CYAN,
+        f"\n  ⟳  Downloading the queue ({plural(len(queue), 'album')})…"))
+    results, drained = _execute_download_queue(
+        queue, args, token, on_progress=lambda: save(queue),
+        refresh_review=True, results_out=results_out)
+    if not args.dry_run:
+        if drained:
+            clear_queue_journal()
+        else:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  {plural(len(queue), 'album')} couldn't be "
+                "downloaded; kept in the queue to retry on the next run."))
+    return results, drained
+
+
 def run_album_walk_mode(args, token):
     """Album fill walk: scan every album under every artist and
     prompt only on incomplete ones."""
@@ -316,14 +332,10 @@ def run_album_walk_mode(args, token):
         if not shared_queue:
             log.info(fmt(C.GRAY, "    The queue is empty."))
             return
-        _save_queue(shared_queue)
-        log.info(fmt(C.CYAN,
-            f"\n  ⟳  Downloading the queue ({plural(len(shared_queue), 'album')})…"))
         results = []
         try:
-            _, drained = _execute_download_queue(
-                shared_queue, args, token, on_progress=_save_now,
-                refresh_review=True, results_out=results)
+            _, drained = _download_queue(
+                shared_queue, args, token, _save_queue, results_out=results)
         finally:
             n_albums_filled += sum(
                 1 for r in results
@@ -334,12 +346,6 @@ def run_album_walk_mode(args, token):
             r.get("result") == "partial" for r in results
         )
         retry_needed = not drained
-        if drained:
-            clear_pending_queue()
-        else:
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  {plural(len(shared_queue), 'album')} couldn't be "
-                "downloaded; kept in the queue to retry on the next run."))
 
     try:
         for i, artist_dir in enumerate(artists, 1):
@@ -563,26 +569,14 @@ def run_walk_queued_mode(args, token):
         nonlocal partial_completion, retry_needed
         if not shared_queue:
             log.info(fmt(C.GRAY, "  The queue is empty."))
-            return 0
-        _save_queue(shared_queue)
-        log.info(fmt(C.CYAN,
-            f"\n  ⟳  Downloading the queue ({plural(len(shared_queue), 'album')})…"))
-        results, drained = _execute_download_queue(
-            shared_queue, args, token, on_progress=_save_now,
-            refresh_review=True)
+            return
+        results, drained = _download_queue(
+            shared_queue, args, token, _save_queue)
         if not args.dry_run:
             partial_completion = partial_completion or any(
                 r.get("result") == "partial" for r in results
             )
             retry_needed = not drained
-            if drained:
-                clear_pending_queue()
-            else:
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  {plural(len(shared_queue), 'album')} couldn't be "
-                    "downloaded; kept in the queue to retry on the next run."))
-        return sum(1 for r in results
-                   if r.get("result") in ("downloaded", "partial"))
 
     n_scanned = 0
     n_skipped = 0

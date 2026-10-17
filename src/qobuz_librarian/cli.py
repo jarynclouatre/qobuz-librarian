@@ -28,10 +28,7 @@ from qobuz_librarian.library import missing_types
 from qobuz_librarian.library.backup import cleanup_old_upgrade_backups
 from qobuz_librarian.quality.tiers import streamrip_quality_cap
 from qobuz_librarian.queue import journal as queue_state
-from qobuz_librarian.queue.persistence import (
-    offer_resume_pending_queue,
-    offer_resume_startup_recovery,
-)
+from qobuz_librarian.queue.persistence import offer_resume_startup_recovery
 from qobuz_librarian.ui_cli.colors import (
     C,
     banner,
@@ -999,7 +996,6 @@ def main():
                     f"  compose:    {cfg.COMPOSE_FILE}  "
                     f"({'present' if cfg.COMPOSE_FILE.exists() else 'MISSING'})"))
             log.info(fmt(C.GRAY, f"  staging:    {cfg.STAGING_DIR}"))
-            log.info(fmt(C.GRAY, f"  log file:   {cfg.FETCH_LOG_FILE}"))
             log.info(fmt(C.GRAY, f"  lock:       {cfg.LOCK_FILE}"))
         return token
 
@@ -1051,10 +1047,10 @@ def main():
 
     # An album put back from a copy has new inodes; its saved rows are
     # sealed again so they are not refused for them.
+    from qobuz_librarian import saved_views
     from qobuz_librarian.library import backup as backup_mod
-    from qobuz_librarian.modes import upgrade as upgrade_mode
     if backup_mod.on_restored is None:
-        backup_mod.on_restored = upgrade_mode.reseal_put_back_album
+        backup_mod.on_restored = saved_views.reseal_put_back_album
 
     def startup_housekeeping():
         from qobuz_librarian import beets_db
@@ -1196,11 +1192,6 @@ def main():
     if args.query:
         from qobuz_librarian.modes.album import run_album_mode
         raise SystemExit(run_album_mode(args, catalogue_token()))
-
-    # Crash-recovery: if a previous queueing run died with decisions still in
-    # memory, its queue journal is still on disk.
-    if not resume_saved_queue:
-        offer_resume_pending_queue(args, download_token)
 
     # Interactive menu loop. The local tools remain reachable without a Qobuz
     # token or downloader; network-backed choices initialise that stack lazily.

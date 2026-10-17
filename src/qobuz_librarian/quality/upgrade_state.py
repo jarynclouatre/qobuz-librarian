@@ -211,57 +211,9 @@ def update_artist(
     """Re-scan one artist and merge it into the saved upgrade snapshot."""
     if scan_artist is None:
         scan_artist = _default_scan_artist(token, args, capped)
-
-    name = artist_dir.name
-    scan_quality_signature = quality_signature()
-    fingerprints: dict[str, str] = {}
-    try:
-        fingerprint = artist_fingerprint(artist_dir)
-        fingerprints[name] = fingerprint
-        specs = _candidate_specs(artist_dir, scan_artist(artist_dir))
-    except Exception as exc:
-        return RefreshResult([], [name], {name: str(exc)}, False, fingerprints)
-
-    with _STATE_LOCK, state_file.store_lock(cfg.UPGRADE_STATE_FILE):
-        state = load()
-        now = time.time()
-        target_generation = generation_state.current_generation()
-        state_revision = generation_state.reserve_revision()
-        if state_revision is None:
-            return RefreshResult(
-                [], [name], {name: "saved state revision could not be written"},
-                False, {name: fingerprint},
-                quality_signature=scan_quality_signature,
-            )
-        same_policy = state.get("quality_signature") == scan_quality_signature
-        # Rows found under another quality setting must not pass as current
-        # when the setting returns, so the folder is left to be checked again.
-        saved = _write_state(_store.state_with_artist(
-            state, name, fingerprint if same_policy else "", specs,
-            now=now, generation=target_generation, revision=state_revision,
-            quality_signature=state.get("quality_signature", ""),
-        ))
-        authority_saved = saved and generation_state.mark_output_current(
-            "upgrade",
-            generation=target_generation,
-            revision=state_revision,
-            complete=bool(state.get("complete", True)),
-            policy_signature=scan_quality_signature,
-            preserve_noncurrent=True,
-        )
-    if not authority_saved:
-        return RefreshResult(
-            [], [name], {name: "saved Upgrade view needs refresh"}, False,
-            {name: fingerprint}, quality_signature=scan_quality_signature,
-        )
-    return RefreshResult(
-        specs,
-        [name],
-        {},
-        True,
-        {name: fingerprint},
-        quality_signature=scan_quality_signature,
-    )
+    return _store.update_artist(
+        artist_dir, lambda d: _candidate_specs(d, scan_artist(d)),
+        load=load, write_state=_write_state)
 
 
 def refresh_for_artists(

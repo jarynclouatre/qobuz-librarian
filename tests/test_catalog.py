@@ -202,6 +202,25 @@ def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
             filter_owned_albums(pairs, {"vanhalen": [1978]})] == ["Van Halen II"]
 
 
+def test_a_japanese_title_matches_its_folder_and_not_a_near_miss(tmp_path, monkeypatch):
+    """An album titled only in Japanese is matched to its folder for Upgrade
+    and counted as owned by the scan; a title one character off is neither."""
+    from qobuz_librarian.library import discovery, scanner
+
+    monkeypatch.setattr(config, "MUSIC_ROOT", tmp_path)
+    folder = tmp_path / "YOASOBI" / "夜に駆ける (2020)"
+    folder.mkdir(parents=True)
+    scanner.clear_scan_caches()
+    album = {**_qalbum("夜に駆ける", 2019), "id": "A", "artist": {"name": "YOASOBI"}}
+    near = {**album, "id": "N", "title": "夜に駆けて"}
+    assert catalog.match_dir_to_catalog(folder, [near, album], "YOASOBI") is album
+    assert catalog.match_dir_to_catalog(folder, [near], "YOASOBI") is None
+    assert catalog.find_album_dir_filesystem(album) == folder
+    assert catalog.find_album_dir_filesystem(near) is None
+    owned = discovery.owned_album_titles([folder])
+    assert catalog.filter_owned_albums([(album, 1), (near, 1)], owned) == [(near, 1)]
+
+
 def test_split_album_merge_rules(tmp_path):
     art = tmp_path / "Bonobo"
     (art / "Black Sands").mkdir(parents=True)

@@ -125,30 +125,42 @@ def beets_sanitize(s):
 def normalize(s):
     """ASCII-fold and strip punctuation for fuzzy comparison.
 
-    Pure CJK / emoji titles that strip to "" return "" - callers treat
-    that as "can't compare" (similarity() returns 0.0 for such pairs).
+    Text with no ASCII letters, such as a Japanese or Cyrillic title, keeps
+    its own letters and digits instead, so "群青 (2019)" is not reduced to
+    its year. Emoji and punctuation alone return "", which callers treat as
+    "can't compare".
     """
     if not s:
         return ""
-    s = unicodedata.normalize("NFKD", s)
-    s = s.encode("ascii", "ignore").decode("ascii")
-    return _NORMALIZE_RE.sub("", s.lower())
+    folded = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    folded = _NORMALIZE_RE.sub("", folded.lower())
+    if folded and not folded.isdigit():
+        return folded
+    own = "".join(c for c in s if unicodedata.category(c)[0] in "LMN")
+    return "".join(c for c in unicodedata.normalize("NFKC", own).casefold()
+                   if unicodedata.category(c)[0] in "LMN")
 
 
-@lru_cache(maxsize=8192)
-def similarity(a, b):
-    """Normalized similarity score [0.0, 1.0] between two strings.
+def key_similarity(na, nb):
+    """similarity() for two keys normalize() already made.
 
-    Two empty-normalized strings (e.g. pure-CJK titles) would score 1.0
-    against each other - a false-positive waiting to bite
-    find_qobuz_album_for_dir. Force 0.0 in that case.
+    An empty key never matches, or two emoji titles would score 1.0. A key
+    outside ASCII matches only itself: on a few kana or hangul a fuzzy
+    score rates a different title one character off as close.
     """
-    na, nb = normalize(a), normalize(b)
     if not na or not nb:
         return 0.0
     if na == nb:
         return 1.0
+    if not (na.isascii() and nb.isascii()):
+        return 0.0
     return SequenceMatcher(None, na, nb).ratio()
+
+
+@lru_cache(maxsize=8192)
+def similarity(a, b):
+    """Normalized similarity score [0.0, 1.0] between two strings."""
+    return key_similarity(normalize(a), normalize(b))
 
 
 _LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)

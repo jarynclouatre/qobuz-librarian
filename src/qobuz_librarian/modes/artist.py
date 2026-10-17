@@ -59,13 +59,12 @@ from qobuz_librarian.queue.executor import (
     _execute_download_queue,
     _refresh_review_state_after_downloads,
 )
-from qobuz_librarian.queue.journal import QueueLoadStatus, load_queue_journal
-from qobuz_librarian.queue.persistence import (
-    clear_pending_queue,
-    kept_queue_note,
-    load_pending_queue,
-    queue_saver,
+from qobuz_librarian.queue.journal import (
+    QueueLoadStatus,
+    clear_queue_journal,
+    load_queue_journal,
 )
+from qobuz_librarian.queue.persistence import kept_queue_note, queue_saver
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, section, truncate, wrap
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
@@ -307,9 +306,9 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     earlier = []
     if shared_queue is None:
         loaded = load_queue_journal()
-        kept, kept_mode, _saved_at = loaded
+        kept, kept_mode = loaded.pending_items()
         if loaded.status is QueueLoadStatus.ABSENT or kept_mode == "artist":
-            earlier = kept or []
+            earlier = kept
             save_queue = queue_saver("artist", dry_run=args.dry_run)
 
             def save_own_queue(items):
@@ -605,7 +604,7 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             if earlier:
                 save_own_queue(queue)
             else:
-                clear_pending_queue()
+                clear_queue_journal()
         elif not drained and save_own_queue is not None:
             log.info(fmt(C.YELLOW, "  ⚠  Some albums couldn't be downloaded."))
             log.info(kept_queue_note(earlier + queue))
@@ -1017,7 +1016,7 @@ def run_artist_mode(artist_name, args, token):
              artist_id, catalog) = run_artist_gap_fill(artist_name, artist_dir, args,
                                                        token, fresh=True)
         except KeyboardInterrupt:
-            kept, mode, _saved_at = load_pending_queue()
+            kept, mode = load_queue_journal().pending_items()
             if kept and mode == "artist":
                 log.info(kept_queue_note(kept))
             raise

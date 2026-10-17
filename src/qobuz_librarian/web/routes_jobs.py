@@ -1557,8 +1557,6 @@ async def job_undo(request: Request, job_id: str):
                 fallback_artist=artist,
                 token=qobuz_access._get_optional_token(),
                 args=flows.build_args(),
-                upgrade=True,
-                downsample=True,
             )
         except Exception as exc:
             _log.info(

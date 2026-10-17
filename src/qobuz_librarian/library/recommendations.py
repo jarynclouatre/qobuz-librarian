@@ -40,7 +40,7 @@ from qobuz_librarian.library.scanner import (
     list_artist_album_dirs,
     list_library_artists,
 )
-from qobuz_librarian.library.tags import normalize
+from qobuz_librarian.library.tags import key_similarity, normalize
 from qobuz_librarian.ui_cli.logging import vlog
 
 # How much of each thing is fetched, resolved and shown. The card counts are
@@ -110,13 +110,15 @@ class Library:
     def _matches_owned(self, name: str) -> bool:
         key = normalize(name)
         if not key:
-            # A pure CJK or emoji name normalizes to nothing, and comparing
-            # nothing to nothing matches everything. Exact text is all that is
-            # safe here.
+            # An emoji name normalizes to nothing, and comparing nothing to
+            # nothing matches everything. Exact text is all that is safe here.
             target = str(name or "").strip()
             return bool(target) and any(target == r.strip() for r in self.raws)
         if key in self.keys:
             return True
+        if not key.isascii():
+            # Exact only, as tags.key_similarity scores it.
+            return False
         # 'The Beatles' and 'Beatles' are the same shelf.
         flipped = key[3:] if key.startswith("the") else "the" + key
         if flipped and flipped in self.keys:
@@ -429,15 +431,10 @@ def resolve_album(
 
 
 def _text_similarity(a: str, b: str) -> float:
-    """Similarity of two names after normalizing both. Kept local rather than
-    reusing tags.similarity so a build comparing thousands of pairs doesn't
-    evict the scanner's cached comparisons."""
-    na, nb = normalize(a), normalize(b)
-    if not na or not nb:
-        return 0.0
-    if na == nb:
-        return 1.0
-    return SequenceMatcher(None, na, nb).ratio()
+    """Similarity of two names after normalizing both. Kept apart from
+    tags.similarity so a build comparing thousands of pairs doesn't evict
+    the scanner's cached comparisons."""
+    return key_similarity(normalize(a), normalize(b))
 
 
 def _qobuz_artist(name: str, token, *, prefer_hires: bool) -> dict | None:

@@ -11,7 +11,7 @@ import threading
 import time
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import post_job_hook
+from qobuz_librarian import post_job_hook, saved_views
 from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
 from qobuz_librarian.library import downsample_state, generation_state
 from qobuz_librarian.library import hidden as hidden_mod
@@ -29,7 +29,7 @@ from qobuz_librarian.ui_cli.errors import (
 )
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
-from qobuz_librarian.web import review_badges, settings_store
+from qobuz_librarian.web import settings_store
 
 
 def _downsample_album(album_dir, keep_originals):
@@ -271,13 +271,7 @@ def run_downsample_walk_mode(args):
                     interrupted = True
                     break
             if artist_attempted:
-                downsample_state.update_artist(artist_dir)
-                saved_state = downsample_state.load()
-                review_badges.sync_candidates(
-                    "downsample",
-                    saved_state,
-                    downsample_state.visible_candidates(saved_state, hidden),
-                )
+                saved_views.refresh_downsample_artist(artist_dir)
             log.info("")
             if interrupted:
                 break

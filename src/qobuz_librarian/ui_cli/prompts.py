@@ -1,11 +1,9 @@
-"""Interactive prompts, display helpers, and fetch-log functions."""
-import json
+"""Interactive prompts and display helpers."""
 import re
 import sys
+import time
 from urllib.parse import urlsplit
 
-from qobuz_librarian import config as cfg
-from qobuz_librarian import state_file
 from qobuz_librarian.library import catalog, scanner
 from qobuz_librarian.library.catalog import (
     album_quality_label,
@@ -24,111 +22,34 @@ from qobuz_librarian.ui_cli.errors import plural, unreadable_artist
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.sentinels import MORE, NO_ANSWER, URL_QUERY
 
-# ── Fetch log ─────────────────────────────────────────────────────────────────
+# ── Recent downloads ──────────────────────────────────────────────────────────
 
-# Once the JSONL grows beyond this, rotate the current file to .1 (one backup
-# kept) and start fresh.
-_FETCH_LOG_MAX_BYTES = 5 * 1024 * 1024
-
-
-def log_fetch(entry):
-    # Both web worker lanes and terminal runs append here; the lock keeps a
-    # rotation from discarding an entry another writer just appended.
-    try:
-        cfg.FETCH_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with state_file.store_lock(cfg.FETCH_LOG_FILE):
-            if cfg.FETCH_LOG_FILE.exists():
-                _rotate_fetch_log_if_needed()
-            with open(cfg.FETCH_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as e:
-        # Surface in --verbose instead of silently lying about
-        # a successful log write. Still doesn't crash the run.
-        vlog(f"log_fetch failed: {e}")
+_STATUS_TAGS = {
+    "done": (C.GREEN, "done"),
+    "failed": (C.RED, "failed"),
+    "canceled": (C.YELLOW, "cancelled"),
+}
 
 
-def _rotate_fetch_log_if_needed():
-    try:
-        if cfg.FETCH_LOG_FILE.stat().st_size <= _FETCH_LOG_MAX_BYTES:
-            return
-        rotated = cfg.FETCH_LOG_FILE.with_suffix(cfg.FETCH_LOG_FILE.suffix + ".1")
-        cfg.FETCH_LOG_FILE.replace(rotated)
-    except OSError as e:
-        vlog(f"fetch-log rotate failed: {e}")
+def show_recent_downloads(limit=10):
+    """Print the last album downloads from History, newest next to the prompt."""
+    from qobuz_librarian.web import job_persistence
 
-
-def _read_fetch_log(limit_tail=None):
-    """Return the logged fetch entries.
-
-    If ``limit_tail`` is set, returns only the last N entries (oldest →
-    newest). The dashboard reads with limit_tail=8 so the whole multi-MB
-    JSONL doesn't get slurped on every page load."""
-    if not cfg.FETCH_LOG_FILE.exists():
-        return []
-    from collections import deque
-    try:
-        with open(cfg.FETCH_LOG_FILE, encoding="utf-8") as f:
-            lines = deque(f, maxlen=limit_tail)
-    except OSError:
-        return []
-    entries = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            # Skip the partial/malformed line, keep going. JSONL's whole
-            # appeal is that one bad line doesn't kill the rest.
-            continue
-        if isinstance(obj, dict):     # a non-dict line would break entry.get(...)
-            entries.append(obj)
-    return entries
-
-
-def show_recent_fetches(limit=10):
-    """Print the last N entries from FETCH_LOG_FILE. Used by '?' in album-mode
-    interactive query - useful on mobile when the user can't recall what they
-    last grabbed."""
-    if not cfg.FETCH_LOG_FILE.exists():
+    job_persistence.init()
+    rows = job_persistence.history_page(limit, 0, bulk=False)
+    if not rows:
         log.info(fmt(C.GRAY, "  No downloads yet."))
         return
-    entries = _read_fetch_log(limit_tail=limit)
-    if not entries:
-        log.info(fmt(C.GRAY, "  No downloads yet."))
-        return
-    n = min(limit, len(entries))
-    log.info(fmt(C.GRAY, f"  Last {plural(n, 'download')}:"))
-    for e in entries[-n:]:
-        ts = (e.get("ts") or "?")[:10]
-        artist = e.get("artist") or "?"
-        title  = e.get("title") or "?"
-        n_ok   = e.get("tracks_downloaded", 0)
-        n_fail = e.get("tracks_failed", 0)
-        result = e.get("result")
-        tag    = ""
-        if result == "partial":
-            counts = []
-            if n_ok:
-                counts.append(f"+{n_ok}")
-            if n_fail:
-                counts.append(f"✗{n_fail}")
-            detail = f" ({', '.join(counts)})" if counts else ""
-            tag = fmt(C.YELLOW, f" ⚠ partial{detail}")
-        elif result == "already_complete":
-            tag = fmt(C.GRAY, " (already complete)")
-        elif result not in (None, "downloaded"):
-            failures = f" (✗{n_fail})" if n_fail else ""
-            tag = fmt(
-                C.YELLOW,
-                f" ⚠ {str(result).replace('_', ' ')}{failures}",
-            )
-        elif n_fail:
-            tag = fmt(C.RED, f" ✗{n_fail}")
-        elif n_ok:
-            tag = fmt(C.GREEN, f" +{n_ok}")
-        log.info(f"    {fmt(C.GRAY, ts)}  {truncate(artist, 22)} - {truncate(title, 32)}{tag}")
+    log.info(fmt(C.GRAY, f"  Last {plural(len(rows), 'download')}:"))
+    for row in reversed(rows):
+        when = row["finished_at"] or row["created_at"]
+        day = time.strftime("%Y-%m-%d", time.localtime(when)) if when else "?"
+        color, word = _STATUS_TAGS.get(row["status"], (C.GRAY, row["status"]))
+        tag = fmt(color, f" {word}")
+        if row["tracks_missing"] > 0:
+            tag += fmt(C.YELLOW, f" ({row['tracks_missing']} missing)")
+        log.info(f"    {fmt(C.GRAY, day)}  {truncate(row['artist'] or '?', 22)}"
+                 f" - {truncate(row['title'] or '?', 32)}{tag}")
 
 
 # ── Interactive UI ────────────────────────────────────────────────────────────
@@ -320,8 +241,7 @@ def interactive_query():
         if not line or line.lower() in ("q", "quit", "exit"):
             return None
         if line == "?":
-            # Show recent fetches and re-prompt; don't return.
-            show_recent_fetches()
+            show_recent_downloads()
             print()
             continue
         if _is_qobuz_url(line):
@@ -343,7 +263,7 @@ def interactive_query():
             if album.lower() in ("q", "quit", "exit"):
                 return None
             if album == "?":
-                show_recent_fetches()
+                show_recent_downloads()
                 print()
                 continue
             # Blank album: use the artist/free-text input as a single combined

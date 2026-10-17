@@ -5,6 +5,7 @@ from pathlib import Path
 
 from qobuz_librarian import state_file
 from qobuz_librarian.library import generation_state
+from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
 from qobuz_librarian.ui_cli import logging as cli_logging
 
 
@@ -231,38 +232,101 @@ class ArtistScanStore:
                 **policy,
             )
 
-    def state_with_artist(
-        self, state, name, fingerprint, candidates, *, now, generation, revision,
-        quality_signature="",
+    def state_without_artist(
+        self, state, name, *, now, generation, revision,
     ):
-        kept = [c for c in state["candidates"] if c.get("artist") != name]
-        kept.extend(self.candidate_to_dict(c) for c in candidates)
-        artists_scanned = list(dict.fromkeys(
-            list(state.get("artists_scanned") or []) + [name]))
-        errors = dict(state.get("errors") or {})
-        errors.pop(name, None)
-        fingerprints = dict(state.get("fingerprints") or {})
-        fingerprints[name] = fingerprint
-        artist_updated_at = dict(state.get("artist_updated_at") or {})
-        artist_updated_at[name] = now
-        artist_revision = dict(state.get("artist_revision") or {})
-        artist_revision[name] = revision
+        def others(key):
+            return {k: v for k, v in (state.get(key) or {}).items() if k != name}
+
         data = {
             "version": self.version,
             "updated_at": now,
             "generation": generation,
             "revision": revision,
             "complete": bool(state.get("complete", True)),
-            "artists_scanned": artists_scanned,
-            "errors": errors,
-            "fingerprints": fingerprints,
-            "artist_updated_at": artist_updated_at,
-            "artist_revision": artist_revision,
+            "artists_scanned": [
+                artist for artist in state.get("artists_scanned") or []
+                if artist != name
+            ],
+            "errors": others("errors"),
+            "fingerprints": others("fingerprints"),
+            "artist_updated_at": others("artist_updated_at"),
+            "artist_revision": others("artist_revision"),
         }
         if self.quality_signature is not None:
-            data["quality_signature"] = quality_signature
-        data["candidates"] = kept
+            data["quality_signature"] = state.get("quality_signature", "")
+        data["candidates"] = [
+            c for c in state.get("candidates") or [] if c.get("artist") != name
+        ]
         return data
+
+    def state_with_artist(
+        self, state, name, fingerprint, candidates, *, now, generation, revision,
+    ):
+        data = self.state_without_artist(
+            state, name, now=now, generation=generation, revision=revision)
+        data["artists_scanned"] = list(dict.fromkeys(
+            list(state.get("artists_scanned") or []) + [name]))
+        data["fingerprints"][name] = fingerprint
+        data["artist_updated_at"][name] = now
+        data["artist_revision"][name] = revision
+        data["candidates"].extend(self.candidate_to_dict(c) for c in candidates)
+        return data
+
+    def _write_artist(self, rebuild, *, load, write_state, policy_signature=""):
+        """Save ``rebuild(state, ...)`` under a new revision; the error, if any."""
+        with self.lock, state_file.store_lock(self.path()):
+            state = load()
+            generation = generation_state.current_generation()
+            revision = generation_state.reserve_revision()
+            if revision is None:
+                return "saved state revision could not be written"
+            saved = write_state(rebuild(
+                state, now=time.time(), generation=generation, revision=revision))
+            if saved and generation_state.mark_output_current(
+                self.surface,
+                generation=generation,
+                revision=revision,
+                complete=bool(state.get("complete", True)),
+                policy_signature=policy_signature,
+                preserve_noncurrent=True,
+            ):
+                return None
+        return f"saved {self.surface} view needs refresh"
+
+    def update_artist(self, artist_dir, scan, *, load, write_state):
+        """Scan one artist again and merge it into the saved snapshot. Rows
+        found under another quality policy keep no fingerprint, so the
+        folder is checked again once the policy returns."""
+        name = artist_dir.name
+        policy = self.quality_signature() if self.quality_signature else ""
+        fingerprints = {}
+        try:
+            fingerprints[name] = artist_fingerprint(artist_dir)
+            candidates = list(scan(artist_dir))
+        except Exception as exc:
+            return RefreshResult([], [name], {name: str(exc)}, False, fingerprints)
+
+        def rebuild(state, **kw):
+            same_policy = (self.quality_signature is None
+                           or state.get("quality_signature") == policy)
+            return self.state_with_artist(
+                state, name, fingerprints[name] if same_policy else "",
+                candidates, **kw)
+
+        error = self._write_artist(
+            rebuild, load=load, write_state=write_state,
+            policy_signature=policy)
+        if error:
+            return RefreshResult([], [name], {name: error}, False, fingerprints)
+        return RefreshResult(candidates, [name], {}, True, fingerprints)
+
+    def remove_artist(self, name, *, load, write_state):
+        error = self._write_artist(
+            lambda state, **kw: self.state_without_artist(state, name, **kw),
+            load=load, write_state=write_state)
+        return RefreshResult([], [name], {name: error} if error else {},
+                             not error, {})
 
     def remove_album_dir(self, album_dir, *, load, write_state, folder_of):
         """Drop the saved rows for one exact album folder without a scan."""

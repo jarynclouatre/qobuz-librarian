@@ -4,21 +4,15 @@ import time
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import post_job_hook
+from qobuz_librarian import post_job_hook, saved_views
 from qobuz_librarian.api.auth import AuthLost
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.download_result import download_attention_kind
 from qobuz_librarian.library import (
     candidate_premise,
-    downsample_state,
     generation_state,
-    library_scan_state,
-    new_releases,
 )
 from qobuz_librarian.library import hidden as hidden_mod
-from qobuz_librarian.library.catalog import (
-    find_album_dir_filesystem,
-)
 from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
 from qobuz_librarian.library.tags import VA_NORMALIZED, known_year, normalize
 from qobuz_librarian.modes.process import UpgradedThenInterrupted, process_album
@@ -37,7 +31,6 @@ from qobuz_librarian.ui_cli.errors import (
 )
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
-from qobuz_librarian.web import review_badges
 
 # process_album outcomes that mean "nothing to upgrade here", not a failure.
 BENIGN_UPGRADE_RESULTS = frozenset({
@@ -50,136 +43,6 @@ BENIGN_UPGRADE_RESULTS = frozenset({
     "dry_run",
     "cancelled",
 })
-
-
-def _artist_dir_from_upgrade_result(album, result):
-    result_dir = (result or {}).get("dir")
-    if result_dir:
-        album_dir = result_dir
-        if not hasattr(album_dir, "exists"):
-            from pathlib import Path
-            album_dir = Path(album_dir)
-        if album_dir.exists():
-            return album_dir.parent if album_dir.is_dir() else album_dir.parent.parent
-    try:
-        clear_scan_caches()
-        album_dir = find_album_dir_filesystem(album)
-        if album_dir and album_dir.exists():
-            return album_dir.parent
-    except Exception as exc:
-        vlog(f"post-upgrade state refresh path lookup failed: {exc}")
-    return None
-
-
-def _forget_upgraded_album(album, album_dir):
-    """Drop an album upgraded just before a stop, or finished by the next
-    start, from the saved Upgrade view, and from Library when ``album`` is
-    given, without the Qobuz check a finished upgrade gets."""
-    if (
-        album is not None
-        and generation_state.output_is_current("library")
-        and not library_scan_state.remove_album(album.get("id"))
-    ):
-        generation_state.mark_output_status(
-            "library",
-            "stale",
-            reason="A CLI replacement could not update the saved Library view.",
-        )
-    if not upgrade_state.remove_album_dir(album_dir):
-        generation_state.mark_output_status(
-            "upgrade",
-            "stale",
-            reason="A CLI replacement could not update the saved Upgrade view.",
-        )
-
-
-def reseal_saved_reviews(fresh_seal):
-    """Give each saved Upgrade and Downsample row the seal ``fresh_seal``
-    returns for it, if any. A view whose saved results can't be rewritten
-    is marked for a refresh, so it neither refuses an album for files the
-    app put back nor leaves it out."""
-    for surface, state in (("upgrade", upgrade_state),
-                           ("downsample", downsample_state)):
-        if (not state.reseal(fresh_seal)
-                and generation_state.output_is_current(surface)):
-            generation_state.mark_output_status(
-                surface, "stale",
-                reason="The app changed an album's files, and these saved "
-                       "results could not be updated.")
-
-
-def reseal_put_back_album(backup_receipt):
-    """Seal again the saved rows over an album a put-back restored byte for
-    byte, so the new inodes of a copy don't make the next run refuse it."""
-    reseal_saved_reviews(candidate_premise.sealer_after_put_back(backup_receipt))
-
-
-def _refresh_saved_state_after_upgrade(album, result, token, args):
-    authority = generation_state.load()
-    if (
-        generation_state.output_is_current("library", state=authority)
-        and not library_scan_state.remove_album((album or {}).get("id"))
-    ):
-        generation_state.mark_output_status(
-            "library",
-            "stale",
-            reason="A CLI replacement could not update the saved Library view.",
-        )
-    if not new_releases.note_owned_album(album):
-        if generation_state.output_is_current(
-            "new_releases", state=authority
-        ):
-            generation_state.mark_output_status(
-                "new_releases",
-                "stale",
-                reason="A CLI replacement could not update New releases.",
-            )
-    artist_dir = _artist_dir_from_upgrade_result(album, result)
-    if artist_dir is None:
-        surfaces = [
-            surface
-            for surface in ("upgrade", "downsample")
-            if generation_state.output_is_current(surface, state=authority)
-        ]
-        if surfaces:
-            generation_state.invalidate(
-                surfaces,
-                "An album was replaced from the terminal, and its artist "
-                "folder could not be identified.",
-            )
-        return
-    hidden = hidden_mod.load()
-    upgrade_result = upgrade_state.update_artist(
-        artist_dir,
-        token=token,
-        args=args,
-        capped=load_capped(),
-    )
-    if not upgrade_result.complete:
-        generation_state.mark_output_status(
-            "upgrade",
-            "stale",
-            reason="Upgrade could not refresh after a CLI replacement.",
-        )
-    upgrade_saved = upgrade_state.load()
-    review_badges.sync_candidates(
-        "upgrade",
-        upgrade_saved,
-        upgrade_state.visible_candidates(upgrade_saved, hidden),
-    )
-    downsample_result = downsample_state.update_artist(artist_dir)
-    if not downsample_result.complete:
-        generation_state.mark_output_status(
-            "downsample",
-            "stale",
-            reason="Downsample could not refresh after a CLI replacement.",
-        )
-    downsample_saved = downsample_state.load()
-    review_badges.sync_candidates(
-        "downsample",
-        downsample_saved,
-        downsample_state.visible_candidates(downsample_saved, hidden),
-    )
 
 
 def run_upgrade_walk_mode(args, token):
@@ -456,7 +319,8 @@ def run_upgrade_walk_mode(args, token):
                 except UpgradedThenInterrupted:
                     n_upgraded_albums += 1
                     stopped_during_removal = c.get("title") or "?"
-                    _forget_upgraded_album(album, payload.get("album_dir"))
+                    saved_views.forget_upgraded_album(
+                        album, payload.get("album_dir"))
                     raise
 
                 _pr_result = (_proc_result or {}).get("result", "")
@@ -482,8 +346,8 @@ def run_upgrade_walk_mode(args, token):
                     continue
                 if _pr_result in BENIGN_UPGRADE_RESULTS:
                     if _pr_result not in {"cancelled", "dry_run"}:
-                        _refresh_saved_state_after_upgrade(
-                            album, _proc_result, token, args)
+                        saved_views.forget_upgraded_album(
+                            None, payload.get("album_dir"))
                     time.sleep(cfg.ARTIST_API_DELAY)
                     continue
                 if not (_proc_result or {}).get("imported", False):
@@ -506,12 +370,13 @@ def run_upgrade_walk_mode(args, token):
                 elif attention_kind == "processing":
                     n_attention_albums += 1
                     n_upgraded_albums += 1
-                    _refresh_saved_state_after_upgrade(
-                        album, _proc_result, token, args)
+                    saved_views.refresh_after_changes(
+                        [{**_proc_result, "album": album}], token, args)
                     time.sleep(cfg.ARTIST_API_DELAY)
                     continue
                 n_upgraded_albums += 1
-                _refresh_saved_state_after_upgrade(album, _proc_result, token, args)
+                saved_views.refresh_after_changes(
+                    [{**_proc_result, "album": album}], token, args)
                 time.sleep(cfg.ARTIST_API_DELAY)
 
             log.info("")

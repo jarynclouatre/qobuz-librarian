@@ -272,14 +272,8 @@ def test_walk_binds_first_keep_choice_and_stops_if_it_cannot_be_saved(
     )
     monkeypatch.setattr(mode, "mark_local_album_capped", lambda _path: True)
     monkeypatch.setattr(mode.upgrade_state, "remove_album_dir", lambda _path: True)
-    monkeypatch.setattr(mode.downsample_state, "update_artist", lambda *_a, **_k: None)
-    monkeypatch.setattr(mode.downsample_state, "load", lambda: {})
-    monkeypatch.setattr(
-        mode.downsample_state,
-        "visible_candidates",
-        lambda *_args: [],
-    )
-    monkeypatch.setattr(mode.review_badges, "sync_candidates", lambda *_args: None)
+    monkeypatch.setattr(mode.saved_views, "refresh_downsample_artist",
+                        lambda _artist_dir: None)
 
     result = mode.run_downsample_walk_mode(
         SimpleNamespace(dry_run=False, yes=True),

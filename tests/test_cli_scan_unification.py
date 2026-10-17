@@ -226,7 +226,7 @@ def test_ctrl_c_in_a_second_artist_run_keeps_both_runs_approvals(
     queue as kept."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.modes import artist
-    from qobuz_librarian.queue import journal, persistence
+    from qobuz_librarian.queue import journal
     from qobuz_librarian.queue.builder import _build_queue_item
 
     root = tmp_path / "music" / "Artist"
@@ -271,7 +271,7 @@ def test_ctrl_c_in_a_second_artist_run_keeps_both_runs_approvals(
     with pytest.raises(KeyboardInterrupt):
         artist.run_artist_gap_fill("Artist", root, args, "tok", fresh=True)
 
-    kept, mode, _saved_at = persistence.load_pending_queue()
+    kept, mode = journal.load_queue_journal().pending_items()
     assert mode == "artist"
     assert [item["album_dir"] for item in kept] == dirs[:2]
 
@@ -371,7 +371,7 @@ def test_a_gap_fill_that_keeps_another_edition_is_done(
     lease = run_lock.acquire()
     try:
         result = executor._resolve_queue_item(
-            item, SimpleNamespace(migrate_multi_artist=True), True, record_fetch=False)
+            item, SimpleNamespace(migrate_multi_artist=True), True)
     finally:
         lease.close()
 

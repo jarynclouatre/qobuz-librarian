@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import repair_log, state_file
+from qobuz_librarian import repair_log, saved_views, state_file
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost, QobuzAccess, QobuzUnavailable
 from qobuz_librarian.api.search import get_album
@@ -50,7 +50,6 @@ from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
     album_quality_label,
     album_year,
-    find_album_dir_filesystem,
     find_qobuz_album_for_dir,
     is_lossless_album,
 )
@@ -60,7 +59,6 @@ from qobuz_librarian.library.discovery import (
     find_missing_for_artist,
     find_new_releases_for_artist,
     flush_resolve_cache,
-    resolve_artist_dir,
 )
 from qobuz_librarian.library.scanner import (
     clear_scan_caches,
@@ -71,7 +69,6 @@ from qobuz_librarian.library.scanner import (
 from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.modes import process as process_mode
 from qobuz_librarian.modes import repair
-from qobuz_librarian.modes import upgrade as upgrade_mode
 from qobuz_librarian.modes.repair import RepairRecovery, RepairRecoveryRequired
 from qobuz_librarian.modes.upgrade import BENIGN_UPGRADE_RESULTS
 from qobuz_librarian.quality import decision as quality_decision
@@ -189,89 +186,6 @@ def _record_unchecked_artists(job, count):
         job.execute_args.pop("_unchecked_artists", None)
 
 
-def _sync_surface_badge(surface):
-    """Point the nav dot at whatever that surface's own page would say.
-
-    A saved view the generation authority holds stale shows the user nothing,
-    so it has nothing to advertise however full its own store looks.
-    """
-    if surface == "upgrade":
-        state_module = upgrade_state
-    elif surface == "downsample":
-        state_module = downsample_state
-    else:
-        return
-    if not generation_state.output_is_current(surface):
-        review_badges.clear_ready(surface)
-        return
-    saved = state_module.load()
-    review_badges.sync_candidates(
-        surface, saved, state_module.visible_candidates(saved))
-
-
-def _artist_dir_from_result(album, result=None, fallback_artist=None):
-    result_dir = (result or {}).get("dir")
-    if result_dir:
-        album_dir = Path(result_dir)
-        if album_dir.exists():
-            return album_dir.parent if album_dir.is_dir() else album_dir.parent.parent
-    if album:
-        try:
-            clear_scan_caches()
-            album_dir = find_album_dir_filesystem(album)
-            if album_dir and album_dir.exists():
-                return album_dir.parent
-        except Exception as exc:
-            log.info(f"  state refresh path lookup failed: {exc}")
-    if fallback_artist:
-        try:
-            return resolve_artist_dir(fallback_artist)
-        except Exception as exc:
-            log.info(f"  state refresh artist lookup failed: {exc}")
-    return None
-
-
-def _refresh_downsample_artist_state(artist_dir):
-    if artist_dir is None:
-        return
-    result = downsample_state.update_artist(artist_dir)
-    if not result.complete:
-        err = next(iter(result.errors.values()), "unknown error")
-        generation_state.mark_output_status(
-            "downsample",
-            "stale",
-            reason="Downsample could not refresh after a local album change.",
-        )
-        log.info(f"  downsample view refresh skipped for {artist_dir.name}: {err}")
-    _sync_surface_badge("downsample")
-
-
-def _refresh_upgrade_artist_state(artist_dir, token, args=None):
-    if not cfg.UPGRADE_SCAN_ENABLED:
-        review_badges.set_ready("upgrade", False)
-        return
-    if artist_dir is None or not token:
-        return
-    try:
-        result = upgrade_state.update_artist(
-            artist_dir,
-            token=token,
-            args=args or build_args(),
-            capped=quality_decision.load_capped(),
-        )
-    except (AuthLost, QobuzUnavailable):
-        raise
-    if not result.complete:
-        err = next(iter(result.errors.values()), "unknown error")
-        generation_state.mark_output_status(
-            "upgrade",
-            "stale",
-            reason="Upgrade could not refresh after a local album change.",
-        )
-        log.info(f"  upgrade view refresh skipped for {artist_dir.name}: {err}")
-    _sync_surface_badge("upgrade")
-
-
 def _refresh_after_local_album_change(
     album,
     result=None,
@@ -279,84 +193,16 @@ def _refresh_after_local_album_change(
     fallback_artist=None,
     token=None,
     args=None,
-    upgrade=False,
-    downsample=False,
+    claims_album=False,
 ):
-    album_id = (album or {}).get("id")
-    authority = generation_state.load()
-    if (
-        album_id
-        and generation_state.output_is_current("library", state=authority)
-        and not library_scan_state.remove_album(album_id)
-    ):
-        generation_state.mark_output_status(
-            "library",
-            "stale",
-            reason="An in-app album change could not update the saved Library view.",
-        )
-    if album_id and not new_releases_mod.note_owned_album(album):
-        if generation_state.output_is_current(
-            "new_releases", state=authority
-        ):
-            generation_state.mark_output_status(
-                "new_releases",
-                "stale",
-                reason="An in-app album change could not update New releases.",
-            )
-    if not album_id:
-        for surface, reason in (
-            (
-                "library",
-                "An album changed in the app, and it could not be matched "
-                "to anything in these saved results.",
-            ),
-            (
-                "new_releases",
-                "An album changed in the app, and it could not be matched "
-                "to anything in these saved New releases results.",
-            ),
-        ):
-            if generation_state.output_is_current(surface, state=authority):
-                generation_state.mark_output_status(
-                    surface,
-                    "stale",
-                    reason=reason,
-                )
     if (result or {}).get("imported") and result.get("dir"):
         reseal_past_album_import(result["dir"])
-    artist_dir = _artist_dir_from_result(album, result, fallback_artist)
-    if artist_dir is None:
-        surfaces = []
-        if upgrade and generation_state.output_is_current(
-            "upgrade", state=authority
-        ):
-            surfaces.append("upgrade")
-        if downsample and generation_state.output_is_current(
-            "downsample", state=authority
-        ):
-            surfaces.append("downsample")
-        if surfaces:
-            generation_state.invalidate(
-                surfaces,
-                "An album changed in the app, and its artist folder could "
-                "not be identified.",
-            )
-            for surface in surfaces:
-                _sync_surface_badge(surface)
-        return
-    if upgrade:
-        try:
-            _refresh_upgrade_artist_state(artist_dir, token, args=args)
-        except (AuthLost, QobuzUnavailable) as exc:
-            generation_state.mark_output_status(
-                "upgrade",
-                "stale",
-                reason="Upgrade could not refresh after a local album change.",
-            )
-            _sync_surface_badge("upgrade")
-            log.info(f"  upgrade view needs refresh: {exc}")
-    if downsample:
-        _refresh_downsample_artist_state(artist_dir)
+    saved_views.refresh_after_changes(
+        [{**(result or {}), "album": album, "fallback_artist": fallback_artist}],
+        token,
+        args or build_args(),
+        claims_album=claims_album,
+    )
 
 
 def _album_cover(album):
@@ -1299,7 +1145,7 @@ def _reseal_reviews(fresh_seal, admits=None):
                 candidate_premise.gap_fill_receipts(fresh))
         return {**c, "payload": payload}
 
-    upgrade_mode.reseal_saved_reviews(fresh_seal)
+    saved_views.reseal_saved_reviews(fresh_seal)
     for job in job_mgr.registry.pending_and_running():
         with job._lock:
             rows = list(job.candidates)
@@ -2448,7 +2294,7 @@ def _scan_library_impl(
                     generation=scan_generation,
                 )
                 if not downsample_save_failed:
-                    _sync_surface_badge("downsample")
+                    saved_views.sync_badge("downsample")
             if upgrade_refresh is not None and upgrade_refresh.complete:
                 upgrade_save_failed = not upgrade_state.save(
                     upgrade_refresh,
@@ -2458,7 +2304,7 @@ def _scan_library_impl(
                     generation=scan_generation,
                 )
                 if not upgrade_save_failed:
-                    _sync_surface_badge("upgrade")
+                    saved_views.sync_badge("upgrade")
                     job.upgrade_finds = len(_offered_upgrades() - offered_before)
             elif upgrade_refresh is None:
                 generation_state.mark_output_status(
@@ -3173,8 +3019,7 @@ def execute_albums(job, chosen, token):
                 fallback_artist=cand.get("artist"),
                 token=token,
                 args=args,
-                upgrade=True,
-                downsample=True,
+                claims_album=True,
             )
             # The album is on disk now, any OTHER parked library review still
             # offering it is stale.
@@ -3543,22 +3388,13 @@ def execute_upgrades(job, chosen, token):
                 fallback_artist=cand.get("artist"),
                 token=token,
                 args=args,
-                upgrade=True,
-                downsample=True,
             )
             # The verified replace refreshed the whole album, so a parked
             # library review's candidates for it (incl. Gap Fill) are stale.
             prune_library_review_candidates(album)
         elif result and _res in (_skip - {"cancelled", "dry_run"}):
-            _refresh_after_local_album_change(
-                album,
-                result,
-                fallback_artist=cand.get("artist"),
-                token=token,
-                args=args,
-                upgrade=True,
-                downsample=True,
-            )
+            saved_views.forget_upgraded_album(
+                None, cand["payload"].get("album_dir"))
         elif _res not in _skip:
             failed += 1
             failed_cands.append(cand)
@@ -3773,7 +3609,7 @@ def scan_downsamples(job):
     if not job.cancel_requested and unchecked:
         _record_unchecked_artists(job, unchecked)
     if not job.cancel_requested and refresh.complete:
-        _sync_surface_badge("downsample")
+        saved_views.sync_badge("downsample")
     if job.cancel_requested:
         log.info("Cancelled. Stopping scan.")
     elif unchecked:
@@ -3887,10 +3723,10 @@ def execute_downsamples(
             log.info("  skipped: folder no longer exists")
             skipped_missing_folders += 1
             if album_dir.parent.is_dir():
-                _refresh_downsample_artist_state(album_dir.parent)
+                saved_views.refresh_downsample_artist(album_dir.parent)
             else:
                 downsample_state.remove_artist(album_dir.parent.name)
-                _sync_surface_badge("downsample")
+                saved_views.sync_badge("downsample")
             continue
         _note_staging_wait(job, "Downsampling albums", i - 1, len(chosen))
         try:
@@ -3938,7 +3774,7 @@ def execute_downsamples(
             failed_albums += 1
         else:
             skipped_unchanged += 1
-        _refresh_downsample_artist_state(album_dir.parent)
+        saved_views.refresh_downsample_artist(album_dir.parent)
         total_errors += res.get("errors", 0)
         total_flush_warns += res.get("flush_warnings", 0)
         resampled_files += res.get("resampled", 0)
@@ -5004,8 +4840,6 @@ def execute_repairs(job, chosen, token):
                 fallback_artist=p.get("artist_name"),
                 token=token,
                 args=args,
-                upgrade=True,
-                downsample=True,
             )
         if stopped_early:
             break

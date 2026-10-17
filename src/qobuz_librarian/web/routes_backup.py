@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import saved_views
 from qobuz_librarian.api.auth import QobuzAccess
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import staging as staging_mod
@@ -420,7 +421,7 @@ def _refresh_tool_lists(origin, reason):
     # The album on disk is now the older version, so the saved Upgrade and
     # Downsample candidates for its artist no longer describe it.
     try:
-        flows._refresh_downsample_artist_state(Path(origin).parent)
+        saved_views.refresh_downsample_artist(Path(origin).parent)
     except Exception:
         _log.exception("downsample state refresh failed after restore")
     try:
