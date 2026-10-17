@@ -1,16 +1,13 @@
 """Album consolidation - find and remove duplicate sibling folders."""
-import functools
 import math
 import os
 import re
 import sqlite3
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from qobuz_librarian import beets_db, config
-from qobuz_librarian.file_exclusion import acquire_inode_write_exclusion
-from qobuz_librarian.integrations import beets as beets_integration
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import catalog, scanner
 from qobuz_librarian.library.scanner import parse_track_num
@@ -23,9 +20,7 @@ from qobuz_librarian.library.tags import (
     strip_album_decorations,
 )
 from qobuz_librarian.quality.decision import quality_change_summary
-from qobuz_librarian.safefile import digest_fd as _digest_fd
-from qobuz_librarian.safefile import named_entry_matches
-from qobuz_librarian.safefile import named_entry_missing as _named_entry_missing
+from qobuz_librarian.safefile import snapshot_tree, stat_identity
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
 from qobuz_librarian.ui_cli.errors import plural
@@ -37,35 +32,6 @@ from qobuz_librarian.ui_cli.prompts import (
 )
 
 _YEAR_RE = re.compile(r"(?<!\d)(19\d\d|20\d\d)(?!\d)")
-_MAX_ALBUM_ENTRIES = 4096
-_MAX_ALBUM_DEPTH = 16
-
-
-def _file_receipt(descriptor):
-    value = os.fstat(descriptor)
-    if not stat.S_ISREG(value.st_mode):
-        raise OSError("consolidation source is not a regular file")
-    return {
-        "type": stat.S_IFMT(value.st_mode),
-        "device": int(value.st_dev),
-        "inode": int(value.st_ino),
-        "size": int(value.st_size),
-        "mtime_ns": int(value.st_mtime_ns),
-        "ctime_ns": int(value.st_ctime_ns),
-        "sha256": _digest_fd(descriptor),
-    }
-
-
-def _same_held_file(descriptor, expected, *, moved=False):
-    try:
-        current = _file_receipt(descriptor)
-    except OSError:
-        return False
-    fields = ("type", "device", "inode", "size", "sha256") if moved else tuple(expected)
-    return all(current.get(field) == expected.get(field) for field in fields)
-
-
-_named_file_matches = functools.partial(named_entry_matches, directory=False)
 
 
 def _metadata_from_held_file(descriptor, path):
@@ -129,329 +95,101 @@ def _metadata_from_held_file(descriptor, path):
 
 
 @dataclass
-class _HeldFile:
+class _ReviewedAlbum:
     path: Path
-    relative: tuple[str, ...]
-    name: str
-    parent_fd: int
-    descriptor: int
-    receipt: dict
-    metadata: dict | None
-    lease: object | None
+    identity: tuple[int, int]
+    snapshot: dict
+    tracks: list[dict]
+    track_keys: frozenset[str]
 
-    def close(self):
-        if self.lease is not None:
-            self.lease.close()
-            self.lease = None
+    def matches(self, *, removed=()):
+        """Whether the folder still holds what was reviewed, less `removed`.
+
+        Folders are compared without their times, which move whenever a
+        file in them is removed."""
         try:
-            os.close(self.descriptor)
+            folder = os.lstat(self.path)
         except OSError:
-            pass
-
-
-@dataclass
-class _HeldDirectory:
-    path: Path
-    relative: tuple[str, ...]
-    name: str
-    descriptor: int
-    parent_fd: int
-    files: list[_HeldFile] = field(default_factory=list)
-    children: list["_HeldDirectory"] = field(default_factory=list)
-
-
-class _AlbumSeal:
-    def __init__(self, path, root_chain, root_names, album_chain, album_parts):
-        self.path = path
-        self.root_chain = root_chain
-        self.root_names = root_names
-        self.album_chain = album_chain
-        self.album_parts = album_parts
-        self.root = _HeldDirectory(
-            path,
-            (),
-            album_parts[-1],
-            album_chain[-1],
-            album_chain[-2],
-        )
-        self.files: list[_HeldFile] = []
-        self.tracks: list[dict] = []
-        self._closed = False
-
-    def _directory_matches(self, directory, removed, cleaned):
-        if directory.relative in cleaned:
-            try:
-                return os.fstat(directory.descriptor).st_nlink == 0
-            except OSError:
-                return False
-        if not beets_integration._merge_directory_matches(
-                directory.descriptor, directory.parent_fd, directory.name):
             return False
-        expected_names = {
-            item.name for item in directory.files
-            if item.relative not in removed
+        current = snapshot_tree(self.path)
+        if (folder.st_dev, folder.st_ino) != self.identity or current is None:
+            return False
+        expected = {
+            key: value for key, value in self.snapshot.items()
+            if key not in removed
         }
-        expected_names.update(
-            child.name for child in directory.children
-            if child.relative not in cleaned
+        if current.keys() != expected.keys():
+            return False
+        return all(
+            current[key][:3] == value[:3] if stat.S_ISDIR(value[2])
+            else current[key] == value
+            for key, value in expected.items()
+        )
+
+    def track_key(self, path):
+        key = os.path.relpath(os.path.abspath(os.fspath(path)), self.path)
+        return key if key in self.track_keys else None
+
+
+def _review_album(path):
+    path = Path(os.path.abspath(os.fspath(path)))
+    if backup_mod._library_path(path) is None:
+        raise OSError("album is not a real folder inside the music library")
+    value = os.lstat(path)
+    snapshot = snapshot_tree(path)
+    if snapshot is None:
+        raise OSError("album folder could not be read")
+    audio_exts = set(config.AUDIO_EXTS)
+    tracks = []
+    track_keys = set()
+    for key in sorted(snapshot, key=lambda key: key.split(os.sep)):
+        identity = snapshot[key]
+        if stat.S_ISDIR(identity[2]):
+            continue
+        track_path = path / key
+        if not stat.S_ISREG(identity[2]):
+            raise OSError(
+                f"unsupported album entry prevents safe consolidation: {track_path}")
+        if track_path.suffix.lower() not in audio_exts:
+            continue
+        descriptor = os.open(
+            track_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
         )
         try:
-            if set(os.listdir(directory.descriptor)) != expected_names:
-                return False
-        except OSError:
-            return False
-        for item in directory.files:
-            if item.lease is not None and not item.lease.intact():
-                return False
-            if item.relative in removed:
-                if (
-                    not _named_entry_missing(directory.descriptor, item.name)
-                    or not _same_held_file(
-                        item.descriptor, item.receipt, moved=True)
-                ):
-                    return False
-            elif (
-                not _named_file_matches(
-                    directory.descriptor, item.name, item.descriptor)
-                or not _same_held_file(item.descriptor, item.receipt)
-            ):
-                return False
-        return all(
-            self._directory_matches(child, removed, cleaned)
-            for child in directory.children
-        )
-
-    def matches(self, *, removed=(), cleaned=()):
-        if self._closed:
-            return False
-        removed = set(removed)
-        cleaned = set(cleaned)
-        return (
-            beets_integration._merge_chain_is_named(
-                self.root_chain, self.root_names)
-            and beets_integration._merge_chain_is_named(
-                self.album_chain, self.album_parts)
-            and self._directory_matches(self.root, removed, cleaned)
-        )
-
-    def held_file(self, path):
-        absolute = Path(os.path.abspath(os.fspath(path)))
-        return next((item for item in self.files if item.path == absolute), None)
-
-    def remove_empty_directories(self, removed):
-        removed = {item.relative for item in removed}
-        cleaned = set()
-        directories = []
-
-        def collect(directory):
-            directories.append(directory)
-            for child in directory.children:
-                collect(child)
-
-        collect(self.root)
-        for directory in sorted(
-                directories, key=lambda item: len(item.relative), reverse=True):
-            if not self.matches(removed=removed, cleaned=cleaned):
-                log.info(fmt(
-                    C.YELLOW,
-                    "    ⚠  Folder contents changed after consolidation; "
-                    "leaving the remaining folders untouched.",
-                ))
-                break
-            try:
-                empty = not os.listdir(directory.descriptor)
-            except OSError:
-                empty = False
-            if not empty:
-                continue
-            if beets_integration._remove_empty_dir(
-                    directory.name, dir_fd=directory.parent_fd):
-                cleaned.add(directory.relative)
-                log.info(fmt(
-                    C.GREEN,
-                    f"    ✓  Removed empty folder: {directory.path.name}.",
-                ))
-            else:
-                log.info(fmt(
-                    C.YELLOW,
-                    f"    ⚠  Couldn't remove the empty folder "
-                    f"{directory.path.name}; left it in place.",
-                ))
-        return cleaned
-
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        for item in self.files:
-            item.close()
-
-        def close_children(directory):
-            for child in directory.children:
-                close_children(child)
-                try:
-                    os.close(child.descriptor)
-                except OSError:
-                    pass
-
-        close_children(self.root)
-        for descriptor in reversed(self.album_chain):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        for descriptor in reversed(self.root_chain):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-
-
-def _open_held_file(parent_fd, name):
-    descriptor = os.open(
-        name,
-        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-        | os.O_NONBLOCK,
-        dir_fd=parent_fd,
-    )
-    try:
-        if not _named_file_matches(parent_fd, name, descriptor):
-            raise OSError("consolidation file changed while it was opened")
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
-def _populate_album_seal(seal):
-    entry_count = 0
-    audio_exts = set(config.AUDIO_EXTS)
-
-    def walk(directory, depth):
-        nonlocal entry_count
-        if depth > _MAX_ALBUM_DEPTH:
-            raise OSError("album directory nesting is too deep to consolidate safely")
-        names = sorted(os.listdir(directory.descriptor))
-        entry_count += len(names)
-        if entry_count > _MAX_ALBUM_ENTRIES:
-            raise OSError("album contains too many entries to consolidate safely")
-        for name in names:
-            value = os.stat(
-                name, dir_fd=directory.descriptor, follow_symlinks=False)
-            child_path = directory.path / name
-            relative = directory.relative + (name,)
-            if stat.S_ISDIR(value.st_mode):
-                child_fd = beets_integration._open_exact_merge_dir(
-                    directory.descriptor, name, value)
-                child = _HeldDirectory(
-                    child_path,
-                    relative,
-                    name,
-                    child_fd,
-                    directory.descriptor,
-                )
-                directory.children.append(child)
-                walk(child, depth + 1)
-                continue
-            if not stat.S_ISREG(value.st_mode):
+            if stat_identity(os.fstat(descriptor)) != identity:
                 raise OSError(
-                    f"unsupported album entry prevents safe consolidation: {child_path}")
-            descriptor = _open_held_file(directory.descriptor, name)
-            lease = None
-            try:
-                metadata = None
-                receipt = _file_receipt(descriptor)
-                if child_path.suffix.lower() in audio_exts:
-                    lease = acquire_inode_write_exclusion(descriptor)
-                    if lease is None or not lease.intact():
-                        raise OSError(
-                            f"audio file changed while it was opened: {child_path}")
-                    metadata = _metadata_from_held_file(descriptor, child_path)
-                    if (
-                        not lease.intact()
-                        or not _named_file_matches(
-                            directory.descriptor, name, descriptor)
-                        or not _same_held_file(descriptor, receipt)
-                    ):
-                        raise OSError(
-                            f"audio file changed while metadata was read: {child_path}")
-                held = _HeldFile(
-                    child_path,
-                    relative,
-                    name,
-                    directory.descriptor,
-                    descriptor,
-                    receipt,
-                    metadata,
-                    lease,
-                )
-                directory.files.append(held)
-                seal.files.append(held)
-                if metadata is not None:
-                    seal.tracks.append(metadata)
-                descriptor = None
-                lease = None
-            finally:
-                if lease is not None:
-                    lease.close()
-                if descriptor is not None:
-                    os.close(descriptor)
-        if set(os.listdir(directory.descriptor)) != set(names):
-            raise OSError("album contents changed while they were reviewed")
-
-    walk(seal.root, 0)
+                    f"audio file changed while it was opened: {track_path}")
+            metadata = _metadata_from_held_file(descriptor, track_path)
+            if stat_identity(os.fstat(descriptor)) != identity:
+                raise OSError(
+                    f"audio file changed while metadata was read: {track_path}")
+        finally:
+            os.close(descriptor)
+        tracks.append(metadata)
+        track_keys.add(key)
+    album = _ReviewedAlbum(
+        path,
+        (value.st_dev, value.st_ino),
+        snapshot,
+        tracks,
+        frozenset(track_keys),
+    )
+    if not album.matches():
+        raise OSError("album contents changed while they were reviewed")
+    return album
 
 
-def _seal_album(path, *, expected_identity=None):
-    path = Path(os.path.abspath(os.fspath(path)))
-    music_root = Path(os.path.abspath(os.fspath(config.MUSIC_ROOT)))
-    try:
-        relative = path.relative_to(music_root)
-    except ValueError:
-        raise OSError("album is outside the configured music library") from None
-    if not relative.parts:
-        raise OSError("the music library root is not an album")
-
-    root_chain, root_names = beets_integration._open_absolute_merge_chain(
-        music_root)
-    album_chain = []
-    seal = None
-    try:
-        album_chain, _created = beets_integration._open_merge_chain(
-            root_chain[-1], tuple(relative.parts))
-        if expected_identity is not None:
-            current = os.fstat(album_chain[-1])
-            if (
-                not stat.S_ISDIR(current.st_mode)
-                or (int(current.st_dev), int(current.st_ino)) != expected_identity
-            ):
-                raise OSError("sibling album changed before it was sealed")
-        seal = _AlbumSeal(
-            path,
-            root_chain,
-            root_names,
-            album_chain,
-            tuple(relative.parts),
-        )
-        _populate_album_seal(seal)
-        if not seal.matches():
-            raise OSError("album changed while it was sealed")
-        return seal
-    except BaseException:
-        if seal is not None:
-            seal.close()
-        else:
-            for descriptor in reversed(album_chain):
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-            for descriptor in reversed(root_chain):
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-        raise
+def _file_receipt(identity):
+    """The receipt the backup checks a file against, from its stat_identity."""
+    return {
+        "type": stat.S_IFMT(identity[2]),
+        "device": identity[0],
+        "inode": identity[1],
+        "size": identity[3],
+        "mtime_ns": identity[4],
+        "ctime_ns": identity[5],
+    }
 
 
 def _sql_identifier(value):
@@ -972,56 +710,61 @@ def _capture_beets_items(paths, anchors_match):
 
 @dataclass
 class _ConsolidationBinding:
-    primary: _AlbumSeal
-    sibling: _AlbumSeal
-    files: tuple[_HeldFile, ...]
+    primary: _ReviewedAlbum
+    sibling: _ReviewedAlbum
+    keys: tuple[str, ...]
     database: _BeetsItemSeal
     kept: dict | None = None
     used: bool = False
 
     @property
+    def paths(self):
+        return [self.sibling.path / key for key in self.keys]
+
+    @property
     def expected_receipts(self):
         return {
-            "/".join(item.relative): item.receipt
-            for item in self.files
+            key: _file_receipt(self.sibling.snapshot[key])
+            for key in self.keys
         }
 
     def before_matches(self):
         return self.primary.matches() and self.sibling.matches()
 
     def after_matches(self):
-        removed = {item.relative for item in self.files}
-        return self.primary.matches() and self.sibling.matches(removed=removed)
+        return (
+            self.primary.matches()
+            and self.sibling.matches(removed=set(self.keys))
+        )
 
     def close(self):
         self.database.close()
 
 
 def _bind_summary(summary, primary, sibling):
-    files = []
-    seen = set()
+    keys = []
     # Which primary track stands in for each sibling file, so the backup
     # can expire once the primary still holds them.
     kept = {}
     for track, primary_track in summary["overlap"]:
         raw_path = track.get("path")
-        held = sibling.held_file(raw_path) if raw_path else None
-        if held is None or held.metadata is None or held.relative in seen:
+        key = sibling.track_key(raw_path) if raw_path else None
+        if key is None or key in keys:
             raise OSError("overlap no longer maps to one reviewed audio file")
-        seen.add(held.relative)
-        files.append(held)
-        standing_in = primary.held_file(primary_track.get("path") or "")
+        keys.append(key)
+        primary_path = primary_track.get("path")
+        standing_in = primary.track_key(primary_path) if primary_path else None
         if kept is not None and standing_in is not None:
-            kept["/".join(held.relative)] = "/".join(standing_in.relative)
+            kept[key] = standing_in
         else:
             kept = None
-    if not files:
+    if not keys:
         return summary
     anchors_match = lambda: primary.matches() and sibling.matches()
     database = _capture_beets_items(
-        [item.path for item in files], anchors_match)
+        [sibling.path / key for key in keys], anchors_match)
     summary["_binding"] = _ConsolidationBinding(
-        primary, sibling, tuple(files), database, kept)
+        primary, sibling, tuple(keys), database, kept)
     return summary
 
 
@@ -1145,32 +888,28 @@ def _summary_from_tracks(sibling, score, sibling_tracks, primary_tracks):
     }
 
 
-def _sealed_sibling_albums(album, primary):
+def _reviewed_sibling_albums(album, primary):
     primary_bare = strip_album_decorations(primary.path.name)
     primary_years = (
         _years_in(primary.path.name)
         or _years_in(album.get("title") or "")
     )
     api_bare = strip_album_decorations(album.get("title") or "")
-    artist_fd = primary.album_chain[-2]
+    artist = primary.path.parent
     try:
-        names = sorted(os.listdir(artist_fd))
+        names = sorted(os.listdir(artist))
     except OSError as exc:
-        raise OSError("couldn't enumerate the exact artist folder") from exc
+        raise OSError("couldn't list the artist folder") from exc
     candidates = []
-    primary_identity = (
-        int(os.fstat(primary.root.descriptor).st_dev),
-        int(os.fstat(primary.root.descriptor).st_ino),
-    )
     for name in names:
         try:
-            value = os.stat(name, dir_fd=artist_fd, follow_symlinks=False)
+            value = os.lstat(artist / name)
         except OSError:
             continue
-        if not stat.S_ISDIR(value.st_mode):
-            continue
-        identity = (int(value.st_dev), int(value.st_ino))
-        if identity == primary_identity:
+        if (
+            not stat.S_ISDIR(value.st_mode)
+            or (value.st_dev, value.st_ino) == primary.identity
+        ):
             continue
         years = _years_in(name)
         if primary_years and years and primary_years.isdisjoint(years):
@@ -1183,23 +922,52 @@ def _sealed_sibling_albums(album, primary):
         if score < config.CONSOLIDATE_THRESH:
             continue
         try:
-            sibling = _seal_album(
-                primary.path.parent / name,
-                expected_identity=identity,
-            )
+            sibling = _review_album(artist / name)
         except OSError as exc:
             log.info(fmt(
                 C.YELLOW,
                 f"  ⚠  Couldn't safely inspect {name} ({exc}); left it untouched.",
             ))
             continue
-        if not primary.matches():
-            sibling.close()
-            for old, _score in candidates:
-                old.close()
-            raise OSError("primary album changed while siblings were inspected")
         candidates.append((sibling, score))
     return sorted(candidates, key=lambda item: -item[1])
+
+
+def _remove_empty_folders(album):
+    """rmdir each folder of the album, deepest first, that is empty and is
+    still the folder reviewed, so a link put in the path is not followed."""
+    folders = [
+        (album.path / key, album.snapshot[key][:3])
+        for key in sorted(
+            (key for key, value in album.snapshot.items()
+             if stat.S_ISDIR(value[2])),
+            key=lambda key: (-key.count(os.sep), key.split(os.sep)),
+        )
+    ]
+    for folder, expected in (*folders, (album.path, album.identity)):
+        try:
+            value = os.lstat(folder)
+            if (
+                not stat.S_ISDIR(value.st_mode)
+                or stat_identity(value)[:len(expected)] != expected
+                or os.listdir(folder)
+            ):
+                continue
+        except OSError:
+            continue
+        try:
+            os.rmdir(folder)
+        except OSError:
+            log.info(fmt(
+                C.YELLOW,
+                f"    ⚠  Couldn't remove the empty folder "
+                f"{folder.name}; left it in place.",
+            ))
+            continue
+        log.info(fmt(
+            C.GREEN,
+            f"    ✓  Removed empty folder: {folder.name}.",
+        ))
 
 
 def execute_consolidation(summary):
@@ -1223,7 +991,7 @@ def execute_consolidation(summary):
         ))
         return [], attempted
     binding.used = True
-    paths = [item.path for item in binding.files]
+    paths = binding.paths
 
     def move_to_backup():
         return backup_mod.backup_gap_fill_files(
@@ -1261,7 +1029,6 @@ def execute_consolidation(summary):
             log.info(fmt(C.GRAY, f"         {reason}."))
         return [], attempted
 
-    removed = [item.path for item in binding.files]
     if binding.database.tracked:
         log.info(fmt(C.GRAY, "    ⤷  Updated the beets library."))
     if backup_result is not None:
@@ -1272,10 +1039,10 @@ def execute_consolidation(summary):
                         f"{plural(config.UPGRADE_BACKUP_RETENTION_DAYS, 'day')})"
                         if expires else "")))
     scanner.clear_scan_caches()
-    binding.sibling.remove_empty_directories(binding.files)
-    for path in removed:
+    _remove_empty_folders(binding.sibling)
+    for path in paths:
         vlog(f"consolidation: moved {path} to protected backup")
-    return removed, 0
+    return paths, 0
 
 
 def consolidate_albums(album, args):
@@ -1294,12 +1061,10 @@ def consolidate_albums(album, args):
         log.info(fmt(C.YELLOW, "  ⚠  Couldn't locate primary album folder after import."))
         log.info(fmt(C.GRAY,   "     Skipping consolidation."))
         return 0
-    primary = None
-    sibling_seals = []
     summaries = []
     try:
         try:
-            primary = _seal_album(primary_dir)
+            primary = _review_album(primary_dir)
         except OSError as exc:
             log.info(fmt(
                 C.YELLOW,
@@ -1316,11 +1081,10 @@ def consolidate_albums(album, args):
             return 0
 
         try:
-            candidates = _sealed_sibling_albums(album, primary)
+            candidates = _reviewed_sibling_albums(album, primary)
         except OSError as exc:
             log.info(fmt(C.YELLOW, f"  ⚠  Consolidation stopped ({exc})."))
             return 0
-        sibling_seals.extend(sibling for sibling, _score in candidates)
         if not candidates:
             log.info(fmt(
                 C.GREEN,
@@ -1462,7 +1226,3 @@ def consolidate_albums(album, args):
             binding = summary.get("_binding")
             if isinstance(binding, _ConsolidationBinding):
                 binding.close()
-        for sibling in sibling_seals:
-            sibling.close()
-        if primary is not None:
-            primary.close()

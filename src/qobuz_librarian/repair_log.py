@@ -13,6 +13,7 @@ Two non-obvious bits of behaviour worth preserving:
   stays unambiguously parseable.
 """
 import fcntl
+import functools
 import hashlib
 import os
 import re
@@ -219,7 +220,7 @@ def _stat_identity(value):
 
 
 class _HeldRepairSource:
-    """One no-follow album file held against writers for its whole diagnosis."""
+    """One no-follow album file kept open for its whole diagnosis."""
 
     def __init__(self, album_dir, path):
         self.album_dir = Path(os.path.abspath(os.fspath(album_dir)))
@@ -227,7 +228,6 @@ class _HeldRepairSource:
         self._directories = []
         self._parts = ()
         self.descriptor = None
-        self.source_receipt = None
         try:
             relative = self.path.relative_to(self.album_dir)
             if (not relative.parts
@@ -252,12 +252,9 @@ class _HeldRepairSource:
             file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
             self.descriptor = os.open(
                 self._parts[-1], file_flags, dir_fd=self._directories[-1])
-            if not stat.S_ISREG(os.fstat(self.descriptor).st_mode):
+            self._identity = _stat_identity(os.fstat(self.descriptor))
+            if not stat.S_ISREG(self._identity[2]):
                 raise OSError("repair source is not a regular file")
-            receipt = self._seal_receipt()
-            if receipt is None or not self._receipt_matches(receipt):
-                raise OSError("repair source could not be sealed before diagnosis")
-            self.source_receipt = receipt
             if not self.intact():
                 raise OSError("repair source changed before diagnosis")
         except BaseException:
@@ -268,21 +265,18 @@ class _HeldRepairSource:
     def size(self):
         return int(os.fstat(self.descriptor).st_size)
 
-    def _receipt_matches(self, receipt):
-        try:
-            sealed = receipt["file"]
-            value = os.fstat(self.descriptor)
-            return (
-                receipt["relative"] == "/".join(self._parts)
-                and sealed["type"] == stat.S_IFMT(value.st_mode)
-                and sealed["device"] == value.st_dev
-                and sealed["inode"] == value.st_ino
-                and sealed["size"] == value.st_size
-                and sealed["mtime_ns"] == value.st_mtime_ns
-                and sealed["ctime_ns"] == value.st_ctime_ns
-            )
-        except (KeyError, OSError, TypeError, ValueError):
-            return False
+    @functools.cached_property
+    def source_receipt(self):
+        """The file's receipt, read in full only when it is offered a refill,
+        or None when the file changed since it was opened."""
+        receipt = self._seal_receipt()
+        if receipt is None:
+            return None
+        sealed = receipt["file"]
+        if (sealed["device"], sealed["inode"], sealed["type"], sealed["size"],
+                sealed["mtime_ns"], sealed["ctime_ns"]) != self._identity:
+            return None
+        return receipt
 
     def _seal_receipt(self):
         before = os.fstat(self.descriptor)
@@ -311,10 +305,11 @@ class _HeldRepairSource:
         }
 
     def intact(self):
-        if (self.descriptor is None
-                or not self._receipt_matches(self.source_receipt)):
+        if self.descriptor is None:
             return False
         try:
+            if _stat_identity(os.fstat(self.descriptor)) != self._identity:
+                return False
             root_named = os.stat(self.album_dir, follow_symlinks=False)
             if (_stat_identity(root_named)[:3]
                     != _stat_identity(os.fstat(self._directories[0]))[:3]):
@@ -425,11 +420,13 @@ def _repair_flac_paths(album_dir):
 
 
 def _append_verified_truncated(report, source, entry):
-    """Attach only the same exact source held before every diagnostic check."""
-    if not source.intact():
+    """Attach the receipt only while the source is still the file every check
+    read."""
+    receipt = source.source_receipt
+    if receipt is None or not source.intact():
         report["unverified"] += 1
         return
-    entry["source_receipt"] = source.source_receipt
+    entry["source_receipt"] = receipt
     report["verified_truncated"].append(entry)
 
 

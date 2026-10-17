@@ -5,7 +5,11 @@ import pytest
 
 
 def test_second_acquire_while_held_raises_lockbusy_with_holder_pid(tmp_path, monkeypatch):
-    lock_file = tmp_path / "run.lock"
+    # A link above the data folder (a dotfile manager's ~/.local/share, or
+    # DATA_DIR on a linked mount) still holds the lock.
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    lock_file = tmp_path / "link" / "run.lock"
     monkeypatch.setattr("qobuz_librarian.config.LOCK_FILE", lock_file)
 
     from qobuz_librarian import run_lock

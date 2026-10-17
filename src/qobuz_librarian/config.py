@@ -335,14 +335,87 @@ UPGRADE_BACKUP_DIR = _env_path(
 )
 
 
+def _real_folder(name, value) -> tuple[str, str]:
+    """``value`` made absolute, and the folder it names once every link on
+    its path is followed. A missing folder is fine; a link loop is not."""
+    try:
+        # realpath turns a leading // into /; compare like with like.
+        given = os.sep + os.path.abspath(os.fspath(value)).lstrip(os.sep)
+        real = os.path.realpath(given)
+        part = real
+        while not os.path.islink(part):
+            parent = os.path.dirname(part)
+            if parent == part:
+                return given, real
+            part = parent
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError(f"{name} cannot be resolved safely: {exc}") from None
+    raise ValueError(
+        f"{name} cannot be resolved safely: the link {part} never reaches "
+        "a folder")
+
+
+def _refuse_linked_roots() -> None:
+    """Refuse a storage folder given through a link, naming the real one.
+
+    The app opens these folders without following links, from / down, so a
+    link anywhere on the path makes imports, backups and restores refuse
+    later. Staging and backup folders that sit beside a linked music folder
+    by default are named too, so they stay where parked downloads and
+    backups already are.
+    """
+    beets_name = ("BEETS_DB_PATH" if os.environ.get("BEETS_DB_PATH")
+                  else "BEETS_CONFIG_DIR")
+    linked, notes, fixes, kept = [], [], [], []
+    for name, value in (
+        ("MUSIC_ROOT", MUSIC_ROOT),
+        ("STAGING_DIR", STAGING_DIR),
+        ("UPGRADE_BACKUP_DIR", UPGRADE_BACKUP_DIR),
+        ("DATA_DIR", DATA_DIR),
+        (beets_name, Path(BEETS_DB_PATH).parent),
+    ):
+        given, real = _real_folder(name, value)
+        if real != given:
+            linked.append(name)
+            notes.append(f"{name} {given} is really {real}")
+        elif ("MUSIC_ROOT" in linked
+              and name in ("STAGING_DIR", "UPGRADE_BACKUP_DIR")
+              and not os.environ.get(name) and os.path.isdir(given)):
+            kept.append(name)
+        else:
+            continue
+        if name == "BEETS_DB_PATH":
+            real = os.path.join(real, Path(BEETS_DB_PATH).name)
+        fixes.append(f"{name}={real}")
+    if not linked:
+        return
+    names = " and ".join(filter(None, (", ".join(linked[:-1]), linked[-1])))
+    lines = [
+        f"{names} {'goes' if len(linked) == 1 else 'go'} through a link, "
+        "and the app needs real folders.",
+        *notes,
+        "Start again with:",
+        *(f"  {fix}" for fix in fixes),
+    ]
+    if kept:
+        lines.append(
+            f"{' and '.join(kept)} "
+            f"{'keeps its current folder' if len(kept) == 1 else 'keep their current folders'}"
+            ", so the app still finds what is parked there.")
+    lines.append("Then, if you use the web app, run Settings > Force full "
+                 "rescan once; the terminal walks read the folders afresh.")
+    raise ValueError("\n   ".join(lines))
+
+
 def validate_storage_roots() -> None:
-    """Refuse storage trees that alias or contain one another.
+    """Refuse storage trees given through a link, or that alias or contain
+    one another.
 
     Library, staging, and retained-backup operations have different ownership
     rules. Letting any of their roots overlap makes exclusions ambiguous and
     can turn an in-progress download or backup into managed library content.
-    Resolve existing symlinks before comparing so aliases fail closed too.
     """
+    _refuse_linked_roots()
     configured = (
         ("MUSIC_ROOT", MUSIC_ROOT),
         ("STAGING_DIR", STAGING_DIR),

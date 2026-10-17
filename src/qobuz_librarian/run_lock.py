@@ -12,13 +12,10 @@ container is blocked while the web container holds the lock.
 import fcntl
 import os
 import stat
-import threading
 import weakref
-from pathlib import Path
 from typing import Optional, TextIO
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.safefile import named_entry_matches
 from qobuz_librarian.ui_cli import colors
 from qobuz_librarian.ui_cli import logging as cli_logging
 from qobuz_librarian.ui_cli.colors import C
@@ -34,74 +31,6 @@ class LockBusy(Exception):
         super().__init__(f"another run is active (pid {pid})")
         self.pid = pid
         self.holder = holder
-
-
-def _lock_path_parts(value):
-    raw = os.fspath(value)
-    if isinstance(raw, bytes):
-        raw = os.fsdecode(raw)
-    if not isinstance(raw, str) or not raw or "\x00" in raw:
-        raise OSError("invalid run-lock path")
-    path = Path(os.path.abspath(raw))
-    try:
-        parts = path.relative_to(Path(os.path.sep)).parts
-    except ValueError:
-        raise OSError("run-lock path has no stable filesystem anchor") from None
-    if not parts:
-        raise OSError("run-lock path must name a file")
-    return path, tuple(parts)
-
-
-def _parent_chain_intact(chain, names):
-    if len(chain) != len(names) + 1:
-        return False
-    try:
-        root_held = os.fstat(chain[0])
-        root_named = os.stat(os.path.sep, follow_symlinks=False)
-    except OSError:
-        return False
-    if (
-        not stat.S_ISDIR(root_held.st_mode)
-        or not stat.S_ISDIR(root_named.st_mode)
-        or (int(root_held.st_dev), int(root_held.st_ino))
-        != (int(root_named.st_dev), int(root_named.st_ino))
-    ):
-        return False
-    return all(
-        named_entry_matches(chain[index], name, chain[index + 1], directory=True)
-        for index, name in enumerate(names)
-    )
-
-
-def _open_lock_parent(value):
-    path, parts = _lock_path_parts(value)
-    names = parts[:-1]
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
-    chain = [os.open(os.path.sep, flags)]
-    try:
-        for name in names:
-            try:
-                descriptor = os.open(name, flags, dir_fd=chain[-1])
-            except FileNotFoundError:
-                try:
-                    os.mkdir(name, 0o755, dir_fd=chain[-1])
-                except FileExistsError:
-                    pass
-                descriptor = os.open(name, flags, dir_fd=chain[-1])
-            if not named_entry_matches(chain[-1], name, descriptor, directory=True):
-                os.close(descriptor)
-                raise OSError("run-lock directory changed while it was opened")
-            chain.append(descriptor)
-        if not _parent_chain_intact(chain, names):
-            raise OSError("run-lock directory changed while it was opened")
-        return path, parts[-1], tuple(chain), names
-    except BaseException:
-        for descriptor in reversed(chain):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        raise
 
 
 def _read_lock_holder(parent_descriptor, name):
@@ -149,118 +78,42 @@ def _close_lock_resources(stream, descriptors):
     return error
 
 
+def _identity(value) -> tuple[int, int]:
+    return int(value.st_dev), int(value.st_ino)
+
+
 class RunLockLease:
     """Owned run-lock handle that can prove the public lock is still held."""
 
-    def __init__(self, stream: TextIO, path: Path, leaf: str, chain, names):
+    def __init__(self, stream: TextIO, parent_fd: int, path: str):
         self._stream = stream
         self._path = path
-        self._leaf = leaf
-        self._parent_chain = chain
-        self._parent_names = names
         self._owner_pid = os.getpid()
-        value = os.fstat(stream.fileno())
-        self._identity = (int(value.st_dev), int(value.st_ino))
-        self._lock = threading.RLock()
+        self._identity = _identity(os.fstat(stream.fileno()))
         self._finalizer = weakref.finalize(
-            self, _close_lock_resources, stream, chain)
-
-    def fileno(self) -> int:
-        return self._stream.fileno()
-
-    @property
-    def closed(self) -> bool:
-        return self._stream.closed
+            self, _close_lock_resources, stream, (parent_fd,))
 
     def intact(self) -> bool:
-        """Revalidate the exact public inode and exclusive kernel lock."""
-        with self._lock:
-            if os.getpid() != self._owner_pid:
+        """Check the configured lock file is still the one this process holds."""
+        if os.getpid() != self._owner_pid or self._stream.closed:
+            return False
+        try:
+            if os.path.abspath(cfg.LOCK_FILE) != self._path:
                 return False
-            try:
-                configured, _parts = _lock_path_parts(cfg.LOCK_FILE)
-            except OSError:
-                return False
-            if (
-                self._stream.closed
-                or configured != self._path
-                or not _parent_chain_intact(
-                    self._parent_chain, self._parent_names)
-            ):
-                return False
-            probe = -1
-            try:
-                descriptor = self._stream.fileno()
-                held = os.fstat(descriptor)
-                parent_descriptor = self._parent_chain[-1]
-                fcntl.flock(
-                    parent_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                named = os.stat(
-                    self._leaf,
-                    dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
-                if (
-                    not stat.S_ISREG(held.st_mode)
-                    or not stat.S_ISREG(named.st_mode)
-                    or held.st_nlink != 1
-                    or named.st_nlink != 1
-                    or (int(held.st_dev), int(held.st_ino)) != self._identity
-                    or (int(named.st_dev), int(named.st_ino)) != self._identity
-                ):
-                    return False
-                # Reasserting LOCK_EX on its own open-file description is a
-                # no-op when intact and safely reacquires it if it was locally
-                # dropped. A separate open must still be refused.
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                probe = os.open(
-                    self._leaf,
-                    os.O_RDWR
-                    | os.O_CLOEXEC
-                    | os.O_NOFOLLOW
-                    | os.O_NONBLOCK,
-                    dir_fd=parent_descriptor,
-                )
-                probe_stat = os.fstat(probe)
-                if (
-                    not stat.S_ISREG(probe_stat.st_mode)
-                    or (int(probe_stat.st_dev), int(probe_stat.st_ino))
-                    != self._identity
-                ):
-                    return False
-                try:
-                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    settled = os.stat(
-                        self._leaf,
-                        dir_fd=parent_descriptor,
-                        follow_symlinks=False,
-                    )
-                    current = os.fstat(descriptor)
-                    return (
-                        _parent_chain_intact(
-                            self._parent_chain, self._parent_names)
-                        and stat.S_ISREG(settled.st_mode)
-                        and settled.st_nlink == 1
-                        and (int(settled.st_dev), int(settled.st_ino))
-                        == self._identity
-                        and (int(current.st_dev), int(current.st_ino))
-                        == self._identity
-                    )
-                return False
-            except (OSError, TypeError, ValueError):
-                return False
-            finally:
-                if probe >= 0:
-                    try:
-                        os.close(probe)
-                    except OSError:
-                        pass
+            held = os.fstat(self._stream.fileno())
+            named = os.lstat(self._path)
+        except (OSError, ValueError):
+            return False
+        return (
+            stat.S_ISREG(named.st_mode)
+            and _identity(held) == _identity(named) == self._identity
+        )
 
     def close(self) -> None:
-        with self._lock:
-            error = self._finalizer() if self._finalizer.alive else None
-        _unregister_current_lease(self)
+        global _current
+        if _current is not None and _current[1]() is self:
+            _current = None
+        error = self._finalizer()
         if error is not None:
             raise error
 
@@ -270,59 +123,16 @@ def require_authority(authority: RunLockLease, error) -> None:
         raise error
 
 
-_CURRENT_LEASE_REGISTRATION: Optional[
-    tuple[int, weakref.ReferenceType[RunLockLease]]
-] = None
-
-
-def _forget_current_lease(reference) -> None:
-    global _CURRENT_LEASE_REGISTRATION
-    registration = _CURRENT_LEASE_REGISTRATION
-    if registration is not None and registration[1] is reference:
-        _CURRENT_LEASE_REGISTRATION = None
-
-
-def _register_current_lease(lease: RunLockLease) -> None:
-    global _CURRENT_LEASE_REGISTRATION
-    if type(lease) is not RunLockLease:
-        raise TypeError("only an exact acquired run-lock lease may be registered")
-    _CURRENT_LEASE_REGISTRATION = (
-        os.getpid(),
-        weakref.ref(lease, _forget_current_lease),
-    )
-
-
-def _unregister_current_lease(lease: RunLockLease) -> None:
-    global _CURRENT_LEASE_REGISTRATION
-    registration = _CURRENT_LEASE_REGISTRATION
-    if registration is None:
-        return
-    try:
-        registered = registration[1]()
-    except TypeError:
-        registered = None
-    if registered is lease:
-        _CURRENT_LEASE_REGISTRATION = None
+_current: Optional[tuple[int, weakref.ReferenceType[RunLockLease]]] = None
 
 
 def current_lease() -> Optional[RunLockLease]:
-    """Return this process's exact live acquired lease, after revalidation."""
-    global _CURRENT_LEASE_REGISTRATION
-    registration = _CURRENT_LEASE_REGISTRATION
-    if registration is None:
+    """Return this process's live acquired lease while it still holds the lock."""
+    if _current is None:
         return None
-    owner_pid, reference = registration
-    try:
-        lease = reference()
-    except TypeError:
-        lease = None
-    if (
-        owner_pid != os.getpid()
-        or type(lease) is not RunLockLease
-        or not lease.intact()
-    ):
-        if _CURRENT_LEASE_REGISTRATION is registration:
-            _CURRENT_LEASE_REGISTRATION = None
+    owner_pid, reference = _current
+    lease = reference()
+    if owner_pid != os.getpid() or lease is None or not lease.intact():
         return None
     return lease
 
@@ -343,27 +153,53 @@ def _warn_lockless(detail: str) -> None:
         "app restarts."))
 
 
-def acquire(holder: Optional[str] = None) -> Optional[RunLockLease]:
-    """Acquire the exact no-follow run lock, or report that it is unavailable."""
-    global unavailable_reason
-    unavailable_reason = None
+def _second_open_refused(parent_fd: int, name: str) -> bool:
+    """Whether flock is enforced here: a second open of the held file must not
+    be able to lock it too."""
     try:
-        path, leaf, chain, names = _open_lock_parent(cfg.LOCK_FILE)
+        probe = os.open(
+            name,
+            os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+    except OSError:
+        return False
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(probe)
+    return False
+
+
+def acquire(holder: Optional[str] = None) -> Optional[RunLockLease]:
+    """Acquire the run lock, or report that it is unavailable."""
+    global _current, unavailable_reason
+    unavailable_reason = None
+    path = os.path.abspath(cfg.LOCK_FILE)
+    leaf = os.path.basename(path)
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+        parent_fd = os.open(
+            os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     except OSError as exc:
         _warn_lockless(f"couldn't open run-lock at {cfg.LOCK_FILE} ({exc})")
         unavailable_reason = exc
         return None
 
-    parent_descriptor = chain[-1]
+    # The folder is locked first: that is what still stops a second writer
+    # after the lock file is deleted, and what earlier versions test.
     try:
-        fcntl.flock(
-            parent_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(parent_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        other = _read_lock_holder(parent_descriptor, leaf)
-        _close_lock_resources(None, chain)
-        raise LockBusy(*other)
+        other = _read_lock_holder(parent_fd, leaf)
+        _close_lock_resources(None, (parent_fd,))
+        raise LockBusy(*other) from None
     except OSError as exc:
-        _close_lock_resources(None, chain)
+        _close_lock_resources(None, (parent_fd,))
         _warn_lockless(f"run-lock not enforceable on {path} ({exc})")
         unavailable_reason = exc
         return None
@@ -379,38 +215,23 @@ def acquire(holder: Optional[str] = None) -> Optional[RunLockLease]:
             | os.O_CLOEXEC
             | os.O_NONBLOCK,
             0o600,
-            dir_fd=parent_descriptor,
+            dir_fd=parent_fd,
         )
         held = os.fstat(descriptor)
-        named = os.stat(
-            leaf, dir_fd=parent_descriptor, follow_symlinks=False)
-        identity = (int(held.st_dev), int(held.st_ino))
-        if (
-            not stat.S_ISREG(held.st_mode)
-            or not stat.S_ISREG(named.st_mode)
-            or held.st_nlink != 1
-            or named.st_nlink != 1
-            or identity != (int(named.st_dev), int(named.st_ino))
-            or not _parent_chain_intact(chain, names)
-        ):
+        if not stat.S_ISREG(held.st_mode) or held.st_nlink != 1:
             raise OSError("run-lock namespace is unsafe")
         stream = os.fdopen(descriptor, "r+", encoding="utf-8")
         descriptor = -1
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            other = _read_lock_holder(parent_descriptor, leaf)
-            _close_lock_resources(stream, chain)
+            other = _read_lock_holder(parent_fd, leaf)
+            _close_lock_resources(stream, (parent_fd,))
             raise LockBusy(*other) from None
-    except LockBusy:
-        raise
     except OSError as exc:
         if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        _close_lock_resources(stream, chain)
+            os.close(descriptor)
+        _close_lock_resources(stream, (parent_fd,))
         _warn_lockless(f"couldn't open run-lock at {path} ({exc})")
         unavailable_reason = exc
         return None
@@ -423,14 +244,20 @@ def acquire(holder: Optional[str] = None) -> Optional[RunLockLease]:
             stream.write(f" {holder}")
         stream.flush()
         os.fsync(stream.fileno())
-        os.fsync(parent_descriptor)
+        os.fsync(parent_fd)
     except OSError as exc:
         cli_logging.vlog(f"run-lock: couldn't record PID ({exc}); lock is held regardless")
 
-    lease = RunLockLease(stream, path, leaf, chain, names)
-    if lease.intact():
-        _register_current_lease(lease)
-        return lease
-    lease.close()
-    _warn_lockless(f"run-lock changed during acquisition at {path}")
-    return None
+    lease = RunLockLease(stream, parent_fd, path)
+    if not lease.intact():
+        lease.close()
+        _warn_lockless(f"run-lock changed during acquisition at {path}")
+        return None
+    if not _second_open_refused(parent_fd, leaf):
+        lease.close()
+        _warn_lockless(
+            f"run-lock not enforceable on {path} (a second open could lock "
+            "it too)")
+        return None
+    _current = (os.getpid(), weakref.ref(lease))
+    return lease

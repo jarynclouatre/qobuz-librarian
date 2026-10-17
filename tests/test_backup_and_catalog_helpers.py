@@ -1104,10 +1104,12 @@ def _bind_consolidation_summary(summary, tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "BEETS_DB_PATH", tmp_path / "beets.db")
     primary = tmp_path / "Primary"
     primary.mkdir(exist_ok=True)
-    primary_seal = consolidation._seal_album(primary)
-    sibling_seal = consolidation._seal_album(summary["dir"])
-    consolidation._bind_summary(summary, primary_seal, sibling_seal)
-    return primary_seal, sibling_seal, summary["_binding"]
+    consolidation._bind_summary(
+        summary,
+        consolidation._review_album(primary),
+        consolidation._review_album(summary["dir"]),
+    )
+    return summary["_binding"]
 
 
 def test_consolidation_never_groups_distinct_years_or_acts_in_a_dry_run(
@@ -1132,15 +1134,9 @@ def test_consolidation_never_groups_distinct_years_or_acts_in_a_dry_run(
     for d in (primary, other, same):
         d.mkdir(parents=True)
 
-    sealed = c._seal_album(primary)
-    found = []
-    try:
-        found = c._sealed_sibling_albums({"title": "Live at Wembley 1990"}, sealed)
-        names = {sibling.path.name for sibling, _score in found}
-    finally:
-        for sibling, _score in found:
-            sibling.close()
-        sealed.close()
+    found = c._reviewed_sibling_albums(
+        {"title": "Live at Wembley 1990"}, c._review_album(primary))
+    names = {sibling.path.name for sibling, _score in found}
     assert "Live at Wembley 1992" not in names
     assert "Live at Wembley" in names
 
@@ -1215,14 +1211,11 @@ def test_execute_consolidation_backs_up_overlap_and_refuses_a_replacement(
                "overlap": [({"path": str(f1)}, {}), ({"path": str(f2)}, {})],
                "unique": []}
 
-    primary_seal, sibling_seal, binding = _bind_consolidation_summary(
-        summary, root, monkeypatch)
+    binding = _bind_consolidation_summary(summary, root, monkeypatch)
     try:
         removed, n_fail = execute_consolidation(summary)
     finally:
         binding.close()
-        sibling_seal.close()
-        primary_seal.close()
 
     assert n_fail == 0
     assert sorted(p.name for p in removed) == ["other.flac", "track.flac"]
@@ -1253,8 +1246,7 @@ def test_execute_consolidation_backs_up_overlap_and_refuses_a_replacement(
         "overlap": [({"path": str(reviewed)}, {})],
         "unique": [],
     }
-    primary_seal, sibling_seal, binding = _bind_consolidation_summary(
-        summary, root, monkeypatch)
+    binding = _bind_consolidation_summary(summary, root, monkeypatch)
     preserved = root / "reviewed.flac"
     reviewed.rename(preserved)
     reviewed.write_bytes(b"same-name replacement")
@@ -1262,8 +1254,6 @@ def test_execute_consolidation_backs_up_overlap_and_refuses_a_replacement(
         removed, n_failed = execute_consolidation(summary)
     finally:
         binding.close()
-        sibling_seal.close()
-        primary_seal.close()
 
     assert removed == [] and n_failed == 1
     assert preserved.read_bytes() == b"reviewed original"
@@ -1315,8 +1305,7 @@ def test_consolidation_database_failure_keeps_recovery_and_reports_failure(
         "overlap": [({"path": str(reviewed)}, {})],
         "unique": [],
     }
-    primary_seal, sibling_seal, binding = _bind_consolidation_summary(
-        summary, root, monkeypatch)
+    binding = _bind_consolidation_summary(summary, root, monkeypatch)
 
     def fail_before_commit(*_args):
         raise OSError("injected failure")
@@ -1327,8 +1316,6 @@ def test_consolidation_database_failure_keeps_recovery_and_reports_failure(
         removed, n_failed = execute_consolidation(summary)
     finally:
         binding.close()
-        sibling_seal.close()
-        primary_seal.close()
 
     assert removed == [] and n_failed == 1
     assert not reviewed.exists()
@@ -1358,14 +1345,11 @@ def test_consolidation_backup_expires_only_while_the_primary_keeps_its_tracks(
         overlap.append(({"path": str(sibling / f"A{name}")},
                         {"path": str(primary / name)}))
     summary = {"dir": sibling, "overlap": overlap, "unique": []}
-    primary_seal, sibling_seal, binding = _bind_consolidation_summary(
-        summary, tmp_path, monkeypatch)
+    binding = _bind_consolidation_summary(summary, tmp_path, monkeypatch)
     try:
         removed, n_failed = execute_consolidation(summary)
     finally:
         binding.close()
-        sibling_seal.close()
-        primary_seal.close()
     assert len(removed) == 2 and n_failed == 0
 
     [backup] = (tmp_path / "backups").iterdir()

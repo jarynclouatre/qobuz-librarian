@@ -42,6 +42,24 @@ from qobuz_librarian.web import jobs as job_mgr
 _log = logging.getLogger("qobuz_librarian")
 
 
+class StartupRefused(RuntimeError):
+    """A start-up refusal whose message already says what to fix.
+
+    Starlette hands uvicorn the formatted traceback to log, which put dozens
+    of framework lines above the message. Formatting reads the traceback
+    through this attribute, so the log shows the message alone; the
+    interpreter keeps the real one.
+    """
+
+    @property
+    def __traceback__(self):
+        return None
+
+    @__traceback__.setter
+    def __traceback__(self, value):
+        BaseException.__traceback__.__set__(self, value)
+
+
 def _has_startup_write_authority() -> bool:
     """Whether this Web process owns the real single-writer boundary."""
     return runtime._run_lock_intact() and not write_gate._web_writes_paused()
@@ -399,7 +417,7 @@ async def _lifespan(_app: FastAPI):
     try:
         cfg.validate_storage_roots()
     except ValueError as exc:
-        raise RuntimeError(f"invalid storage paths: {exc}") from None
+        raise StartupRefused(f"invalid storage paths: {exc}") from None
     api_auth.check_env_credentials()
     api_auth.sweep_streamrip_run_copies()
     # Acquire the shared run lock so separate CLI runs cannot overlap Web work.

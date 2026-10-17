@@ -6222,7 +6222,7 @@ def _files_in_album(path, *, compare=False, exact=False):
     if entries is None:
         return None
     missing = different = renamed = 0
-    album_files = None
+    album_sizes = None
     try:
         for source in entries:
             relative = source.relative_to(target)
@@ -6233,16 +6233,18 @@ def _files_in_album(path, *, compare=False, exact=False):
                 continue
             destination = origin / relative
             if not destination.is_file():
-                if album_files is None:
-                    album_files = [
-                        entry for entry in _list_tree(origin) or ()
-                        if stat.S_ISREG(entry.lstat().st_mode)]
-                size = source.stat().st_size
+                if album_sizes is None:
+                    album_sizes = {}
+                    for entry in _list_tree(origin) or ():
+                        info = entry.lstat()
+                        if stat.S_ISREG(info.st_mode):
+                            album_sizes.setdefault(
+                                info.st_size, []).append(entry)
                 if any(
-                        entry.stat().st_size == size
-                        and (not exact
-                             or filecmp.cmp(source, entry, shallow=False))
-                        for entry in album_files):
+                        not exact
+                        or filecmp.cmp(source, entry, shallow=False)
+                        for entry in album_sizes.get(
+                            source.stat().st_size, ())):
                     renamed += 1
                 else:
                     missing += 1

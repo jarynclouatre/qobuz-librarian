@@ -47,3 +47,15 @@ def test_storage_roots_must_be_separate_non_nested_directories(
     monkeypatch.setattr(cfg, "STAGING_DIR", staging_alias)
     with pytest.raises(ValueError):
         cfg.validate_storage_roots()
+
+    # The app opens the music folder without following links, so a link to
+    # it or above it is refused at start-up instead of failing imports later.
+    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
+    music_alias = tmp_path / "music-alias"
+    music_alias.symlink_to(music, target_is_directory=True)
+    linked_parent = tmp_path / "nas"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+    for root in (music_alias, linked_parent / "music"):
+        monkeypatch.setattr(cfg, "MUSIC_ROOT", root)
+        with pytest.raises(ValueError):
+            cfg.validate_storage_roots()
