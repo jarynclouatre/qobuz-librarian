@@ -361,13 +361,6 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     )
     if name in {"job.html", "_job_body.html"}:
         job = context.get("job")
-        holder_id = queue_recovery._startup_recovery_web_job_id()
-        context.setdefault("recovery_holder_job_id", (
-            holder_id
-            if (job.kind == "download" and job.attention == "recovery"
-                and not job.recoveries and holder_id != job.id)
-            else None
-        ))
         nav_page, return_href, return_label = job_labels._job_nav_destination(job)
         context.setdefault("job_nav_page", nav_page)
         context.setdefault("job_return_href", return_href)
@@ -380,17 +373,6 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
                 if job.execute_kind == "downsample"
                 else None
             ),
-        )
-    if name in {"job.html", "_job_body.html", "history.html"}:
-        context.setdefault("retry_can_queue", write_gate._retry_can_queue)
-        context.setdefault(
-            "durable_recovery_control",
-            queue_recovery._durable_recovery_control(),
-        )
-    if name in {"job.html", "_job_body.html", "queue.html"}:
-        context.setdefault(
-            "cancel_protected_job_id",
-            job_mgr.durable_recovery_job_id(),
         )
     return templates.TemplateResponse(request=request, name=name,
                                       context=context, status_code=status_code)

@@ -1816,18 +1816,13 @@ def _decode_row(r, *, decode_logs):
     return job
 
 
-def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
+def prune_finished(keep: int) -> None:
     """Drop the oldest terminal rows past ``keep`` so the archive doesn't
     grow without bound. Non-terminal jobs, unresolved Repair recoveries, and
     active single-track Undo records are never pruned here. Best-effort: a
     sqlite error logs and bows out."""
     if keep <= 0:
         return
-    retained = (
-        retain_job_id
-        if isinstance(retain_job_id, str) and retain_job_id
-        else None
-    )
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -1843,8 +1838,6 @@ def prune_finished(keep: int, *, retain_job_id: str | None = None) -> None:
             ordinary_seen = 0
             removable = []
             for job_id, raw_single in rows:
-                if job_id == retained:
-                    continue
                 try:
                     single = json.loads(raw_single or "{}")
                 except (TypeError, ValueError):
@@ -2165,24 +2158,19 @@ def has_active_single_undo(single) -> bool:
     )
 
 
-def clear_history(*, retain_job_id: str | None = None) -> bool:
+def clear_history() -> bool:
     """Delete ordinary finished jobs; retain recovery and Undo state."""
     with _lock:
         conn = _get_conn()
         if conn is None:
             return False
         try:
-            retained = (
-                retain_job_id
-                if isinstance(retain_job_id, str) and retain_job_id
-                else None
-            )
             rows = conn.execute(
                 f"SELECT id, recoveries, single FROM jobs WHERE {_TERMINAL_SQL}"
             ).fetchall()
             removable = []
             for job_id, raw_recoveries, raw_single in rows:
-                if job_id == retained or (raw_recoveries or "[]") != "[]":
+                if (raw_recoveries or "[]") != "[]":
                     continue
                 try:
                     single = json.loads(raw_single or "{}")

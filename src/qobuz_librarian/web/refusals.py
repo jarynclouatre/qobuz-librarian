@@ -10,56 +10,6 @@ from qobuz_librarian.web import queue_recovery, rendering, runtime, storage, wri
 _log = logging.getLogger("qobuz_librarian")
 
 
-def _settled_completion_response(request, job):
-    """Take the completed-download lane when a refused settlement has already
-    cleared the recovery it refused over.
-
-    `settle_blocked_item` only settles a pre-launch abort, so it refuses a
-    download that imported and then stranded a file in staging, but it parks
-    that staging first, which is the one thing the recovery was waiting on.
-    Re-read the recovery and the completion record it just moved, or the reply
-    describes a state this request has already left behind.
-    """
-    if not runtime._run_lock_intact():
-        _log.info("Retry %s: no completed-download lane; run lock not held.",
-                  job.id)
-        return None
-    try:
-        recovery = queue_recovery._record_startup_recovery(runtime._RUN_LOCK_HANDLE)
-    except Exception:
-        _log.warning("Retry %s: no completed-download lane; the recovery "
-                     "record could not be re-read.", job.id, exc_info=True)
-        return None
-    status = queue_recovery._recovery_status_value(recovery)
-    completed = queue_recovery._durable_completion_status(job)
-    if status != "clear" or completed is not True:
-        _log.info("Retry %s: no completed-download lane; recovery is %s and "
-                  "the download's completion record reads %s.",
-                  job.id, status, completed)
-        return None
-    _log.info("Retry %s: the refused settlement had already cleared the "
-              "recovery, so taking the completed-download lane.", job.id)
-    busy = _lock_busy_response(request)
-    if busy is not None:
-        _log.info("Retry %s: the completed-download lane stopped; another "
-                  "process holds the run lock.", job.id)
-        return busy
-    if not queue_recovery._reconcile_acknowledged_job(
-        job,
-        "Download completed. Retry cleared the leftover that was blocking it.",
-    ):
-        _log.warning("Retry %s: the completed download could not be written "
-                     "to History.", job.id)
-        return _durable_recovery_response(
-            request,
-            "The completed download could not be saved to History. No "
-            "download was started. Check the data-folder permissions, then "
-            "restart Qobuz Librarian.",
-        )
-    _log.info("Retry %s: settled as a completed download.", job.id)
-    return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
-
-
 def _durable_recovery_response(request, message: str):
     if rendering._is_htmx(request):
         return HTMLResponse(
@@ -87,12 +37,9 @@ def _job_admission_response(request):
     )
 
 
-def _lock_busy_response(request, *, durable_resume_job_id: str | None = None,
-                        queue_behind_job=None, downloads: bool = False):
+def _lock_busy_response(request, *, downloads: bool = False):
     """Return a 503 response if web writes are paused, else None."""
     notice = write_gate._writes_paused_notice(
-        durable_resume_job_id=durable_resume_job_id,
-        queue_behind_job=queue_behind_job,
         log_details=True,
         downloads=downloads,
     )

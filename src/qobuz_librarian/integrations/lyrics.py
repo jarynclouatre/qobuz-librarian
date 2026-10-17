@@ -556,6 +556,7 @@ def _iter_post_import_flacs(album_dirs, owned_tracks, seen):
         for payload in owned_tracks or ()
         if (target := _owned_track_target(payload)) is not None
     }
+    yield from _iter_secure_owned_flacs(owned_tracks)
     for directory in album_dirs:
         if directory is None or not isinstance(directory, Path):
             continue
@@ -563,7 +564,6 @@ def _iter_post_import_flacs(album_dirs, owned_tracks, seen):
             if path in excluded:
                 continue
             yield path, parent_fd, parent_guard, None
-    yield from _iter_secure_owned_flacs(owned_tracks)
 
 
 def _held_track_is_named(path, parent_fd, track_fd, expected, parent_guard=None):
@@ -645,7 +645,7 @@ def write_post_import_sidecars(
     and sidecars that this pass can prove it created, plus exact parent-directory
     identity transitions caused by those writes. ``owned_tracks`` contains
     sealed one-file import receipts; those leaves are excluded from album
-    scans and handled only while their original identities still match."""
+    scans and handled first, while their original identities still match."""
     if not cfg.LYRICS_ENABLED or not HAVE_LYRIC_FETCH:
         return
     # Only mutagen is needed to read the embedded tag and write the .lrc -

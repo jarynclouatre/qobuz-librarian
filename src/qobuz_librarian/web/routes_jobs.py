@@ -31,7 +31,6 @@ from qobuz_librarian.library import (
     new_releases,
 )
 from qobuz_librarian.library import hidden as hidden_mod
-from qobuz_librarian.queue.startup_recovery import BlockedItemSettlementAction
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import (
@@ -1265,64 +1264,6 @@ async def job_dismiss_rest(request: Request, job_id: str):
     return JSONResponse(payload)
 
 
-@router.post("/jobs/{job_id}/give-up")
-async def job_give_up(request: Request, job_id: str):
-    """Abandon a blocked download so downloads and scans can run again."""
-    job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
-    if not job:
-        return RedirectResponse(
-            url="/queue?error=" + rendering._notice_key(
-                "That job is no longer in History."),
-            status_code=303)
-    form = await request.form()
-    if not queue_recovery._recovery_submission_matches(
-        job,
-        str(form.get("recovery_operation_id") or ""),
-        str(form.get("recovery_item_id") or ""),
-    ):
-        return refusals._durable_recovery_response(
-            request,
-            "That interrupted download is no longer the one holding things "
-            "up. Nothing was changed. Reload the page.",
-        )
-    control = queue_recovery._durable_recovery_control()
-    imported = bool(control and (control.get("imported") or control.get("partial")))
-    settled, reason = queue_recovery._settle_durable_web_recovery(
-        job,
-        BlockedItemSettlementAction.DISCARD,
-    )
-    _log.info(
-        "Give up %s: discarding the blocked download %s.", job.id,
-        "succeeded" if settled
-        else f"was refused: {(reason or 'no reason given').rstrip('.')}")
-    if not settled:
-        return refusals._durable_recovery_response(
-            request,
-            reason or "The interrupted download could not be discarded.",
-        )
-    with job._lock:
-        job.attention = ""
-        job.status = job_mgr.JobStatus.CANCELED
-        job.error = None
-        job.summary = (
-            f"Abandoned. {reason} Downloads and scans can run again."
-            if imported else
-            "Abandoned. The interrupted download was discarded and nothing "
-            "was added to your library. Downloads and scans can run again."
-        )
-    if not job_persistence.persist(job):
-        return refusals._durable_recovery_response(
-            request,
-            "The interrupted download was cleared and downloads can run "
-            "again, but its outcome could not be saved to History. "
-            + (reason if imported else "Nothing was added to your library.")
-            + " Check the data-folder permissions before restarting Qobuz "
-            "Librarian.",
-        )
-    job_mgr._start_post_job_hook_for_job(job)
-    return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
-
-
 _RETRY_RETURN_KEYS = ("p", "jp", "attention")
 
 
@@ -1398,33 +1339,6 @@ async def job_retry(request: Request, job_id: str):
             "This track's saved recovery state is uncertain, so Retry is "
             "paused. No download was started. Restart Qobuz Librarian.",
         )
-    raw_recovery_operation = form.get("recovery_operation_id")
-    raw_recovery_item = form.get("recovery_item_id")
-    recovery_submission = (
-        raw_recovery_operation is not None or raw_recovery_item is not None
-    )
-    recovery_operation_id = (
-        raw_recovery_operation.strip()
-        if isinstance(raw_recovery_operation, str)
-        else ""
-    )
-    recovery_item_id = (
-        raw_recovery_item.strip()
-        if isinstance(raw_recovery_item, str)
-        else ""
-    )
-    if recovery_submission and (
-        not recovery_operation_id
-        or not recovery_item_id
-        or len(recovery_operation_id) > 128
-        or len(recovery_item_id) > 128
-    ):
-        return refusals._durable_recovery_response(
-            request,
-            "That recovery Retry is incomplete or stale. No download was "
-            "started. Reload this page and try again.",
-        )
-
     try:
         credentials = await qobuz_access._authorize_qobuz_for_web(
             QobuzAccess.DOWNLOAD_ACTION
@@ -1432,33 +1346,6 @@ async def job_retry(request: Request, job_id: str):
     except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
         message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
         return _land(error=message)
-
-    # A Retry is also the only user-triggered lane for an interrupted durable
-    # Web download.
-    if not runtime._run_lock_intact():
-        busy = refusals._lock_busy_response(request)
-        if busy is not None:
-            return busy
-        return refusals._durable_recovery_response(
-            request,
-            "The run lock could not be verified. No download was started. "
-            "Restart Qobuz Librarian.",
-        )
-    try:
-        recovery = queue_recovery._record_startup_recovery(runtime.run_lock_handle())
-    except Exception:
-        _log.exception(
-            "couldn't check recovery before retrying job %s", job.id)
-        return refusals._durable_recovery_response(
-            request,
-            "The saved recovery state could not be checked safely. No "
-            "download was started. Restart Qobuz Librarian.",
-        )
-    recovery_status = queue_recovery._recovery_status_value(recovery)
-    if queue_recovery._terminal_queue_waiting():
-        busy = refusals._lock_busy_response(request, downloads=True)
-        if busy is not None:
-            return busy
 
     completion_acknowledged = queue_recovery._durable_completion_status(job)
     if completion_acknowledged is None:
@@ -1468,18 +1355,10 @@ async def job_retry(request: Request, job_id: str):
             "download was started. Check the data-folder permissions, then "
             "restart Qobuz Librarian.",
         )
+    busy = refusals._lock_busy_response(request, downloads=True)
+    if busy is not None:
+        return busy
     if completion_acknowledged:
-        if recovery_status != "clear":
-            return refusals._durable_recovery_response(
-                request,
-                "This download is already recorded as complete, but its "
-                "interrupted recovery proof is not settled yet. No download "
-                "was started. Check the application log, then restart Qobuz "
-                "Librarian.",
-            )
-        busy = refusals._lock_busy_response(request)
-        if busy is not None:
-            return busy
         if not queue_recovery._reconcile_acknowledged_job(job):
             return refusals._durable_recovery_response(
                 request,
@@ -1488,104 +1367,6 @@ async def job_retry(request: Request, job_id: str):
                 "then restart Qobuz Librarian.",
             )
         return _land(started=job.id)
-
-    # Behind a different album's unsettled recovery, this Retry waits for that
-    # one to settle.
-    queue_behind = queue_recovery._recovery_pause_is_another_download(job)
-
-    if recovery_submission:
-        if not queue_recovery._recovery_submission_matches(
-            job,
-            recovery_operation_id,
-            recovery_item_id,
-        ):
-            return refusals._durable_recovery_response(
-                request,
-                "That interrupted-download Retry is stale. No download was "
-                "started. Reload the job and use its current Retry button.",
-            )
-    elif (
-        recovery_status != "clear" or job.attention == "recovery"
-    ) and not queue_behind:
-        return refusals._durable_recovery_response(
-            request,
-            "This download needs its exact recovery Retry control. No "
-            "download was started. Reload the interrupted job and use Retry "
-            "there.",
-        )
-
-    if (
-        recovery_submission
-        and
-        recovery_status == "attention_required"
-        and queue_recovery._durable_recovery_matches_job(job)
-    ):
-
-        with qobuz_access._CREDENTIAL_LOCK:
-            if not qobuz_access._credential_generation_is_active(credentials.generation):
-                message = job_mgr.qobuz_action_error_message(
-                    CredentialChanged(),
-                    unchanged=True,
-                )
-                return _land(error=message)
-            settled, reason = queue_recovery._settle_durable_web_recovery(
-                job,
-                BlockedItemSettlementAction.RETRY,
-            )
-        _log.info(
-            "Retry %s: settling the blocked download %s.", job.id,
-            "succeeded" if settled
-            else f"was refused: {(reason or 'no reason given').rstrip('.')}")
-        if not settled:
-            reconciled = refusals._settled_completion_response(request, job)
-            if reconciled is not None:
-                return reconciled
-            return refusals._durable_recovery_response(
-                request,
-                reason or "The interrupted download remains blocked.",
-            )
-        recovery = queue_recovery.startup_recovery_result()
-        recovery_status = queue_recovery._recovery_status_value(recovery)
-    durable_resume = (
-        recovery_status == "resume_required"
-        and queue_recovery._durable_recovery_matches_job(job)
-    )
-    if job.attention == "recovery" and not (
-        recovery_status == "clear" or durable_resume
-    ):
-        return refusals._durable_recovery_response(
-            request,
-            "This download needs recovery attention and cannot be retried "
-            "safely. No download was started. Check the application log, "
-            "then restart Qobuz Librarian.",
-        )
-    if not queue_behind:
-        if recovery_status == "attention_required":
-            return refusals._durable_recovery_response(
-                request,
-                "The saved interrupted download needs recovery attention. No "
-                "download was started. Check the application log, then restart "
-                "Qobuz Librarian.",
-            )
-        if recovery_status == "resume_required" and not durable_resume:
-            return refusals._durable_recovery_response(
-                request,
-                "Saved recovery belongs to a different or changed download. No "
-                "download was started. Retry only the exact interrupted job.",
-            )
-        if recovery_status not in {"clear", "resume_required"}:
-            return refusals._durable_recovery_response(
-                request,
-                "The saved recovery state could not be verified safely. No "
-                "download was started. Restart Qobuz Librarian.",
-            )
-    busy = refusals._lock_busy_response(
-        request,
-        durable_resume_job_id=job.id if durable_resume else None,
-        queue_behind_job=job if queue_behind else None,
-    )
-    if busy is not None:
-        return busy
     album_id = job.album_id
     retry_as_new = bool((job.execute_args or {}).get("new_edition"))
     retry_track_id = str((job.single or {}).get("track_id") or "")
@@ -1597,13 +1378,10 @@ async def job_retry(request: Request, job_id: str):
     try:
         loop = asyncio.get_running_loop()
         token = credentials.token
-        album = None
-        if not durable_resume:
-            album = await qobuz_access._qobuz_call(
-                qobuz_search.get_album, album_id, token)
+        album = await qobuz_access._qobuz_call(
+            qobuz_search.get_album, album_id, token)
         same_edition_complete = bool(
-            album is not None
-            and retry_as_new
+            retry_as_new
             and await loop.run_in_executor(
                 None, lambda: download_admission._same_edition_is_complete(album)
             )
@@ -1625,135 +1403,13 @@ async def job_retry(request: Request, job_id: str):
             # get_album await above; re-check inside the submit lock (as
             # queue_download does) so a retry can't start a job after the CLI
             # handoff.
-            if not runtime._run_lock_intact():
-                busy = refusals._lock_busy_response(request)
-                if busy is not None:
-                    return busy
-                return refusals._durable_recovery_response(
-                    request,
-                    "The run lock was lost while Retry was preparing. No "
-                    "download was started. Restart Qobuz Librarian.",
-                )
-            try:
-                recovery_now = queue_recovery._record_startup_recovery(runtime.run_lock_handle())
-            except Exception:
-                _log.exception(
-                    "couldn't recheck recovery while retrying job %s", job.id)
-                return refusals._durable_recovery_response(
-                    request,
-                    "The saved recovery state changed while Retry was "
-                    "preparing and could not be checked safely. No download "
-                    "was started. Restart Qobuz Librarian.",
-                )
-            recovery_status_now = queue_recovery._recovery_status_value(recovery_now)
-            durable_resume_now = (
-                recovery_status_now == "resume_required"
-                and queue_recovery._durable_recovery_matches_job(job)
-            )
-            if recovery_submission and not queue_recovery._recovery_submission_matches(
-                job,
-                recovery_operation_id,
-                recovery_item_id,
-            ):
-                return refusals._durable_recovery_response(
-                    request,
-                    "The interrupted download changed while Retry was "
-                    "preparing. No download was started. Reload the job and "
-                    "try again.",
-                )
-            acknowledged_now = queue_recovery._durable_completion_status(job)
-            if acknowledged_now is None:
-                return refusals._durable_recovery_response(
-                    request,
-                    "The saved completion record could not be checked safely. "
-                    "No download was started. Restart Qobuz Librarian.",
-                )
-            if acknowledged_now:
-                if recovery_status_now == "clear" and (
-                    queue_recovery._reconcile_acknowledged_job(job)
-                ):
-                    return _land(started=job.id)
-                return refusals._durable_recovery_response(
-                    request,
-                    "This download is already recorded as complete, but its "
-                    "recovery could not be finalized safely. No download was "
-                    "started. Restart Qobuz Librarian.",
-                )
-            queue_behind = queue_recovery._recovery_pause_is_another_download(job)
-            if job.attention == "recovery" and not (
-                recovery_status_now == "clear" or durable_resume_now
-            ):
-                return refusals._durable_recovery_response(
-                    request,
-                    "This download needs recovery attention and cannot be "
-                    "retried safely. No download was started. Restart Qobuz "
-                    "Librarian.",
-                )
-            if not queue_behind:
-                if recovery_status_now == "attention_required":
-                    return refusals._durable_recovery_response(
-                        request,
-                        "The saved interrupted download needs recovery "
-                        "attention. No download was started. Restart Qobuz "
-                        "Librarian.",
-                    )
-                if (
-                    recovery_status_now == "resume_required"
-                    and not durable_resume_now
-                ):
-                    return refusals._durable_recovery_response(
-                        request,
-                        "The saved interrupted download no longer matches this "
-                        "job. No download was started. Restart Qobuz Librarian.",
-                    )
-                if recovery_status_now not in {"clear", "resume_required"}:
-                    return refusals._durable_recovery_response(
-                        request,
-                        "The saved recovery state could not be verified safely. "
-                        "No download was started. Restart Qobuz Librarian.",
-                    )
-            if durable_resume and recovery_status_now == "clear":
-                return refusals._durable_recovery_response(
-                    request,
-                    "The saved interrupted download changed while Retry was "
-                    "preparing. No download was started. Restart Qobuz "
-                    "Librarian.",
-                )
-            durable_resume = durable_resume_now
-            if not durable_resume and same_edition_complete:
+            busy = refusals._lock_busy_response(request, downloads=True)
+            if busy is not None:
+                return busy
+            if same_edition_complete:
                 return _land(
                     error="This edition is already in your library. "
                           "Nothing to retry.",
-                )
-            busy = refusals._lock_busy_response(
-                request,
-                durable_resume_job_id=job.id if durable_resume else None,
-                queue_behind_job=job if queue_behind else None,
-            )
-            if busy is not None:
-                return busy
-            durable_planned = None
-            if durable_resume:
-                durable_planned = queue_recovery._durable_recovery_planned(job)
-                if durable_planned is None:
-                    return refusals._durable_recovery_response(
-                        request,
-                        "The exact saved download plan could not be loaded "
-                        "safely. No download was started. Restart Qobuz "
-                        "Librarian.",
-                    )
-                album = durable_planned.get("album")
-                if not isinstance(album, dict):
-                    return refusals._durable_recovery_response(
-                        request,
-                        "The exact saved download plan is invalid. No "
-                        "download was started. Restart Qobuz Librarian.",
-                    )
-            elif album is None:
-                return refusals._durable_recovery_response(
-                    request,
-                    "The album lookup changed while Retry was preparing. No "
-                    "download was started. Reload the job and try again.",
                 )
             title = album.get("title") or job.title or "?"
             artist = (album.get("artist") or {}).get("name") or job.artist or "?"
@@ -1762,14 +1418,6 @@ async def job_retry(request: Request, job_id: str):
             # the same one-track run instead.
             single = job.single
             track = None
-            as_new = False
-            if durable_resume and single and single.get("track_id"):
-                return refusals._durable_recovery_response(
-                    request,
-                    "The saved full-album recovery does not match this "
-                    "single-track job. No download was started. Restart "
-                    "Qobuz Librarian.",
-                )
             if single and single.get("track_id"):
                 tid = str(single.get("track_id"))
                 track = next(
@@ -1786,73 +1434,53 @@ async def job_retry(request: Request, job_id: str):
                 # Carry the "get this edition too" override across the retry,
                 # without it the rebuilt run sees the album as already owned
                 # and skips the download the user explicitly asked for.
-                if durable_planned is not None:
-                    run = job_runs._make_download_run(
-                        album,
-                        token,
-                        durable_planned=durable_planned,
-                    )
-                else:
-                    as_new = retry_as_new
-                    run = job_runs._make_download_run(
-                        album,
-                        token,
-                        treat_as_new=as_new,
-                    )
+                run = job_runs._make_download_run(
+                    album,
+                    token,
+                    treat_as_new=retry_as_new,
+                )
             edition = str(
                 ((track.get("version") if track is not None else None)
                  or album.get("version") or job.edition or "")
             ).strip()
-            if durable_resume:
-                job.edition = edition
-                if not job_mgr.resubmit_failed(job, run):
-                    return refusals._durable_recovery_response(
-                        request,
-                        "The exact interrupted job could not be queued safely. "
-                        "No download was started. Restart Qobuz Librarian.",
-                    )
-                new_job = job
-            else:
-                new_job = job_mgr.Job(
-                    title=(track.get("title") or title)
-                    if track is not None else title,
-                    artist=artist,
-                    album_id=album_id,
-                    edition=edition,
-                )
-                if track is not None:
-                    # Seed the same two keys /download does at submit and let
-                    # the run fill in the rest. Copying the whole dict carried
-                    # the old job's Undo record onto a job that may download
-                    # nothing (the "you already have this" early return never
-                    # touches j.single), so two jobs offered Undo of one file
-                    # and one of them claimed it downloaded nothing.
-                    new_job.single = {
-                        "album_id": album_id,
-                        "track_id": str(single.get("track_id")),
+            new_job = job_mgr.Job(
+                title=(track.get("title") or title)
+                if track is not None else title,
+                artist=artist,
+                album_id=album_id,
+                edition=edition,
+            )
+            if track is not None:
+                # Seed the same two keys /download does at submit and let
+                # the run fill in the rest. Copying the whole dict carried
+                # the old job's Undo record onto a job that may download
+                # nothing (the "you already have this" early return never
+                # touches j.single), so two jobs offered Undo of one file
+                # and one of them claimed it downloaded nothing.
+                new_job.single = {
+                    "album_id": album_id,
+                    "track_id": str(single.get("track_id")),
+                }
+            elif retry_as_new:
+                new_job.execute_args = {"new_edition": True}
+            if job_mgr.submit(new_job, run) is None:
+                return refusals._job_admission_response(request)
+            # The retry is the answer to the failure, so the old row stops
+            # offering Retry and holding the Queue warning dot.
+            if job_persistence.mark_retried(job.id, new_job.id):
+                with job._lock:
+                    job.execute_args = {
+                        **(job.execute_args or {}),
+                        "retry_disabled": "retried",
+                        "retried_as": new_job.id,
                     }
-                if as_new:
-                    new_job.execute_args = {"new_edition": True}
-                submit = (job_mgr.submit_held if queue_behind
-                          else job_mgr.submit)
-                if submit(new_job, run) is None:
-                    return refusals._job_admission_response(request)
-                # The retry is the answer to the failure, so the old row stops
-                # offering Retry and holding the Queue warning dot.
-                if job_persistence.mark_retried(job.id, new_job.id):
-                    with job._lock:
-                        job.execute_args = {
-                            **(job.execute_args or {}),
-                            "retry_disabled": "retried",
-                            "retried_as": new_job.id,
-                        }
-                attention = job.attention
-                if attention and attention != "recovery" and (
-                    job_persistence.acknowledge_attention(job.id, attention)
-                ):
-                    with job._lock:
-                        if job.attention == attention:
-                            job.attention = ""
+            attention = job.attention
+            if attention and attention != "recovery" and (
+                job_persistence.acknowledge_attention(job.id, attention)
+            ):
+                with job._lock:
+                    if job.attention == attention:
+                        job.attention = ""
         return _land(started=new_job.id)
     except NoCredsError as exc:
         message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
@@ -2191,11 +1819,7 @@ async def job_cancel(
         None, lambda: job_mgr.request_cancel(job)
     )
     if not canceled:
-        protected = job_mgr.cancel_is_protected(job)
-        importing = job.importing
-        if protected:
-            message = "An interrupted-download recovery cannot be cancelled."
-        elif importing:
+        if job.importing:
             message = "Import has started and cannot be stopped."
         elif job.status in job_mgr.TERMINAL:
             message = "That job had already finished."

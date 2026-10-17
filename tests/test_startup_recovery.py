@@ -210,35 +210,29 @@ def test_restart_pins_a_gap_fill_carrier_before_queue_work_can_resume(
     assert (backup.path / ".ql_upgrade_unverified").is_file()
 
 
-def test_giving_up_a_restart_blocked_gap_fill_puts_the_owned_tracks_back(
+def test_a_restart_mid_gap_fill_puts_the_owned_tracks_back_on_its_own(
     tmp_path,
     monkeypatch,
 ):
     # A restart mid gap fill leaves the owned tracks in the item's backup and
-    # the album folder empty; until the block is settled no download runs.
+    # the album folder empty. Start-up puts them back and returns the album to
+    # its queue.
     owned, backup, current = _gap_fill_carrier_left_by_a_crash(
         tmp_path, monkeypatch)
 
     authority = run_lock.acquire()
     try:
-        blocked = startup_recovery.recover_startup_state(authority=authority)
-        binding = startup_recovery.blocked_settlement_binding(blocked)
-        assert binding is not None
-        settled = startup_recovery.settle_blocked_item(
-            authority=authority,
-            operation_id=current.operation_id,
-            item_id=binding[0].item_id,
-            action=startup_recovery.BlockedItemSettlementAction.DISCARD,
-        )
-        after = startup_recovery.recover_startup_state(authority=authority)
+        result = startup_recovery.recover_startup_state(
+            authority=authority, settle=True)
     finally:
         authority.close()
 
-    assert settled.status is (
-        startup_recovery.BlockedItemSettlementStatus.DISCARDED)
     assert owned.read_bytes() == b"owned original"
     assert not backup.path.exists()
-    assert after.status is startup_recovery.StartupRecoveryStatus.CLEAR
+    assert [entry.outcome for entry in result.settled] == ["requeue"]
+    assert result.status is startup_recovery.StartupRecoveryStatus.RESUME_REQUIRED
+    saved = journal.load_queue_journal(current.operation_id).journal
+    assert [item.phase for item in saved.items] == [journal.QueuePhase.PENDING]
 
 
 @pytest.mark.parametrize(
@@ -775,7 +769,8 @@ def test_startup_recovery_is_fail_closed_and_settles_exact_work(
 
 
 
-def _blocked_download_journal(tmp_path, monkeypatch, *, label, parked=True):
+def _blocked_download_journal(tmp_path, monkeypatch, *, label, parked=True,
+                              mode="web-job:abc12345"):
     from argparse import Namespace
 
     from qobuz_librarian.integrations.staging import (
@@ -810,17 +805,22 @@ def _blocked_download_journal(tmp_path, monkeypatch, *, label, parked=True):
     )
     plan = plan_durable_new_album(item, Namespace(no_import=False))
     assert plan is not None
+    queued = [item]
+    origin = CompletionOrigin(CompletionOriginKind.WEB_JOB, "abc12345")
+    if not mode.startswith("web-job:"):
+        queued.append(_build_queue_item(
+            album={"id": "43", "title": "Next", "tracks": {"items": [track]}},
+            album_dir=None, label="Next", missing=[track], present=[],
+            upgrade_only=False, auto_upgrade=False, quality=4,
+        ))
+        origin = CompletionOrigin(CompletionOriginKind.CLI, "download-queue")
     saved = journal.save_queue_journal(
-        journal.create_queue_journal([item], mode="web-job:abc12345")
+        journal.create_queue_journal(queued, mode=mode)
     )
     item_id = saved.items[0].item_id
     owner = RecoveryOwner(saved.operation_id, item_id)
     owner_record = {"operation_id": saved.operation_id, "item_id": item_id}
-    initial = initial_completion_input(
-        plan,
-        owner,
-        CompletionOrigin(CompletionOriginKind.WEB_JOB, "abc12345"),
-    )
+    initial = initial_completion_input(plan, owner, origin)
     current = journal.transition_journal_item(
         saved,
         item_id,
@@ -887,31 +887,37 @@ def test_user_retry_discards_parked_staging_and_frees_the_item(tmp_path, monkeyp
     assert saved_item.block_reason is None
 
 
-def test_user_retry_discards_a_crashed_downloads_live_run(tmp_path, monkeypatch):
-    # A crash mid-rip leaves the run root itself behind (never parked). The
-    # user's Retry after the restart must be able to throw it away too.
+@pytest.mark.parametrize("mode", ("web-job:abc12345", "walk_queue"))
+def test_start_up_discards_a_download_cut_off_before_import(
+    tmp_path, monkeypatch, mode,
+):
+    # A crash mid-rip leaves the run root itself behind (never parked).
+    # Start-up throws it away on its own: a web job's saved entry goes so the
+    # job can be queued again, and a terminal queue keeps the album and the
+    # rest of the queue for its resume prompt.
     operation_id, item_id, run = _blocked_download_journal(
-        tmp_path, monkeypatch, label="Crashed Album", parked=False
+        tmp_path, monkeypatch, label="Crashed Album", parked=False, mode=mode
     )
 
     authority = run_lock.acquire()
     try:
-        settled = startup_recovery.settle_blocked_item(
-            authority=authority,
-            operation_id=operation_id,
-            item_id=item_id,
-            action=startup_recovery.BlockedItemSettlementAction.RETRY,
-        )
+        result = startup_recovery.recover_startup_state(
+            authority=authority, settle=True)
     finally:
         authority.close()
 
-    assert settled.status is startup_recovery.BlockedItemSettlementStatus.RETRYABLE
     assert not run.path.exists()
-    reloaded = journal.load_queue_journal(operation_id).journal
-    saved_item = reloaded.items[0]
-    assert saved_item.phase is journal.QueuePhase.ACTIVE
-    assert saved_item.recovery_references == ()
-    assert saved_item.block_reason is None
+    assert not any((tmp_path / "staging" / cfg.BEETS_RETRY_DIR).glob("*/*"))
+    assert [(entry.item_id, entry.mode, entry.album_id, entry.outcome)
+            for entry in result.settled] == [(item_id, mode, "42", "requeue")]
+    loaded = journal.load_queue_journal(operation_id)
+    if mode.startswith("web-job:"):
+        assert result.status is startup_recovery.StartupRecoveryStatus.CLEAR
+        assert loaded.status is journal.QueueLoadStatus.ABSENT
+    else:
+        assert result.status is startup_recovery.StartupRecoveryStatus.RESUME_REQUIRED
+        assert [item.phase for item in loaded.journal.items] == [
+            journal.QueuePhase.PENDING, journal.QueuePhase.PENDING]
 
 
 def test_user_discard_clears_the_blocked_download_operation(tmp_path, monkeypatch):
@@ -1013,40 +1019,3 @@ def test_boot_retains_a_journal_less_staging_run_instead_of_wedging(
         for group in (tmp_path / "staging" / cfg.BEETS_RETRY_DIR).iterdir()
     ] == ["abandoned"]
     assert retained[0].read_bytes() == b"art"
-
-
-def test_a_staged_leftover_is_settleable_beside_its_beets_carrier():
-    """A download that imported and stranded a file keeps its Beets carrier
-    listed next to the staging record, so reading the class off the reference
-    list instead of off what is blocking matched nothing real and left the
-    terminal with no way out.
-    """
-    from types import SimpleNamespace
-
-    from qobuz_librarian.queue.startup_recovery import (
-        SETTLEABLE_IMPORTED,
-        SETTLEABLE_PRELAUNCH,
-        SETTLEABLE_STAGED_LEFTOVER,
-        settleable_block_kind,
-    )
-
-    def _item(kinds, reason):
-        return SimpleNamespace(
-            recovery_references=[SimpleNamespace(kind=k) for k in kinds],
-            block_reason=reason,
-        )
-
-    stranded = _item(
-        ["download-staging-run", "managed-beets"],
-        "download-staging-run-present",
-    )
-    assert settleable_block_kind(stranded) is SETTLEABLE_STAGED_LEFTOVER
-
-    prelaunch = _item(
-        ["managed-beets-reservation"], "managed-reservation-absent")
-    assert settleable_block_kind(prelaunch) is SETTLEABLE_PRELAUNCH
-
-    # A carrier on its own means Beets already ran; that is offered too.
-    assert settleable_block_kind(
-        _item(["managed-beets"], "managed-completion-proof-unavailable")
-    ) is SETTLEABLE_IMPORTED

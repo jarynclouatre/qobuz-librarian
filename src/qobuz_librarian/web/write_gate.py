@@ -29,30 +29,23 @@ def _terminal_queue_notice():
                 f"in Settings, then run “{command}”; it offers to resume or "
                 "discard the queue."),
         "action": {"href": "/settings#mode", "label": "Open Settings"},
-        "settle": None,
-        "give_up": None,
     }
 
 
-def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
-                          queue_behind_job=None,
-                          log_details: bool = False,
+def _writes_paused_notice(*, log_details: bool = False,
                           downloads: bool = False):
     """Why downloads and scans are paused, in the user's words, or None.
 
     One source for both the 503 a blocked request gets and the notice the
     dashboard shows, so the two cannot drift into naming different causes.
     ``log_details`` is for the request path only: the dashboard reads this on
-    every load and must not write a log line each time. ``queue_behind_job``
-    is the one job allowed past another download's recovery, to wait its turn
-    rather than be refused. ``downloads`` is for a request that downloads
-    albums, the only work a queue saved in the terminal holds.
+    every load and must not write a log line each time. ``downloads`` is for
+    a request that downloads albums, the only work a queue saved in the
+    terminal holds.
     """
     queue_recovery._await_recovery_refresh()
     reason = ""
     action = None
-    settle = None
-    give_up = None
     if runtime._CLI_MODE:
         reason = "Terminal mode is holding the library."
         msg = ("Terminal (CLI) mode is on, so downloads and scans are paused "
@@ -169,125 +162,34 @@ def _writes_paused_notice(*, durable_resume_job_id: str | None = None,
                 "the data folder (the downloads it listed will need queuing "
                 "again), then restart Qobuz Librarian."
             )
-        elif queue_recovery._recovery_pause_is_another_download(queue_behind_job):
-            return None
         else:
-            reason = "An interrupted download couldn't be verified."
-            # A terminal download never became a web job, so it has no History
-            # row and no Retry button. Point each origin at the surface that
-            # can settle it, the way the resume_required branch below does.
-            origin = queue_recovery._startup_recovery_origin_value()
+            reason = "An interrupted download couldn't be cleared safely."
             named = queue_recovery._startup_recovery_album_label()
             of_album = f" of “{named}”" if named else ""
-            paused = ("Downloads and scans are paused, and its saved queue and "
-                      "staged files were left unchanged. ")
-            held_job_id = queue_recovery._startup_recovery_web_job_id()
-            partial = startup_recovery.partial_import_note(
-                queue_recovery._STARTUP_RECOVERY_RESULT)
-            if partial is not None:
-                msg = (f"{partial} Downloads and scans are paused until it "
-                       "is given up, which keeps the tracks Beets moved and "
-                       "sets the rest aside in Settings > Diagnostics.")
-                if origin == "cli":
-                    settle = queue_recovery._terminal_recovery_offer()
-                elif held_job_id is not None:
-                    action = {"href": f"/jobs/{held_job_id}",
-                              "label": "Open that download"}
-            elif origin != "cli" and held_job_id is not None:
-                action = {"href": f"/jobs/{held_job_id}",
-                          "label": "Open that download"}
-                give_up = queue_recovery._web_give_up_offer(held_job_id)
-                msg = ("Downloads and scans are paused until the interrupted "
-                       f"download{of_album} is retried or given up. Its saved "
-                       "queue and staged files were left unchanged.")
-            elif origin == "cli":
-                settle = queue_recovery._terminal_recovery_offer()
-                if settle is not None:
-                    # Not everyone who starts a download in a terminal wants to
-                    # go back to one to get out of it, and giving up on the
-                    # album is the one decision that lifts the pause on its own.
-                    action = {"href": "/queue", "label": "Settle it"}
-                    if settle["imported"]:
-                        msg = (f"An interrupted terminal download{of_album} "
-                               "stopped after Beets had filed it, and it "
-                               "could not be verified. Downloads and scans "
-                               "are paused. Giving up on it clears the pause "
-                               "and keeps what Beets filed in your library. "
-                               "Checking it again needs terminal mode in "
-                               "Settings.")
-                    else:
-                        msg = (f"An interrupted terminal download{of_album} "
-                               "could not be verified safely. " + paused +
-                               "Giving up on it clears the pause, and because "
-                               "nothing reached your library the album is "
-                               "still there to download again from the "
-                               "Library review or a search. Trying that same "
-                               "download again needs terminal mode in "
-                               "Settings.")
-                else:
-                    action = {"href": "/settings#mode", "label": "Open Settings"}
-                    msg = (f"An interrupted terminal download{of_album} could "
-                           "not be verified safely. " + paused + "Switch to "
-                           "terminal mode in Settings and run Qobuz Librarian "
-                           "there; it offers to settle this.")
-            elif getattr(queue_recovery._STARTUP_RECOVERY_RESULT, "reason",
-                         None) == "startup-recovery-unsettled":
+            if getattr(queue_recovery._STARTUP_RECOVERY_RESULT, "reason",
+                       None) == "startup-recovery-unsettled":
                 msg = ("Interrupted work could not be checked safely, so "
                        "downloads and scans are paused and nothing was "
                        "changed. The “" + startup_recovery.BLOCKED_DOWNLOAD_LOG_ENTRY
                        + "” entry in the application log says why.")
             else:
                 msg = (f"An interrupted download{of_album} could not be "
-                       "verified safely. " + paused + "Settle it from the "
-                       "interface it was started in; if it stays blocked, "
-                       "check the application log.")
+                       "cleared safely. Downloads and scans are paused, and "
+                       "its staged files were left as they were. "
+                       "Qobuz Librarian tries again when it restarts; the "
+                       "application log says why it stopped.")
     elif queue_recovery._terminal_queue_waiting():
         return _terminal_queue_notice() if downloads else None
-    elif (
-        queue_recovery._startup_recovery_status_value() == "resume_required"
-        and not queue_recovery._durable_resume_allowed(durable_resume_job_id or "")
-        and not queue_recovery._recovery_pause_is_another_download(queue_behind_job)
-    ):
-        reason = "An interrupted download is waiting to be settled."
-        origin = queue_recovery._startup_recovery_origin_value()
-        named = queue_recovery._startup_recovery_album_label()
-        of_album = f" of “{named}”" if named else ""
-        held_job_id = queue_recovery._startup_recovery_web_job_id()
-        if origin == "cli":
-            action = {"href": "/settings#mode", "label": "Open Settings"}
-            msg = (f"An interrupted terminal download{of_album} has saved "
-                   "recovery state. Other library changes are paused. Switch "
-                   "to terminal mode in Settings, then resume that download "
-                   "there.")
-        elif held_job_id is not None:
-            # The saved origin is missing on records written before it
-            # existed, and it decided the wording; the job named by the saved
-            # mode is the one to open, so that is what the notice offers.
-            action = {"href": f"/jobs/{held_job_id}",
-                      "label": "Open that download"}
-            give_up = queue_recovery._web_give_up_offer(held_job_id)
-            msg = ("Downloads and scans are paused until the interrupted "
-                   f"download{of_album} is retried or given up.")
-        else:
-            msg = (f"An interrupted download{of_album} has saved recovery "
-                   "state. Other library changes are paused until that exact "
-                   "download is resumed from the interface where it started.")
+    elif queue_recovery._startup_recovery_status_value() == "resume_required":
+        reason = "An interrupted terminal download is waiting."
+        action = {"href": "/settings#mode", "label": "Open Settings"}
+        msg = ("An interrupted download saved in the terminal is waiting to "
+               "finish. Other library changes are paused. Switch to terminal "
+               "mode in Settings, then run Qobuz Librarian there; it offers to "
+               "resume it.")
     else:
         return None
-    return {"reason": reason, "msg": msg, "action": action, "settle": settle,
-            "give_up": give_up}
-
-
-def _retry_can_queue(job) -> bool:
-    """Whether Retry would queue this job behind the paused recovery."""
-    if isinstance(job, dict):
-        job = (job_mgr.registry.get(job["id"])
-               or job_mgr.load_historical_job(job["id"]))
-    return (
-        not queue_recovery._terminal_queue_waiting()
-        and queue_recovery._recovery_pause_is_another_download(job)
-        and _writes_paused_notice(queue_behind_job=job) is None
-    )
+    return {"reason": reason, "msg": msg, "action": action}
 
 
 def _web_writes_paused() -> bool:

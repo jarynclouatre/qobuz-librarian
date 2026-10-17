@@ -6,7 +6,7 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
@@ -16,7 +16,6 @@ from qobuz_librarian.completion import (
     CompletionOriginKind,
     RecoveryOwner,
     completion_input_ready,
-    normalise_album_id,
     parse_completion_input_record,
 )
 from qobuz_librarian.completion_live import (
@@ -150,12 +149,32 @@ class StartupRecoveryItem:
 
 
 @dataclass(frozen=True, slots=True)
+class SettledDownload:
+    """What start-up did with one download a restart cut off.
+
+    ``outcome`` is "requeue" when nothing of it reached the library and it
+    can run again, "checked" when Beets had filed it and it is being proved
+    again, "kept" when what Beets filed stays without that proof, and
+    "set-aside" when Beets stopped part way and the rest was set aside.
+    """
+
+    operation_id: str
+    mode: str
+    item_id: str
+    album_id: str | None
+    label: str
+    outcome: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class StartupRecoveryResult:
     status: StartupRecoveryStatus
     items: tuple[StartupRecoveryItem, ...] = ()
     reason: str | None = None
     post_import_relocation: RelocationRecoveryResult | None = None
     paths: tuple[Path, ...] = ()
+    settled: tuple[SettledDownload, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1020,15 +1039,17 @@ def _continue_prelaunch_settlement(
 def _discard_parked_item_staging(authority, journal, item):
     """Throw away a blocked item's staged download on user authority."""
     owner = {"operation_id": journal.operation_id, "item_id": item.item_id}
+    present = []
     for reference in _staging_references(item):
         _require_authority(authority)
         inspection = _staging_inspection(reference, owner)
         _require_authority(authority)
         status = getattr(inspection, "status", None)
-        if status is StagingReferenceStatus.ABSENT:
-            continue
-        if status is not StagingReferenceStatus.MATCH:
+        if status is StagingReferenceStatus.MATCH:
+            present.append(reference)
+        elif status is not StagingReferenceStatus.ABSENT:
             return None
+    for reference in present:
         if reference.kind == _STAGING_RUN_KIND:
             # A crash leaves the run root itself behind, never parked. Park
             # it the way a deliberate stop would - the park refuses if a file
@@ -1488,185 +1509,6 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
     return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)
 
 
-def partial_import_note(result) -> str | None:
-    """Where a blocked download Beets stopped part-way through filing has
-    left things, or None when no blocked download is one."""
-    for entry in getattr(result, "items", ()):
-        if entry.phase is not queue_state.QueuePhase.BLOCKED:
-            continue
-        loaded = queue_state.load_queue_journal(entry.operation_id)
-        if loaded.status is not queue_state.QueueLoadStatus.READY or loaded.journal is None:
-            continue
-        item = next(
-            (value for value in loaded.journal.items if value.item_id == entry.item_id),
-            None,
-        )
-        launched = None if item is None else _launched_import(entry.operation_id, item)
-        if launched is not None and launched[0] == _IMPORT_PARTIAL:
-            return _partial_import_reason(item, launched[2])
-    return None
-
-
-def import_stopped_part_way(operation_id, item) -> bool:
-    """True when the blocked item's Beets import stopped after moving some
-    of its files, so giving up keeps those and sets the rest aside."""
-    launched = _launched_import(operation_id, item)
-    return launched is not None and launched[0] == _IMPORT_PARTIAL
-
-
-def import_was_filed(operation_id, item) -> bool:
-    """True when the blocked item's Beets import finished and sealed its
-    record, so clearing it keeps a whole album in the library."""
-    launched = _launched_import(operation_id, item)
-    return launched is not None and launched[0] == _IMPORT_FILED
-
-
-SETTLEABLE_PRELAUNCH = "prelaunch"
-SETTLEABLE_STAGED_LEFTOVER = "staged-leftover"
-SETTLEABLE_IMPORTED = "imported"
-SETTLEABLE_PARTIAL = "partial"
-
-_PRELAUNCH_SETTLEMENT_BLOCKS = frozenset({
-    (_MANAGED_RESERVATION_KIND, "managed-reservation-absent"),
-    (_MANAGED_RESERVATION_KIND, "managed-reservation-origin"),
-    (_MANAGED_CARRIER_KIND, "managed-carrier-unsealed-origin"),
-})
-
-
-def settleable_block_kind(item) -> str | None:
-    """Which decision a blocked queue item can be offered, or None for neither.
-
-    A pre-launch abort never reached Beets, so settling it re-runs the
-    download; a staged leftover is the opposite, and parking the file is the
-    whole of what its recovery waits on. The staged case is read off
-    ``block_reason``, not the reference list - an import that stranded a file
-    keeps its Beets carrier listed beside the staging record. A block that
-    holds nothing, or only the tracks its download moved out of the library,
-    never reached Beets either; settling it puts those tracks back first. A
-    block holding only its Beets carrier ran Beets, and whether it finished
-    is read from the carrier when the decision is offered.
-    """
-    references = tuple(item.recovery_references or ())
-    held = tuple(
-        reference
-        for reference in references
-        if reference.kind != _LIBRARY_BACKUP_CARRIER_KIND
-    )
-    if not held:
-        return SETTLEABLE_PRELAUNCH
-    if (
-        len(held) == 1
-        and (held[0].kind, item.block_reason)
-        in _PRELAUNCH_SETTLEMENT_BLOCKS
-    ):
-        return SETTLEABLE_PRELAUNCH
-    if (
-        item.block_reason in _STAGING_BLOCK_REASONS
-        and any(reference.kind in _STAGING_KINDS for reference in references)
-    ):
-        return SETTLEABLE_STAGED_LEFTOVER
-    if len(held) == 1 and held[0].kind == _MANAGED_CARRIER_KIND:
-        return SETTLEABLE_IMPORTED
-    return None
-
-
-def blocked_settlement_binding(result):
-    """Bind one settleable block to its frozen terminal completion owner.
-
-    Both interfaces offer the same decision on the same block, so both read
-    the identity from here: a settlement offered on anything less than this
-    exact match would be settling somebody else's download.
-    """
-    items = tuple(getattr(result, "items", ()))
-    blocked = tuple(
-        item
-        for item in items
-        if item.phase is queue_state.QueuePhase.BLOCKED
-        and item.action is StartupRecoveryAction.BLOCKED
-    )
-    if (
-        result.status is not StartupRecoveryStatus.ATTENTION_REQUIRED
-        or result.reason != "queue-item-blocked"
-        or len(blocked) != 1
-        or not items
-        or any(
-            item.operation_id != blocked[0].operation_id
-            or item.mode != blocked[0].mode
-            or (
-                item is not blocked[0]
-                and (
-                    item.phase is not queue_state.QueuePhase.PENDING
-                    or item.action is not StartupRecoveryAction.PENDING
-                )
-            )
-            for item in items
-        )
-    ):
-        return None
-    target = blocked[0]
-    if target.mode.startswith("web-job:"):
-        return None
-    loaded = queue_state.load_queue_journal(target.operation_id)
-    journal = loaded.journal
-    if (
-        loaded.status is not queue_state.QueueLoadStatus.READY
-        or journal is None
-        or journal.operation_id != target.operation_id
-        or journal.mode != target.mode
-        or journal.retirements
-        or len(journal.items) != len(items)
-    ):
-        return None
-    classified = {item.item_id: item for item in items}
-    if len(classified) != len(items):
-        return None
-    for queued in journal.items:
-        recovered = classified.get(queued.item_id)
-        if recovered is None or recovered.phase is not queued.phase:
-            return None
-        expected_action = (
-            StartupRecoveryAction.BLOCKED
-            if queued.item_id == target.item_id
-            else StartupRecoveryAction.PENDING
-        )
-        if recovered.action is not expected_action:
-            return None
-    queued = next(
-        (item for item in journal.items if item.item_id == target.item_id),
-        None,
-    )
-    if queued is None:
-        return None
-    settleable = settleable_block_kind(queued)
-    if settleable is None:
-        return None
-    completion_input = parse_completion_input_record(
-        queued.completion_input,
-        expected_owner=RecoveryOwner(target.operation_id, target.item_id),
-    )
-    planned_album = queued.planned.get("album")
-    if (
-        completion_input is None
-        or completion_input.origin.kind is not CompletionOriginKind.CLI
-        or completion_input.origin.reference != "download-queue"
-        or not isinstance(planned_album, dict)
-        or normalise_album_id(planned_album.get("id"))
-        != normalise_album_id(completion_input.expectation.album_id)
-    ):
-        return None
-    # Offer nothing the settlement would refuse: an import Beets stopped
-    # part-way through can only be given up, and only a finished one kept.
-    launched = _launched_import(target.operation_id, queued)
-    if launched is not None and launched[0] == _IMPORT_PARTIAL:
-        settleable = SETTLEABLE_PARTIAL
-    elif settleable == SETTLEABLE_IMPORTED and (
-        launched is None or launched[0] != _IMPORT_FILED
-    ):
-        return None
-    label = planned_album.get("title") or queued.planned.get("label") or "download"
-    return target, str(label), settleable
-
-
 def settle_blocked_item(
     *,
     authority: RunLockLease,
@@ -1706,10 +1548,47 @@ def settle_blocked_item(
                 return _set_partial_import_aside(
                     authority, journal, item, carrier, launched)
             return _blocked_settlement(
-                _partial_import_reason(item, launched[2]) + " It can't be "
-                "downloaded again from here; giving up on it keeps what beets "
-                "moved and sets the rest aside."
+                _partial_import_reason(item, launched[2]) + " It is not "
+                "downloaded again."
             )
+        managed_references = _references(item, _MANAGED_KINDS)
+        if len(managed_references) > 1:
+            return _blocked_settlement(
+                "This blocked item is not an exact pre-launch Beets abort.")
+        reference = managed_references[0] if managed_references else None
+        owner = RecoveryOwner(journal.operation_id, item.item_id)
+        # Nothing is discarded or put back until the app knows Beets left the
+        # library alone, or finished with it.
+        reservation = None
+        if reference is not None and reference.kind == _MANAGED_RESERVATION_KIND:
+            _require_authority(authority)
+            reservation = inspect_managed_reservation(reference.data, owner)
+            _require_authority(authority)
+            if reservation.outcome is ManagedReservationInspectionOutcome.ACTIVITY:
+                return _blocked_settlement(
+                    "Beets may have started or changed the library, so this item remains blocked."
+                )
+            if reservation.outcome not in {
+                ManagedReservationInspectionOutcome.ABSENT,
+                ManagedReservationInspectionOutcome.ORIGIN,
+            }:
+                return _blocked_settlement(
+                    "The app could not prove that Beets stayed pre-launch, so "
+                    "this item remains blocked."
+                )
+        elif (
+            reference is not None
+            and reference.kind == _MANAGED_CARRIER_KIND
+            and launched is None
+        ):
+            _require_authority(authority)
+            inspection = inspect_managed_carrier(reference.data, owner)
+            _require_authority(authority)
+            if inspection.outcome is not ManagedCarrierInspectionOutcome.UNSEALED_ORIGIN:
+                return _blocked_settlement(
+                    "The app could not prove that Beets stayed pre-launch, so "
+                    "this item remains blocked."
+                )
         if launched is not None and launched[0] == _IMPORT_UNTOUCHED:
             # Beets adds an album's rows before it moves the files; rows for
             # files still in staging are dropped so nothing points at them.
@@ -1722,6 +1601,14 @@ def settle_blocked_item(
                     "blocked."
                 )
             _require_authority(authority)
+        if (
+            (launched is None or launched[0] != _IMPORT_FILED)
+            and (reference is None or reference.kind != _MANAGED_SETTLEMENT_KIND)
+        ):
+            restored = _put_back_library_backup(authority, journal, item)
+            if type(restored) is BlockedItemSettlementResult:
+                return restored
+            journal, item = restored
         journal, item, staging_reason, _changed = _reconcile_item_staging(
             authority,
             journal,
@@ -1737,13 +1624,7 @@ def settle_blocked_item(
                 )
             journal, item = settled_staging
 
-        managed_references = _references(item, _MANAGED_KINDS)
-        reference = managed_references[0] if len(managed_references) == 1 else None
         if reference is None:
-            restored = _put_back_library_backup(authority, journal, item)
-            if type(restored) is BlockedItemSettlementResult:
-                return restored
-            journal, item = restored
             if item.recovery_references:
                 return _blocked_settlement(
                     "This item has no exact pre-launch Beets state to settle."
@@ -1757,18 +1638,10 @@ def settle_blocked_item(
                 requested_action=action,
             )
 
-        owner = RecoveryOwner(journal.operation_id, item.item_id)
         carrier = None
         manifest_hash = None
         if reference.kind == _MANAGED_RESERVATION_KIND:
-            _require_authority(authority)
-            inspection = inspect_managed_reservation(reference.data, owner)
-            _require_authority(authority)
-            if inspection.outcome is ManagedReservationInspectionOutcome.ABSENT:
-                restored = _put_back_library_backup(authority, journal, item)
-                if type(restored) is BlockedItemSettlementResult:
-                    return restored
-                journal, item = restored
+            if reservation.outcome is ManagedReservationInspectionOutcome.ABSENT:
                 queue_state._commit_absent_managed_settlement(
                     journal,
                     item_id=item.item_id,
@@ -1777,18 +1650,8 @@ def settle_blocked_item(
                 )
                 _require_authority(authority)
                 return _settled_result(action)
-            if inspection.outcome is ManagedReservationInspectionOutcome.ORIGIN:
-                carrier = inspection.carrier
-                manifest_hash = inspection.manifest_hash
-            elif inspection.outcome is ManagedReservationInspectionOutcome.ACTIVITY:
-                return _blocked_settlement(
-                    "Beets may have started or changed the library, so this item remains blocked."
-                )
-            else:
-                return _blocked_settlement(
-                    "The app could not prove that Beets stayed pre-launch, so "
-                    "this item remains blocked."
-                )
+            carrier = reservation.carrier
+            manifest_hash = reservation.manifest_hash
         elif reference.kind == _MANAGED_CARRIER_KIND:
             _require_authority(authority)
             inspection = inspect_managed_carrier(reference.data, owner)
@@ -1827,10 +1690,6 @@ def settle_blocked_item(
                 "The app could not prove the exact pre-launch Beets state, so "
                 "this item remains blocked."
             )
-        restored = _put_back_library_backup(authority, journal, item)
-        if type(restored) is BlockedItemSettlementResult:
-            return restored
-        journal, item = restored
         committed = queue_state._begin_prelaunch_managed_settlement(
             journal,
             item_id=item.item_id,
@@ -1851,12 +1710,159 @@ def settle_blocked_item(
         return _blocked_settlement("Run-lock authority was lost, so the item remains blocked.")
 
 
+def _settled_download(journal, item, outcome, reason=""):
+    album = item.planned.get("album")
+    album = album if isinstance(album, dict) else {}
+    album_id = album.get("id")
+    return SettledDownload(
+        operation_id=journal.operation_id,
+        mode=journal.mode,
+        item_id=item.item_id,
+        album_id=None if album_id is None else str(album_id),
+        label=str(album.get("title") or item.planned.get("label") or "download"),
+        outcome=outcome,
+        reason=reason,
+    )
+
+
+def _settle_choice(journal, item, tried):
+    """The settlement a blocked download gets on its own, and its outcome.
+
+    One Beets stopped part way through keeps what it moved. One Beets filed
+    is checked again first and kept as it is if that fails. Anything else
+    never reached the library, so its partial download goes: a terminal
+    queue keeps the album to resume, and a web job's entry is dropped so
+    the job can be queued again with a fresh plan.
+    """
+    launched = _launched_import(journal.operation_id, item)
+    if launched is not None and launched[0] == _IMPORT_PARTIAL:
+        return BlockedItemSettlementAction.DISCARD, "set-aside"
+    if launched is not None and launched[0] == _IMPORT_FILED:
+        if BlockedItemSettlementAction.RETRY in tried:
+            return BlockedItemSettlementAction.DISCARD, "kept"
+        return BlockedItemSettlementAction.RETRY, "checked"
+    if journal.mode.startswith("web-job:"):
+        return BlockedItemSettlementAction.DISCARD, "requeue"
+    return BlockedItemSettlementAction.RETRY, "requeue"
+
+
+def _settle_next_blocked(authority, journals, tried, outcomes):
+    """Settle one blocked item not yet tried with the action it needs.
+
+    Returns False once every blocked item has had each settlement it can
+    get, so a refusal ends in attention instead of a loop.
+    """
+    for journal in journals:
+        for item in sorted(journal.items, key=lambda value: value.item_id):
+            if item.phase is not queue_state.QueuePhase.BLOCKED:
+                continue
+            key = (journal.operation_id, item.item_id)
+            while True:
+                _require_authority(authority)
+                action, outcome = _settle_choice(journal, item, tried.get(key, ()))
+                if action in tried.get(key, ()):
+                    break
+                tried[key] = (*tried.get(key, ()), action)
+                settled = settle_blocked_item(
+                    authority=authority,
+                    operation_id=journal.operation_id,
+                    item_id=item.item_id,
+                    action=action,
+                )
+                if settled.status is not BlockedItemSettlementStatus.BLOCKED:
+                    outcomes[key] = _settled_download(
+                        journal, item, outcome,
+                        "" if outcome == "requeue" else settled.reason)
+                    return True
+                log.warning(
+                    "%s: %s: %s",
+                    BLOCKED_DOWNLOAD_LOG_ENTRY,
+                    item.planned.get("label") or item.item_id,
+                    settled.reason,
+                )
+                loaded = queue_state.load_queue_journal(journal.operation_id)
+                current = loaded.journal
+                item = next(
+                    (
+                        value
+                        for value in (current.items if current is not None else ())
+                        if value.item_id == item.item_id
+                    ),
+                    None,
+                )
+                if item is None or item.phase is not queue_state.QueuePhase.BLOCKED:
+                    return True
+                journal = current
+    return False
+
+
+def _requeue_unstarted(authority, journals, outcomes):
+    """Return downloads that never staged anything to their queue.
+
+    A web job's saved entry is dropped so the job can be queued again, and
+    a terminal one goes back to pending for the resume prompt.
+    """
+    changed = False
+    classified = {
+        (entry.operation_id, entry.item_id): entry.action
+        for entry in _classify(journals)
+    }
+    for journal in journals:
+        for item in journal.items:
+            key = (journal.operation_id, item.item_id)
+            action = classified.get(key)
+            if journal.mode.startswith("web-job:"):
+                if (
+                    len(journal.items) != 1
+                    or journal.retirements
+                    or action not in {
+                        StartupRecoveryAction.PENDING,
+                        StartupRecoveryAction.RESUME_DOWNLOAD,
+                    }
+                ):
+                    continue
+                settled = discard_unstarted_item(
+                    authority=authority,
+                    operation_id=journal.operation_id,
+                    item_id=item.item_id,
+                )
+                if settled.status is not BlockedItemSettlementStatus.DISCARDED:
+                    continue
+            elif action is StartupRecoveryAction.RESUME_DOWNLOAD:
+                _require_authority(authority)
+                queue_state.reset_unstarted_item_to_pending(journal, item.item_id)
+                _require_authority(authority)
+            else:
+                continue
+            outcomes[key] = _settled_download(journal, item, "requeue")
+            changed = True
+    return changed
+
+
 def recover_startup_state(
     *,
     authority: RunLockLease,
     acknowledge_completion=None,
+    settle: bool = False,
 ) -> StartupRecoveryResult:
-    """Settle only exact restart evidence; never run downloads or imports."""
+    """Settle only exact restart evidence; never run downloads or imports.
+
+    With ``settle``, a download a restart cut off is settled on its own as
+    well: see ``_settle_choice``. Only a block nothing can be proved about
+    still ends in attention.
+    """
+    tried = {}
+    outcomes = {}
+    result = _recover_startup_state(
+        authority, acknowledge_completion, settle, tried, outcomes)
+    if not outcomes:
+        return result
+    return replace(result, settled=tuple(outcomes.values()))
+
+
+def _recover_startup_state(
+    authority, acknowledge_completion, settle, tried, outcomes,
+) -> StartupRecoveryResult:
     try:
         _require_authority(authority)
         relocation = reconcile_post_import_relocations(
@@ -1906,6 +1912,12 @@ def recover_startup_state(
                 _require_authority(authority)
                 if _retain_unclaimed_staging_runs(authority, unclaimed):
                     continue
+                log.warning(
+                    "%s: a download folder in staging no saved queue claims "
+                    "could not be moved aside: %s",
+                    BLOCKED_DOWNLOAD_LOG_ENTRY,
+                    ", ".join(unclaimed),
+                )
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
                     reason="unclaimed-staging-run",
@@ -1935,6 +1947,12 @@ def recover_startup_state(
                     BlockedItemSettlementStatus.DISCARDED,
                 }:
                     continue
+                log.warning(
+                    "%s: %s: %s",
+                    BLOCKED_DOWNLOAD_LOG_ENTRY,
+                    settlement[1].planned.get("label") or settlement[1].item_id,
+                    settled.reason,
+                )
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
                     _classify(journals),
@@ -1946,6 +1964,9 @@ def recover_startup_state(
                     loads = _load_namespace(authority)
                     journals = _sorted_journals(loads)
                     classified = _classify(journals)
+                if settle and _settle_next_blocked(
+                        authority, journals, tried, outcomes):
+                    continue
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
                     classified,
@@ -1977,6 +1998,12 @@ def recover_startup_state(
                     ManagedCarrierRetirementOutcome.RETIRED,
                     ManagedCarrierRetirementOutcome.ALREADY_ABSENT,
                 }:
+                    log.warning(
+                        "%s: the record of a finished Beets import could not "
+                        "be retired: %s",
+                        BLOCKED_DOWNLOAD_LOG_ENTRY,
+                        result.reason or result.outcome.value,
+                    )
                     return StartupRecoveryResult(
                         StartupRecoveryStatus.ATTENTION_REQUIRED,
                         classified,
@@ -2033,11 +2060,16 @@ def recover_startup_state(
                     acknowledge_completion,
                 ):
                     continue
+                key = (resolving[0].operation_id, resolving[1].item_id)
+                tried[key] = (*tried.get(key, ()), BlockedItemSettlementAction.RETRY)
                 loads = _load_namespace(authority)
                 journals = _sorted_journals(loads)
                 _recover_active_reservations(authority, journals)
                 loads = _load_namespace(authority)
                 journals = _sorted_journals(loads)
+                if settle and _settle_next_blocked(
+                        authority, journals, tried, outcomes):
+                    continue
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
                     _classify(journals),
@@ -2047,6 +2079,9 @@ def recover_startup_state(
             if _recover_active_reservations(authority, journals):
                 loads = _load_namespace(authority)
                 journals = _sorted_journals(loads)
+                if settle and _settle_next_blocked(
+                        authority, journals, tried, outcomes):
+                    continue
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
                     _classify(journals),
@@ -2064,6 +2099,9 @@ def recover_startup_state(
                 _require_authority(authority)
                 queue_state.clear_queue_journal(empty.operation_id)
                 _require_authority(authority)
+                continue
+
+            if settle and _requeue_unstarted(authority, journals, outcomes):
                 continue
 
             classified = _classify(journals)

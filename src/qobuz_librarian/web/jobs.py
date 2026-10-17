@@ -59,8 +59,6 @@ log = logging.getLogger("qobuz_librarian")
 
 # Thread-local pointer to the job currently being run on this worker.
 _TLS = threading.local()
-_durable_recovery_state_lock = threading.Lock()
-_durable_recovery_job_id: str | None = None
 _settings_admission_lock = threading.RLock()
 
 
@@ -69,31 +67,6 @@ def settings_admission_guard():
     """Serialize live config apply with both worker-lane RUNNING claims."""
     with _settings_admission_lock:
         yield
-
-
-def set_durable_recovery_job_id(job_id: str | None) -> None:
-    """Pin the exact Web job that owns the current durable resume."""
-    global _durable_recovery_job_id
-    value = job_id if isinstance(job_id, str) and job_id else None
-    with _durable_recovery_state_lock:
-        _durable_recovery_job_id = value
-
-
-def durable_recovery_job_id() -> str | None:
-    with _durable_recovery_state_lock:
-        return _durable_recovery_job_id
-
-
-def _is_durable_recovery_job(job) -> bool:
-    return (
-        type(job) is Job
-        and durable_recovery_job_id() == job.id
-    )
-
-
-def cancel_is_protected(job) -> bool:
-    """True while generic cancellation would sever durable recovery."""
-    return _is_durable_recovery_job(job)
 
 
 def _current_job_cancel_requested() -> bool:
@@ -756,10 +729,7 @@ class JobRegistry:
             self._order.append(job.id)
             self._prune_locked()
         job_persistence.persist(job)
-        job_persistence.prune_finished(
-            self.PERSIST_KEEP,
-            retain_job_id=durable_recovery_job_id(),
-        )
+        job_persistence.prune_finished(self.PERSIST_KEEP)
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
@@ -806,8 +776,7 @@ class JobRegistry:
         finished = [self._jobs[jid] for jid in self._order
                     if (jid in self._jobs
                         and self._jobs[jid].status in TERMINAL
-                        and not self._jobs[jid].recoveries
-                        and jid != durable_recovery_job_id())]
+                        and not self._jobs[jid].recoveries)]
         excess = len(finished) - self.MAX_FINISHED
         if excess <= 0:
             return
@@ -834,8 +803,7 @@ class JobRegistry:
                         and (self._jobs[jid].status not in TERMINAL
                              or self._jobs[jid].recoveries
                              or job_persistence.has_active_single_undo(
-                                 self._jobs[jid].single)
-                             or jid == durable_recovery_job_id()))]
+                                 self._jobs[jid].single)))]
             dropped = [jid for jid in self._jobs.keys() if jid not in keep]
             for jid in dropped:
                 self._jobs.pop(jid, None)
@@ -1495,15 +1463,11 @@ def stop_for_restart() -> None:
     """Start winding down because the app is stopping.
 
     Nothing more leaves the queues, and each running job stops as it would
-    for a cancel. An album already importing finishes first. A job that owns
-    an unsettled durable recovery is left to finish, as a cancel would leave
-    it.
+    for a cancel. An album already importing finishes first.
     """
     _restart_stop.set()
     _stop_event.set()
     for job in registry.executing():
-        if cancel_is_protected(job):
-            continue
         with job._lock:
             # A cancel already asked for stays a cancel, and an import under
             # way finishes and is recorded as it ends.
@@ -1562,21 +1526,6 @@ def configure_held_release(check: Callable[[], bool] | None) -> None:
         _held_release_check = check
 
 
-def submit_held(job: Job, fn) -> Optional[Job]:
-    """Queue a download that waits for a paused library before it starts.
-
-    It cannot go on the work queue: the interrupted download that paused the
-    library is retried through that same queue, so a job waiting at the head
-    of it would keep the one thing that lifts the pause from ever running.
-    """
-    if not job_persistence.admit(job):
-        return None
-    registry.add(job)
-    with _held_downloads_lock:
-        _held_downloads.append((job, fn))
-    return job
-
-
 def qobuz_hold() -> dict | None:
     """Why downloads wait for Qobuz and how many do, or None."""
     with _held_downloads_lock:
@@ -1628,10 +1577,9 @@ def _hold_for_qobuz(job: Job, fn) -> bool:
     """Set a download aside while Qobuz is unavailable.
 
     It is rebuilt from its saved album so it runs with whatever credentials
-    are saved when its turn comes. A download resuming an interrupted one
-    keeps its exact run and is never held.
+    are saved when its turn comes.
     """
-    if _qobuz_hold is None or not job.album_id or cancel_is_protected(job):
+    if _qobuz_hold is None or not job.album_id:
         return False
     from qobuz_librarian.web import job_runs
     run = job_runs._requeued_download_run(job) or fn
@@ -1660,11 +1608,8 @@ def _wait_for_qobuz(job: Job, fn, exc) -> bool:
 
 
 def _wait_for_recovery(job: Job, fn) -> bool:
-    """Return a download that reached the staging door while another
-    download's interrupted recovery holds the library to the held downloads,
-    which start once that recovery is settled."""
-    if cancel_is_protected(job):
-        return False
+    """Return a download that reached the staging door while downloads are
+    paused to the held downloads, which start once the pause lifts."""
     _back_to_waiting(job)
     with _held_downloads_lock:
         _hold_in_order(job, fn)
@@ -1697,70 +1642,6 @@ def _release_held_downloads() -> None:
         _held_downloads.clear()
     for job, fn in released:
         _download_queue.put((job, fn))
-
-
-def resubmit_failed(job: Job, fn) -> bool:
-    """Requeue the exact registered failed job without minting a new identity.
-
-    Durable startup recovery is bound to the original Web job id.  This narrow
-    transition keeps that identity, persists PENDING before the worker can see
-    it, and refuses stale/historical copies or a repeated request.
-    """
-    if type(job) is not Job or not callable(fn):
-        return False
-
-    with registry._lock:
-        if registry._jobs.get(job.id) is not job:
-            return False
-        with job._lock:
-            if job.status is not JobStatus.FAILED or job.recoveries:
-                return False
-
-            previous = {
-                "status": job.status,
-                "phase": job.phase,
-                "error": job.error,
-                "summary": job.summary,
-                "attention": job.attention,
-                "quality_shortfall": dict(job.quality_shortfall),
-                "tracks_missing": job.tracks_missing,
-                "cancel_requested": job.cancel_requested,
-                "started_at": job.started_at,
-                "finished_at": job.finished_at,
-                "progress_phase": job.progress_phase,
-                "progress_current": job.progress_current,
-                "progress_total": job.progress_total,
-                "progress_item": job.progress_item,
-                "progress_found": job.progress_found,
-                "progress_found_artists": job.progress_found_artists,
-                "progress_unit": job.progress_unit,
-            }
-            job.status = JobStatus.PENDING
-            job.phase = ""
-            job.error = None
-            job.summary = ""
-            job.attention = ""
-            job.quality_shortfall = {}
-            job.tracks_missing = 0
-            job.cancel_requested = False
-            job.started_at = None
-            job.finished_at = None
-            job.progress_phase = ""
-            job.progress_current = 0
-            job.progress_total = 0
-            job.progress_item = ""
-            job.progress_found = 0
-            job.progress_found_artists = 0
-            job.progress_unit = ""
-        if not job_persistence.persist(job):
-            with job._lock:
-                # A queued cancel may have won after PENDING was published.
-                if job.status is JobStatus.PENDING:
-                    for name, value in previous.items():
-                        setattr(job, name, value)
-            return False
-        _download_queue.put((job, fn))
-        return True
 
 
 def submit_scan(job: Job, scan_fn, execute_fn):
@@ -2183,11 +2064,110 @@ def cancel_review(job: Job) -> Optional[bool]:
         return True
 
 
+# How many times in a row a download cut off before import is queued again
+# on its own before it waits for Retry.
+RESTART_REQUEUE_LIMIT = 2
+
+_LEGACY_PAUSE_TEXT = (
+    "downloads and scans are paused",
+    "downloads are paused",
+    "downloads and scans stay paused",
+    "library work paused for an interrupted download",
+)
+
+
+def _settle_restarted_download(job: Job, settled, *, was_running: bool,
+                               can_requeue: bool) -> bool:
+    """Apply what start-up did with a download a restart cut off.
+
+    Returns True when the job is to wait in the queue again. The count is
+    saved with the job before it can run, so a download that keeps getting
+    cut off stops after ``RESTART_REQUEUE_LIMIT`` tries.
+    """
+    restart = job_persistence.RESTART_INTERRUPTED + " " if was_running else ""
+    job.phase = ""
+    job.cancel_requested = False
+    if settled.outcome == "requeue" and was_running:
+        count = (job.execute_args or {}).get("restart_requeues")
+        count = count if type(count) is int else 0
+        if not can_requeue:
+            job.error = restart + "Use Retry to download it again."
+            job.attention = "failed"
+        elif count < RESTART_REQUEUE_LIMIT:
+            job.execute_args = {**(job.execute_args or {}),
+                                "restart_requeues": count + 1}
+            job.status = JobStatus.PENDING
+            job.error = None
+            job.attention = ""
+            job.started_at = None
+            job.finished_at = None
+            job.push_line(
+                "Interrupted by a restart before anything was imported. The "
+                "partial download was removed and the album was queued again.")
+            return True
+        else:
+            job.error = (restart + "It was cut off before import "
+                         f"{plural(count + 1, 'time')}, so it was not queued "
+                         "again. Use Retry to download it again.")
+            job.attention = "failed"
+    elif settled.outcome == "requeue":
+        job.error = "This download did not finish. Use Retry to download it again."
+        job.attention = "failed"
+    else:
+        job.error = restart + settled.reason
+        job.attention = "processing"
+    job.status = JobStatus.FAILED
+    job.finished_at = job.finished_at or time.time()
+    return False
+
+
+def settle_restarted_downloads(cut_off: dict) -> None:
+    """Apply what settling did to stopped jobs restored before it ran."""
+    for job_id, settled in cut_off.items():
+        job = registry.get(job_id)
+        if (
+            job is None
+            or job.status is not JobStatus.FAILED
+            or job.recoveries
+            or normalise_album_id(job.album_id)
+            != normalise_album_id(settled.album_id)
+        ):
+            continue
+        with job._lock:
+            _settle_restarted_download(
+                job, settled, was_running=False, can_requeue=False)
+        job_persistence.persist(job)
+
+
+def _clear_legacy_pause(job: Job) -> bool:
+    """Rewrite a download's saved pause notice once nothing holds it.
+
+    Earlier versions saved "downloads are paused" text, and a recovery
+    attention, with the job; once its saved queue entry is gone neither is
+    true, and the job can simply be retried.
+    """
+    error = (job.error or "").lower()
+    if (
+        job.status is not JobStatus.FAILED
+        or not job.album_id
+        or job.recoveries
+        or (job.attention != "recovery"
+            and not any(text in error for text in _LEGACY_PAUSE_TEXT))
+    ):
+        return False
+    restart = job_persistence.RESTART_INTERRUPTED
+    job.error = ((restart + " Use Retry to download it again.")
+                 if (job.error or "").startswith(restart)
+                 else "This download did not finish. Use Retry to download it again.")
+    job.attention = "failed"
+    return True
+
+
 def restore_jobs(
     execute_registry: dict,
     *,
-    durable_recovery_clear: bool = False,
-    durable_recovery_job_id: str | None = None,
+    unsettled: frozenset = frozenset(),
+    cut_off: dict | None = None,
     requeue: Callable[[Job], Optional[Callable]] | None = None,
     return_picks: Callable[[Job], None] | None = None,
     finished_upgrades=(),
@@ -2211,7 +2191,10 @@ def restore_jobs(
         again") and saved back. The user sees them rather than them
         silently vanishing. The exception is a PENDING job ``requeue``
         returns a run function for: it never started, so it waits in the
-        queue again, in the order it was first queued. A review's run that
+        queue again, in the order it was first queued. ``cut_off`` maps
+        a download job's id to what start-up did with its saved queue entry
+        (see ``_settle_restarted_download``); ``unsettled`` names the jobs
+        whose entry could not be settled. A review's run that
         stopped without saving its stop hands its picks to ``return_picks``.
         An Upgrade run counts the album folders in ``finished_upgrades``,
         whose upgrade the start-up finished, as upgraded.
@@ -2306,17 +2289,16 @@ def restore_jobs(
                 )
                 is True
             )
-        # `durable_recovery_clear` is process-wide, and a terminal-started
-        # recovery owns no job id at all. A job whose own completion is
-        # acknowledged is finished while some other download's recovery is
-        # outstanding; the completion proof is only read, never redefined.
-        recovery_is_this_job = (
-            durable_recovery_job_id is not None
-            and job.id == durable_recovery_job_id
-        )
-        if completion_acknowledged and (
-            durable_recovery_clear is True or not recovery_is_this_job
+        settled = (cut_off or {}).get(job.id)
+        if settled is not None and (
+            job.id in unsettled
+            or job.recoveries
+            or job.execute_args_unreadable
+            or normalise_album_id(job.album_id)
+            != normalise_album_id(settled.album_id)
         ):
+            settled = None
+        if completion_acknowledged:
             # Startup recovery proved and acknowledged this exact job
             # incarnation before retiring the queue journal.
             job.status = JobStatus.DONE
@@ -2328,22 +2310,30 @@ def restore_jobs(
             job.finished_at = job.finished_at or time.time()
             historical += 1
             _persist_restored_transition(job, previous_status)
-        elif completion_acknowledged:
-            # This job's own recovery is the outstanding one, so the
-            # acknowledgement is not enough to retire it here.
-            job.status = JobStatus.FAILED
-            job.phase = ""
-            # This state survives a restart, so the route out is left to the
-            # pause notice rather than prescribed here.
-            job.error = (
-                "This download is recorded as complete, but its own "
-                "interrupted recovery is still outstanding, so downloads and "
-                "scans stay paused. The application log names the reason."
-            )
-            job.attention = "recovery"
-            job.cancel_requested = False
-            job.finished_at = job.finished_at or time.time()
-            interrupted += 1
+        elif settled is not None and (
+            status in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.FAILED)
+        ):
+            run = (requeue(job) if requeue is not None
+                   and not row.get("single_unreadable") else None)
+            if _settle_restarted_download(
+                job, settled, was_running=status is not JobStatus.FAILED,
+                can_requeue=run is not None,
+            ) and _persist_restored_transition(job, previous_status) is True:
+                requeued.append((job, run))
+            else:
+                if job.status is not JobStatus.FAILED:
+                    job.status = JobStatus.FAILED
+                    job.error = (job_persistence.RESTART_INTERRUPTED
+                                 + " Use Retry to download it again.")
+                    job.finished_at = time.time()
+                interrupted += 1
+                _persist_restored_transition(job, previous_status)
+        elif (
+            status == JobStatus.FAILED
+            and job.id not in unsettled
+            and _clear_legacy_pause(job)
+        ):
+            historical += 1
             _persist_restored_transition(job, previous_status)
         elif unknown_recovery_status:
             job.error = ("This saved Repair job had an unrecognised state. "
@@ -2358,7 +2348,7 @@ def restore_jobs(
             and not pending_review
             and requeue is not None
             and not row.get("single_unreadable")
-            and job.id != durable_recovery_job_id
+            and job.id not in unsettled
             and (run := requeue(job)) is not None
         ):
             requeued.append((job, run))
@@ -2438,9 +2428,11 @@ def restore_jobs(
                     + "The saved details needed to retry this job couldn't "
                     "be read. Start it again from its original page."
                 )
-            elif job.album_id and job.id == durable_recovery_job_id:
-                job.error = (restart + "Downloads and scans are paused until "
-                             "it is retried or given up.")
+            elif job.id in unsettled:
+                job.error = (restart + "Its download couldn't be cleared "
+                             "safely, so downloads and scans are paused. "
+                             "Qobuz Librarian tries again when it restarts.")
+                job.attention = "recovery"
             elif job.album_id:
                 job.error = restart + "Use Retry to download it again."
             elif job.execute_kind == "lyrics":
@@ -2675,12 +2667,8 @@ def request_cancel(job: Job) -> bool:
     - pending          → canceled or returned to review
 
     Returns False if the job is finished, is already putting an album into the
-    library, or owns unsettled durable recovery.
+    library.
     """
-    # A durable retry must keep its original job identity until the saved
-    # journal settles.
-    if cancel_is_protected(job):
-        return False
     if job.status == JobStatus.AWAITING_REVIEW:
         review_canceled = cancel_review(job)
         if review_canceled is True:

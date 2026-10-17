@@ -11,6 +11,26 @@ from qobuz_librarian.ui_cli.logging import vlog
 log = logging.getLogger("qobuz_librarian")
 
 
+class _ThreadConnection:
+    """One thread's connection, closed when the thread ends.
+
+    A connection sits in a reference cycle with its statement cache, so a
+    finished worker's connection would otherwise keep its database and WAL
+    files open until the next garbage collection."""
+
+    def __init__(self, conn: sqlite3.Connection, generation: int):
+        self.conn = conn
+        self.generation = generation
+
+    def close(self) -> None:
+        try:
+            self.conn.close()
+        except sqlite3.Error:
+            pass
+
+    __del__ = close
+
+
 class CacheDB:
     """Manage one cache database and recover from corrupt files."""
 
@@ -53,13 +73,7 @@ class CacheDB:
 
     def handle_db_error(self, e: sqlite3.Error) -> None:
         """Close this thread's connection and discard a corrupt database."""
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            try:
-                conn.close()
-            except sqlite3.Error:
-                pass
-            self._local.conn = None
+        self.close()
         if not self._is_corrupt_error(e):
             return
         with self._init_lock:
@@ -104,30 +118,25 @@ class CacheDB:
 
     def conn(self) -> sqlite3.Connection:
         """Return this thread's connection, reopening after corrupt-file recovery."""
-        conn = getattr(self._local, "conn", None)
-        if conn is not None and getattr(self._local, "generation", None) != self._generation:
-            try:
-                conn.close()
-            except sqlite3.Error:
-                pass
-            conn = None
-            self._local.conn = None
-        if conn is None:
+        held = getattr(self._local, "held", None)
+        if held is not None and held.generation != self._generation:
+            self.close()
+            held = None
+        if held is None:
             conn = sqlite3.connect(str(self._db_path()), timeout=5)
             conn.execute("PRAGMA synchronous=NORMAL")
-            self._local.conn = conn
-            self._local.generation = self._generation
-        return conn
+            held = self._local.held = _ThreadConnection(conn, self._generation)
+        return held.conn
+
+    def close(self) -> None:
+        """Close this thread's connection."""
+        held = getattr(self._local, "held", None)
+        self._local.held = None
+        if held is not None:
+            held.close()
 
     def reset_for_tests(self) -> None:
         """Close this thread's connection and reset database initialization."""
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            try:
-                conn.close()
-            except sqlite3.Error:
-                pass
-            self._local.conn = None
-        self._local.generation = None
+        self.close()
         self._initialized = False
         self._generation = 0

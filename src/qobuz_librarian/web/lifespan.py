@@ -192,8 +192,15 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
     runtime._RUN_LOCK_HANDLE = lease
     try:
         settings_store.reload_from_disk()
-        result = queue_recovery._record_startup_recovery(lease)
-        if restore_jobs:
+        result = queue_recovery._record_startup_recovery(lease, settle=True)
+        if restore_jobs and runtime._JOBS_RESTORED:
+            unsettled = queue_recovery._unsettled_web_job_ids()
+            job_mgr.settle_restarted_downloads({
+                job_id: settled
+                for job_id, settled in queue_recovery.take_settled_downloads().items()
+                if job_id not in unsettled
+            })
+        elif restore_jobs:
             _restore_jobs_once()
         return result
     except BaseException:
@@ -282,10 +289,8 @@ def _restore_jobs_once() -> bool:
             finished, put_back = _settle_interrupted_upgrades()
             job_mgr.restore_jobs(
                 job_runs._RESUME_EXECUTE,
-                durable_recovery_clear=(
-                    queue_recovery._startup_recovery_status_value() == "clear"
-                ),
-                durable_recovery_job_id=queue_recovery._startup_recovery_web_job_id(),
+                unsettled=queue_recovery._unsettled_web_job_ids(),
+                cut_off=queue_recovery.settled_downloads(),
                 requeue=job_runs._requeued_download_run,
                 return_picks=flows.return_interrupted_picks,
                 finished_upgrades=finished,
@@ -296,6 +301,7 @@ def _restore_jobs_once() -> bool:
                 exc,
             )
             return False
+        queue_recovery.take_settled_downloads()
         flows.note_upgrades_put_back(put_back)
         runtime._JOBS_RESTORED = True
         return True
@@ -360,7 +366,6 @@ async def _lifespan(_app: FastAPI):
         runtime._JOBS_RESTORED = False
     queue_recovery._STARTUP_RECOVERY_RESULT = None
     queue_recovery._STARTUP_RECOVERY_UNKNOWN = False
-    job_mgr.set_durable_recovery_job_id(None)
     qobuz_access._scrub_stored_credentials(_log)
     cli_logging.attach_file_handler(cfg.APP_LOG_FILE, cfg.LOG_LEVEL)
     if web_auth.auth_disabled():

@@ -520,6 +520,49 @@ def test_lyric_sidecars_keep_the_tags_around_them(
     assert flac.FLAC(track)["lyrics"] == ["[00:00.50]line\n"]
 
 
+def test_a_grabbed_track_gets_its_sidecar_when_the_album_is_rewritten_too(
+        tmp_path, monkeypatch, tagged_flac):
+    """A single track grabbed into an album whose other tracks also lose
+    their embedded copy still gets its own .lrc in sidecar mode."""
+    from mutagen import flac
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian import safefile
+    from qobuz_librarian.integrations import lyrics
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    monkeypatch.setattr(cfg, "LYRICS_ENABLED", True)
+    monkeypatch.setattr(cfg, "LYRICS_FORMAT", "sidecar")
+    monkeypatch.setattr(lyrics, "HAVE_LYRIC_FETCH", True)
+    album = tmp_path / "Artist" / "Album"
+    kept = tagged_flac(album / "01 - Kept.flac", lyrics="[00:01.00]kept")
+    kept.with_suffix(".lrc").write_text("[00:01.00]kept")
+    grabbed = tagged_flac(album / "02 - Grabbed.flac", lyrics="[00:01.00]grabbed")
+
+    def identity(path):
+        return safefile.identity_record(os.stat(path))
+
+    receipt = {
+        "version": 1, "sealed": True, "root": str(tmp_path),
+        "root_identity": identity(tmp_path),
+        "items": [{
+            "relative": "Artist/Album/02 - Grabbed.flac",
+            "file": identity(grabbed),
+            "album_scope": {
+                "relative": "Artist/Album", "directory": identity(album),
+                "ancestors": [{"relative": "Artist",
+                               "directory": identity(album.parent)}],
+            },
+        }],
+    }
+
+    lyrics.write_post_import_sidecars([album], owned_tracks=[receipt])
+
+    assert grabbed.with_suffix(".lrc").read_text() == "[00:01.00]grabbed"
+    assert "lyrics" not in flac.FLAC(grabbed)
+    assert "lyrics" not in flac.FLAC(kept)
+
+
 # ── beets: _beets_direct behaviour ─────────────────────────────────────────
 
 

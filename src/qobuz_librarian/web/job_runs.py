@@ -17,7 +17,6 @@ from qobuz_librarian.modes import process as process_mode
 from qobuz_librarian.queue import builder as queue_builder
 from qobuz_librarian.queue import durable_album
 from qobuz_librarian.queue import executor as queue_executor
-from qobuz_librarian.queue import journal as queue_state
 from qobuz_librarian.web import (
     download_outcomes,
     flows,
@@ -115,7 +114,6 @@ def _make_download_run(
     token,
     *,
     treat_as_new=False,
-    durable_planned=None,
 ):
     """Return the run(j) callable used by both queue_download and job_retry.
 
@@ -148,19 +146,7 @@ def _make_download_run(
                     )
             durable_item = None
             separate = treat_as_new
-            if durable_planned is not None:
-                if treat_as_new:
-                    raise ValueError(
-                        "a saved durable retry cannot change edition intent"
-                    )
-                durable_item = queue_state._deserialize_queue_item(
-                    durable_planned
-                )
-                if durable_item["album"] != album:
-                    raise ValueError(
-                        "the saved durable retry album changed before execution"
-                    )
-            elif not treat_as_new and catalog.is_lossless_album(album):
+            if not treat_as_new and catalog.is_lossless_album(album):
                 existing, album_dir, missing, present = catalog.find_edition_tracks(album)
                 other = catalog.other_version_dir(album)
                 separate = bool(missing and other and album_dir is None)
@@ -196,21 +182,25 @@ def _make_download_run(
                     # raising.
                     try:
                         if runtime._run_lock_intact():
-                            queue_recovery._record_startup_recovery(runtime._RUN_LOCK_HANDLE)
+                            queue_recovery._record_startup_recovery(
+                                runtime._RUN_LOCK_HANDLE, settle=True)
                     except BaseException as refresh_exc:
                         _log.warning(
                             "couldn't refresh durable Web recovery after an "
                             "executor failure: %s",
                             refresh_exc,
                         )
+                    queue_recovery.take_settled_downloads([j.id])
                     raise
 
                 refresh_failed = False
                 recovery = None
                 try:
                     if runtime._run_lock_intact():
+                        # A download this run left blocked is settled here, as
+                        # start-up would, but never queued again.
                         recovery = queue_recovery._record_startup_recovery(
-                            runtime._RUN_LOCK_HANDLE)
+                            runtime._RUN_LOCK_HANDLE, settle=True)
                     else:
                         refresh_failed = True
                 except Exception as exc:
@@ -220,8 +210,10 @@ def _make_download_run(
                         "executor returned: %s",
                         exc,
                     )
+                settled = queue_recovery.take_settled_downloads([j.id]).get(j.id)
                 recovery_status = getattr(
                     getattr(recovery, "status", None), "value", None)
+                clear = recovery_status == "clear" and not refresh_failed
                 result = (
                     results[0]
                     if type(results) is list
@@ -233,83 +225,39 @@ def _make_download_run(
                     drained is True
                     and result is not None
                     and result.get("imported") is True
-                    and recovery_status == "clear"
-                    and not refresh_failed
+                    and clear
                 )
-                # A cancel and an undeliverable album both end with the partial
-                # download discarded and nothing left waiting on recovery, so
-                # neither is a durable failure.
-                cancelled_clean = (
-                    result is not None
-                    and result.get("result") in ("cancelled", "incomplete")
-                    and recovery_status == "clear"
-                    and not refresh_failed
-                )
-                if accepted or cancelled_clean:
+                if accepted:
                     r = result
-                    durable_completion_settled = accepted
+                    durable_completion_settled = True
+                elif (
+                    queue_recovery._durable_completion_status(j) is True
+                    and clear
+                    and runtime._run_lock_intact()
+                    and queue_recovery._reconcile_acknowledged_job(j)
+                ):
+                    # Completion crossed its durable Web acknowledgement
+                    # boundary even though the executor's return was not a
+                    # normal drained result.
+                    return
+                elif clear and (settled is None or settled.outcome == "requeue"):
+                    # Nothing is left waiting on recovery, so this is an
+                    # ordinary failed, cancelled or undeliverable download.
+                    r = result or {}
                 else:
                     r = result or {}
                     durable_failure = True
-                    completion_acknowledged = queue_recovery._durable_completion_status(j)
-                    # `recovery_status` is process-wide, so on its own it fails
-                    # a download whose own completion is acknowledged because
-                    # some other item's recovery is outstanding. Whose recovery
-                    # it is decides; the completion proof is only read.
-                    recovery_is_this_job = queue_recovery._startup_recovery_web_job_id() == j.id
-                    if (
-                        completion_acknowledged is True
-                        and (recovery_status == "clear"
-                             or not recovery_is_this_job)
-                        and runtime._run_lock_intact()
-                        and queue_recovery._reconcile_acknowledged_job(j)
-                    ):
-                        # Completion crossed its durable Web acknowledgement
-                        # boundary even though the executor's return was not a
-                        # normal drained result.
-                        return
-                    retryable = (
-                        completion_acknowledged is False
-                        and result is not None
-                        and result.get("result") == "retry"
-                        and recovery_status == "resume_required"
-                        and queue_recovery._durable_recovery_matches_job(j)
-                    )
-                    # History and the job page render Retry for whichever job
-                    # HOLDS the durable recovery control, which is wider than
-                    # `retryable`: an attention stop holds it too. Choosing the
-                    # copy on the narrower test printed "cleared under Settings
-                    # > Diagnostics" directly beside a working Retry button, and
-                    # Diagnostics has no control for this; it only checks
-                    # volumes, binaries and upgrade backups.
-                    control = queue_recovery._durable_recovery_control()
-                    holds_control = bool(control and control["job_id"] == j.id)
                     j.status = job_mgr.JobStatus.FAILED
-                    if retryable:
-                        j.attention = ""
-                        j.error = (
-                            "This download stopped before anything was "
-                            "imported, so downloads and scans are paused. Use "
-                            "Retry to download it again, or Give up on this "
-                            "album to drop it and carry on."
-                        )
-                    elif holds_control:
-                        j.attention = "recovery"
-                        j.error = (
-                            "This download couldn't be confirmed as finished "
-                            "cleanly, so downloads are paused. Use Retry on "
-                            "this job to settle it, or Give up on this album "
-                            "to discard it and carry on."
-                        )
+                    if clear:
+                        j.attention = "processing"
+                        j.error = settled.reason
                     else:
-                        # The recovery is held by a different job, so no Retry
-                        # is rendered here; send them to the one that has it.
                         j.attention = "recovery"
                         j.error = (
-                            "This download couldn't be confirmed as finished "
-                            "cleanly, so downloads are paused. Open the "
-                            "download holding the recovery from Queue or "
-                            "History and use Retry to settle it."
+                            "This download couldn't be cleared safely, so "
+                            "downloads and scans are paused and its files were "
+                            "left as they are. Qobuz Librarian tries again "
+                            "when it restarts."
                         )
         status, attention = download_result.download_job_outcome(r)
         if durable_failure:
@@ -382,7 +330,7 @@ def _requeued_download_run(job):
         or job.execute_kind
         or job.recoveries
         or job.execute_args_unreadable
-        or set(args) - {"new_edition"}
+        or set(args) - {"new_edition", "restart_requeues"}
     ):
         return None
     album_id = str(job.album_id)

@@ -6,7 +6,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from qobuz_librarian.download_result import download_notes_in
-from qobuz_librarian.queue.startup_recovery import BlockedItemSettlementAction
 from qobuz_librarian.web import (
     job_labels,
     job_persistence,
@@ -26,42 +25,6 @@ async def queue_head():
     return Response(status_code=200)
 
 
-@router.post("/queue/interrupted/discard")
-async def discard_interrupted_terminal_download(request: Request):
-    """Give up on an interrupted terminal download from the web."""
-    form = await request.form()
-    offer = queue_recovery._terminal_recovery_offer()
-    if offer is None or (
-        str(form.get("recovery_operation_id") or "") != offer["operation_id"]
-        or str(form.get("recovery_item_id") or "") != offer["item_id"]
-    ):
-        return RedirectResponse(
-            url="/queue?error=" + rendering._notice_key(
-                "That interrupted download is no longer the one holding things "
-                "up. Nothing was changed. Reload the page."),
-            status_code=303)
-    settled, reason = queue_recovery._settle_blocked_recovery(
-        BlockedItemSettlementAction.DISCARD)
-    _log.info(
-        "Give up on the interrupted terminal download: %s.",
-        "succeeded" if settled
-        else f"refused: {(reason or 'no reason given').rstrip('.')}")
-    if not settled:
-        return RedirectResponse(
-            url="/queue?error=" + rendering._notice_key(
-                reason or "The interrupted download could not be discarded."),
-            status_code=303)
-    # No album name here: the banner it was clicked from names it, and the
-    # query the queue page reads is capped.
-    return RedirectResponse(
-        url="/queue?notice=" + rendering._notice_key(
-            f"Gave up on the interrupted download. {reason}"
-            if offer["imported"] or offer["partial"] else
-            "Gave up on the interrupted download. Nothing reached your "
-            "library."),
-        status_code=303)
-
-
 @router.get("/queue", response_class=HTMLResponse)
 async def queue_page(request: Request, error: str = "", notice: str = ""):
     """The Queue tab: jobs in flight (pending / scanning / running). Parked
@@ -70,7 +33,6 @@ async def queue_page(request: Request, error: str = "", notice: str = ""):
     the History tab, which reads the durable archive rather than the capped
     in-memory set."""
     pending = job_mgr.registry.pending_and_running()
-    protected_id = job_mgr.durable_recovery_job_id()
     return rendering._tr(request, "queue.html", {
         "pending": pending,
         "queue_rows_signature": job_labels._queue_rows_signature(pending),
@@ -78,9 +40,6 @@ async def queue_page(request: Request, error: str = "", notice: str = ""):
         # job page shows, so the Queue list says why a job hasn't started
         # instead of a bare "Queued". None for anything already running.
         "queue_waits": {j.id: job_labels._queue_wait(j) for j in pending},
-        "queue_has_cancel_protected": any(
-            j.id == protected_id for j in pending
-        ),
         "error": rendering._notice_text(error),
         "notice": rendering._notice_text(notice),
         "page": "queue",
@@ -204,10 +163,9 @@ async def queue_clear(request: Request):
             return refusals._durable_recovery_response(
                 request,
                 "History cannot be cleared while an interrupted download still "
-                "has saved recovery state. Retry or settle that download first.",
+                "has saved recovery state.",
             )
-        retained_job_id = job_mgr.durable_recovery_job_id()
-        if not job_persistence.clear_history(retain_job_id=retained_job_id):
+        if not job_persistence.clear_history():
             message = (
                 "History couldn't be cleared from the data folder. Nothing "
                 "was removed; check the data volume and try again."
@@ -224,25 +182,20 @@ async def queue_clear(request: Request):
 async def queue_cancel_pending():
     # Parked reviews are exempt: the queue page does not show them, and a bulk
     # clear must never take something the user can't see.
-    protected = 0
     finishing = 0
     unsaved = 0
     for j in list(job_mgr.registry.pending_and_running()):
         if j.status == job_mgr.JobStatus.AWAITING_REVIEW:
             continue
         if not job_mgr.request_cancel(j):
-            if job_mgr.cancel_is_protected(j):
-                protected += 1
-            elif j.importing:
+            if j.importing:
                 finishing += 1
             elif j.status in job_mgr.TERMINAL:
                 continue
             else:
                 unsaved += 1
-    if protected or finishing or unsaved:
+    if finishing or unsaved:
         parts = ["Queue cleared where safe."]
-        if protected:
-            parts.append("The interrupted-download recovery was not cancelled.")
         if finishing:
             noun = "job is" if finishing == 1 else "jobs are"
             parts.append(

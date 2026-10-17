@@ -4,7 +4,7 @@ import math
 import time
 from datetime import datetime
 
-from qobuz_librarian.web import job_persistence, queue_recovery, runtime
+from qobuz_librarian.web import job_persistence, runtime
 from qobuz_librarian.web import jobs as job_mgr
 
 
@@ -14,12 +14,10 @@ def _queue_wait(job):
     worker and downloads another (see web/jobs.py), so a job only waits behind
     others in its OWN lane (job.kind: "scan" | "download"). ``position`` counts
     how many run before it (the one holding the worker + any earlier-queued).
-    A job waiting behind an interrupted download instead carries
-    ``paused_for``, because "starts automatically" is not true of it: nothing
-    moves until that album is retried or given up. One held because Qobuz
-    rejected the token or could not be reached carries ``for_qobuz``.
+    One held because Qobuz rejected the token or could not be reached carries
+    ``for_qobuz``, and one held while downloads are paused ``paused``.
 
-    Returns {"ahead_title", "lane", "position", "paused_for", "for_qobuz"} or
+    Returns {"ahead_title", "lane", "position", "paused", "for_qobuz"} or
     None when nothing's ahead, i.e. it's about to start, so there's nothing to
     explain."""
     if job.status != job_mgr.JobStatus.PENDING:
@@ -34,20 +32,15 @@ def _queue_wait(job):
         elif (j.status == job_mgr.JobStatus.PENDING
               and (j.created_at or 0) < (job.created_at or 0)):
             ahead += 1
-    paused_for = None
-    if queue_recovery._recovery_pause_is_another_download(job):
-        paused_for = {
-            "album": queue_recovery._startup_recovery_album_label(),
-            "job_id": queue_recovery._startup_recovery_web_job_id(),
-        }
     for_qobuz = job_mgr.waiting_for_qobuz(job)
-    if holder is None and ahead == 0 and paused_for is None and not for_qobuz:
+    paused = not for_qobuz and job_mgr.is_held(job)
+    if holder is None and ahead == 0 and not paused and not for_qobuz:
         return None
     return {
         "ahead_title": holder.title if holder else "",
         "lane": job.kind,
         "position": ahead + (1 if holder else 0),
-        "paused_for": paused_for,
+        "paused": paused,
         "for_qobuz": for_qobuz,
     }
 

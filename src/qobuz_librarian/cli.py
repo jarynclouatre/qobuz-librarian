@@ -32,7 +32,6 @@ from qobuz_librarian.queue.persistence import (
     offer_resume_pending_queue,
     offer_resume_startup_recovery,
 )
-from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import (
     C,
     banner,
@@ -77,298 +76,47 @@ def parse_qobuz_url(url: str) -> tuple[str, str] | None:
     return None
 
 
-def _recover_startup_queue(authority):
+def _recover_startup_queue(authority, *, settle=False):
     """Inspect durable queue state without starting download/import work."""
     from qobuz_librarian.queue.startup_recovery import recover_startup_state
 
-    return recover_startup_state(authority=authority)
+    return recover_startup_state(authority=authority, settle=settle)
 
 
-def _record_startup_recovery(authority):
+def _record_startup_recovery(authority, *, settle=False):
     global _STARTUP_RECOVERY_RESULT
-    _STARTUP_RECOVERY_RESULT = _recover_startup_queue(authority)
+    _STARTUP_RECOVERY_RESULT = _recover_startup_queue(authority, settle=settle)
     return _STARTUP_RECOVERY_RESULT
+
+
+def _report_settled_downloads(result):
+    """Say what start-up did with each download a restart cut off."""
+    for settled in getattr(result, "settled", ()):
+        label = f"“{settled.label}”"
+        if settled.outcome == "requeue" and settled.mode.startswith("web-job:"):
+            line = (f"{label} was cut off in the web app before it was "
+                    "imported. Its partial download was removed; Retry there "
+                    "downloads it again.")
+        elif settled.outcome == "requeue":
+            line = (f"{label} was cut off before it was imported. Its partial "
+                    "download was removed and it is back in the saved queue.")
+        elif settled.outcome == "checked":
+            line = f"{label} was filed by Beets before it stopped and is checked again."
+        else:
+            line = f"{label}: {settled.reason}"
+        log.info(fmt(C.YELLOW, wrap(line)))
 
 
 def _startup_recovery_status():
     return getattr(_STARTUP_RECOVERY_RESULT, "status", None)
 
 
-def _cli_retry_settlement_matches(result, target) -> bool:
-    from qobuz_librarian.queue.startup_recovery import (
-        StartupRecoveryAction,
-        StartupRecoveryStatus,
-    )
-
-    if result.status is not StartupRecoveryStatus.RESUME_REQUIRED:
-        return False
-    recovered = next(
-        (
-            item
-            for item in result.items
-            if item.operation_id == target.operation_id
-            and item.item_id == target.item_id
-            and item.mode == target.mode
-        ),
-        None,
-    )
-    loaded = queue_state.load_queue_journal(target.operation_id)
-    if (
-        recovered is None
-        or recovered.phase is not queue_state.QueuePhase.PENDING
-        or recovered.action is not StartupRecoveryAction.PENDING
-        or loaded.status is not queue_state.QueueLoadStatus.READY
-        or loaded.journal is None
-        or loaded.journal.mode != target.mode
-    ):
-        return False
-    queued = next(
-        (
-            item
-            for item in loaded.journal.items
-            if item.item_id == target.item_id
-        ),
-        None,
-    )
-    return (
-        queued is not None
-        and queued.phase is queue_state.QueuePhase.PENDING
-        and not queued.recovery_references
-        and queued.block_reason is None
-        and queued.completion_input is None
-        and queued.completion_evidence is None
-    )
-
-
-def _cli_discard_settlement_matches(result, target) -> bool:
-    from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
-
-    if result.status not in {
-        StartupRecoveryStatus.CLEAR,
-        StartupRecoveryStatus.RESUME_REQUIRED,
-    } or any(
-        item.operation_id == target.operation_id
-        and item.item_id == target.item_id
-        for item in result.items
-    ):
-        return False
-    loaded = queue_state.load_queue_journal(target.operation_id)
-    return loaded.status is queue_state.QueueLoadStatus.ABSENT or (
-        loaded.status is queue_state.QueueLoadStatus.READY
-        and loaded.journal is not None
-        and loaded.journal.mode == target.mode
-        and all(
-            item.item_id != target.item_id for item in loaded.journal.items
-        )
-    )
-
-
-def _cli_settlement_cleared_recovery(result, target) -> bool:
-    """True when a refused settlement left nothing for this item to settle."""
-    from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
-
-    return result.status is StartupRecoveryStatus.CLEAR and all(
-        item.operation_id != target.operation_id
-        or item.item_id != target.item_id
-        for item in getattr(result, "items", ())
-    )
-
-
-def _cli_blocked_item_settled(result, target) -> bool:
-    """True when this exact item is no longer blocked, whatever else is.
-
-    Clearing a staged leftover can leave the rest of the recovery to reconcile
-    on the next pass, so the whole-recovery answer is not this item's answer.
-    """
-    return all(
-        item.operation_id != target.operation_id
-        or item.item_id != target.item_id
-        or item.phase is not queue_state.QueuePhase.BLOCKED
-        for item in getattr(result, "items", ())
-    )
-
-
-def _offer_blocked_cli_settlement(authority, result):
-    """Offer an explicit decision for one settleable blocked download."""
-    from qobuz_librarian.queue.startup_recovery import (
-        SETTLEABLE_IMPORTED,
-        SETTLEABLE_PARTIAL,
-        SETTLEABLE_STAGED_LEFTOVER,
-        BlockedItemSettlementAction,
-        BlockedItemSettlementStatus,
-        blocked_settlement_binding,
-        settle_blocked_item,
-    )
-
-    binding = blocked_settlement_binding(result)
-    if binding is None:
-        return result, False, None
-    item, label, settleable = binding
-    leftover = settleable == SETTLEABLE_STAGED_LEFTOVER
-    imported = settleable == SETTLEABLE_IMPORTED
-    partial = settleable == SETTLEABLE_PARTIAL
-
-    if leftover:
-        # The file in staging holds the queue, not the saved entry, so a retry
-        # and a discard would both name the same act. Two choices, not three.
-        prompt = (
-            f"\n  “{label}” left something behind in the staging folder, and "
-            "downloads and scans\n"
-            "  stay paused until it is cleared.\n"
-            "  Clear it now, or keep it for later?\n"
-            "  Choice [c=clear now, Enter=keep]: "
-        )
-        retry_words = {"c", "clear", "r", "retry"}
-        again = "  Enter c to clear it, or press Enter to keep it: "
-    elif imported:
-        prompt = (
-            f"\n  Beets had already filed “{label}” when the download "
-            "stopped.\n"
-            "  Check it again, keep it blocked for later, or clear it and keep "
-            "what Beets filed?\n"
-            "  Choice [r=check again, Enter=keep, d=clear]: "
-        )
-        retry_words = {"r", "retry"}
-        again = "  Enter r to check again, d to clear, or press Enter to keep it: "
-    elif partial:
-        prompt = (
-            f"\n  Beets stopped part-way through filing “{label}”.\n"
-            "  Clearing it keeps the tracks Beets moved in the library. The "
-            "rest are kept in Settings >\n"
-            "  Diagnostics, along with any backup of the album's earlier "
-            "tracks, which Restore there puts back.\n"
-            "  Clear it, or keep it blocked for later?\n"
-            "  Choice [d=clear, Enter=keep]: "
-        )
-        retry_words = set()
-        again = "  Enter d to clear it, or press Enter to keep it: "
-    else:
-        prompt = (
-            f"\n  The interrupted download “{label}” stopped before Beets "
-            "changed the library.\n"
-            "  Retry it, keep it blocked for later, or discard its saved queue "
-            "entry?\n"
-            "  Choice [r=retry, Enter=keep, d=discard]: "
-        )
-        retry_words = {"r", "retry"}
-        again = "  Enter r to retry, d to discard, or press Enter to keep it: "
-    while True:
-        try:
-            choice = ask(prompt)
-        except KeyboardInterrupt:
-            choice = None
-        if choice is None:
-            choice = ""
-        if choice in {"", "k", "keep"}:
-            return result, True, None
-        if choice in retry_words:
-            action = BlockedItemSettlementAction.RETRY
-            expected = BlockedItemSettlementStatus.RETRYABLE
-            break
-        if not leftover and choice in {"d", "discard"}:
-            try:
-                confirmed = ask(
-                    "  Type DISCARD to remove this saved queue entry: ",
-                    colour=C.RED, lower=False) or ""
-            except KeyboardInterrupt:
-                confirmed = ""
-            if confirmed != "DISCARD":
-                return result, True, None
-            action = BlockedItemSettlementAction.DISCARD
-            expected = BlockedItemSettlementStatus.DISCARDED
-            break
-        prompt = again
-
-    if leftover:
-        settled_line = f"Cleared the leftover that was blocking “{label}”."
-    elif (imported or partial) and action is BlockedItemSettlementAction.DISCARD:
-        settled_line = None
-    elif imported:
-        settled_line = f"“{label}” will be checked again."
-    elif action is BlockedItemSettlementAction.DISCARD:
-        settled_line = f"Removed the saved queue entry for “{label}”."
-    else:
-        settled_line = f"Queued “{label}” to download again."
-    try:
-        settled = settle_blocked_item(
-            authority=authority,
-            operation_id=item.operation_id,
-            item_id=item.item_id,
-            action=action,
-        )
-        fresh = _record_startup_recovery(authority)
-    except Exception as exc:
-        vlog(f"couldn't settle the blocked download: {exc}")
-        return result, False, None
-    matches = (
-        _cli_retry_settlement_matches
-        if action is BlockedItemSettlementAction.RETRY
-        else _cli_discard_settlement_matches
-    )
-    refused = settled.status is not expected
-    # A refusal still parks the item's stranded staging, and for a download that
-    # already imported that is the whole of what was outstanding. Reporting the
-    # refusal over a recovery it just cleared would strand the run behind a
-    # stale verdict.
-    if refused:
-        took_effect = (
-            _cli_settlement_cleared_recovery(fresh, item)
-            or _cli_blocked_item_settled(fresh, item)
-        )
-    else:
-        took_effect = matches(fresh, item)
-    current = fresh
-    if not took_effect:
-        # The rest of the recovery can reconcile a pass behind the settlement,
-        # so read once more and report from that read. Falling back to the
-        # verdict from before the decision printed "could not be verified
-        # safely" over a choice that had just succeeded.
-        current = _record_startup_recovery(authority)
-        took_effect = (
-            matches(current, item)
-            or _cli_settlement_cleared_recovery(current, item)
-            or _cli_blocked_item_settled(current, item)
-        )
-    if not took_effect:
-        if refused:
-            log.info(fmt(C.YELLOW, f"  {settled.reason}"))
-            return result, False, None
-        return current, False, None
-    # Say the choice took effect whether or not the run can carry on: the
-    # warning that may follow is about the rest of the recovery, and on its own
-    # it read as though the decision had been refused.
-    log.info(fmt(C.GREEN, f"  ✓ {settled_line or settled.reason}"))
-    if _cli_settlement_cleared_recovery(current, item):
-        return current, False, None
-    return current, False, (
-        "\n   Restart Qobuz Librarian to finish settling it. Nothing else was "
-        "started.\n"
-    )
-
-
-def _die_unsettled_startup_recovery(
-    authority,
-    result=None,
-    *,
-    kept: bool = False,
-    note: str | None = None,
-) -> None:
+def _die_unsettled_startup_recovery(authority, result=None) -> None:
     try:
         authority.close()
     except OSError:
         pass
-    if note is not None:
-        # The decision landed but the run still cannot carry on, so the stop
-        # reports what succeeded rather than the generic failure below.
-        die(fmt(C.YELLOW, note), EXIT_GENERAL)
-    if kept:
-        message = (
-            "\n  The interrupted download was kept for later.\n"
-            "   Its saved queue entry was left unchanged and no other work "
-            "was started.\n"
-        )
-        color = C.YELLOW
-    elif (
+    if (
         getattr(result, "reason", None) == "post-import-relocation-unsettled"
         and getattr(result, "post_import_relocation", None) is not None
     ):
@@ -430,22 +178,17 @@ def _die_unsettled_startup_recovery(
             BLOCKED_DOWNLOAD_LOG_ENTRY,
             detail or (getattr(result, "reason", "") or "reason not reported"),
         )
-        from qobuz_librarian.queue.startup_recovery import partial_import_note
-
         # A state this stop is reached in survives a restart, so the message
         # names where the outstanding work is instead of prescribing one.
-        partial = partial_import_note(result)
         message = (
-            "\n✗  An interrupted download could not be verified safely.\n"
-            + (f"   {partial}\n" if partial else "")
-            + "   The saved queue and staged files were left unchanged, and no "
-            "other work was started.\n"
+            "\n✗  An interrupted download could not be cleared safely.\n"
+            "   Its staged files were left as they were, and no other work "
+            "was started.\n"
             f"   What is still outstanding is under {cfg.STAGING_DIR}. The "
             f"“{BLOCKED_DOWNLOAD_LOG_ENTRY}” entry in the application "
             "log has the technical detail.\n"
         )
-        color = C.RED
-    die(fmt(color, message), EXIT_GENERAL)
+    die(fmt(C.RED, message), EXIT_GENERAL)
 
 
 def _compose_service_name() -> str:
@@ -503,7 +246,7 @@ def acquire_run_lock():
             EXIT_LOCK_BUSY)
     if lease is not None and lease.intact() is True:
         try:
-            result = _record_startup_recovery(lease)
+            result = _record_startup_recovery(lease, settle=True)
         except Exception as exc:
             try:
                 lease.close()
@@ -524,12 +267,9 @@ def acquire_run_lock():
                 pass
             raise
         from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
-        kept = False
-        note = None
+        _report_settled_downloads(result)
         if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
-            result, kept, note = _offer_blocked_cli_settlement(lease, result)
-        if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
-            _die_unsettled_startup_recovery(lease, result, kept=kept, note=note)
+            _die_unsettled_startup_recovery(lease, result)
         _RUN_LEASE = lease
         return lease
     if lease is not None:

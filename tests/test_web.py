@@ -552,7 +552,7 @@ def client(monkeypatch):
         lambda generation: generation == qobuz_credentials.generation,
     )
 
-    def _record_clear(_authority):
+    def _record_clear(_authority, **_kwargs):
         queue_recovery._STARTUP_RECOVERY_RESULT = clear_recovery
         return clear_recovery
 
@@ -1816,21 +1816,18 @@ def test_retry_rebuilds_archived_failed_download(client, monkeypatch):
     _remove_job(new_job)
 
 
-def test_an_unfinished_queue_holds_only_downloads_until_given_up(
+def test_an_unfinished_terminal_queue_holds_only_downloads(
     client, monkeypatch, tmp_path,
 ):
     """A Library walk stopped with an album queued paused every web scan and
-    tool, while the terminal holds only its downloads for that queue. A rip
-    that fails before writing anything leaves its saved queue entry waiting
-    on Retry, which pauses every download and scan and fails the same way
-    each time; Give up has to clear it."""
+    tool, while the terminal holds only its downloads for that queue."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian import run_lock
     from qobuz_librarian.queue import journal
     from qobuz_librarian.queue.builder import _build_queue_item
     from qobuz_librarian.web import job_persistence, queue_recovery, runtime, write_gate
 
-    def _record(lease):
+    def _record(lease, **_kwargs):
         result = queue_recovery._recover_startup_queue(lease)
         queue_recovery._STARTUP_RECOVERY_RESULT = result
         return result
@@ -1862,53 +1859,6 @@ def test_an_unfinished_queue_holds_only_downloads_until_given_up(
         assert r.status_code == 503
     finally:
         authority.close()
-
-    monkeypatch.setattr(cfg, "STAGING_DIR", tmp_path / "staging")
-    monkeypatch.setattr(cfg, "QUEUE_JOURNAL_DIR", tmp_path / "journals")
-    monkeypatch.setattr(job_persistence, "_disabled", False)
-    job_persistence._reset_for_tests()
-    job_persistence.init()
-
-    job = jm.Job(title="Anvil Vapre", artist="Autechre", album_id="42")
-    job.status = jm.JobStatus.FAILED
-    job.finished_at = time.time()
-    jm.registry.add(job)
-    job_persistence.persist(job)
-    track = {"id": "101", "media_number": 1, "track_number": 1}
-    item = _build_queue_item(
-        album={"id": "42", "title": "Anvil Vapre", "maximum_bit_depth": 24,
-               "maximum_sampling_rate": 96, "tracks": {"items": [track]}},
-        album_dir=None, label="Anvil Vapre", missing=[track], present=[],
-        upgrade_only=False, auto_upgrade=False, quality=4,
-    )
-    saved = journal.save_queue_journal(
-        journal.create_queue_journal([item], mode=f"web-job:{job.id}"))
-
-    authority = run_lock.acquire()
-    monkeypatch.setattr(runtime, "_RUN_LOCK_HANDLE", authority)
-    try:
-        _record(authority)
-        assert queue_recovery._startup_recovery_status_value() == "resume_required"
-        control = queue_recovery._durable_recovery_control()
-        hooks = []
-        monkeypatch.setattr(jm, "_start_post_job_hook", hooks.append)
-
-        r = client.post(
-            f"/jobs/{job.id}/give-up",
-            data={"recovery_operation_id": control["operation_id"],
-                  "recovery_item_id": control["item_id"]},
-            follow_redirects=False,
-        )
-
-        assert r.status_code == 303
-        assert (journal.load_queue_journal(saved.operation_id).status
-                is journal.QueueLoadStatus.ABSENT)
-        assert queue_recovery._startup_recovery_status_value() == "clear"
-        assert [(hook["id"], hook["status"], hook["summary"]) for hook in hooks] == [
-            (job.id, "canceled", job.summary)]
-    finally:
-        authority.close()
-        _remove_job(job)
 
 
 # ── per-job cancel button on queue page ───────────────────────────────
@@ -2165,7 +2115,14 @@ def test_select_all_and_dismiss_rest_act_only_on_the_rows_in_scope(
 def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
         client, monkeypatch, tmp_path):
     from qobuz_librarian import config as cfg
-    from qobuz_librarian.web import job_persistence, lifespan, runtime, write_gate
+    from qobuz_librarian.queue import startup_recovery
+    from qobuz_librarian.web import (
+        job_persistence,
+        lifespan,
+        queue_recovery,
+        runtime,
+        write_gate,
+    )
 
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     job_persistence._reset_for_tests()
@@ -2176,8 +2133,25 @@ def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
     third = jm.Job(title="Third", album_id="3", created_at=300.0)
     second = jm.Job(title="Second", album_id="2", created_at=200.0)
     finished = jm.Job(title="Finished", album_id="4", created_at=50.0)
-    for job in (started, third, second, finished):
+    # Cut off before import: queued again on its own, until the cap.
+    cut_off = jm.Job(title="Cut off", album_id="5", created_at=400.0,
+                     status=jm.JobStatus.RUNNING)
+    capped = jm.Job(title="Capped", album_id="6", created_at=500.0,
+                    status=jm.JobStatus.RUNNING,
+                    execute_args={"restart_requeues": jm.RESTART_REQUEUE_LIMIT})
+    # Paused by an older version, whose pause has since cleared.
+    paused = jm.Job(title="Paused", album_id="7", created_at=40.0,
+                    status=jm.JobStatus.FAILED, attention="failed",
+                    error=job_persistence.RESTART_INTERRUPTED + " Downloads and "
+                    "scans are paused until it is retried or given up.")
+    for job in (started, third, second, finished, cut_off, capped, paused):
         job_persistence.persist(job)
+    for job in (cut_off, capped):
+        monkeypatch.setitem(
+            queue_recovery._SETTLED_DOWNLOADS, job.id,
+            startup_recovery.SettledDownload(
+                "op", f"web-job:{job.id}", "item", job.album_id, job.title,
+                "requeue", ""))
     connection = job_persistence._conn
     connection.execute(
         "INSERT INTO durable_job_completions "
@@ -2223,10 +2197,18 @@ def test_a_restart_requeues_waiting_downloads_but_not_the_started_one(
 
     assert jm.registry.get(started.id).status == jm.JobStatus.FAILED
     assert jm.registry.get(finished.id).status == jm.JobStatus.DONE
-    assert len(jm.registry.all()) == 4
-    assert [job.id for job, _run in jm._held_downloads] == [second.id, third.id]
+    assert len(jm.registry.all()) == 7
+    assert [job.id for job, _run in jm._held_downloads] == [
+        second.id, third.id, cut_off.id]
     assert {job.status for job, _run in jm._held_downloads} == {
         jm.JobStatus.PENDING}
+    saved = job_persistence.load_one(cut_off.id)
+    assert saved["status"] == "pending"
+    assert saved["execute_args"]["restart_requeues"] == 1
+    assert jm.registry.get(capped.id).status == jm.JobStatus.FAILED
+    assert jm.registry.get(capped.id).attention == "failed"
+    assert jm.registry.get(paused.id).error != paused.error
+    assert not queue_recovery.settled_downloads()
 
 
 def test_a_restart_restores_saved_jobs_past_broken_rows_and_old_schemas(
@@ -2384,8 +2366,7 @@ def test_a_restart_restores_saved_jobs_past_broken_rows_and_old_schemas(
     monkeypatch.setattr(job_persistence, "durable_completion_acknowledged",
                         lambda job_id, **_kw: True)
 
-    jm.restore_jobs({}, durable_recovery_clear=False,
-                    durable_recovery_job_id=None)
+    jm.restore_jobs({})
 
     restored = jm.registry.get(saved.id)
     assert restored.status == jm.JobStatus.DONE
@@ -2664,7 +2645,7 @@ def test_a_review_run_lands_each_pick_and_reparks_what_it_could_not_finish(
 
 
 def test_bulk_cancel_pending_never_touches_parked_reviews(client, monkeypatch):
-    """Bulk cancellation leaves reviews and protected recovery untouched."""
+    """Bulk cancellation leaves reviews untouched."""
     monkeypatch.setattr(jm.job_persistence, "_write_snapshot", lambda *_a: True)
     review = jm.Job(title="Library scan")
     review.execute_kind = "library"
@@ -2672,39 +2653,18 @@ def test_bulk_cancel_pending_never_touches_parked_reviews(client, monkeypatch):
     review.add_candidate("album", "Keep me", "X", payload={})
     queued = jm.Job(title="Album", artist="A", album_id="q1")
     queued.status = jm.JobStatus.PENDING
-    recovery = jm.Job(id="durable-owner", title="Interrupted album retry", artist="A")
-    recovery.status = jm.JobStatus.RUNNING
     jm.registry.add(review)
     jm.registry.add(queued)
-    jm.registry.add(recovery)
-    jm.set_durable_recovery_job_id(recovery.id)
     try:
-        individual = client.post(f"/jobs/{recovery.id}/cancel", follow_redirects=False)
-        assert individual.status_code == 303
-        assert recovery.status == jm.JobStatus.RUNNING
-        assert recovery.cancel_requested is False
-
-        queue_refusal = client.post(
-            f"/jobs/{recovery.id}/cancel",
-            data={"return_to": "/queue"},
-            follow_redirects=False,
-        )
-        assert queue_refusal.status_code == 303
-        assert queue_refusal.headers["location"].startswith("/queue?error=")
-
         bulk = client.post("/queue/cancel-pending", follow_redirects=False)
         assert bulk.status_code == 303
         assert bulk.headers["location"].startswith("/queue")
         assert review.status == jm.JobStatus.AWAITING_REVIEW
         assert len(review.candidates) == 1
         assert queued.cancel_requested is True
-        assert recovery.status == jm.JobStatus.RUNNING
-        assert recovery.cancel_requested is False
     finally:
-        jm.set_durable_recovery_job_id(None)
         _remove_job(review)
         _remove_job(queued)
-        _remove_job(recovery)
 
 
 # ── CLI/web mode hand-off ───────────────────────────────────────────────────────

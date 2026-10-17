@@ -51,8 +51,8 @@
     {% elif job.status.value == 'pending' %}
     {% set qw = (queue_waits or {}).get(job.id) %}
     <p id="card-prog-{{ job.id }}" class="ql-row-meta">
-      {%- if qw and qw.paused_for -%}
-      Waiting until {% if qw.paused_for.album %}“{{ qw.paused_for.album }}”{% else %}the interrupted download{% endif %} is retried or given up.
+      {%- if qw and qw.paused -%}
+      Waiting until downloads can run again.
       {%- elif qw and qw.for_qobuz -%}
       Waiting for Qobuz.
       {%- elif qw -%}
@@ -70,12 +70,7 @@
   </div>
 
   {% if job.status.value in ('pending', 'running', 'scanning') %}
-  {% if job.id == cancel_protected_job_id %}
-  <div class="ql-activity-actions">
-    <span class="ql-status-chip is-warning"
-          title="This job resumes an interrupted download and cannot be cancelled.">Recovery protected</span>
-  </div>
-  {% elif job.importing %}
+  {% if job.importing %}
   {# Beets runs to its own end, so a Cancel here would be a dead control. Say
      what is happening instead of greying a button whose reason only lives in
      hover text a phone can't show. #}
@@ -158,7 +153,7 @@
   <form action="/queue/cancel-pending" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
-            data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %}{% if queue_has_cancel_protected %} The interrupted-download recovery is not cancelled.{% endif %} Completed work and parked reviews are untouched."
+            data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %} Completed work and parked reviews are untouched."
             data-confirm-action="Clear queue" data-irreversible>Clear the queue</button>
   </form>
 </div>
