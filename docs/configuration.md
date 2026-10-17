@@ -40,9 +40,9 @@ out of library scans and import targets.
 
 Give each of these folders, and the data and beets folders, by its real
 path. If a path goes through a link, whether the folder itself or one above
-it, the app refuses to start and names the real folder to use. After you
-change it, run Settings > Force full rescan once so the Library review
-picks up the new path.
+it, the app refuses to start and names the real folder to use. If that
+changes the music folder, run **Force full rescan** on Settings once so the
+Library review picks up the new path.
 
 ## Behaviour toggles
 
