@@ -46,6 +46,12 @@ def _title_key(value) -> str:
     return discovery.owned_title_key(text) or text.casefold()
 
 
+def _title_keys(found) -> set:
+    """A Qobuz album's title key, with and without its version."""
+    return {_title_key(found.get("title")),
+            _title_key(catalog._release_title(found))}
+
+
 def _name_key(value) -> str:
     text = str(value or "").strip()
     return normalize(text) or text.casefold()
@@ -56,7 +62,7 @@ def _matches_snapshot(found, album, artist_name) -> bool:
     if isinstance(found_artist, dict):
         found_artist = found_artist.get("name") or ""
     if not (
-        _title_key(found.get("title")) == _title_key(_snapshot_album_title(album))
+        _title_key(_snapshot_album_title(album)) in _title_keys(found)
         and _name_key(found_artist) == _name_key(artist_name)
     ):
         return False
@@ -172,7 +178,47 @@ def _usable(album) -> bool:
     return is_lossless_album(album) and bool(tracks or count)
 
 
-def _by_stored_id(album, artist_name, token):
+def _holds_saved_recordings(found, album, artist_name) -> bool:
+    """Whether a Qobuz album by the backed-up artist, titled as the backed-up
+    album once its version is set aside, holds every one of the backed-up
+    tracks, each known by its ISRC, for a backed-up album whose folder and
+    title name no edition."""
+    found_artist = (found.get("artist") or {}).get("name") or ""
+    saved = [catalog._edition_title_parts(text, folder=True)
+             for text in (album.get("name"), album.get("title")) if text]
+    found_title, _versions = catalog._edition_title_parts(
+        found.get("title"), found.get("version"))
+    wanted = _album_isrcs(album)
+    have = {_isrc(t.get("isrc"))
+            for t in (found.get("tracks") or {}).get("items") or []}
+    return (
+        not any(versions for _title, versions in saved)
+        and found_title in {title for title, _versions in saved}
+        and _name_key(found_artist) == _name_key(artist_name)
+        and bool(wanted)
+        and len(wanted) == len(album.get("tracks") or [])
+        and set(wanted) <= have
+    )
+
+
+def _backed_up(found, album, artist_name) -> int:
+    """How surely a Qobuz album is the backed-up one: 2 when it matches the
+    backup's title and tracks, 1 when only its recordings do, else 0.
+
+    A download files an edition under the album's bare title, so for a
+    folder that names none, an album of that title holding every backed-up
+    recording is the one.
+    """
+    if not _usable(found):
+        return 0
+    if _matches_snapshot(found, album, artist_name):
+        return 2
+    return 1 if _holds_saved_recordings(found, album, artist_name) else 0
+
+
+def _stored_album(album, token):
+    """The Qobuz album the backup recorded for this folder, or None when
+    Qobuz no longer has it."""
     album_id = album.get("qobuz_album_id")
     if not album_id:
         return None
@@ -182,10 +228,13 @@ def _by_stored_id(album, artist_name, token):
         raise
     except Exception:
         return None
-    return found if _usable(found) and _matches_snapshot(found, album, artist_name) else None
+    return found if _usable(found) else None
 
 
 def _by_isrc(album, artist_name, token):
+    """The first album the backup's ISRCs lead to that matches it, and the
+    first that holds its recordings."""
+    held = None
     for code in _album_isrcs(album)[:ISRC_LOOKUP_TRIES]:
         track = find_qobuz_track_by_isrc(code, token)
         album_id = ((track or {}).get("album") or {}).get("id")
@@ -197,15 +246,20 @@ def _by_isrc(album, artist_name, token):
             raise
         except Exception:
             continue
-        if _usable(found) and _matches_snapshot(found, album, artist_name):
-            return found
-    return None
+        sure = _backed_up(found, album, artist_name)
+        if sure == 2:
+            return found, held
+        if sure and held is None:
+            held = found
+    return None, held
 
 
 def _by_search(album, artist_name, token):
+    """The first album a search by name finds that matches the backup, and
+    the first that holds its recordings."""
     title = _snapshot_album_title(album)
     if not title:
-        return None
+        return None, None
     wanted = _title_key(title)
     wanted_artist = _name_key(artist_name)
     try:
@@ -213,10 +267,11 @@ def _by_search(album, artist_name, token):
     except (AuthLost, QobuzUnavailable):
         raise
     except Exception:
-        return None
+        return None, None
+    held = None
     lossless = [a for a in results if is_lossless_album(a)]
     for found in lossless:
-        if _title_key(found.get("title")) != wanted:
+        if wanted not in _title_keys(found):
             continue
         found_artist = (found.get("artist") or {}).get("name") or ""
         if wanted_artist and _name_key(found_artist) != wanted_artist:
@@ -227,24 +282,33 @@ def _by_search(album, artist_name, token):
             raise
         except Exception:
             continue
-        if _usable(full) and _matches_snapshot(full, album, artist_name):
-            return full
-    return None
+        sure = _backed_up(full, album, artist_name)
+        if sure == 2:
+            return full, held
+        if sure and held is None:
+            held = full
+    return None, held
 
 
 def _resolve(album, artist_name, token):
-    """Find one backed-up album on Qobuz. Returns (album dict, reason)."""
-    found = _by_stored_id(album, artist_name, token)
+    """Find one backed-up album on Qobuz. Returns (album dict, reason).
+
+    The album the backup recorded comes first. After it, one an ISRC or a
+    search finds matching the backup wins over one that only holds its
+    recordings, so an edition sharing the original's recordings is not
+    taken for it. A recorded album that holds other recordings, as one
+    recorded before the folder's edition was switched does, is passed over.
+    """
+    stored = _stored_album(album, token)
+    if stored is not None and _backed_up(stored, album, artist_name):
+        return stored, None
+    found, held = _by_isrc(album, artist_name, token)
+    if found is None:
+        found, searched = _by_search(album, artist_name, token)
+        found = found or held or searched
     if found is not None:
         return found, None
-    stored_failed = bool(album.get("qobuz_album_id"))
-    found = _by_isrc(album, artist_name, token)
-    if found is not None:
-        return found, None
-    found = _by_search(album, artist_name, token)
-    if found is not None:
-        return found, None
-    if stored_failed:
+    if album.get("qobuz_album_id") and stored is None:
         return None, NO_QOBUZ_ALBUM
     return None, NO_ISRC_MATCH if _album_isrcs(album) else NO_SEARCH_MATCH
 

@@ -20,7 +20,14 @@ from qobuz_librarian.recovery import (
     normalise_recovery_owner,
     recovery_owner_matches,
 )
-from qobuz_librarian.safefile import delete_verified, fsync_dir, fsync_dirs, write_new_at
+from qobuz_librarian.safefile import (
+    delete_tree_verified,
+    delete_verified,
+    fsync_dir,
+    fsync_dirs,
+    snapshot_tree,
+    write_new_at,
+)
 from qobuz_librarian.safefile import named_entry_missing as _name_missing_at
 from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace
 from qobuz_librarian.safefile import stat_identity as _identity
@@ -853,6 +860,17 @@ def remove_empty_retry_groups():
         ):
             removed += 1
     return removed
+
+
+def remove_emptied_kept_runs():
+    """Remove the --no-import download folders a manual import emptied: ones
+    holding no file at all, only empty folders."""
+    for name in kept_staging_run_names():
+        root = Path(cfg.STAGING_DIR) / name
+        snapshot = snapshot_tree(root)
+        if snapshot is not None and all(
+                stat.S_ISDIR(value[2]) for value in snapshot.values()):
+            delete_tree_verified(root, snapshot)
 
 
 def _is_private_retry_group(path):

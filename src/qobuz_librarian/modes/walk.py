@@ -21,7 +21,11 @@ from qobuz_librarian.modes.artist import (
 )
 from qobuz_librarian.queue.executor import _execute_download_queue
 from qobuz_librarian.queue.journal import clear_queue_journal
-from qobuz_librarian.queue.persistence import kept_queue_note, queue_saver
+from qobuz_librarian.queue.persistence import (
+    OWN_FILES_LEFT,
+    kept_queue_note,
+    queue_saver,
+)
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate, wrap
 from qobuz_librarian.ui_cli.errors import (
@@ -254,7 +258,7 @@ def _download_queue(queue, args, token, save, results_out=None):
     if not args.dry_run:
         if drained:
             clear_queue_journal()
-        else:
+        elif queue:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {plural(len(queue), 'album')} couldn't be "
                 "downloaded; kept in the queue to retry on the next run."))
@@ -323,6 +327,7 @@ def run_album_walk_mode(args, token):
     no_answer = False
     partial_completion = False
     retry_needed = False
+    own_files_left = False
 
     _save_queue = queue_saver("album_walk", dry_run=args.dry_run)
 
@@ -330,7 +335,7 @@ def run_album_walk_mode(args, token):
         _save_queue(shared_queue)
 
     def _flush_queue():
-        nonlocal n_albums_filled, partial_completion, retry_needed
+        nonlocal n_albums_filled, partial_completion, retry_needed, own_files_left
         if not shared_queue:
             log.info(fmt(C.GRAY, "    The queue is empty."))
             return
@@ -347,7 +352,9 @@ def run_album_walk_mode(args, token):
         partial_completion = partial_completion or any(
             r.get("result") == "partial" for r in results
         )
-        retry_needed = not drained
+        retry_needed = not drained and bool(shared_queue)
+        own_files_left = own_files_left or any(
+            r.get("companions_unsettled") for r in results)
 
     try:
         for i, artist_dir in enumerate(artists, 1):
@@ -441,10 +448,15 @@ def run_album_walk_mode(args, token):
         args.consolidate = saved_consolidate
 
     if shared_queue and not interrupted and not args.dry_run:
-        _q = ask(
-            f"\n  Walk {'stopped' if walk_stopped else 'done'}. "
-            f"{plural(len(shared_queue), 'album')} still queued. "
-            "Download now? [Y/n]: ")
+        try:
+            _q = ask(
+                f"\n  Walk {'stopped' if walk_stopped else 'done'}. "
+                f"{plural(len(shared_queue), 'album')} still queued. "
+                "Download now? [Y/n]: ")
+        except KeyboardInterrupt:
+            print()
+            interrupted = True
+            _q = None
         if _q is not None and _q in ("", "y", "yes"):
             try:
                 _flush_queue()
@@ -458,7 +470,8 @@ def run_album_walk_mode(args, token):
 
     print()
     needs_attention = (interrupted or no_answer or partial_completion
-                       or retry_needed or bool(discovery_errors))
+                       or retry_needed or own_files_left
+                       or bool(discovery_errors))
     log.info(fmt(C.GRAY,
         f"     Already complete: {n_albums_complete} · "
         f"Filled: {n_albums_filled}"))
@@ -495,6 +508,8 @@ def run_album_walk_mode(args, token):
         clause = f"{plural(len(discovery_errors), 'artist')} could not be read"
     elif partial_completion or retry_needed:
         clause = "some albums need a retry"
+    elif own_files_left:
+        clause = OWN_FILES_LEFT
     if interrupted:
         log.info(fmt(C.GRAY, "  Interrupted."))
     elif clause:
@@ -569,12 +584,13 @@ def run_walk_queued_mode(args, token):
     _save_queue = queue_saver("walk_queue", dry_run=args.dry_run)
     partial_completion = False
     retry_needed = False
+    own_files_left = False
 
     def _save_now():
         _save_queue(shared_queue)
 
     def _flush_queue():
-        nonlocal partial_completion, retry_needed
+        nonlocal partial_completion, retry_needed, own_files_left
         if not shared_queue:
             log.info(fmt(C.GRAY, "  The queue is empty."))
             return
@@ -584,7 +600,9 @@ def run_walk_queued_mode(args, token):
             partial_completion = partial_completion or any(
                 r.get("result") == "partial" for r in results
             )
-            retry_needed = not drained
+            retry_needed = not drained and bool(shared_queue)
+            own_files_left = own_files_left or any(
+                r.get("companions_unsettled") for r in results)
 
     n_scanned = 0
     n_skipped = 0
@@ -752,7 +770,7 @@ def run_walk_queued_mode(args, token):
 
     print()
     needs_attention = (interrupted or partial_completion or retry_needed
-                       or bool(discovery_errors))
+                       or own_files_left or bool(discovery_errors))
     log.info(fmt(C.GRAY, f"     Scanned {n_scanned}, skipped {n_skipped}."))
     if (n_scanned and not needs_attention and not walk_stopped
             and not args.dry_run):
@@ -762,6 +780,8 @@ def run_walk_queued_mode(args, token):
         clause = f"{plural(len(discovery_errors), 'artist')} could not be read"
     elif partial_completion or retry_needed:
         clause = "some albums need a retry"
+    elif own_files_left:
+        clause = OWN_FILES_LEFT
     if interrupted:
         log.info(fmt(C.GRAY, "  Interrupted." if ctrl_c else "  Stopped."))
     elif clause:

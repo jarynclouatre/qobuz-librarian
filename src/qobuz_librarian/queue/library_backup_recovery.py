@@ -17,6 +17,7 @@ from qobuz_librarian.library.backup import (
     capture_album_source_receipt,
     carry_backup_companions,
     dispose_backup,
+    dispose_put_back_upgrade_backup,
     library_backup_disposal_record,
     library_backup_origin_state,
     library_backup_record_absent,
@@ -28,6 +29,10 @@ from qobuz_librarian.library.backup import (
     restore_upgrade_backup,
     settle_library_backup_intent,
     warn_pin_failed,
+)
+from qobuz_librarian.library.candidate_premise import (
+    resealed_after_put_back,
+    resealed_after_tracks_put_back,
 )
 from qobuz_librarian.library.catalog import folder_holds_all_tracks
 from qobuz_librarian.queue import journal as queue_state
@@ -269,12 +274,15 @@ def prepare_library_backup_settlement(
         return _attention(journal, "library-backup-replacement-unavailable")
 
     if reference.data["kind"] == "upgrade":
+        from qobuz_librarian.modes import process
+
         authority_check()
         replacement_receipt = carry_backup_companions(
             backup,
             replacement,
             expected_replacement_receipt=replacement_receipt,
             expected_owner=owner_data,
+            renamed=process._lyrics_follow_tracks(backup.path, replacement),
         )
         authority_check()
         if replacement_receipt is None:
@@ -430,18 +438,10 @@ def finish_library_backup_settlement(
             return _attention(journal, "library-backup-replacement-unverified")
         authority_check()
 
-    managed_carrier = next((reference for reference in current.recovery_references
-                            if reference.kind == "managed-beets"), None)
-    retired = None
-    if managed_carrier is not None:
-        retired = retire_managed_replacement_entries(
-            managed_carrier.data, owner, replacement, data["replacement_receipt"],
-            authority_check=authority_check,
-        )
-    if retired is None:
-        retired = retire_backup_beets_entries(
-            data["carrier"], replacement, data["replacement_receipt"],
-        )
+    retired = retire_replaced_entries(
+        current, owner, data["carrier"], replacement,
+        data["replacement_receipt"], authority_check=authority_check,
+    )
     if not retired:
         authority_check()
         _pin(
@@ -490,6 +490,26 @@ def finish_library_backup_settlement(
     )
 
 
+def retire_replaced_entries(item, owner, carrier, replacement,
+                            replacement_receipt, *, authority_check):
+    """Retire the Beets entries of the album an upgrade replaced, as its
+    import recorded them or, without that record, as its backup holds
+    them."""
+    managed_carrier = next((reference for reference in item.recovery_references
+                            if reference.kind == "managed-beets"), None)
+    retired = None
+    if managed_carrier is not None:
+        retired = retire_managed_replacement_entries(
+            managed_carrier.data, owner, replacement, replacement_receipt,
+            authority_check=authority_check,
+        )
+    if retired is None:
+        retired = retire_backup_beets_entries(
+            carrier, replacement, replacement_receipt,
+        )
+    return retired
+
+
 def restore_library_backup(
     journal,
     item_id,
@@ -505,7 +525,8 @@ def restore_library_backup(
     origin is replaced, and nothing is put back while a folder above it is
     missing. A backup that was planned but never sealed is forgotten once
     nothing is left at its path, and an unfinished upgrade backup goes
-    once its album is whole in its place.
+    once its album is whole in its place, as does a complete one a copy
+    back stopped before deleting.
     """
     if not callable(authority_check):
         raise ValueError("authority_check must be callable")
@@ -570,21 +591,37 @@ def restore_library_backup(
             or state == "restored" and backup.complete is not True
         ):
             restore_upgrade_backup(backup, origin, expected_owner=owner_data)
+        elif record["kind"] == "upgrade" and state == "restored":
+            dispose_put_back_upgrade_backup(
+                backup, origin, expected_owner=owner_data)
         authority_check()
         state = library_backup_origin_state(record, expected_owner=owner_data)
         authority_check()
+        if state == "restored" and not library_backup_record_absent(
+                record, expected_owner=owner_data):
+            return _attention(
+                journal, f"library-backup-put-back-kept:{record['path']}")
     if state != "restored" or not library_backup_record_absent(
         record,
         expected_owner=owner_data,
     ):
         return _attention(
             journal, f"library-backup-restore-unsettled:{record['path']}")
+    # Files copied back have new inodes, so the item is sealed again over
+    # the files just proved, or resuming it would refuse them as changed.
+    authority_check()
+    sealed = _item(journal, item_id).planned["source_premise"]
+    if record["kind"] == "upgrade":
+        resealed = resealed_after_put_back(sealed, record["receipt"], {})
+    else:
+        resealed = resealed_after_tracks_put_back(sealed, record["receipt"])
     authority_check()
     try:
         saved = queue_state.forget_restored_library_backup(
             journal,
             item_id,
             reference,
+            source_premise=resealed,
         )
     except (OSError, queue_state.QueueJournalError) as exc:
         raise LibraryBackupPersistenceError(

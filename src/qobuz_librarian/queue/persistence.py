@@ -65,6 +65,11 @@ def queue_saver(mode, *, dry_run=False):
     return save
 
 
+# What a run asks of the user after an upgrade whose album's own files could
+# not be carried into the new copy.
+OWN_FILES_LEFT = "copy your own files from the backups the next start keeps"
+
+
 def kept_queue_note(queue):
     """Where a run's unfinished queue waits, and how to run it."""
     return fmt(C.GRAY, wrap(

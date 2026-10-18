@@ -69,6 +69,26 @@ def _has_startup_write_authority() -> bool:
 # another run holds it as the app starts.
 _startup_maintained = False
 _put_back_pending = False
+# Held, never waited for, for a whole Resume web app and for each later
+# put-back of albums left in their backups, so Switch and Resume can say
+# which is running.
+_TAKING_BACK = threading.Lock()
+_putting_back = False
+
+
+def _put_back_unless_taking_back(put_back) -> None:
+    """Run ``put_back`` holding ``_TAKING_BACK``. While a Resume holds it,
+    the put-back waits for the next try."""
+    global _put_back_pending, _putting_back
+    if not _TAKING_BACK.acquire(blocking=False):
+        _put_back_pending = True
+        return
+    _putting_back = True
+    try:
+        put_back()
+    finally:
+        _putting_back = False
+        _TAKING_BACK.release()
 
 
 def _startup_cleanup() -> None:
@@ -90,6 +110,7 @@ def _startup_cleanup() -> None:
     try:
         if startup_recovery.saved_queue_operation_ids() == set():
             staging_mod.remove_empty_retry_groups()
+        staging_mod.remove_emptied_kept_runs()
     except Exception as e:
         _log.debug("staging clean-up error at startup: %s", e)
 
@@ -120,7 +141,7 @@ def _late_startup_maintenance() -> None:
         return
     _startup_maintained = True
     try:
-        _put_back_albums()
+        _put_back_unless_taking_back(_put_back_albums)
         _startup_cleanup()
     finally:
         lock.release()
@@ -227,13 +248,15 @@ async def _retry_web_run_lock(log, *, delay: float = 30) -> None:
                 None, _late_startup_maintenance)
         elif _put_back_pending and not runtime._SHUTTING_DOWN:
             await asyncio.get_running_loop().run_in_executor(
-                None, _put_back_albums_left_in_backups)
+                None, _put_back_unless_taking_back,
+                _put_back_albums_left_in_backups)
         if runtime._SHUTTING_DOWN:
             return
         if await asyncio.get_running_loop().run_in_executor(
                 None, _retry_web_run_lock_once, log):
             await asyncio.get_running_loop().run_in_executor(
-                None, _put_back_albums_left_in_backups)
+                None, _put_back_unless_taking_back,
+                _put_back_albums_left_in_backups)
 
 
 def _retry_web_run_lock_once(log) -> bool:

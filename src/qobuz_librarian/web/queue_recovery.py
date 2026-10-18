@@ -3,12 +3,14 @@ import logging
 import os
 import threading
 import time
+from dataclasses import replace
 
 from qobuz_librarian import completion
+from qobuz_librarian import config as cfg
 from qobuz_librarian.completion import CompletionOrigin, CompletionOriginKind, RecoveryOwner
 from qobuz_librarian.queue import journal as queue_state
 from qobuz_librarian.queue import startup_recovery
-from qobuz_librarian.web import job_persistence, runtime
+from qobuz_librarian.web import job_persistence, runtime, storage
 from qobuz_librarian.web import jobs as job_mgr
 
 _log = logging.getLogger("qobuz_librarian")
@@ -37,6 +39,11 @@ _STARTUP_RECOVERY_LOCK = threading.RLock()
 # What settling did with each web job's saved queue entry, by job id, until
 # the job itself takes it.
 _SETTLED_DOWNLOADS: dict = {}
+
+
+# The downloads a terminal run left that settling kept in the library, until
+# the Search page says so; no web job shows them.
+_KEPT_TERMINAL_DOWNLOADS: list = []
 
 
 def _recover_startup_queue(authority, *, settle=False):
@@ -107,6 +114,8 @@ def _record_startup_recovery(authority, *, settle=False):
         for settled in getattr(result, "settled", ()):
             if settled.mode.startswith(prefix):
                 _SETTLED_DOWNLOADS[settled.mode[len(prefix):]] = settled
+            elif settled.outcome in {"kept", "set-aside"}:
+                _KEPT_TERMINAL_DOWNLOADS.append(settled)
         _STARTUP_RECOVERY_RESULT = result
         _STARTUP_RECOVERY_UNKNOWN = False
         return _STARTUP_RECOVERY_RESULT
@@ -127,6 +136,18 @@ def take_settled_downloads(job_ids=None) -> dict:
             if job_id in _SETTLED_DOWNLOADS
         }
     return taken
+
+
+def take_kept_terminal_downloads() -> list:
+    """Remove and return the terminal downloads settling kept, with the
+    album folders their reasons name as the host sees them."""
+    with _STARTUP_RECOVERY_LOCK:
+        taken = list(_KEPT_TERMINAL_DOWNLOADS)
+        _KEPT_TERMINAL_DOWNLOADS.clear()
+    music = os.path.abspath(os.fspath(cfg.MUSIC_ROOT))
+    shown, _is_host = storage._resolve_host_path(music)
+    return [replace(settled, reason=settled.reason.replace(f" {music}/", f" {shown}/"))
+            for settled in taken]
 
 
 def _unsettled_web_job_ids() -> frozenset:

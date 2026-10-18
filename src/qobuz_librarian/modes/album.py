@@ -184,7 +184,7 @@ def _download_album_now(
             if not getattr(args, "dry_run", False):
                 if drained:
                     clear_queue_journal()
-                else:
+                elif queue:
                     log.info(fmt(
                         C.YELLOW,
                         "  ⚠  Safe recovery was saved. Restart without a "

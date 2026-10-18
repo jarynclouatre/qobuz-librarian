@@ -49,6 +49,8 @@ from qobuz_librarian.integrations.staging import (
     staging_run_from_record,
 )
 from qobuz_librarian.library.backup import (
+    capture_album_source_receipt,
+    companion_conflicts,
     library_backup_record,
     load_backup_result,
     load_library_backup_record,
@@ -67,6 +69,7 @@ from qobuz_librarian.queue.library_backup_recovery import (
     finish_library_backup_settlement,
     prepare_library_backup_settlement,
     restore_library_backup,
+    retire_replaced_entries,
 )
 from qobuz_librarian.queue.post_import_finalizer import (
     finalize_carrier_retirement,
@@ -145,6 +148,10 @@ class StartupRecoveryItem:
     phase: queue_state.QueuePhase
     action: StartupRecoveryAction
     reason: str | None = None
+    label: str = ""
+    holds_backup: bool = False
+    holds_staging: bool = False
+    explained: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +354,9 @@ def _classify(journals) -> tuple[StartupRecoveryItem, ...]:
                     phase=item.phase,
                     action=action,
                     reason=reason,
+                    label=_album_title(item),
+                    holds_backup=bool(_references(item, _LIBRARY_BACKUP_KINDS)),
+                    holds_staging=bool(_staging_references(item)),
                 )
             )
     return tuple(classified)
@@ -1188,6 +1198,13 @@ def _put_back_library_backup(authority, journal, item):
             "folder was removed, create it again. Then restart Qobuz "
             "Librarian."
         )
+    if reason.startswith("library-backup-put-back-kept:"):
+        return _blocked_settlement(
+            f"The tracks backed up to {paths['path']} are back in "
+            f"{paths['origin']}, but the backup could not be removed, so "
+            "both were kept and this item remains blocked. Check that the "
+            "backup folder is writable, then restart Qobuz Librarian."
+        )
     if reason == "library-backup-intent-unsettled":
         return _blocked_settlement(
             f"The backup this item began at {paths['path']} was not "
@@ -1454,8 +1471,31 @@ def _backup_sentence(backup):
     )
 
 
+def _upgrade_backup_kept(only=None):
+    """Where the album an upgrade replaced is kept, holding the only copy of
+    ``only``, and what to do with it. Restore refuses an older album over a
+    download at least its size and replaces a smaller one outright, so this
+    does not send anyone to it."""
+    held = f", which holds the only copy of {only}" if only else ""
+    return (
+        f"kept whole in a backup listed in Settings > Diagnostics{held}. Copy "
+        "what you want from it, then remove its folder yourself."
+    )
+
+
+_BEETS_MAY_LIST = (
+    " Beets may still list the replaced album beside the new copy; "
+    "`beet update` clears its entries for files that are gone."
+)
+
+
 def _keep_imported_files(authority, journal, item, reference, manifest_hash):
-    """Clear a download Beets finished filing, leaving the library as it is."""
+    """Clear a download Beets finished filing, leaving the library as it is.
+
+    Beets stops listing the album an upgrade replaced, whose files are kept
+    in its backup, or the reason says it may still list it.
+    """
+    album, retired = _retire_replaced_album(authority, journal, item, reference)
     kept = _keep_backup_for_settings(
         authority, journal, item,
         "queue backup kept - the download was cleared after Beets filed it",
@@ -1467,10 +1507,66 @@ def _keep_imported_files(authority, journal, item, reference, manifest_hash):
         authority, journal, item, reference, manifest_hash, backup_reference)
     if settled.status is not BlockedItemSettlementStatus.DISCARDED:
         return settled
-    reason = "The download was cleared; what Beets filed stays in your library."
-    if backup is not None:
-        reason += _backup_sentence(backup)
+    if item.block_reason == "library-backup-companions-unsettled":
+        uncarried = _backup_only_files(backup, album) or "files"
+        reason = (
+            f"The new copy is in your library, but {uncarried} from the album "
+            "it replaced could not be carried into it. That album is "
+            f"{_upgrade_backup_kept()}"
+        )
+    else:
+        reason = "The download was cleared; what Beets filed stays in your library."
+        if backup is not None and backup.receipt.get("kind") == "upgrade":
+            reason += f" The album it replaced is {_upgrade_backup_kept()}"
+        elif backup is not None:
+            reason += _backup_sentence(backup)
+    if not retired:
+        reason += _BEETS_MAY_LIST
     return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)
+
+
+def _retire_replaced_album(authority, journal, item, reference):
+    """Retire the Beets entries of the album an upgrade download replaced.
+
+    Returns the folder Beets filed the download in, when known, and whether
+    no entries are left to retire.
+    """
+    backups = _references(item, _LIBRARY_BACKUP_KINDS)
+    if not (
+        len(backups) == 1
+        and backups[0].kind == _LIBRARY_BACKUP_CARRIER_KIND
+        and backups[0].data.get("kind") == "upgrade"
+    ):
+        return None, True
+    owner = RecoveryOwner(journal.operation_id, item.item_id)
+    _require_authority(authority)
+    try:
+        with reopen_managed_evidence(reference.data, owner) as managed_lease:
+            managed = managed_lease.revalidate()
+    except OSError:
+        return None, False
+    album = Path(managed.library_root) / managed.album_path
+    receipt = capture_album_source_receipt(album)
+    return album, receipt is not None and retire_replaced_entries(
+        item, owner, backups[0].data, album, receipt,
+        authority_check=lambda: _require_authority(authority),
+    )
+
+
+def _backup_only_files(backup, album):
+    """The files of the album an upgrade replaced that only its backup
+    holds, by name while they are few, or None when there are none or they
+    can't be told."""
+    from qobuz_librarian.modes import process
+
+    receipt = None if album is None else capture_album_source_receipt(album)
+    left = None if receipt is None else companion_conflicts(
+        backup, receipt, process._lyrics_follow_tracks(backup.path, album))
+    if not left:
+        return None
+    if len(left) > 3:
+        return plural(len(left), "file")
+    return " and ".join(filter(None, (", ".join(left[:-1]), left[-1])))
 
 
 def _set_partial_import_aside(authority, journal, item, reference, launched):
@@ -1569,7 +1665,11 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
         )
     elif set_aside:
         reason += f" What it left in staging was set aside and is {listed} it."
-    if backup is not None:
+    if backup is not None and backup.receipt.get("kind") == "upgrade":
+        only = _backup_only_files(backup, Path(backup.receipt["origin"]))
+        reason += f" The album it replaced is {_upgrade_backup_kept(only)}"
+        reason += _BEETS_MAY_LIST
+    elif backup is not None:
         reason += _backup_sentence(backup)
     return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)
 
@@ -1778,16 +1878,23 @@ def settle_blocked_item(
         return _blocked_settlement("Run-lock authority was lost, so the item remains blocked.")
 
 
+def _album_title(item):
+    """The title of the album a saved item downloads, for messages; its
+    queue label is only its place in the queue."""
+    album = item.planned.get("album")
+    title = album.get("title") if isinstance(album, dict) else None
+    return str(title or item.planned.get("label") or "download")
+
+
 def _settled_download(journal, item, outcome, reason=""):
     album = item.planned.get("album")
-    album = album if isinstance(album, dict) else {}
-    album_id = album.get("id")
+    album_id = album.get("id") if isinstance(album, dict) else None
     return SettledDownload(
         operation_id=journal.operation_id,
         mode=journal.mode,
         item_id=item.item_id,
         album_id=None if album_id is None else str(album_id),
-        label=str(album.get("title") or item.planned.get("label") or "download"),
+        label=_album_title(item),
         outcome=outcome,
         reason=reason,
     )
@@ -1797,9 +1904,11 @@ def _settle_choice(journal, item, tried):
     """The settlement a blocked download gets on its own, and its outcome.
 
     One Beets stopped part way through keeps what it moved. One Beets filed
-    is checked again first and kept as it is if that fails, and one whose
-    album changed after it was recorded as finished is kept at once.
-    Anything else never reached the library, so its partial download goes:
+    is checked again first and kept as it is if that fails. One whose album
+    changed after it was recorded as finished, or whose album's own files
+    could not be carried into it, is kept at once, as checking it again
+    meets the same files. Anything else never reached the library, so its
+    partial download goes:
     a terminal queue keeps the album to resume, and a web job's entry is
     dropped so the job can be queued again with a fresh plan.
     """
@@ -1807,10 +1916,10 @@ def _settle_choice(journal, item, tried):
     if launched is not None and launched[0] == _IMPORT_PARTIAL:
         return BlockedItemSettlementAction.DISCARD, "set-aside"
     if launched is not None and launched[0] == _IMPORT_FILED:
-        if (
-            BlockedItemSettlementAction.RETRY in tried
-            or item.block_reason == "completed-item-proof-unavailable"
-        ):
+        if BlockedItemSettlementAction.RETRY in tried or item.block_reason in {
+            "completed-item-proof-unavailable",
+            "library-backup-companions-unsettled",
+        }:
             return BlockedItemSettlementAction.DISCARD, "kept"
         return BlockedItemSettlementAction.RETRY, "checked"
     if journal.mode.startswith("web-job:"):
@@ -1818,7 +1927,7 @@ def _settle_choice(journal, item, tried):
     return BlockedItemSettlementAction.RETRY, "requeue"
 
 
-def _settle_next_blocked(authority, journals, tried, outcomes):
+def _settle_next_blocked(authority, journals, tried, outcomes, said):
     """Settle one blocked item not yet tried with the action it needs.
 
     Returns False once every blocked item has had each settlement it can
@@ -1847,11 +1956,12 @@ def _settle_next_blocked(authority, journals, tried, outcomes):
                         "" if outcome == "requeue" else settled.reason)
                     return True
                 log.warning(
-                    "%s: %s: %s",
+                    "%s: “%s”: %s",
                     BLOCKED_DOWNLOAD_LOG_ENTRY,
-                    item.planned.get("label") or item.item_id,
+                    _album_title(item),
                     settled.reason,
                 )
+                said.add(key)
                 loaded = queue_state.load_queue_journal(journal.operation_id)
                 current = loaded.journal
                 item = next(
@@ -1925,15 +2035,20 @@ def recover_startup_state(
     """
     tried = {}
     outcomes = {}
+    said = set()
     result = _recover_startup_state(
-        authority, acknowledge_completion, settle, tried, outcomes)
+        authority, acknowledge_completion, settle, tried, outcomes, said)
+    if said:
+        result = replace(result, items=tuple(
+            replace(entry, explained=(entry.operation_id, entry.item_id) in said)
+            for entry in result.items))
     if not outcomes:
         return result
     return replace(result, settled=tuple(outcomes.values()))
 
 
 def _recover_startup_state(
-    authority, acknowledge_completion, settle, tried, outcomes,
+    authority, acknowledge_completion, settle, tried, outcomes, said,
 ) -> StartupRecoveryResult:
     try:
         _require_authority(authority)
@@ -2025,11 +2140,12 @@ def _recover_startup_state(
                 }:
                     continue
                 log.warning(
-                    "%s: %s: %s",
+                    "%s: “%s”: %s",
                     BLOCKED_DOWNLOAD_LOG_ENTRY,
-                    settlement[1].planned.get("label") or settlement[1].item_id,
+                    _album_title(settlement[1]),
                     settled.reason,
                 )
+                said.add((settlement[0].operation_id, settlement[1].item_id))
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
                     _classify(journals),
@@ -2042,7 +2158,7 @@ def _recover_startup_state(
                     journals = _sorted_journals(loads)
                     classified = _classify(journals)
                 if settle and _settle_next_blocked(
-                        authority, journals, tried, outcomes):
+                        authority, journals, tried, outcomes, said):
                     continue
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
@@ -2151,7 +2267,7 @@ def _recover_startup_state(
                 loads = _load_namespace(authority)
                 journals = _sorted_journals(loads)
                 if settle and _settle_next_blocked(
-                        authority, journals, tried, outcomes):
+                        authority, journals, tried, outcomes, said):
                     continue
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
@@ -2163,7 +2279,7 @@ def _recover_startup_state(
                 loads = _load_namespace(authority)
                 journals = _sorted_journals(loads)
                 if settle and _settle_next_blocked(
-                        authority, journals, tried, outcomes):
+                        authority, journals, tried, outcomes, said):
                     continue
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,

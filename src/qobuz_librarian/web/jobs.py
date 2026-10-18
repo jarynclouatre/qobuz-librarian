@@ -837,6 +837,8 @@ class JobLogHandler(logging.Handler):
         # never touch this job's lock.
         if getattr(_TLS, "current_job", None) is not self.job:
             return False
+        if getattr(record, "file_only", False):
+            return False
         return super().filter(record)
 
     def emit(self, record: logging.LogRecord):

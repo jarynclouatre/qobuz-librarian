@@ -2795,6 +2795,7 @@ def carry_backup_companions(
         expected_replacement_receipt=None,
         expected_owner=None,
         skip_conflicts=False,
+        renamed=None,
 ):
     """Copy the backup's non-audio files the album lacks into it, replacing
     nothing.
@@ -2808,9 +2809,10 @@ def carry_backup_companions(
     file where one of its folders goes, is left untouched and keeps the
     backup: it returns ``None`` unless ``skip_conflicts`` is set, in which
     case the other companions are still carried; ``companion_conflicts``
-    names what stayed behind. On success, returns the album's new receipt
-    for the later disposal check. Any doubt returns ``None`` and leaves the
-    backup.
+    names what stayed behind. ``renamed`` maps a companion to the name it
+    takes in the album, such as the lyrics of a track that has another name
+    there. On success, returns the album's new receipt for the later disposal
+    check. Any doubt returns ``None`` and leaves the backup.
     """
     if not _backup_owner_authorized(backup, expected_owner):
         return None
@@ -2845,16 +2847,19 @@ def carry_backup_companions(
                     not in cfg.AUDIO_EXTS
             )
         ]
+        targets = {relative: (renamed or {}).get(relative, relative)
+                   for relative in companions}
         missing_files = []
         for relative_text in sorted(companions):
-            existing = replacement_files.get(relative_text)
+            target_text = targets[relative_text]
+            existing = replacement_files.get(target_text)
             if existing is not None:
                 if existing["sha256"] != backup_files[relative_text]["sha256"]:
                     if skip_conflicts:
                         continue
                     return None
                 continue
-            if relative_text in expected["tree"]["directories"]:
+            if target_text in expected["tree"]["directories"]:
                 if skip_conflicts:
                     continue
                 return None
@@ -2862,7 +2867,7 @@ def carry_backup_companions(
 
         carried_files = []
         for relative_text in missing_files:
-            parts = _companion_relative_parts(relative_text)
+            parts = _companion_relative_parts(targets[relative_text])
             parents = ["/".join(parts[:depth])
                        for depth in range(1, len(parts))]
             if any(parent in replacement_files for parent in parents):
@@ -2872,7 +2877,8 @@ def carry_backup_companions(
             carried_files.append(relative_text)
 
         for relative_text in carried_files:
-            target = _library_path(album / relative_text, create_parents=True)
+            target = _library_path(
+                album / targets[relative_text], create_parents=True)
             if target is None:
                 return None
             copy_file(backup.path / relative_text, target,
@@ -2882,11 +2888,12 @@ def carry_backup_companions(
             return None
         tree = result["tree"]
         files = dict(tree["files"])
-        carried = {relative: files.pop(relative, {}).get("sha256")
+        carried = {targets[relative]: files.pop(targets[relative], {}).get(
+                       "sha256")
                    for relative in carried_files}
         if (
             files != replacement_files
-            or carried != {relative: backup_files[relative]["sha256"]
+            or carried != {targets[relative]: backup_files[relative]["sha256"]
                            for relative in carried_files}
             or tree["root_identity"] != expected["tree"]["root_identity"]
             or any(tree["directories"].get(relative) != value
@@ -2902,8 +2909,9 @@ def carry_backup_companions(
         _close_descriptors(opened[-1])
 
 
-def companion_conflicts(backup, replacement_receipt):
-    """The backup's non-audio files that the album holds different bytes for.
+def companion_conflicts(backup, replacement_receipt, renamed=None):
+    """The backup's non-audio files that the album holds different bytes for,
+    under the name ``renamed`` gives them there.
 
     After a carry with ``skip_conflicts`` these exist only in the backup.
     """
@@ -2915,8 +2923,8 @@ def companion_conflicts(backup, replacement_receipt):
             if PurePosixPath(relative).name not in _SIDECARS
             and Path(PurePosixPath(relative).name).suffix.lower()
                 not in cfg.AUDIO_EXTS
-            and (album_files.get(relative) or {}).get("sha256")
-                != expected["sha256"]
+            and (album_files.get((renamed or {}).get(relative, relative))
+                 or {}).get("sha256") != expected["sha256"]
         )
     except (AttributeError, KeyError, TypeError):
         return None
@@ -4563,6 +4571,24 @@ def restore_upgrade_backup(
     if restored:
         _tell_restored(backup.receipt, original_path)
     return restored
+
+
+def dispose_put_back_upgrade_backup(
+        backup, original_path: Path, *, expected_owner=None) -> bool:
+    """Delete a complete upgrade backup once every file in it is back at
+    ``original_path`` byte for byte, as a copy back stopped before it
+    deleted the backup leaves them, and tell ``on_restored``. Without that
+    proof, or if the deletion fails, both are kept and this says False."""
+    receipt = capture_album_source_receipt(original_path)
+    if receipt is None or not dispose_backup(
+            backup,
+            replacement_path=original_path,
+            expected_replacement_receipt=receipt,
+            replacement_validator=backup_files_preserved,
+            expected_owner=expected_owner):
+        return False
+    _tell_restored(backup.receipt, original_path)
+    return True
 
 
 def backup_payload(receipt):

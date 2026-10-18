@@ -175,7 +175,7 @@ def _writes_paused_notice(*, log_details: bool = False,
             else:
                 msg = (f"An interrupted download{of_album} could not be "
                        "cleared safely. Downloads and scans are paused, and "
-                       "its staged files were left as they were. "
+                       "its files were left as they were. "
                        "Qobuz Librarian tries again when it restarts; the "
                        "application log says why it stopped.")
     elif queue_recovery._terminal_queue_waiting():

@@ -6,10 +6,13 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import redaction
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.api.auth import CredentialChanged
-from qobuz_librarian.library import catalog
+from qobuz_librarian.library import catalog, discovery
 from qobuz_librarian.library import hidden as hidden_mod
+from qobuz_librarian.library.scanner import list_artist_album_dirs
+from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.queue import builder as queue_builder
 from qobuz_librarian.queue import executor as queue_executor
+from qobuz_librarian.ui_cli.logging import vlog
 from qobuz_librarian.web import (
     flows,
     job_persistence,
@@ -266,6 +269,33 @@ def _folder_label(landed_dir):
     return " / ".join(relative.parts) or None
 
 
+def _rest_of_album_note(landed_dir, token):
+    """What Library scans make of the rest of an album a track download
+    left part-owned, or "" when that can't be told."""
+    if cfg.SUPPRESS_SINGLE_TRACK_GAPS:
+        return "The rest of the album stays out of scans."
+    try:
+        relative = Path(landed_dir).relative_to(
+            os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
+    except (TypeError, ValueError):
+        return ""
+    if len(relative.parts) < 2:
+        return ""
+    folder = Path(cfg.MUSIC_ROOT) / relative.parts[0]
+    if normalize(folder.name) in VA_NORMALIZED:
+        return "Scans skip Various Artists folders."
+    try:
+        artist_id = discovery.resolve_folder_artist(
+            folder.name, token, list_artist_album_dirs(folder))[0]
+    except Exception as exc:
+        vlog(f"couldn't tell whether scans read {folder.name!r}: {exc}")
+        return ""
+    if not artist_id:
+        return (f"Qobuz has no artist for “{folder.name}”, so scans skip "
+                "that folder.")
+    return "Future scans can still offer the rest of the album."
+
+
 _SINGLE_TRACK_FAILURES = {
     "disk_full": "Out of disk space before the track landed. The job log says where.",
     "io_error": (
@@ -371,12 +401,8 @@ def _make_single_track_run(album, track, token):
             try:
                 hidden_mod.mark_single(artist, title, catalog.album_year(album),
                                        album.get("id"))
-                j.summary = (
-                    f"{got} "
-                    + ("The rest of the album stays out of scans."
-                       if cfg.SUPPRESS_SINGLE_TRACK_GAPS
-                       else "Future scans can still offer the rest of the album.")
-                )
+                j.summary = " ".join(filter(None, (
+                    got, _rest_of_album_note(landed_dir, active_token))))
             except OSError as e:
                 # The track landed fine, so don't fail the job, but don't claim
                 # the exclusion stuck either.

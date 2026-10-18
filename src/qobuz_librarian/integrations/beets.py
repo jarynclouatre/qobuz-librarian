@@ -447,6 +447,30 @@ def _beets_progress_album(line, staging_root):
     return album
 
 
+def _traceback_line(line, before):
+    """What part of a Python traceback a line beets printed is, given what
+    the line before it was: True for a frame, "error" for the closing line
+    naming the error, False outside one."""
+    if line.startswith("Traceback (most recent call last)"):
+        return True
+    if before is True:
+        return True if line[:1].isspace() else "error"
+    if before == "error" and line.startswith((
+            "During handling of the above exception",
+            "The above exception was the direct cause")):
+        return True
+    return False
+
+
+def _log_beets_output(text, part):
+    """Log a line beets printed. A traceback goes to the log file only; the
+    failure report names its error in one line."""
+    if part:
+        log.info(text, extra={"file_only": True})
+    else:
+        log.info(text)
+
+
 def _prepare_staging_tags(
     roots=None,
     *,
@@ -5548,6 +5572,7 @@ def _beets_direct_guarded(
     report_progress("Importing into your library", 0, total_albums, "")
     log.info(fmt(C.CYAN, "  ⟳  Running beets import ..."))
     out_lines = []
+    in_traceback = [False]
     last_output = [time.monotonic()]
     # Captured by _reader for per-album progress updates. A list-of-1 lets the
     # nested function can mutate without `nonlocal`.
@@ -5628,7 +5653,8 @@ def _beets_direct_guarded(
         # Route through the shared logger so the web UI's SSE stream
         # sees beets output too (raw sys.stdout would only land in
         # docker logs, leaving the job page silent during import).
-        log.info(fmt(C.GRAY, "    " + line.rstrip()))
+        in_traceback[0] = _traceback_line(line, in_traceback[0])
+        _log_beets_output(fmt(C.GRAY, "    " + line.rstrip()), in_traceback[0])
 
     def _read_beets_output():
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -5886,9 +5912,23 @@ def _beets_direct_guarded(
     log.info(fmt(C.RED, f"  ✗  beets exited {proc.returncode}."))
     log.info(fmt(C.GRAY, f"     Config: {cfg.BEETS_CONFIG_DIR}/config.yaml"))
     if override_path:
-        log.info(fmt(C.GRAY, f"     Override: {override_path}"))
-    for line in full_out.splitlines()[-20:]:
-        log.info(fmt(C.GRAY, f"    {line}"))
+        vlog(f"beets override config: {override_path}")
+    lines = full_out.splitlines()
+    parts, part = [], False
+    for line in lines:
+        if line.strip():
+            part = _traceback_line(line, part)
+        parts.append(part)
+    shown = list(zip(lines, parts))[-20:]
+    last_error = max(
+        (index for index, (_line, part) in enumerate(shown) if part == "error"),
+        default=None)
+    for index, (line, part) in enumerate(shown):
+        if index == last_error:
+            error = line.strip().partition(": ")[2] or line.strip()
+            log.info(fmt(C.GRAY, f"     Beets stopped on an error: {error}."))
+        else:
+            _log_beets_output(fmt(C.GRAY, f"    {line}"), part)
     _report_staging_remnants()
     return False, "error"
 
@@ -5898,26 +5938,35 @@ def _report_staging_remnants():
     failure so the user knows exactly what didn't import. A bare
     "files remain in staging" line leaves them guessing across batches
     of 100+ albums."""
+    audio_exts = set(cfg.AUDIO_EXTS)
+
+    def tracks_in(folder):
+        try:
+            return sum(
+                1 for f in folder.rglob("*") if f.is_file() and f.suffix.lower() in audio_exts
+            )
+        except OSError:
+            return 0
+
     try:
         folders = sorted(
             p for p in cfg.STAGING_DIR.iterdir() if p.is_dir() and p.name != cfg.BEETS_RETRY_DIR
         )
     except OSError:
         return
-    if not folders:
+    # A --no-import download a manual import emptied holds no album to list.
+    counted = [
+        (folder, n_audio) for folder in folders
+        if (n_audio := tracks_in(folder))
+        or not staging_mod.is_kept_staging_run_name(folder.name)
+    ]
+    if not counted:
         return
-    log.info(fmt(C.GRAY, f"     Staged folders remaining ({len(folders)}):"))
-    audio_exts = set(cfg.AUDIO_EXTS)
-    for folder in folders[:20]:
-        try:
-            n_audio = sum(
-                1 for f in folder.rglob("*") if f.is_file() and f.suffix.lower() in audio_exts
-            )
-        except OSError:
-            n_audio = 0
+    log.info(fmt(C.GRAY, f"     Staged folders remaining ({len(counted)}):"))
+    for folder, n_audio in counted[:20]:
         log.info(fmt(C.GRAY, f"       · {folder.name} ({errors.plural(n_audio, 'track')})"))
-    if len(folders) > 20:
-        log.info(fmt(C.GRAY, f"       … and {len(folders) - 20} more"))
+    if len(counted) > 20:
+        log.info(fmt(C.GRAY, f"       … and {len(counted) - 20} more"))
 
 
 _CONSOLIDATION_PROTECT_ALL = object()

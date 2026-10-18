@@ -647,18 +647,44 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
     receipt = capture_album_source_receipt(dest)
     if receipt is None:
         return None
+    renamed = _lyrics_follow_tracks(backup_path, dest)
     updated = carry_backup_companions(
         backup_path,
         dest,
         expected_replacement_receipt=receipt,
         skip_conflicts=True,
+        renamed=renamed,
     )
     if updated is None:
         return None
-    left = companion_conflicts(backup_path, updated)
+    left = companion_conflicts(backup_path, updated, renamed)
     if left is None:
         return None
     return dest, updated, left
+
+
+def _lyrics_follow_tracks(backup_path, replacement_path):
+    """The name each of the backup's .lrc files takes in the replacement:
+    that of the track its own track became, where that has another name.
+    None are renamed when the tracks can't be paired, or when two would end
+    up with one name."""
+    backup_path = Path(os.fspath(backup_path))
+    replacement_path = Path(os.fspath(replacement_path))
+    new_tracks, new_degraded = _folder_tracks_checked(replacement_path)
+    old_tracks, old_degraded = _folder_tracks_checked(backup_path)
+    pairs = (None if new_degraded or old_degraded
+             else _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks))
+    renamed = {}
+    for old, new in pairs or ():
+        source = Path(old["path"]).with_suffix(".lrc")
+        if source.is_file():
+            renamed[source.relative_to(backup_path).as_posix()] = (
+                Path(new["path"]).with_suffix(".lrc")
+                .relative_to(replacement_path).as_posix())
+    names = [renamed.get(name, name) for name in (
+        path.relative_to(backup_path).as_posix()
+        for path in backup_path.rglob("*.lrc"))]
+    return renamed if len(set(names)) == len(names) else {}
 
 
 def _keep_own_cover(backup, staged_dirs):

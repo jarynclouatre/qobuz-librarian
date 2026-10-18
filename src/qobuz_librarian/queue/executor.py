@@ -1591,6 +1591,7 @@ def _resolve_queue_item(
         ),
         "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
         "upgrade_unverified": bool(item.get("upgrade_unverified", False)),
+        "upgrade_put_back": bool(item.get("upgrade_put_back", False)),
         "catalogue_unverified": bool(item.get("catalogue_unverified", False)),
         "recovery_unverified": bool(item.get("recovery_unverified", False)),
         "quality_verdict": item.get("quality_verdict"),
@@ -2043,13 +2044,16 @@ def _queue_done_line(results, n_items, *, stopped=False):
     without one of them failing, so the verdict reads the album tally as well
     as the track tally. A cancelled album is tallied as cancelled rather than
     by its tracks. An album Qobuz could not deliver whole was discarded, so
-    every track it asked for is still unresolved.
+    every track it asked for is still unresolved. An Upgrade that kept the
+    original, and an album whose files changed after it was queued, were
+    left as they are, with nothing to retry.
     """
     n_success = sum(1 for r in results if r.get("result") == "downloaded")
     n_cancelled = sum(1 for r in results if r.get("result") == "cancelled")
+    n_left = sum(1 for r in results if _left_as_it_is(r))
     n_total_ok = n_total_missing = 0
     for r in results:
-        if r.get("result") == "cancelled":
+        if r.get("result") == "cancelled" or _left_as_it_is(r):
             continue
         missing = sum(incomplete_track_counts(r))
         if r.get("result") == "incomplete":
@@ -2057,8 +2061,9 @@ def _queue_done_line(results, n_items, *, stopped=False):
         else:
             n_total_ok += r.get("n_ok", 0)
         n_total_missing += missing
-    n_unfinished = max(0, n_items - n_success - n_cancelled)
-    clear = n_total_missing == 0 and n_unfinished == 0 and n_cancelled == 0
+    n_unfinished = max(0, n_items - n_success - n_cancelled - n_left)
+    clear = (n_total_missing == 0 and n_unfinished == 0 and n_cancelled == 0
+             and n_left == 0)
     text = (f"  {'✓' if clear else '⚠'} Queue {'stopped' if stopped else 'done'}: "
             f"{n_success}/{n_items} albums OK · "
             f"{n_total_ok} track{'s' if n_total_ok != 1 else ''} downloaded · "
@@ -2066,10 +2071,18 @@ def _queue_done_line(results, n_items, *, stopped=False):
     if n_cancelled:
         text += (f" · {n_cancelled} album"
                  f"{'s' if n_cancelled != 1 else ''} cancelled")
+    if n_left:
+        text += (f" · {plural(n_left, 'album')} left as "
+                 f"{'it is' if n_left == 1 else 'they are'}")
     if n_unfinished:
         text += (f" · {n_unfinished} album"
                  f"{'s' if n_unfinished != 1 else ''} unfinished")
     return (C.GREEN if clear else C.YELLOW), text
+
+
+def _left_as_it_is(result):
+    return result.get("result") == "stale_candidate" or (
+        result.get("result") == "incomplete" and result.get("upgrade_put_back"))
 
 
 def _durable_completion_line(result, elapsed):
@@ -2647,6 +2660,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 if outcome.reason == "upgrade-unverified":
                     # The original stays, and another try would fetch the
                     # same copy, so nothing is left to retry.
+                    item["upgrade_put_back"] = True
                     verdict = item.get("quality_verdict") or {}
                     if verdict.get("under"):
                         mark_album_capped(item["album"].get("id"), item["album"], {
@@ -2676,13 +2690,27 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     "siblings_preserved": [],
                     "imported": False,
                     "auto_upgrade": bool(item.get("auto_upgrade")),
+                    "companions_unsettled": outcome.reason
+                        == "library-backup-companions-unsettled",
                 })
                 durable_stopped = True
-                log.info(fmt(
-                    C.YELLOW,
-                    "    ⚠  This album needs a safe retry or recovery; "
-                    "stopping the queue.",
-                ))
+                if results[-1]["companions_unsettled"]:
+                    # The next start keeps it as it is, so nothing of it is
+                    # left to resume.
+                    queue.remove(item)
+                    log.info(fmt(
+                        C.YELLOW,
+                        "    ⚠  The new copy is in your library, but files "
+                        "from the album it replaced could not be carried "
+                        "into it. Stopping the queue; the next time the "
+                        "app starts, it keeps that album as a backup.",
+                    ))
+                else:
+                    log.info(fmt(
+                        C.YELLOW,
+                        "    ⚠  This album needs a safe retry or recovery; "
+                        "stopping the queue.",
+                    ))
                 break
             if outcome.status is DurableAlbumStatus.COMPLETE:
                 if not removed or outcome.post_dir is None:

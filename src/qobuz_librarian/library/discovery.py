@@ -622,22 +622,22 @@ def _materialize_tracks(album, token):
 def _held_edition(album, existing, album_dir, artist_name, token, catalog,
                   prefer_hires):
     """The release filed in ``album_dir`` that the files there are the same
-    edition of (same_edition), or None; and whether Qobuz left a release
-    that could be it unchecked. ``album`` stands when none of its songs is
-    on the files as another version; otherwise, of it and the other
-    releases in ``catalog`` filed there, the one that pairs with the most
-    files, the first on a tie. A gap is filled from that edition only, so a
-    folder never mixes two masters."""
+    edition of (same_edition), or None; whether Qobuz left a release that
+    could be it unchecked; and the closest release, the one that pairs with
+    the most files. ``album`` stands when none of its songs is on the files
+    as another version; otherwise, of it and the other releases in
+    ``catalog`` filed there, the one that pairs with the most files, the
+    first on a tie. A gap is filled from that edition only, so a folder
+    never mixes two masters."""
     def fit(release):
-        if not same_edition(release, existing, album_dir, token, fill=True):
-            return None
         missing, present = edition_missing(release, existing, album_dir)
-        return len(present), not held_by_other_versions(
+        held = same_edition(release, existing, album_dir, token, fill=True)
+        return len(present), held, held and not held_by_other_versions(
             release, existing, album_dir, missing)
 
-    best, best_fit = album, fit(album)
-    if best_fit is not None and best_fit[1]:
-        return album, False
+    fits = [(album, fit(album))]
+    if fits[0][1][2]:
+        return album, False, album
     unchecked = False
     for other in _catalog_candidates_for_dir(
             album_dir, catalog, artist_name, prefer_hires):
@@ -651,14 +651,18 @@ def _held_edition(album, existing, album_dir, artist_name, token, catalog,
         except QobuzError:
             unchecked = True
             continue
-        if not (full.get("tracks") or {}).get("items"):
-            continue
-        other_fit = fit(full)
-        if other_fit is not None and (best_fit is None or other_fit[0] > best_fit[0]):
-            best, best_fit = full, other_fit
-    if best_fit is None or (unchecked and not best_fit[1]):
-        return None, unchecked
-    return best, False
+        if (full.get("tracks") or {}).get("items"):
+            fits.append((full, fit(full)))
+
+    def most_files(entries):
+        return max(entries, key=lambda entry: entry[1][0])
+
+    closest = most_files(fits)[0]
+    held = [entry for entry in fits if entry[1][1]]
+    best = most_files(held) if held else None
+    if best is None or (unchecked and not best[1][2]):
+        return None, unchecked, closest
+    return best[0], False, best[0]
 
 
 def _edition_gap(album, existing, album_dir):
@@ -676,8 +680,9 @@ def _edition_gap(album, existing, album_dir):
 class DirMatch:
     """How one owned folder matched the catalog. status is one of: partial,
     complete, false_match, low_overlap, predicted_path_mismatch, no_tracks,
-    other_edition (no listed release is the edition the folder holds),
-    unchecked (Qobuz did not return a release that could be it), no_match."""
+    other_edition (no listed release is the edition the folder holds;
+    qobuz_album is the closest one), unchecked (Qobuz did not return a
+    release that could be it), no_match."""
     status: str
     album_dir: Path
     qobuz_album: dict | None = None
@@ -717,11 +722,12 @@ def match_album_dir(album_dir, artist_name, token, *, catalog, prefer_hires):
     if missing and len(present) * 2 < len(existing):
         return DirMatch("low_overlap", album_dir, album, existing=existing)
     if missing:
-        held, unchecked = _held_edition(album, existing, album_dir, artist_name,
-                                        token, catalog, prefer_hires)
+        held, unchecked, closest = _held_edition(
+            album, existing, album_dir, artist_name, token, catalog, prefer_hires)
         if held is None:
-            return DirMatch("unchecked" if unchecked else "other_edition",
-                            album_dir, album, existing=existing)
+            if unchecked:
+                return DirMatch("unchecked", album_dir, album, existing=existing)
+            return DirMatch("other_edition", album_dir, closest, existing=existing)
         album = held
         missing, present = _edition_gap(album, existing, album_dir)
     status = "partial" if missing else "complete"
@@ -909,7 +915,7 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
             if (len(present) * 2 >= len(existing)
                     or holds_recordings(tracks, existing)):
                 if key in fill_keys and missing and present and not resolved:
-                    edition, missed = _held_edition(
+                    edition, missed, _closest = _held_edition(
                         album, existing, album_dir, artist_name, token, catalog,
                         opts.prefer_hires)
                     if missed and unchecked is not None:

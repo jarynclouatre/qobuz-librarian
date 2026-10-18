@@ -67,7 +67,11 @@ from qobuz_librarian.queue.journal import (
     clear_queue_journal,
     load_queue_journal,
 )
-from qobuz_librarian.queue.persistence import kept_queue_note, queue_saver
+from qobuz_librarian.queue.persistence import (
+    OWN_FILES_LEFT,
+    kept_queue_note,
+    queue_saver,
+)
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, section, truncate, wrap
 from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
@@ -626,13 +630,14 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                 save_own_queue(queue)
             else:
                 clear_queue_journal()
-        elif not drained and save_own_queue is not None:
-            log.info(fmt(C.YELLOW, "  ⚠  Some albums couldn't be downloaded."))
-            log.info(kept_queue_note(earlier + queue))
-        elif not drained:
-            log.info(fmt(C.YELLOW,
-                "  ⚠  Some albums couldn't be downloaded. They were kept for "
-                "retry; rerun to try them again."))
+        elif not drained and (earlier or queue):
+            if save_own_queue is not None:
+                log.info(fmt(C.YELLOW, "  ⚠  Some albums couldn't be downloaded."))
+                log.info(kept_queue_note(earlier + queue))
+            else:
+                log.info(fmt(C.YELLOW,
+                    "  ⚠  Some albums couldn't be downloaded. They were kept "
+                    "for retry; rerun to try them again."))
 
     if pending_stop is not None:
         if save_own_queue is not None and (earlier or queue):
@@ -650,7 +655,9 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             catalog if catalog_fetched else None)
 
 
-_ATTENTION_BUCKETS = {"partial", "not_imported", "stopped", "failed", "other"}
+_ATTENTION_BUCKETS = {
+    "partial", "not_imported", "stopped", "failed", "other", "own_files_left",
+}
 
 
 def _gap_fill_result_bucket(result):
@@ -685,6 +692,8 @@ def _gap_fill_result_bucket(result):
 
     if status in {"already_complete", "skipped_already_higher_quality"}:
         return "already_complete"
+    if status == "incomplete" and result.get("upgrade_put_back"):
+        return "kept"
     if status in {"user_skipped", "user_stopped", "dismissed"}:
         return "skipped"
     if status == "no_qobuz_match":
@@ -699,6 +708,8 @@ def _gap_fill_result_bucket(result):
         return "nothing_available"
     if status in {"low_overlap", "sibling_skipped"}:
         return "held"
+    if result.get("companions_unsettled"):
+        return "own_files_left"
     if status in stopped_results:
         return "stopped"
     if status in hard_failures:
@@ -957,6 +968,7 @@ def _report_gap_fill_summary(results):
         "already_complete": 0,
         "filled": 0,
         "upgraded": 0,
+        "kept": 0,
         "partial": 0,
         "skipped": 0,
         "no_match": 0,
@@ -967,6 +979,7 @@ def _report_gap_fill_summary(results):
         "dry_run": 0,
         "not_imported": 0,
         "stopped": 0,
+        "own_files_left": 0,
         "failed": 0,
         "other": 0,
     }
@@ -977,6 +990,7 @@ def _report_gap_fill_summary(results):
         ("already_complete", C.GREEN, "✓ already complete:"),
         ("filled", C.GREEN, "✓ tracks filled:"),
         ("upgraded", C.MAGENTA, "↑ auto-upgraded:"),
+        ("kept", C.YELLOW, "original kept, not upgraded:"),
         ("partial", C.YELLOW, "⚠ partly filled:"),
         ("skipped", C.YELLOW, "skipped by user:"),
         ("no_match", C.YELLOW, "no Qobuz match:"),
@@ -987,6 +1001,7 @@ def _report_gap_fill_summary(results):
         ("dry_run", C.GRAY, "dry run, not fetched:"),
         ("not_imported", C.YELLOW, "downloaded, not imported:"),
         ("stopped", C.YELLOW, "stopped, still queued:"),
+        ("own_files_left", C.YELLOW, "upgraded, own files left out:"),
         ("failed", C.RED, "✗ failed:"),
         ("other", C.YELLOW, "other outcomes:"),
     )
@@ -1003,8 +1018,13 @@ def _gap_fill_exit_code(counts):
         for bucket in _ATTENTION_BUCKETS
     )
     if needs_attention:
-        clause = "retry the unfinished albums above"
-        log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
+        clauses = []
+        if any(counts[bucket] for bucket in _ATTENTION_BUCKETS - {"own_files_left"}):
+            clauses.append("retry the unfinished albums above")
+        if counts["own_files_left"]:
+            clauses.append(OWN_FILES_LEFT)
+        log.warning(fmt(C.YELLOW,
+            f"  ⚠  Needs attention: {', and '.join(clauses)}."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))
     return EXIT_GENERAL if needs_attention else 0

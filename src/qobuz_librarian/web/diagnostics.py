@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import Request
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import download as download_mod
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
@@ -386,7 +387,8 @@ def _diagnostics():
         })
     try:
         blocking = beets_mod.staging_leftover_entries()
-        kept = staging_mod.kept_staging_run_names()
+        kept = tuple(name for name in staging_mod.kept_staging_run_names()
+                     if download_mod.staged_album_dirs(cfg.STAGING_DIR / name))
         idle = set(os.listdir(cfg.STAGING_DIR)).difference(blocking, kept)
     except OSError:
         blocking, kept = [], ()

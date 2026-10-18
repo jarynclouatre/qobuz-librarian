@@ -63,6 +63,10 @@ _DOWNLOAD_SUMMARY_LABELS = {
     ),
     "not_imported": "Downloaded, but the import didn't land. Library unchanged.",
 }
+_UPGRADE_REFUSED = (
+    "The new copy couldn't be verified against yours, so your original was "
+    "kept and the download was discarded."
+)
 
 
 def _summarize_download_result(r):
@@ -143,6 +147,8 @@ def _download_summary(r):
         return (f"Every track Qobuz streams is in the library; "
                 f"{plural(n, 'track')} {'is' if n == 1 else 'are'} not "
                 "available on Qobuz.")
+    if kind == "incomplete" and r.get("upgrade_put_back"):
+        return _UPGRADE_REFUSED
     if kind in _DOWNLOAD_SUMMARY_LABELS:
         return _DOWNLOAD_SUMMARY_LABELS[kind]
     if not r.get("imported"):
@@ -292,7 +298,16 @@ def download_error(result, *, job_controls=True):
     if status == "failed":
         if result.get("rate_limited"):
             return "Qobuz rate-limited this download. Try again later."
+        if result.get("companions_unsettled"):
+            return (
+                "The new copy is in your library, but files from the album "
+                "it replaced could not be carried into it. The next time "
+                "the app starts, it keeps that album as a backup in Settings "
+                "> Diagnostics."
+            )
         if result.get("result") == "incomplete":
+            if result.get("upgrade_put_back"):
+                return _UPGRADE_REFUSED
             return _undeliverable_album_error(result)
         n_failed = result.get("n_fail", 0) - unavailable
         other = beyond_retry(lossy_only, unavailable)

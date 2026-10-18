@@ -92,10 +92,10 @@ def _report_settled_downloads(result):
         label = f"“{settled.label}”"
         if settled.outcome == "requeue" and settled.mode.startswith("web-job:"):
             line = (f"{label} was cut off in the web app before it was "
-                    "imported. Its partial download was removed; the web app "
+                    "imported. Any partial download was removed; the web app "
                     "queues it again or offers Retry.")
         elif settled.outcome == "requeue":
-            line = (f"{label} was cut off before it was imported. Its partial "
+            line = (f"{label} was cut off before it was imported. Any partial "
                     "download was removed and it is back in the saved queue.")
         elif settled.outcome == "checked":
             line = f"{label} was filed by Beets before it stopped and is checked again."
@@ -171,26 +171,33 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
             BLOCKED_DOWNLOAD_LOG_ENTRY,
         )
 
-        # The block reason is an internal diagnostic, so it goes to the log the
-        # message names. Nothing else writes it, and the message used to point
-        # at a log entry that was never recorded.
-        detail = "; ".join(
-            f"{entry.item_id}: {entry.reason or 'reason not reported'}"
-            for entry in getattr(result, "items", ())
+        blocked = [
+            entry for entry in getattr(result, "items", ())
             if entry.phase is queue_state.QueuePhase.BLOCKED
-        )
-        log.error(
-            "%s: %s.",
-            BLOCKED_DOWNLOAD_LOG_ENTRY,
-            detail or (getattr(result, "reason", "") or "reason not reported"),
-        )
+        ]
+        # Settling has logged why each item it tried is still blocked. The
+        # block reason itself is an internal code, kept in the saved queue.
+        for entry in blocked:
+            if not entry.explained:
+                log.error(
+                    "%s: “%s” stopped part way; the next start settles it "
+                    "or says why it can't.",
+                    BLOCKED_DOWNLOAD_LOG_ENTRY, entry.label)
+        if getattr(result, "reason", None) == "run-lock-authority-lost":
+            log.error("%s: the run lock was lost while the saved queue was "
+                      "being checked.", BLOCKED_DOWNLOAD_LOG_ENTRY)
         # A state this stop is reached in survives a restart, so the message
         # names where the outstanding work is instead of prescribing one.
+        outstanding = " and ".join(str(folder) for folder, holds in (
+            (cfg.STAGING_DIR, any(entry.holds_staging for entry in blocked)),
+            (cfg.UPGRADE_BACKUP_DIR,
+             any(entry.holds_backup for entry in blocked)),
+        ) if holds) or cfg.STAGING_DIR
         message = (
             "\n✗  An interrupted download could not be cleared safely.\n"
-            "   Its staged files were left as they were, and no other work "
-            "was started.\n"
-            f"   What is still outstanding is under {cfg.STAGING_DIR}. The "
+            "   Its files were left as they were, and no other work was "
+            "started.\n"
+            f"   What is still outstanding is under {outstanding}. The "
             f"“{BLOCKED_DOWNLOAD_LOG_ENTRY}” entry in the application "
             "log has the technical detail.\n"
         )
@@ -1076,6 +1083,7 @@ def main():
             process_mode.finish_interrupted_upgrades()
             if not saved_queue:
                 staging_mod.remove_empty_retry_groups()
+            staging_mod.remove_emptied_kept_runs()
         except Exception as e:
             vlog(f"interrupted upgrade settle error: {e}")
         try:

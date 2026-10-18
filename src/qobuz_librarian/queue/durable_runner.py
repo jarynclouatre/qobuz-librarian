@@ -1122,6 +1122,7 @@ def execute_durable_new_album(
                     or not process._track_annotations_preserved(
                         backup.path, album_dirs[0])):
                 raise OSError("original track tags could not be verified")
+            process._keep_own_cover(backup.path, album_dirs)
             _require_authority(authority)
         cleaned_bindings = prepare_managed_staging_tags(
             album_dirs,

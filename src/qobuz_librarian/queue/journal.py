@@ -2694,11 +2694,14 @@ def forget_restored_library_backup(
     journal: QueueJournal,
     item_id: str,
     carrier: RecoveryReference,
+    *,
+    source_premise=None,
 ) -> QueueJournal:
-    """Forget only the exact carrier whose files are proved back at origin."""
+    """Forget only the exact carrier whose files are proved back at origin,
+    and seal the item over the album again with ``source_premise`` if given."""
     return _forget_library_backup_reference(
         journal, item_id, carrier, "backup_carriers",
-        _strict_library_backup_carrier,
+        _strict_library_backup_carrier, source_premise=source_premise,
     )
 
 
@@ -2716,7 +2719,7 @@ def forget_unused_library_backup_intent(
 
 
 def _forget_library_backup_reference(journal, item_id, reference, listed,
-                                     strict):
+                                     strict, *, source_premise=None):
     previous = _reload_matching_journal(journal)
     target_index = next(
         (index for index, item in enumerate(previous.items) if item.item_id == item_id),
@@ -2745,6 +2748,10 @@ def _forget_library_backup_reference(journal, item_id, reference, listed,
         )
     updated = replace(
         target,
+        planned=(
+            target.planned if source_premise is None
+            else {**target.planned, "source_premise": source_premise}
+        ),
         recovery_references=tuple(
             reference
             for reference in target.recovery_references

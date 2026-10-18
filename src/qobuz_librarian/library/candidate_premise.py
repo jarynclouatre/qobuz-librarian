@@ -510,8 +510,9 @@ def resealed_after_put_back(value, backup_receipt, captures):
     A copy back from another filesystem gives every file a new inode, so the
     old seal would refuse an album whose bytes are proven the same. A row
     whose seal still holds, that was sealed over another version of the
-    folder, or whose folder no longer holds the restored files by name, size
-    and mtime, keeps its seal.
+    folder, whose folder no longer holds the restored files by name, size
+    and mtime, or whose folders above the album are not the ones it was
+    backed up from, keeps its seal.
     """
     origin = backup_receipt.get("origin")
     if type(value) is not dict or value.get("path") != origin:
@@ -537,10 +538,41 @@ def resealed_after_put_back(value, backup_receipt, captures):
         captures[kind] = capture(kind, origin)
     fresh = captures[kind]
     if (fresh is None or _durable_premises_match(premise, fresh)
+            or not _durable_generations_match(
+                sealed["path_generations"][:-1],
+                fresh["receipt"]["path_generations"][:-1])
             or _names_sizes_times(fresh["receipt"]["tree"])
             != _names_sizes_times(source["tree"])):
         return None
     return fresh
+
+
+def resealed_after_tracks_put_back(value, backup_receipt):
+    """A fresh seal for a gap-fill row whose tracks a backup set aside and a
+    put-back proved against it byte for byte, or None.
+
+    The tracks come back as copies with new inodes. Each must keep the size
+    and mtime it was sealed with, and nothing else in the folder may differ
+    from the seal.
+    """
+    origin = backup_receipt.get("origin")
+    premise = canonical_premise(value)
+    if (premise is None or premise["version"] != PREMISE_VERSION
+            or premise["kind"] != "gap-fill" or premise["path"] != origin):
+        return None
+    fresh = capture("gap-fill", origin)
+    if fresh is None or _durable_premises_match(premise, fresh):
+        return None
+    sealed = premise["receipt"]
+    files = dict(sealed["tree"]["files"])
+    before = _names_sizes_times(sealed["tree"])
+    after = _names_sizes_times(fresh["receipt"]["tree"])
+    for relative in backup_payload(backup_receipt):
+        if relative not in before or before[relative] != after.get(relative):
+            return None
+        files[relative] = fresh["receipt"]["tree"]["files"][relative]
+    expected = {**sealed, "tree": {**sealed["tree"], "files": files}}
+    return fresh if durable_receipts_match(expected, fresh["receipt"]) else None
 
 
 def sealer_after_put_back(backup_receipt):

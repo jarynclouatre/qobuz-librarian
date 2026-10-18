@@ -3,7 +3,6 @@ import asyncio
 import logging
 import os
 import shutil
-import threading
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -638,9 +637,17 @@ def _mode_refused(text):
         status_code=303)
 
 
-# Held for a whole Resume web app, so a second click, or one from another
-# tab, is told the library is already being taken back.
-_TAKING_BACK = threading.Lock()
+_TAKING_BACK = lifespan._TAKING_BACK
+
+
+def _taking_back(then: str, *, already: str = ""):
+    """The refusal while ``_TAKING_BACK`` is held: for a Resume web app, or
+    for a put-back of albums left in their backups."""
+    doing = (
+        "putting back albums an interrupted upgrade or repair left in their "
+        "backups" if lifespan._putting_back
+        else f"{already}taking the library back")
+    return _mode_refused(f"The web app is {doing}. Give it a moment, then {then}.")
 
 
 @router.post("/settings/mode")
@@ -652,6 +659,9 @@ async def set_mode(request: Request, target: str = Form("")):
     """
     want = (target or "").strip().lower()
     if want == "cli":
+        if _TAKING_BACK.locked():
+            return _taking_back("try again")
+
         def _handoff():
             # Flip to CLI mode first so a /download or scan POST landing
             # during the handoff is refused (503) instead of slipping past the
@@ -677,6 +687,8 @@ async def set_mode(request: Request, target: str = Form("")):
 
         loop = asyncio.get_running_loop()
         if not await loop.run_in_executor(None, _handoff):
+            if _TAKING_BACK.locked():
+                return _taking_back("try again")
             return _mode_refused(
                 "Finish or cancel the running library work before handing off to the "
                 "terminal.")
@@ -730,16 +742,17 @@ async def set_mode(request: Request, target: str = Form("")):
             if not _TAKING_BACK.acquire(blocking=False):
                 return "taking"
             try:
-                return _take_back()
+                outcome = _take_back()
+                if outcome == "resumed":
+                    lifespan._put_back_albums_left_in_backups()
+                return outcome
             finally:
                 _TAKING_BACK.release()
 
         outcome = await asyncio.get_running_loop().run_in_executor(
             None, _take_back_once)
         if outcome == "taking":
-            return _mode_refused(
-                "The web app is already taking the library back. Give it a "
-                "moment, then reload this page.")
+            return _taking_back("reload this page", already="already ")
         if outcome == "busy":
             # A CLI session still holds the lock, so we can't take it back yet.
             return _mode_refused(
@@ -751,8 +764,5 @@ async def set_mode(request: Request, target: str = Form("")):
                 "mode stayed paused and its run lock was "
                 "released; check the data-folder permissions, "
                 "then try again.")
-        if outcome == "resumed":
-            await asyncio.get_running_loop().run_in_executor(
-                None, lifespan._put_back_albums_left_in_backups)
         return RedirectResponse(url="/settings?mode=web#mode", status_code=303)
     return RedirectResponse(url="/settings", status_code=303)

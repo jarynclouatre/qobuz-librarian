@@ -40,6 +40,8 @@ log.setLevel(logging.INFO)
 log.addFilter(_RedactFilter())
 _sh = logging.StreamHandler(sys.stdout)
 _sh.setFormatter(logging.Formatter("%(message)s"))
+# Lines logged with extra={"file_only": True} reach the log file alone.
+_sh.addFilter(lambda record: not getattr(record, "file_only", False))
 # Pin the console to INFO so lowering the LOGGER to DEBUG for the file handler
 # (see attach_file_handler) doesn't flood the terminal - DEBUG belongs in the
 # log file, not on screen. set_quiet() raises this to WARNING for --quiet.

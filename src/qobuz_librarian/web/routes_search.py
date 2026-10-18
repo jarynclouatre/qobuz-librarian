@@ -47,6 +47,7 @@ from qobuz_librarian.web import (
     job_runs,
     new_release_checks,
     qobuz_access,
+    queue_recovery,
     refusals,
     rendering,
     runtime,
@@ -301,6 +302,8 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
                 diagnostics._album_name_from_path(path)
                 for path in runtime.take_restored_albums()
             ],
+            "kept_terminal_downloads":
+                queue_recovery.take_kept_terminal_downloads(),
         }
 
     loop = asyncio.get_running_loop()
