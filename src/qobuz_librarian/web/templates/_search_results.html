@@ -394,7 +394,7 @@
           {% set key = 'track-' ~ r.album_id ~ '-' ~ r.track_id %}
           <div class="ql-table-row ql-table-row--track{% if r.owned %} is-owned{% endif %}" role="row" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if r.owned else 0 }}" data-queued="{{ 1 if r.queued else 0 }}" data-scanning="{{ 1 if r.scanning else 0 }}">
             <label class="ql-table-check" role="cell" data-search-select-wrap>
-              {% if not r.owned %}
+              {% if not r.owned and not r.unavailable %}
               <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="{{ key }}"
                      {% if r.queued or r.scanning %}disabled{% endif %}
                      aria-label="Select {{ release_title(r.title, r.version) }} by {{ r.artist }}">
@@ -410,14 +410,14 @@
                 <div class="ql-table-sub"><div class="ql-table-release-meta"><span class="ql-sub-version">{{ r.version }}</span></div></div>
                 {% endif %}
                 <div class="ql-table-subtitle ql-sub-mobile">{{ result_link('album', r.album_id, r.album_title) }}{% if r.year and r.year != '?' %} · {{ r.year }}{% endif %}{% if r.track_n != '?' %} · Track {{ r.track_n }}{% if r.total != '?' %} of {{ r.total }}{% endif %}{% endif %}</div>
-                <span class="ql-sub-mobile ql-sub-meta">{% if r.owned %}<span class="ql-owned-label">In library</span>{% else %}{{ quality_badge(r) }}{% endif %}</span>
+                <span class="ql-sub-mobile ql-sub-meta">{% if r.owned %}<span class="ql-owned-label">In library</span>{% elif not r.unavailable %}{{ quality_badge(r) }}{% endif %}</span>
               </div>
             </div>
             <div class="ql-table-artist" role="cell">{{ result_link('artist', r.artist_id, r.artist) }}</div>
             <div class="ql-table-muted" role="cell">{{ result_link('album', r.album_id, r.album_title) }}</div>
             <span class="ql-table-mono ql-num" role="cell">{{ r.year }}</span>
-            <span role="cell">{% if r.owned %}<span class="ql-owned-label">In library</span>{% else %}{{ quality_badge(r) }}{% endif %}</span>
-            <span class="ql-table-action" role="cell">{% if not r.owned %}{{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued, scanning=r.scanning) }}{% endif %}</span>
+            <span role="cell">{% if r.owned %}<span class="ql-owned-label">In library</span>{% elif not r.unavailable %}{{ quality_badge(r) }}{% endif %}</span>
+            <span class="ql-table-action" role="cell">{% if r.owned %}{% elif r.unavailable %}<span class="ql-other-version-label" title="Qobuz lists this track but does not stream it">Not&nbsp;on&nbsp;Qobuz</span>{% else %}{{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued, scanning=r.scanning) }}{% endif %}</span>
           </div>
           {% endfor %}
         </div>
@@ -430,7 +430,7 @@
       {% for r in results %}
       {% set key = 'track-' ~ r.album_id ~ '-' ~ r.track_id %}
       <div class="ql-grid-tile{% if r.owned %} is-owned{% endif %}" data-search-item data-search-key="{{ key }}" data-owned="{{ 1 if r.owned else 0 }}" data-queued="{{ 1 if r.queued else 0 }}" data-scanning="{{ 1 if r.scanning else 0 }}">
-        {% if not r.owned %}
+        {% if not r.owned and not r.unavailable %}
         <label class="ql-grid-check" data-search-select-wrap>
           <input type="checkbox" class="ql-checkbox" data-search-select data-search-key="{{ key }}"
                  {% if r.queued or r.scanning %}disabled{% endif %}
@@ -446,6 +446,7 @@
         </div>
         <div class="ql-grid-footer">
           {% if r.owned %}<span class="ql-owned-label">In library</span>
+          {% elif r.unavailable %}<span class="ql-other-version-label" title="Qobuz lists this track but does not stream it">Not&nbsp;on&nbsp;Qobuz</span>
           {% else %}{{ quality_badge(r) }}
           {{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued, scanning=r.scanning) }}{% endif %}
         </div>

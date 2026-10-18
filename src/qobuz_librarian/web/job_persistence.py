@@ -1910,6 +1910,35 @@ def has_active_single_undo(single) -> bool:
     )
 
 
+def single_mark_still_used(album_id, job_id) -> bool:
+    """Whether another saved track grab from the album still holds its
+    single mark and has its track in the library."""
+    if not album_id:
+        return False
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            return False
+        try:
+            rows = conn.execute(
+                "SELECT single FROM jobs WHERE id != ?", (job_id,)
+            ).fetchall()
+        except sqlite3.Error:
+            return False
+    for (raw_single,) in rows:
+        try:
+            single = json.loads(raw_single or "{}")
+        except (TypeError, ValueError):
+            continue
+        if (type(single) is dict
+                and single.get("album_id") == album_id
+                and single.get("marked") is True
+                and single.get("removed") is not True
+                and has_active_single_undo(single)):
+            return True
+    return False
+
+
 def clear_history() -> bool:
     """Delete ordinary finished jobs; retain recovery and Undo state."""
     with _lock:

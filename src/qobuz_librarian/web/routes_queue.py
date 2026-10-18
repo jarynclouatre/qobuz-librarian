@@ -157,6 +157,13 @@ async def queue_history(
 async def queue_clear(request: Request):
     """Clear the History: drop finished/canceled/failed jobs from the registry
     and the full on-disk archive. In-flight jobs are untouched."""
+    if queue_recovery._startup_recovery_status_value() is None:
+        # Recovery was never checked because this app does not hold the run
+        # lock; say why rather than blame an interrupted download.
+        busy = refusals._lock_busy_response(request)
+        if busy is not None:
+            return busy
+
     def _clear():
         # Settling saved recovery holds this lock for as long as it takes;
         # wait for it off the event loop.

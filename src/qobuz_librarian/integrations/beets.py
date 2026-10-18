@@ -4789,6 +4789,9 @@ class MusicDiskFull(OSError):
     def __init__(self):
         super().__init__(errno.ENOSPC, self.MESSAGE)
 
+    def __str__(self):
+        return self.MESSAGE
+
 
 def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
                         places=None, folder=None):

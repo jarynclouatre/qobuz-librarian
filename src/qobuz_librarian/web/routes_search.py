@@ -158,6 +158,7 @@ def _library_scan_resume_due():
         and not generation_state.baseline_complete()
         and scan_checkpoint.pending() is not None
         and not _auto_scan_backing_off()
+        and time.time() >= new_release_checks._auto_start_backoff["until"]
     )
 
 
@@ -629,6 +630,7 @@ async def _track_results(raw, query, token, queued_tracks):
             "queued":      (str(alb.get("id")), str(t.get("id")))
                            in queued_tracks,
             "scanning":    False,
+            "unavailable": catalog.unstreamable(t),
         })
         _track_raws.append(t)
 
@@ -721,13 +723,26 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
         _album_raws.append(a)
 
     if _album_raws:
-        def _annotate_owned():
-            def fetch_album(album_id):
-                return api_client.call_within(
-                    cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, album_id, token)
+        annotations = []
+        stop = threading.Event()
 
-            annotations = []
+        def _annotate_owned():
+            unreachable = []
+
+            def fetch_album(album_id):
+                if unreachable:
+                    raise unreachable[0]
+                try:
+                    return api_client.call_within(
+                        cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album,
+                        album_id, token)
+                except QobuzUnavailable as exc:
+                    unreachable.append(exc)
+                    raise
+
             for alb in _album_raws:
+                if stop.is_set():
+                    return
                 try:
                     annotations.append(
                         catalog.search_result_ownership(alb, fetch_album))
@@ -735,20 +750,20 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                     annotations.append({"ownership_unknown": True})
                     _log.exception(
                         "ownership annotation failed for album %s", alb.get("id"))
-            return annotations
         try:
-            annotations = await asyncio.wait_for(
+            await asyncio.wait_for(
                 loop.run_in_executor(None, _annotate_owned),
                 timeout=_OWNERSHIP_TIMEOUT)
-            for res, annotation in zip(results, annotations):
-                res.update(annotation)
         except asyncio.TimeoutError:
+            stop.set()
             _log.warning(
-                "ownership annotation timed out (%ss) for %r; results "
+                "ownership annotation timed out (%ss) for %r; later results "
                 "shown without Owned marks", _OWNERSHIP_TIMEOUT, query)
         except Exception:
             _log.exception(
                 "ownership annotation failed for %r", query)
+        for res, annotation in zip(results, list(annotations)):
+            res.update(annotation)
 
     # Collapse the flat result list into one row per album: a
     # remaster, deluxe, and box set of the same record group together
@@ -1126,19 +1141,26 @@ def _track_length(seconds):
     return f"{s // 60}:{s % 60:02d}"
 
 
-def _album_tracklist(album_id, token):
-    """One release's tracks, with the ones in its library folder marked."""
-    album = api_client.call_within(
-        cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, album_id, token)
-    items = (album.get("tracks") or {}).get("items") or []
-    present_ids = set()
+def _owned_track_ids(album):
     try:
-        present_ids = {str(t.get("id")) for t in catalog.find_edition_tracks(album)[3]}
+        return {str(t.get("id")) for t in catalog.find_edition_tracks(album)[3]}
     except Exception:
         # A library that can't be read still leaves a usable tracklist; the
         # marks are the only thing lost.
         _log.exception(
-            "tracklist ownership check failed for album %r", album_id)
+            "tracklist ownership check failed for album %r", album.get("id"))
+        return set()
+
+
+def _album_tracklist(album_id, token):
+    """One release's tracks, with the ones in its library folder marked."""
+    album = api_client.call_within(
+        cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album, album_id, token)
+    return _tracklist_rows(album, _owned_track_ids(album))
+
+
+def _tracklist_rows(album, present_ids):
+    items = (album.get("tracks") or {}).get("items") or []
     tracks = []
     for i, t in enumerate(items, 1):
         title = t.get("title") or "?"
@@ -1166,10 +1188,22 @@ async def search_album_tracks(request: Request, album_id: str = ""):
     tracks = []
     try:
         token = qobuz_access._get_token()
-        tracks = await asyncio.wait_for(
+        album = await asyncio.wait_for(
             loop.run_in_executor(
-                None, lambda: _album_tracklist(album_id, token)),
+                None, lambda: api_client.call_within(
+                    cfg.WEB_FETCH_TIMEOUT, qobuz_search.get_album,
+                    album_id, token)),
             timeout=cfg.WEB_FETCH_TIMEOUT)
+        present_ids = set()
+        try:
+            present_ids = await asyncio.wait_for(
+                loop.run_in_executor(None, _owned_track_ids, album),
+                timeout=_OWNERSHIP_TIMEOUT)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "tracklist ownership check timed out (%ss) for album %r; "
+                "shown without marks", _OWNERSHIP_TIMEOUT, album_id)
+        tracks = _tracklist_rows(album, present_ids)
     except NoCredsError:
         error = "No Qobuz credentials set. Visit Settings."
     except asyncio.TimeoutError:
@@ -1294,6 +1328,13 @@ async def queue_download(request: Request, album_id: str = Form(""),
             _tracks = (album.get("tracks") or {}).get("items") or []
             single_track = next(
                 (t for t in _tracks if str(t.get("id")) == track_id), None)
+            if single_track is not None and catalog.unstreamable(single_track):
+                msg = "Qobuz doesn't stream that track, so it can't be downloaded."
+                if rendering._is_htmx(request):
+                    return _download_fragment(
+                        "error", html.escape(msg), "failed")
+                return RedirectResponse(
+                    url="/queue?error=" + rendering._notice_key(msg), status_code=303)
             if single_track is None:
                 msg = "That track isn't on this album."
                 if rendering._is_htmx(request):

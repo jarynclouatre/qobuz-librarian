@@ -30,7 +30,8 @@ def _queue_wait(job):
         if j.status in (job_mgr.JobStatus.SCANNING, job_mgr.JobStatus.RUNNING):
             holder = j
         elif (j.status == job_mgr.JobStatus.PENDING
-              and (j.created_at or 0) < (job.created_at or 0)):
+              and (j.queued_at or j.created_at or 0)
+              < (job.queued_at or job.created_at or 0)):
             ahead += 1
     for_qobuz = job_mgr.waiting_for_qobuz(job)
     paused = not for_qobuz and job_mgr.is_held(job)

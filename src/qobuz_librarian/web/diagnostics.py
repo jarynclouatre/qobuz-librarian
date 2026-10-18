@@ -92,20 +92,35 @@ _STAGING_LEFTOVER_KINDS = {
 }
 
 
-# A failed download, and an incomplete --no-import one, keep their audio under
-# the stopped-download kind; the group's name carries the label it was kept
-# with.
-_FAILED_GROUP = re.compile(r"-failed(?:-[0-9a-f]{24})?$")
-_FAILED_RUN = (
-    "Files from a failed download",
-    "A download failed before these files were filed into your library.",
-)
-_INCOMPLETE_GROUP = re.compile(r"-incomplete(?:-[0-9a-f]{24})?$")
-_INCOMPLETE_RUN = (
-    "Files kept from a --no-import download",
-    "The download was missing tracks, so these files were kept here for "
-    "you to import or remove.",
-)
+# Stopped-download groups are named "<stamp>-<label>-<hex>"; the label says
+# why the run was kept.
+_KEPT_RUN_LABEL = re.compile(r"^\d{8}_\d{6}-(.+?)(?:-[0-9a-f]{24})?$")
+_KEPT_RUN_KINDS = {
+    "failed": (
+        "Files from a failed download",
+        "A download failed before these files were filed into your library.",
+    ),
+    "incomplete": (
+        "Files kept from a --no-import download",
+        "The download was missing tracks, so these files were kept here for "
+        "you to import or remove.",
+    ),
+    "download-incomplete": (
+        "Files from a download that came up short",
+        "Qobuz didn't deliver the whole album, so nothing was filed and these "
+        "files were kept here.",
+    ),
+    "beets-incomplete": (
+        "Files Beets did not file",
+        "The download finished, but Beets did not file all of it into your "
+        "library, so these files were kept here.",
+    ),
+    "incomplete-replacement": (
+        "Files from an upgrade that came up short",
+        "The new download was missing tracks, so your original album was put "
+        "back and these files were kept here.",
+    ),
+}
 
 
 # A download sets aside a FLAC that won't decode and any lossy file under one
@@ -213,11 +228,10 @@ def _staging_leftovers():
         kind = inspection.kind or "unresolved"
         label, reason = _STAGING_LEFTOVER_KINDS.get(
             kind, _STAGING_LEFTOVER_KINDS["unresolved"])
-        if kind == "interrupted" and _FAILED_GROUP.search(inspection.path.name):
-            label, reason = _FAILED_RUN
-        elif kind == "interrupted" and _INCOMPLETE_GROUP.search(
-                inspection.path.name):
-            label, reason = _INCOMPLETE_RUN
+        kept_as = _KEPT_RUN_LABEL.match(inspection.path.name)
+        if kind == "interrupted" and kept_as:
+            label, reason = _KEPT_RUN_KINDS.get(
+                kept_as.group(1), (label, reason))
         what = ""
         held = inspection.file_group or inspection.planned_file
         size = (held.retained.identity[3] if held is not None

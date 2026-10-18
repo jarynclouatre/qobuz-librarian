@@ -454,6 +454,11 @@
       location.replace(NAV_DEFAULTS[restore.tab]);
       return;
     }
+    if (active && restore && NAV_DEFAULTS[restore.tab] && restore.tab !== active) {
+      // The remembered page sent us elsewhere (a cleared job, say); the tab
+      // starts from its own page next time.
+      try { sessionStorage.removeItem(NAV_STATE_PREFIX + restore.tab); } catch (e) {}
+    }
     var restoredJob = /^\/jobs\/[^/]+\/?$/.test(location.pathname)
       ? document.getElementById("job-content") : null;
     if (active && restore && restore.tab === active && restore.url === current
@@ -925,8 +930,8 @@
     }, 0);
   });
 
-  function restoreBusySubmitButtons() {
-    document.querySelectorAll("form[data-busy-submit] button[type=submit]").forEach(function (b) {
+  function restoreBusySubmitButtons(root) {
+    (root || document).querySelectorAll("form[data-busy-submit] button[type=submit]").forEach(function (b) {
       if (b.dataset.busyHtml == null) return;
       b.disabled = false;
       b.classList.remove("is-disabled");
@@ -938,6 +943,14 @@
   window.addEventListener("pageshow", function (evt) {
     if (!evt.persisted) return;
     restoreBusySubmitButtons();
+  });
+
+  // An htmx form the response left in place (a refusal, an error, no
+  // answer) gets its button back.
+  document.addEventListener("htmx:afterRequest", function (evt) {
+    var form = evt.detail && evt.detail.elt;
+    form = form && form.closest ? form.closest("form[data-busy-submit]") : null;
+    if (form && form.isConnected) restoreBusySubmitButtons(form);
   });
 
   if ("serviceWorker" in navigator) {
@@ -1070,17 +1083,48 @@
   // hx-confirm attributes go through the same styled dialog instead of the
   // browser's native popup (htmx asks via this event before it would call
   // window.confirm itself).
+  function redrawnHtmxConfirmControl(el) {
+    var key = confirmControlKey(el);
+    var found = null;
+    document.querySelectorAll("[hx-confirm]").forEach(function (candidate) {
+      if (found || confirmControlKey(candidate) !== key) return;
+      var submit = candidate.tagName === "FORM"
+        ? candidate.querySelector("[type=submit]") : candidate;
+      if (submit && !submit.disabled) found = candidate;
+    });
+    return found;
+  }
+
   document.addEventListener("htmx:confirm", function (evt) {
     var q = evt.detail && evt.detail.question;
     if (!q) return;
     evt.preventDefault();
     var source = evt.detail && evt.detail.elt;
+    if (source && source.dataset && source.dataset.confirmBypass === "1") {
+      delete source.dataset.confirmBypass;
+      evt.detail.issueRequest(true);
+      return;
+    }
     window.qlConfirm(q, {
       action: (source && source.getAttribute("data-confirm-action")) || "",
       dismiss: (source && source.getAttribute("data-confirm-dismiss")) || "",
       irreversible: isIrreversible(source),
     }).then(function (ok) {
-      if (ok) evt.detail.issueRequest(true);
+      if (!ok) return;
+      if (!source || source.isConnected) {
+        evt.detail.issueRequest(true);
+        return;
+      }
+      // A poll can redraw the control while the dialog is open; send the
+      // answer through its redrawn copy.
+      var target = redrawnHtmxConfirmControl(source);
+      if (!target) {
+        showToast("The page changed before you confirmed, so nothing was done.", "warning");
+        return;
+      }
+      target.dataset.confirmBypass = "1";
+      if (target.tagName === "FORM") target.requestSubmit();
+      else target.click();
     });
   });
 
@@ -1495,7 +1539,7 @@
   // One-shot flash flags should not stay in the URL after first paint.
   var FLASH_PARAMS = ["approved", "stale", "saved", "queued", "connected",
                       "unverified", "mode", "error", "noselection", "skipped",
-                      "notice", "quality_note", "waiting", "refreshed"];
+                      "notice", "quality_note", "waiting", "refreshed", "started"];
   function cleanFlashUrl() {
     if (typeof URL !== "function" || !history.replaceState) return;
     try {
@@ -2612,6 +2656,32 @@
           : (jc && jc.dataset.jobKind === "repair" ? "Scan in progress" : "Scanning");
       }
     }
+    // A page drawn while the job waited has no clock or progress card, so
+    // the first progress fetches the running page in its place.
+    var renderedQueued = !!(activity && activity.hasAttribute("data-queued"));
+    var leavingQueued = false;
+    function leaveQueued() {
+      if (leavingQueued || !window.htmx) return;
+      leavingQueued = true;
+      var embedded = jc && jc.dataset.embedded ? "?embedded=1" : "";
+      sessionFetch("/jobs/" + id + "/content" + embedded)
+        .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
+        .then(function (html) {
+          var target = document.getElementById("job-content");
+          if (!target || finished) return;
+          // Progress replayed for a job that still waits: keep waiting.
+          if (/id="job-activity"[^>]*data-queued/.test(html)) {
+            leavingQueued = false;
+            return;
+          }
+          finished = true;
+          if (src) { try { src.close(); } catch (e) {} }
+          stopWatching();
+          stopElapsed();
+          window.htmx.swap(target, html, { swapStyle: "outerHTML" });
+        })
+        .catch(function () { leavingQueued = false; });
+    }
     // A stream that dies without closing is invisible to EventSource: no
     // error fires, the last progress line just stays on screen and a finished
     // scan goes on reading as a running one. The server pings a quiet stream,
@@ -2654,7 +2724,6 @@
       src.onmessage = function (e) {
         streamAlive();
         if (!titleSet) { document.title = "\u25b6 " + baseTitle; titleSet = true; }
-        clearQueuedState();
         if (logEl) { logEl.appendChild(document.createTextNode(e.data + "\n")); logEl.scrollTop = logEl.scrollHeight; }
       };
       src.addEventListener("ping", streamAlive);
@@ -2685,6 +2754,7 @@
       src.addEventListener("progress", function (e) {
         streamAlive();
         var p; try { p = JSON.parse(e.data); } catch (_) { return; }
+        if (renderedQueued) { leaveQueued(); return; }
         clearQueuedState();
         if (window.qlDismissSupersededFlashes) window.qlDismissSupersededFlashes();
         var detail = phaseDetail(p.phase);

@@ -2918,19 +2918,41 @@ def execute_albums(job, chosen, token):
                 part for part in (job.error, *messages) if part
             )
 
-    def _fold_back_unfinished():
+    def _fold_back_unfinished(*, always=False):
         # Token death / outage mid-batch: once something has imported, this
         # job is headed for FAILED (approve's no-harm re-park only covers the
         # nothing-landed case), fold the picks this run didn't finish back
         # into the living review, ticked, so they come back to retry like any
-        # other early exit.
-        if not job._imported_any:
+        # other early exit. A full disk has no re-park, so it always folds.
+        if not job._imported_any and not always:
             return
         leftovers = _resealed_past_own_imports(
             job, failed_cands + [cand] + chosen[processed:])
         if review_kind:
             _remember_review_save(
                 _return_picks(leftovers, review_kind, review_args))
+
+    def _disk_full_summary():
+        parts = []
+        if ok:
+            parts.append(f"{plural(ok, 'album')} downloaded")
+        if partial:
+            parts.append(f"{plural(partial, 'album')} partly downloaded")
+        attention_total = sum(attention_counts.values())
+        if attention_total:
+            parts.append(f"{plural(attention_total, 'album')} "
+                         f"{'needs' if attention_total == 1 else 'need'} attention")
+        job.summary = "Stopped: the music disk is full. " + (
+            ", ".join(parts) + "." if parts else "Nothing was downloaded.")
+        if review_kind:
+            destination = ("Library" if is_library_run else
+                           "New releases" if is_nr_run else "Restore review")
+            job.summary += (
+                f" The rest could not be saved back to {destination}."
+                if retry_save_failed else
+                f" The rest are selected for retry in {destination}."
+            )
+
     for i, cand in enumerate(chosen, 1):
         if job.cancel_requested:
             break
@@ -2996,8 +3018,11 @@ def execute_albums(job, chosen, token):
                                            if premise["kind"] == "gap-fill"
                                            else None
                                        ))
-        except (AuthLost, QobuzUnavailable, beets_mod.MusicDiskFull):
-            _fold_back_unfinished()
+        except (AuthLost, QobuzUnavailable, beets_mod.MusicDiskFull) as e:
+            disk_full = isinstance(e, beets_mod.MusicDiskFull)
+            _fold_back_unfinished(always=disk_full)
+            if disk_full:
+                _disk_full_summary()
             raise
         except Exception as e:
             log.info(f"  failed: {e}")
@@ -3069,7 +3094,8 @@ def execute_albums(job, chosen, token):
             failure_causes.append(failure_cause(result or {}))
         time.sleep(cfg.ARTIST_API_DELAY)
     job._progress_scope = None
-    if job.cancel_requested:
+    if job.cancel_requested and (
+            cancelled_cand is not None or processed < len(chosen)):
         # Nothing this run leaves behind is lost: the picks it never started
         # AND the ones that failed along the way fold back into the living
         # review, ticked, so a cancel mid-batch doesn't strand them in this
@@ -3239,6 +3265,7 @@ def execute_albums(job, chosen, token):
         )
         job.error = " ".join(part for part in (job.error, warning) if part)
         job.attention = job.attention or "review"
+    _close_completed_job(job)
 
 
 def execute_upgrades(job, chosen, token):
@@ -3413,20 +3440,31 @@ def execute_upgrades(job, chosen, token):
             break
         time.sleep(cfg.ARTIST_API_DELAY)
     job._progress_scope = None
-    if job.cancel_requested or current_interrupted:
+    if current_interrupted or (
+            job.cancel_requested and processed < len(chosen)):
         first_unfinished = processed - 1 if current_interrupted else processed
-        retry_count = len(failed_cands) + len(chosen[first_unfinished:])
-        retry_saved = return_unfinished(first_unfinished)
+        leftovers = failed_cands + chosen[first_unfinished:]
+        retry_saved = _return_picks(
+            leftovers, "upgrade", execute_args=job.execute_args)
         parts = [f"{ok} upgraded"]
+        if failed:
+            parts.append(f"{failed} failed")
         if current_interrupted:
             parts.append("1 interrupted")
         parts.append(f"{len(chosen) - processed} not started")
         job.summary = "Stopped early. " + ", ".join(parts) + "."
-        if retry_count and retry_saved is not False:
+        if retry_saved is False:
             job.summary += (
-                f" {plural(retry_count, 'retry choice')} returned to Upgrade, "
-                "selected for retry."
+                f" {plural(len(leftovers), 'retry choice')} could not be "
+                "saved back to Upgrade."
             )
+        elif leftovers:
+            job.summary += (
+                f" {plural(len(leftovers), 'retry choice')} returned to "
+                "Upgrade, selected for retry."
+            )
+        if cd_quality_tracks:
+            job.summary += f" {cd_quality_note(cd_quality_tracks)}"
         if kept:
             job.summary += (
                 f" {plural(kept, 'replacement')} retained a safety backup."
@@ -3460,6 +3498,13 @@ def execute_upgrades(job, chosen, token):
         elif processing_attention:
             job.attention = "processing"
             job.error = "Post-download work needs attention; see the job log."
+        elif failed:
+            job.error = f"{plural(failed, 'album')} couldn't be upgraded."
+        if retry_saved is False:
+            job.error = " ".join(part for part in (
+                job.error,
+                "Retry choices could not be saved. Check the data folder, "
+                "then refresh Upgrade before retrying.") if part)
         if kept or catalogue_failed or quality_attention or processing_attention:
             _mark_job_failed(job)
         log.info(job.summary)
@@ -3537,6 +3582,8 @@ def execute_upgrades(job, chosen, token):
             )
             job.error += retry_note
         _mark_job_failed(job)
+    else:
+        _close_completed_job(job)
 
 
 def _note_scan_wrap_up(job, done, total):
@@ -4859,21 +4906,41 @@ def execute_repairs(job, chosen, token):
     if stopped_early:
         if unfinished_start is None:
             unfinished_start = processed
-        retry_count = len(failed_cands) + len(chosen[unfinished_start:])
-        retry_saved = return_unfinished(unfinished_start)
+        leftovers = failed_cands + chosen[unfinished_start:]
+        retry_saved = _return_picks(
+            leftovers,
+            "repair",
+            execute_args=getattr(job, "execute_args", None),
+        )
         parts = [f"{fixed} repaired"]
         if unverified:
             parts.append(f"{unverified} replaced but unproven")
+        if failed:
+            parts.append(f"{failed} failed")
         if interrupted:
             parts.append(f"{interrupted} interrupted")
         if recovery_count:
             parts.append(f"{recovery_count} kept for recovery")
         parts.append(f"{len(chosen) - processed} not started")
         job.summary = "Stopped early. " + ", ".join(parts) + "."
-        if retry_count and retry_saved is not False:
+        if retry_saved is False:
             job.summary += (
-                f" {plural(retry_count, 'retry choice')} returned to Repair, "
-                "selected for retry."
+                f" {plural(len(leftovers), 'retry choice')} could not be "
+                "saved back to Repair."
+            )
+            job.error = (
+                "Retry choices could not be saved. Check the data folder, "
+                "then run a fresh Repair scan."
+            )
+        elif leftovers:
+            job.summary += (
+                f" {plural(len(leftovers), 'retry choice')} returned to "
+                "Repair, selected for retry."
+            )
+        if failed and not job.error:
+            job.error = (
+                f"{failed} of {plural(len(chosen), 'album')} couldn't be "
+                "repaired; see the log."
             )
         log.info(job.summary)
         with job._lock:

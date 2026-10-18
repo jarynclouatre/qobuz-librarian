@@ -333,6 +333,8 @@ class Job:
     # its own end, so a cancel arriving now cannot stop it.
     importing: bool = False
     created_at: float = field(default_factory=time.time)
+    # When an approved review joined the back of the scan lane.
+    queued_at: Optional[float] = field(default=None, repr=False)
     # When the job actually started working (left the queue).
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -782,6 +784,8 @@ class JobRegistry:
         finished = [self._jobs[jid] for jid in self._order
                     if (jid in self._jobs
                         and self._jobs[jid].status in TERMINAL
+                        # Its worker has yet to save the final result.
+                        and self._jobs[jid].finished_at is not None
                         and not self._jobs[jid].recoveries)]
         excess = len(finished) - self.MAX_FINISHED
         if excess <= 0:
@@ -807,6 +811,7 @@ class JobRegistry:
             keep = [jid for jid in self._order
                     if (self._jobs.get(jid)
                         and (self._jobs[jid].status not in TERMINAL
+                             or self._jobs[jid].finished_at is None
                              or self._jobs[jid].recoveries
                              or job_persistence.has_active_single_undo(
                                  self._jobs[jid].single)))]
@@ -1071,6 +1076,24 @@ def staging_lock():
     return _staging_lock
 
 
+class StagingWaitCancelled(Exception):
+    """A cancel arrived while the job waited for the staging lock."""
+
+
+@contextmanager
+def staging_lock_unless_cancelled(job):
+    """The staging lock for a job that has changed nothing yet; a cancel
+    while it waits behind another run ends the wait."""
+    mutex = staging_lock()
+    while not mutex.acquire(timeout=0.5):
+        if job.cancel_requested:
+            raise StagingWaitCancelled()
+    try:
+        yield mutex
+    finally:
+        mutex.release()
+
+
 # Human label for a long staging-lock hold. A library-wide Lyrics scan holds
 # the mutex for its whole (possibly hours-long) run, not per album.
 _staging_holder: Optional[str] = None
@@ -1227,6 +1250,9 @@ def _run_task(job: Job, fn):
             if _wait_for_qobuz(job, fn, e.__cause__):
                 return
             e = e.__cause__
+        if isinstance(e, StagingWaitCancelled):
+            job.status = JobStatus.CANCELED
+            return
         if job.cancel_requested and isinstance(e, QobuzUnavailable):
             # Stopped while waiting on Qobuz, which a cancel cuts short.
             job.status = JobStatus.CANCELED
@@ -2040,6 +2066,7 @@ def approve(
             j.push_line(message)
             j.notify_review_changed()
 
+    job.queued_at = time.time()
     _scan_queue.put((job, _execute))
     return True
 

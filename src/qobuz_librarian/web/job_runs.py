@@ -137,7 +137,7 @@ def _make_download_run(
         flows._note_staging_wait(j, "Downloading", 0, 1)
         durable_failure = False
         durable_completion_settled = False
-        with job_mgr.staging_lock():
+        with job_mgr.staging_lock_unless_cancelled(j):
             with qobuz_access._CREDENTIAL_LOCK:
                 if (active is not None
                         and not qobuz_access._credential_generation_is_active(
@@ -313,7 +313,8 @@ def _make_download_run(
                 flows._fold_partial_gap_fill(
                     album, (album.get("artist") or {}).get("name") or "",
                     retryable, album_dir=r.get("dir"))
-        if durable_completion_settled:
+        if durable_completion_settled or (
+                durable_item is None and r.get("imported")):
             # Exact completion, external acknowledgement, carrier retirement,
             # and journal cleanup all finished before the executor returned.
             # Close the Web state under the same lock as request_cancel so a

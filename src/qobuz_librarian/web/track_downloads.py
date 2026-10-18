@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import redaction
+from qobuz_librarian import download_result, redaction
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.api.auth import CredentialChanged
 from qobuz_librarian.library import catalog, discovery
@@ -326,7 +326,7 @@ def _make_single_track_run(album, track, token):
         artist = (album.get("artist") or {}).get("name") or "?"
         title = album.get("title") or "?"
         t_title = track.get("title") or "?"
-        existing, album_dir, missing, _present = catalog.find_edition_tracks(
+        existing, album_dir, missing, present = catalog.find_edition_tracks(
             album, track_id=track.get("id"))
         missing_ids = {str(t.get("id")) for t in missing}
         # Already own this exact track? Don't re-rip it; that just lands a beets
@@ -349,7 +349,7 @@ def _make_single_track_run(album, track, token):
         qi["_capture_import_ownership"] = True
         flows._note_staging_wait(j, "Downloading", 0, 1)
         owned_path = None
-        with job_mgr.staging_lock():
+        with job_mgr.staging_lock_unless_cancelled(j):
             with qobuz_access._CREDENTIAL_LOCK:
                 if (active is not None
                         and not qobuz_access._credential_generation_is_active(
@@ -379,6 +379,17 @@ def _make_single_track_run(album, track, token):
                     j, ownership_valid=owned_path is not None)
         if not download_succeeded:
             j.status = job_mgr.JobStatus.FAILED
+            _, _, lossy_only, unavailable = download_result.track_shortfall(qi)
+            if (lossy_only or unavailable) and qi.get("result") not in (
+                    "disk_full", "io_error"):
+                j.error = (
+                    "Qobuz only has this track in a lossy format, so it was "
+                    "not added." if lossy_only else
+                    "Qobuz doesn't stream this track, so it can't be "
+                    "downloaded.")
+                j.execute_args = {**(j.execute_args or {}),
+                                  "retry_disabled": "lossy"}
+                return
             broken = qi.get("n_broken") and not qi.get("n_fail")
             j.error = _SINGLE_TRACK_FAILURES.get(qi.get("result"))
             if not j.error or broken and qi.get("result") == "incomplete":
@@ -396,7 +407,11 @@ def _make_single_track_run(album, track, token):
         got = f"Got “{t_title}”" + (f", filed under {folder}." if folder else ".")
         # The mark keeps Upgrade off a deliberate single whatever the toggle
         # says; the toggle only decides whether scans read it.
-        marked = len(missing) > 1
+        rest = [t for t in missing
+                if str(t.get("id")) != str(track.get("id"))
+                and not catalog.unstreamable(t)]
+        marked = len(rest) > len(
+            catalog.bonus_versions(rest, [*present, track]))
         if marked:
             try:
                 hidden_mod.mark_single(artist, title, catalog.album_year(album),
@@ -445,4 +460,5 @@ def _make_single_track_run(album, track, token):
             token=active_token,
             args=args,
         )
+        flows._close_completed_job(j)
     return run

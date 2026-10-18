@@ -1587,7 +1587,8 @@ async def job_undo(request: Request, job_id: str):
 
     def _clear_deliberate_single_mark() -> bool:
         """Whether the exact suppression mark is gone from the saved store."""
-        if not info.get("marked"):
+        if not info.get("marked") or job_persistence.single_mark_still_used(
+                info.get("album_id"), job.id):
             return True
         try:
             hidden_mod.unmark_single(

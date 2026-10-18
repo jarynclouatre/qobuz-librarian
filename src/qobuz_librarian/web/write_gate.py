@@ -15,18 +15,22 @@ from qobuz_librarian.web import queue_recovery, runtime, storage
 _log = logging.getLogger("qobuz_librarian")
 
 
+def _terminal_command():
+    return ("docker compose run --rm -it qobuz-librarian cli"
+            if cfg.in_container() else "qobuz-librarian")
+
+
 def _terminal_queue_notice():
     """Why downloads wait for a queue the terminal saved, or None."""
     waiting = queue_recovery._terminal_queue_waiting()
     if not waiting:
         return None
-    command = ("docker compose run --rm -it qobuz-librarian cli"
-               if cfg.in_container() else "qobuz-librarian")
     return {
         "reason": "A download queue saved in the terminal is waiting.",
         "msg": (f"Downloads are paused: a queue of {plural(waiting, 'album')} "
                 "saved in the terminal is waiting. Switch to terminal mode "
-                f"in Settings, then run “{command}”; it offers to resume or "
+                f"in Settings, then run “{_terminal_command()}”; it offers to "
+                "resume or "
                 "discard the queue."),
         "action": {"href": "/settings#mode", "label": "Open Settings"},
     }
@@ -185,8 +189,8 @@ def _writes_paused_notice(*, log_details: bool = False,
         action = {"href": "/settings#mode", "label": "Open Settings"}
         msg = ("An interrupted download saved in the terminal is waiting to "
                "finish. Other library changes are paused. Switch to terminal "
-               "mode in Settings, then run Qobuz Librarian there; it offers to "
-               "resume it.")
+               f"mode in Settings, then run “{_terminal_command()}”; it offers "
+               "to resume it.")
     else:
         return None
     return {"reason": reason, "msg": msg, "action": action}

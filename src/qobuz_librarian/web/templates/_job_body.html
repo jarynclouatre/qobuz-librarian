@@ -338,11 +338,11 @@
       </form>
       {% elif s in ('done', 'failed') and job.single and job.single.get('owned_path') and not job.single.get('removed') and not job._preserve_persisted_single and not job._single_undo_unavailable %}
       <form action="/jobs/{{ job.id }}/undo" method="post"
-            hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML"
-            data-confirm="Remove the downloaded track and undo the single?"
-            data-confirm-action="Remove track">
+            hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm" data-irreversible{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Undo (removes track)</button>
+        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm" data-irreversible
+                data-confirm="Remove the downloaded track and undo the single?"
+                data-confirm-action="Remove track"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Undo (removes track)</button>
         {% include "_writes_paused_reason.html" %}
       </form>
       {% endif %}
