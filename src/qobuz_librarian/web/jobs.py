@@ -48,7 +48,7 @@ from qobuz_librarian.completion import (
 )
 from qobuz_librarian.integrations import beets
 from qobuz_librarian.integrations import rip as rip_module
-from qobuz_librarian.library import library_scan_state, scan_checkpoint
+from qobuz_librarian.library import library_scan_state, scan_checkpoint, scanner
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.post_job_hook import release_title
 from qobuz_librarian.ui_cli.errors import plural
@@ -1131,6 +1131,8 @@ def _friendly_job_error(exc, fallback: str) -> str:
         # too (that double-encodes characters like & in a path).
         fname = str(exc.filename) if exc.filename else "see log"
         return f"Required tool or path missing; see log ({fname})."
+    if isinstance(exc, beets.MusicDiskFull):
+        return f"{exc.strerror}."
     if isinstance(exc, OSError):
         import errno
         if exc.errno == errno.ENOSPC:
@@ -1196,6 +1198,7 @@ def _run_task(job: Job, fn):
     handler.setFormatter(logging.Formatter("%(message)s"))
     log.addHandler(handler)
     _TLS.current_job = job
+    scanner.forget_named_paths()
     try:
         fn(job)
         if (job.cancel_requested and job.status not in TERMINAL

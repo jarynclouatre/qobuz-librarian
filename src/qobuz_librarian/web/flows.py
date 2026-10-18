@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import repair_log, saved_views, state_file
+from qobuz_librarian import disk_support, repair_log, saved_views, state_file
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost, QobuzAccess, QobuzUnavailable
 from qobuz_librarian.api.search import get_album
@@ -2996,7 +2996,7 @@ def execute_albums(job, chosen, token):
                                            if premise["kind"] == "gap-fill"
                                            else None
                                        ))
-        except (AuthLost, QobuzUnavailable):
+        except (AuthLost, QobuzUnavailable, beets_mod.MusicDiskFull):
             _fold_back_unfinished()
             raise
         except Exception as e:
@@ -3339,7 +3339,7 @@ def execute_upgrades(job, chosen, token):
                                        already_confirmed=True,
                                        upgrade_only=True, token=token,
                                        expected_album_receipt=premise["receipt"])
-        except (AuthLost, QobuzUnavailable):
+        except (AuthLost, QobuzUnavailable, beets_mod.MusicDiskFull):
             return_unfinished(i - 1)
             raise
         except Exception as e:
@@ -3547,6 +3547,9 @@ def _note_scan_wrap_up(job, done, total):
 
 def scan_downsamples(job):
     """Scan local files for albums stored above CD rate."""
+    refusal = disk_support.refusal("downsample")
+    if refusal:
+        raise RuntimeError(refusal)
     clear_scan_caches()
     unreadable_artists = {}
 
@@ -4178,6 +4181,9 @@ def _repair_scan_caveats(n_unverified, n_failed_albums, n_failed_artists):
 def scan_repairs(job, token):
     """Scan every album for ISRC-verified truncated FLACs (fanned out across
     ARTIST_SCAN_WORKERS; see _scan_repair_artist for the per-artist work)."""
+    refusal = disk_support.refusal("repair")
+    if refusal:
+        raise RuntimeError(refusal)
     with scan_checkpoint.Writer("repair") as checkpoint:
         return _scan_repairs_impl(job, token, checkpoint)
 
@@ -4792,7 +4798,7 @@ def execute_repairs(job, chosen, token):
                 return_unfinished(i - 1, include_current=False)
                 raise exc.cause
             raise
-        except (AuthLost, QobuzUnavailable):
+        except (AuthLost, QobuzUnavailable, beets_mod.MusicDiskFull):
             return_unfinished(i - 1)
             raise
         except Exception as e:
@@ -4954,6 +4960,12 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         job.error = job.summary
         _mark_job_failed(job)
         log.info(job.summary)
+        return
+    refusal = disk_support.refusal("lyrics")
+    if refusal:
+        job.summary = job.error = refusal
+        _mark_job_failed(job)
+        log.info(refusal)
         return
 
     log.info(f"Fetching lyrics across the library (writing {(cfg.LYRICS_FORMAT or 'embed').lower()}).")

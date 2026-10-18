@@ -161,7 +161,16 @@ On boot, the container chowns its managed config folders and the `data` and `sta
 
 Operations that replace or remove an existing library file also require the share to flush file and directory changes reliably. If the mount cannot do that, Qobuz Librarian stops the destructive step and keeps the original.
 
-Upgrade, Gap Fill, Repair, Re-download and Consolidation move the tracks they replace to a backup and put them back if the step fails, which needs a share that can rename a file without replacing one already there. Local disks can. The Linux NFS client and rclone mounts cannot, so there these steps leave the album as it is and name the folder. SMB/CIFS and other mounts are not checked.
+The app tries the disk under the music, staging and upgrade backup folders once, while it holds the library, and **Settings → Diagnostics** says what each one can't do. A feature whose folder can't do what it needs stops before it starts and names the folder:
+
+- Downloads need a staging folder that can rename a file without replacing one already there and swap a file for its new copy in one step.
+- A new or whole lossless album downloaded in one crash-safe step, as it is while import-time Downsample is off, also needs a music folder that can rename without replacing. Elsewhere that album is left out before it downloads; single tracks, partial albums, MP3, albums downloaded with Downsample on and downloads not imported still go ahead.
+- Upgrade, Gap Fill, Repair, Re-download and Consolidation move the tracks they replace to a backup and put them back if the step fails, which needs music and upgrade backup folders that can rename without replacing. Upgrade and Repair stop before they start; the others leave that album as it is and name the folder. Upgrade also needs a music folder that can swap files, to give the new tracks your own tags.
+- Lyrics needs a music folder that can rename without replacing, and with `LYRICS_FORMAT` set to `embed` or `both` one that can swap files too. With `sidecar` on a disk that can't swap files, a track's plain `.lrc` file is kept instead of being replaced by synced lyrics. A backup's **Remove** in Diagnostics needs the same when it copies the backup's lyrics onto the album first, and a disk that can swap files when that replaces an `.lrc` file the album already has.
+- Downsample needs a music folder that can swap files.
+- Albums picked from a Library, Upgrade, Downsample or Repair scan, and album downloads that fill gaps in an album already in the library, are checked against what is on disk before anything changes, which needs a music folder whose disk records when folders were created.
+
+Local Linux disks such as ext4, Btrfs and XFS can do all of this. NFS and rclone mounts can't rename safely, and rclone and many other FUSE mounts don't record when folders were created. SMB/CIFS shares and exFAT disks can rename without replacing but can't swap files. Keep staging on a local disk. A music folder on a share still works for scans, and for what the list above allows.
 
 For a read-only music share, append `:ro` to the `/music` bind and set `QL_CHECK_VOLUMES=0` in `.env`; otherwise write endpoints, including scan starts, return 503 while the write check fails. The check is live, so fixing the mount or its ownership takes effect without a restart.
 

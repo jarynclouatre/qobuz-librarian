@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from qobuz_librarian import beets_db, raise_open_file_limit, run_lock
+from qobuz_librarian import beets_db, disk_support, raise_open_file_limit, run_lock
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.integrations import beets as beets_mod
@@ -551,6 +551,10 @@ async def _lifespan(_app: FastAPI):
             _log.error("STARTUP: critical volumes not usable: %s. Write "
                        "endpoints will return 503 until the mounts are "
                        "fixed.", problems)
+        for label, ok, detail in await asyncio.get_running_loop().run_in_executor(
+                None, disk_support.report):
+            if not ok:
+                _log.warning("STARTUP: %s: %s", label, detail)
         maintenance_task = None
         if runtime._run_lock_intact():
             _restore_jobs_once()

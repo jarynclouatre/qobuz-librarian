@@ -166,6 +166,17 @@ def _gone(path) -> bool:
     return False
 
 
+def _library_folders():
+    """The names at the top of MUSIC_ROOT other than NAS and Windows system
+    folders, or None when it can't be listed."""
+    from qobuz_librarian.library import scanner
+    try:
+        names = os.listdir(cfg.MUSIC_ROOT)
+    except OSError:
+        return None
+    return set(names) - scanner.SYSTEM_FOLDER_NAMES
+
+
 def prune_missing(force: bool = False) -> int:
     """Drop rows whose file is gone, keeping the db proportional to the library.
 
@@ -174,6 +185,11 @@ def prune_missing(force: bool = False) -> int:
     without bound. Throttled to once a day - a CLI session that opens and closes
     repeatedly shouldn't re-walk the whole table each time - and skipped when
     MUSIC_ROOT is absent so an unmounted library volume can't wipe the cache.
+
+    A row under MUSIC_ROOT whose artist folder isn't one the root lists goes
+    too: one in a recycle bin, or one read through another case of the
+    folder's name on a case-insensitive disk, which the census would count a
+    second time.
     """
     if not _db.ensure() or not cfg.MUSIC_ROOT.exists():
         return 0
@@ -188,10 +204,18 @@ def prune_missing(force: bool = False) -> int:
     # paths whose files are now gone, even if the put() for them hasn't been
     # flushed yet.
     flush_pending()
+    root = str(cfg.MUSIC_ROOT).rstrip("/") + "/"
+    listed = _library_folders()
+
+    def stale(path):
+        unlisted = (listed is not None and path.startswith(root)
+                    and path[len(root):].split("/", 1)[0] not in listed)
+        return unlisted or _gone(path)
+
     try:
         conn = _db.conn()
         gone = [(p,) for (p,) in conn.execute("SELECT path FROM files")
-                if _gone(p)]
+                if stale(p)]
         if gone:
             conn.executemany("DELETE FROM files WHERE path = ?", gone)
             conn.commit()

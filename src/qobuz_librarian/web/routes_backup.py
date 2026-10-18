@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import saved_views
+from qobuz_librarian import disk_support, saved_views
 from qobuz_librarian.api.auth import QobuzAccess
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import staging as staging_mod
@@ -619,6 +619,10 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                     "was kept.") + diagnostics._diagnostics_fragment(request)
             if not refusal.removable:
                 body = (f"{html.escape(refusal.detail)} The backup was left "
+                        "untouched.")
+            elif refusal.reason == "lyrics" and (
+                    disk_refusal := disk_support.refusal("lyric_carry")):
+                body = (f"{html.escape(disk_refusal)} The backup was left "
                         "untouched.")
             elif refusal.reason == "lyrics":
                 body = (f"Couldn't copy the lyrics of "

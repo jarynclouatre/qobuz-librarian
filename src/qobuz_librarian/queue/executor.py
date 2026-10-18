@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import download_result, post_job_hook, run_lock, saved_views
+from qobuz_librarian import (
+    disk_support,
+    download_result,
+    post_job_hook,
+    run_lock,
+    saved_views,
+)
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import AuthLost
 from qobuz_librarian.completion import (
@@ -39,6 +45,7 @@ from qobuz_librarian.download_result import (
 )
 from qobuz_librarian.integrations.beets import (
     ImportedThenInterrupted,
+    MusicDiskFull,
     _consolidate_duplicate_albums,
     _prepare_staging_tags,
     beets_import_albums,
@@ -809,7 +816,8 @@ def _import_album_with_retry(
         places=None, folder=None):
     """Run beets import on ``album_dirs`` with up to ``BEETS_MAX_ATTEMPTS``
     attempts, retrying only on idle-timeout (other failures aren't transient).
-    Returns True on import success, False on permanent failure."""
+    Returns True on import success, False on permanent failure, and raises
+    MusicDiskFull when beets stopped on a full disk."""
     if not album_dirs:
         return True
     if ownership_out is not None:
@@ -852,6 +860,8 @@ def _import_album_with_retry(
                 f"pausing {int(cfg.BEETS_RETRY_PAUSE)}s before retry."))
             time.sleep(cfg.BEETS_RETRY_PAUSE)
             continue
+        if kind == "disk_full":
+            raise MusicDiskFull
         return False
     return False
 
@@ -905,7 +915,10 @@ def _reimport_parked_albums():
     that still fail stay parked for the run after. Returns (anything_imported,
     landed_library_dirs): the flag drives the duplicate-album fold, and the
     resolved dirs feed the post-import lyric finaliser. A parked reimport
-    that skipped it kept its embedded lyrics and never got its .lrc sidecar."""
+    that skipped it kept its embedded lyrics and never got its .lrc sidecar.
+
+    A full disk stops the re-imports there: the OSError(ENOSPC) is raised
+    with that pair for the albums before it as ``parked_results``."""
     groups = list_groups(kind="beets")
     any_ok = False
     landed_dirs = []
@@ -918,8 +931,14 @@ def _reimport_parked_albums():
         # landed folder is findable after the import for the lyric finaliser.
         sigs_by_dir = {d: track_signatures_for_album_dirs([d])
                        for d in album_dirs}
-        _import_album_with_retry(
-            album_dirs, source_receipts=group.trees)
+        disk_full = None
+        try:
+            _import_album_with_retry(
+                album_dirs, source_receipts=group.trees)
+        except OSError as exc:
+            if exc.errno != errno.ENOSPC:
+                raise
+            disk_full = exc
         outcome = reconcile_imported_group(group)
         if outcome["moved_audio"]:
             any_ok = True
@@ -941,6 +960,9 @@ def _reimport_parked_albums():
                 f"  ⚠  Kept recovery folder {group.path}: it contains "
                 "unverified changes or companion files and won't be "
                 "automatically replayed again."))
+        if disk_full is not None:
+            disk_full.parked_results = (any_ok, landed_dirs)
+            raise disk_full
     return any_ok, landed_dirs
 
 
@@ -1563,7 +1585,7 @@ def _resolve_queue_item(
     if _stop in (
             "cancelled", "incomplete", "interrupted", "disk_full", "io_error",
             "auth_lost", "import_failed", "upgrade_aborted_backup_failed",
-            "stale_candidate"):
+            "stale_candidate", "disk_refused"):
         status = _stop
     elif n_ok and (n_retryable or n_unretryable or outcome_attention):
         status = "partial"
@@ -2194,6 +2216,14 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             # below stands down for exactly that reason.
             on_progress()
 
+    def _stop_for_full_disk(location):
+        nonlocal disk_full
+        log.info(fmt(C.RED,
+            f"\n    Out of disk space{location}. Stopping "
+            "the queue; restoring backups and keeping the rest for a "
+            "retry once space is freed."))
+        disk_full = True
+
     def _ensure_preflight():
         nonlocal any_imported, _parked_post_dirs, preflight_done
         if preflight_done:
@@ -2201,7 +2231,14 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         _require_executor_authority(authority)
         staging_preflight(args)
         _require_executor_authority(authority)
-        parked_imported, parked_dirs = _reimport_parked_albums()
+        try:
+            parked_imported, parked_dirs = _reimport_parked_albums()
+        except OSError as exc:
+            if exc.errno != errno.ENOSPC:
+                raise
+            parked_imported, parked_dirs = getattr(
+                exc, "parked_results", (False, []))
+            _stop_for_full_disk(" during library import")
         _require_executor_authority(authority)
         any_imported = any_imported or parked_imported
         _parked_post_dirs.extend(parked_dirs)
@@ -2274,7 +2311,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             raise retention_exc from cause
 
     def _handle_download_exception(item, exc, *, phase=None):
-        nonlocal interrupted, disk_full, io_error, auth_lost_exc
+        nonlocal interrupted, io_error, auth_lost_exc
         if isinstance(exc, KeyboardInterrupt):
             log.info(fmt(C.YELLOW,
                 "\n    Interrupted. Stopping further downloads and "
@@ -2288,18 +2325,13 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             item["result"] = "auth_lost"
             auth_lost_exc = exc
         elif isinstance(exc, OSError):
-            if exc.errno == errno.ENOSPC:
-                location = (
+            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                _stop_for_full_disk(
                     f" during {phase}"
                     if phase
                     else f" at {cfg.STAGING_DIR}"
                 )
-                log.info(fmt(C.RED,
-                    f"\n    Out of disk space{location}. Stopping "
-                    "the queue; restoring backups and keeping the rest for a "
-                    "retry once space is freed."))
                 item["result"] = "disk_full"
-                disk_full = True
             else:
                 from qobuz_librarian.ui_cli.errors import oserr_hint
                 # oserr_hint already ends the sentence for a permissions or
@@ -2602,6 +2634,15 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 "    Crash-safe recovery doesn't cover this album; using the "
                 "standard path, which backs up anything it replaces."))
 
+        if plan is not None and resume_owner is None and (
+                refusal := disk_support.refusal("whole_albums")):
+            log.info(fmt(C.YELLOW, f"    ⚠  {refusal} Nothing was downloaded."))
+            item["result"] = "disk_refused"
+            _drop(item)
+            results.append(_resolve_queue_item(
+                item, args, False, authority=authority))
+            continue
+
         if plan is not None:
             def _prepare_staged(album_dirs, checkpoint_sources):
                 title = edition_album_title(album) if item.get("exact_edition") else None
@@ -2694,7 +2735,10 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         == "library-backup-companions-unsettled",
                 })
                 durable_stopped = True
-                if results[-1]["companions_unsettled"]:
+                if outcome.reason == "managed-import-disk-full":
+                    results[-1]["disk_full"] = True
+                    _stop_for_full_disk(" during library import")
+                elif results[-1]["companions_unsettled"]:
                     # The next start keeps it as it is, so nothing of it is
                     # left to resume.
                     queue.remove(item)

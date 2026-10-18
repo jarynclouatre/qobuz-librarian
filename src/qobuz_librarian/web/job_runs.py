@@ -11,6 +11,7 @@ from qobuz_librarian.api.auth import (
     QobuzAccess,
     QobuzUnavailable,
 )
+from qobuz_librarian.integrations.beets import MusicDiskFull
 from qobuz_librarian.library import candidate_premise, catalog
 from qobuz_librarian.modes import process as process_mode
 from qobuz_librarian.queue import builder as queue_builder
@@ -271,6 +272,8 @@ def _make_download_run(
                             "left as they are. Qobuz Librarian tries again "
                             "when it restarts."
                         )
+                    if r.get("disk_full"):
+                        j.error = f"{MusicDiskFull.MESSAGE}. {j.error}"
         status, attention = download_result.download_job_outcome(r)
         if durable_failure:
             pass

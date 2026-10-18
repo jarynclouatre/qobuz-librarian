@@ -665,7 +665,7 @@ def _gap_fill_result_bucket(result):
     hard_failures = {
         "failed", "nothing_landed", "not_imported", "import_failed",
         "upgrade_aborted_backup_failed",
-        "replacement_aborted_catalogue_failed",
+        "replacement_aborted_catalogue_failed", "disk_refused",
     }
     stopped_results = {
         "interrupted", "cancelled", "disk_full", "io_error", "auth_lost",

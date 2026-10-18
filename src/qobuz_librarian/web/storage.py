@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import disk_support
 from qobuz_librarian.library import collection_snapshot, flac_cache
 from qobuz_librarian.ui_cli.colors import format_size
 
@@ -102,6 +103,9 @@ def _require_music_write_target_for_job() -> None:
     if state != "ready":
         raise RuntimeError(_music_write_target_message(
             state, recorded_albums, job_started=True))
+    refusal = disk_support.refusal("downloads")
+    if refusal:
+        raise RuntimeError(refusal)
 
 
 _census_cache: tuple | None = None

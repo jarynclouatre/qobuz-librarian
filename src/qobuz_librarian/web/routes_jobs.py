@@ -17,7 +17,7 @@ from fastapi.responses import (
     Response,
 )
 
-from qobuz_librarian import completion
+from qobuz_librarian import completion, disk_support
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api import search as qobuz_search
 from qobuz_librarian.api.auth import CredentialChanged, NoCredsError, QobuzAccess
@@ -66,6 +66,15 @@ _LIBRARY_SURFACE_KINDS = ("library", "new_releases")
 _QOBUZ_REVIEW_KINDS = ("library", "new_releases", "upgrade", "repair",
                        "collection_restore")
 _PREMISE_REVIEW_KINDS = _QOBUZ_REVIEW_KINDS + ("downsample",)
+# What the work each review starts needs of the disks it writes to.
+_REVIEW_DISK_FEATURES = {
+    "library": ("downloads", "picks"),
+    "new_releases": ("downloads", "picks"),
+    "collection_restore": ("downloads", "picks"),
+    "repair": ("downloads", "repair", "picks"),
+    "upgrade": ("upgrade",),
+    "downsample": ("downsample", "picks"),
+}
 
 
 @router.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -332,6 +341,14 @@ async def job_approve(request: Request, job_id: str):
         if not has_pick:
             return RedirectResponse(url=f"{dest}?noselection=1",
                                     status_code=303)
+        disk_refusal = await loop.run_in_executor(
+            None, lambda: disk_support.refusal(
+                *_REVIEW_DISK_FEATURES.get(job.execute_kind, ())))
+        if disk_refusal:
+            return RedirectResponse(
+                url=dest + "?error=" + rendering._notice_key(disk_refusal),
+                status_code=303,
+            )
         if job.execute_kind in _PREMISE_REVIEW_KINDS:
             stale_premise_candidate_ids = await loop.run_in_executor(
                 None,
@@ -784,6 +801,10 @@ def _changed_artist_folders(candidates):
 
 
 def _all_candidates_stale_message(execute_kind, counts, candidates=()):
+    if counts.get("unsupported", 0):
+        refusal = disk_support.refusal("picks")
+        if refusal:
+            return f"{refusal} Nothing was started."
     causes = []
     changed = counts.get("changed", 0)
     folders = (_changed_artist_folders(candidates)

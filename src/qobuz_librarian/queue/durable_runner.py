@@ -1260,7 +1260,8 @@ def execute_durable_new_album(
         )
         return DurableAlbumResult(
             DurableAlbumStatus.ATTENTION,
-            "managed-import-unsettled",
+            "managed-import-disk-full" if imported.disk_full
+            else "managed-import-unsettled",
             operation_id=operation_id,
             item_id=item_id,
         )

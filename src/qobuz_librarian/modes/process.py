@@ -28,6 +28,7 @@ from qobuz_librarian.download_result import (
 from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.integrations.beets import (
     _ART_EXTS,
+    MusicDiskFull,
     _beets_snapshot_from_record,
     _beets_snapshot_record,
     _prepare_staging_tags,
@@ -690,9 +691,10 @@ def _lyrics_follow_tracks(backup_path, replacement_path):
 def _keep_own_cover(backup, staged_dirs):
     """Give the download the album's own cover art where both have one.
 
-    A staged image with a different image at the same place in the backup
-    takes the backup's bytes, so the import files the user's cover instead of
-    Qobuz's and the backup's proof finds it unchanged.
+    A staged image with a different image at the same place in the backup,
+    under that name or one that differs from it only in case, takes the
+    backup's bytes, so the import files the user's cover instead of Qobuz's
+    and the backup's proof finds it unchanged.
     """
     kept = 0
     for staged in staged_dirs:
@@ -707,6 +709,10 @@ def _keep_own_cover(backup, staged_dirs):
         for image in images:
             own = Path(backup) / image.relative_to(staged)
             try:
+                if not os.path.lexists(own) and own.parent.is_dir():
+                    named = [path for path in own.parent.iterdir()
+                             if path.name.casefold() == own.name.casefold()]
+                    own = named[0] if len(named) == 1 else own
                 if own.is_symlink() or not own.is_file():
                     continue
                 data = own.read_bytes()
@@ -1490,6 +1496,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     n_ok = n_fail = n_lossy = 0
     failed_tracks, lossy_tracks, broken_tracks = [], [], []
     imported = False
+    disk_full = None
     upgrade_unverified = False
     catalogue_unverified = False
     companions_kept = []
@@ -1762,14 +1769,18 @@ def process_album(album, args, *, allow_force=True, label=None,
             # duplicate rows, so skip the full-library de-dup scan for it.
             # Folding the new entry into the replaced one would change the
             # rows the retire step below proves it is removing.
-            imported = pending and beets_import_paths(
-                consolidate=album_dir is not None and not exact_edition,
-                album_dirs=staged_dirs_for_import,
-                album_dir=album_dir,
-                folder=import_folder,
-                protected_paths=(
-                    [album_dir] if replaced_beets_entries is not None else None),
-            )
+            try:
+                imported = pending and beets_import_paths(
+                    consolidate=album_dir is not None and not exact_edition,
+                    album_dirs=staged_dirs_for_import,
+                    album_dir=album_dir,
+                    folder=import_folder,
+                    protected_paths=(
+                        [album_dir] if replaced_beets_entries is not None
+                        else None),
+                )
+            except MusicDiskFull as exc:
+                imported, disk_full = False, exc
             if (
                 imported
                 and "_staging_run" in download_result
@@ -2131,6 +2142,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                 recovery_unverified=recovery_unverified,
             )
 
+    if disk_full is not None:
+        raise disk_full
     if imported:
         clear_attempts_after_import(download_result)
 

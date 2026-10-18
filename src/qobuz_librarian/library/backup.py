@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import disk_support
 from qobuz_librarian.integrations.rip import flac_audio_ok
 from qobuz_librarian.library import scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
@@ -2788,6 +2789,25 @@ def _remove_earlier_carry_folder(backup_fd, receipt, album, album_receipt):
         return
 
 
+def _case_alias(album, names, name):
+    """The one entry of ``names``, the album's listing, that differs from
+    ``name`` only in case and that the album folder also finds under
+    ``name``: one file on a case-insensitive disk. None otherwise."""
+    folded = name.casefold()
+    found = [other for other in names
+             if other != name and other.casefold() == folded]
+    if len(found) != 1:
+        return None
+    try:
+        given = os.lstat(os.path.join(album, name))
+        listed = os.lstat(os.path.join(album, found[0]))
+    except OSError:
+        return None
+    if (given.st_dev, given.st_ino) != (listed.st_dev, listed.st_ino):
+        return None
+    return found[0]
+
+
 def carry_backup_companions(
         backup,
         replacement_path,
@@ -2853,6 +2873,10 @@ def carry_backup_companions(
         for relative_text in sorted(companions):
             target_text = targets[relative_text]
             existing = replacement_files.get(target_text)
+            if existing is None and (alias := _case_alias(
+                    album, replacement_files, target_text)):
+                targets[relative_text] = alias
+                existing = replacement_files[alias]
             if existing is not None:
                 if existing["sha256"] != backup_files[relative_text]["sha256"]:
                     if skip_conflicts:
@@ -2918,13 +2942,20 @@ def companion_conflicts(backup, replacement_receipt, renamed=None):
     try:
         backup_files = backup.receipt["tree"]["files"]
         album_files = replacement_receipt["tree"]["files"]
+        album = replacement_receipt["origin"]
+
+        def held(relative):
+            name = (renamed or {}).get(relative, relative)
+            if name not in album_files:
+                name = _case_alias(album, album_files, name) or name
+            return album_files.get(name) or {}
+
         return sorted(
             relative for relative, expected in backup_files.items()
             if PurePosixPath(relative).name not in _SIDECARS
             and Path(PurePosixPath(relative).name).suffix.lower()
                 not in cfg.AUDIO_EXTS
-            and (album_files.get((renamed or {}).get(relative, relative))
-                 or {}).get("sha256") != expected["sha256"]
+            and held(relative).get("sha256") != expected["sha256"]
         )
     except (AttributeError, KeyError, TypeError):
         return None
@@ -5649,6 +5680,12 @@ def _carry_lyrics(source: Path, destination: Path, carried: list) -> bool:
 
     if _lyrics_rank(source) <= _lyrics_rank(destination):
         return True
+    refusal = disk_support.refusal("lyric_carry", *(
+        ("lrc_replace",) if os.path.lexists(destination.with_suffix(".lrc"))
+        else ()))
+    if refusal:
+        log.info(fmt(C.YELLOW, f"  ⚠  {refusal}"))
+        return False
     try:
         lyric_fetch.carry_lyrics(
             source, cfg.UPGRADE_BACKUP_DIR, destination, cfg.MUSIC_ROOT,

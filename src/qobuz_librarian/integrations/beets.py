@@ -38,8 +38,9 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 
-from qobuz_librarian import beets_db
+from qobuz_librarian import beets_db, disk_support
 from qobuz_librarian import config as cfg
+from qobuz_librarian.api.auth import detect_disk_full
 from qobuz_librarian.completion import (
     ManagedImportEvidence,
     ManagedMapping,
@@ -57,6 +58,7 @@ from qobuz_librarian.recovery import (
     normalise_recovery_owner,
 )
 from qobuz_librarian.safefile import (
+    delete_verified,
     fsync_dir,
     named_entry_matches,
     named_entry_missing,
@@ -374,12 +376,14 @@ def _under_kept_run(p):
     return staging_mod.is_kept_staging_run_name(first)
 
 
-# Finder, Explorer and Synology write these into folders they browse or index.
+# Finder, Explorer and Synology write these into folders they browse or index,
+# and a stopped disk check can leave its own behind.
 _SYSTEM_FILE_NAMES = frozenset({".DS_Store", "Thumbs.db", "@eaDir"})
 
 
 def is_system_file(name):
-    return name in _SYSTEM_FILE_NAMES or name.startswith("._")
+    return (name in _SYSTEM_FILE_NAMES or name.startswith("._")
+            or disk_support.is_probe_name(name))
 
 
 def staging_leftovers(first_each=False):
@@ -896,6 +900,7 @@ class ManagedBeetsImportResult:
     spawned: bool = False
     reservation: dict | None = None
     replaced_entries: dict | None = None
+    disk_full: bool = False
 
 
 def _valid_ownership_identity(value):
@@ -4706,7 +4711,8 @@ def beets_import_paths(
     consolidate=True, *, album_dirs, source_files_out=None, album_dir=None,
     protected_paths=None, folder=None,
 ):
-    """Run beets on explicit staged albums and return a success bool.
+    """Run beets on explicit staged albums and return a success bool, or
+    raise MusicDiskFull when beets stopped on a full disk.
 
     The fold after the import leaves ``protected_paths`` alone. ``folder`` is
     the library folder the album is filed in whether or not it exists yet.
@@ -4726,13 +4732,18 @@ def beets_import_paths(
     intended_audio = tuple(
         receipt for receipt in prepared_sources if receipt.path.suffix.lower() in cfg.AUDIO_EXTS
     )
-    ok, _ = _beets_direct(
+    started_ns = time.time_ns()
+    ok, kind = _beets_direct(
         override_path,
         cleanup,
         [str(directory) for directory in roots],
         intended_audio=intended_audio,
         beets_runtime=runtime,
     )
+    if not ok:
+        _clean_up_failed_import(roots, (album_dir, folder), started_ns)
+    if kind == "disk_full":
+        raise MusicDiskFull
     if ok and album_dir is not None and not _consolidation_path_is_protected(
             album_dir, protected_paths):
         forget_replaced_beets_entries(folder=album_dir)
@@ -4749,15 +4760,30 @@ class ImportedThenInterrupted(KeyboardInterrupt):
     """Ctrl-C landed after beets had imported the album."""
 
 
+class MusicDiskFull(OSError):
+    """Beets stopped because the disk, or the quota, it files albums on is
+    full. Every download lane stops its run on this."""
+
+    MESSAGE = ("Out of disk space during library import. Free some space in "
+               "the music folder, then retry")
+
+    def __init__(self):
+        super().__init__(errno.ENOSPC, self.MESSAGE)
+
+
 def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
                         places=None, folder=None):
-    """Run beets import scoped to ``album_dirs`` and return a tri-state code:
+    """Run beets import scoped to ``album_dirs`` and return one of:
 
     - ``"ok"``: import succeeded.
     - ``"timeout"``: the idle-timeout guard fired; the executor decides
       whether to retry based on ``cfg.BEETS_MAX_ATTEMPTS``.
+    - ``"disk_full"``: beets stopped on a full disk or quota.
     - ``"error"``: any other failure (config missing, non-zero exit,
       silent skip). The executor won't retry these.
+
+    A failed run's partial copies in the library, and the folders it made
+    that are left empty, are removed.
 
     Consolidation is left to the caller (run once per batch instead of per
     album, since the duplicate-album fold is a library-wide pass), apart
@@ -4784,6 +4810,7 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
     intended_audio = tuple(
         receipt for receipt in prepared_sources if receipt.path.suffix.lower() in cfg.AUDIO_EXTS
     )
+    started_ns = time.time_ns()
     ok, kind = _beets_direct(
         override_path,
         cleanup,
@@ -4792,6 +4819,8 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
         intended_audio=intended_audio,
         beets_runtime=runtime,
     )
+    if not ok:
+        _clean_up_failed_import(album_dirs, (album_dir, folder), started_ns)
     if ok and album_dir is not None:
         try:
             forget_replaced_beets_entries(folder=album_dir)
@@ -4900,8 +4929,9 @@ def beets_import_managed(
             reservation=reservation,
         )
     intended_audio = tuple(intent)
+    started_ns = time.time_ns()
     try:
-        ok, _kind = _beets_direct(
+        ok, kind = _beets_direct(
             override_path,
             cleanup,
             [str(directory) for directory in roots],
@@ -4919,12 +4949,15 @@ def beets_import_managed(
         )
     evidence = capture.get("result") if ok else None
     spawned = capture.get("spawned") is True
+    if not ok and spawned:
+        _clean_up_failed_import(roots, (album_dir,), started_ns)
     if not ok or evidence is None:
         return ManagedBeetsImportResult(
             "uncertain" if spawned else "refused",
             reference,
             spawned=spawned,
             reservation=reservation,
+            disk_full=kind == "disk_full",
         )
     return ManagedBeetsImportResult(
         "ok",
@@ -5429,6 +5462,127 @@ def _count_audio_under(paths, *, include_retry=False):
     return n
 
 
+# Beets copies a track it moves to another disk into '.<name>.<random>.beets'
+# beside where it goes, and leaves that copy behind when the copy fails.
+_BEETS_PARTIAL_RE = re.compile(r"\.(.+)\.[a-z0-9_]{8}\.beets", re.DOTALL)
+
+
+def _changed_subfolders(parent, since_ns):
+    try:
+        with os.scandir(parent) as entries:
+            return [Path(entry.path) for entry in entries
+                    if entry.is_dir(follow_symlinks=False)
+                    and entry.stat(follow_symlinks=False).st_mtime_ns >= since_ns]
+    except OSError:
+        return []
+
+
+def _clean_up_failed_import(roots, folders, since_ns):
+    """Remove what an import that began at ``since_ns`` and failed left in
+    the library: Beets' partial copies of the tracks staged under ``roots``,
+    then the folders it made that hold nothing, in ``folders`` or a library
+    folder changed since then."""
+    # FAT keeps times to 2 seconds, and a share's clock can run a little behind.
+    changed_since = since_ns - 5_000_000_000
+    folders = [Path(folder) for folder in folders if folder is not None]
+    level = [Path(cfg.MUSIC_ROOT), *folders]
+    for _depth in range(3):
+        level = [child for parent in level
+                 for child in _changed_subfolders(parent, changed_since)]
+        folders.extend(level)
+    folders = list(dict.fromkeys(folders))
+    _remove_beets_partials(roots, folders, changed_since)
+    # A new folder's birth time can trail the clock read above by a tick.
+    _remove_new_empty_folders(folders, since_ns - 1_000_000_000)
+
+
+def _remove_beets_partials(roots, folders, since_ns):
+    """Remove the partial copies in ``folders`` that have Beets' temporary
+    name for a track, were written since ``since_ns``, and hold the start of
+    a track still staged under ``roots``."""
+    staged = []
+    for root in roots:
+        try:
+            staged.extend(path for path in Path(root).rglob("*")
+                          if path.suffix.lower() in cfg.AUDIO_EXTS and path.is_file())
+        except OSError:
+            continue
+    if not staged:
+        return
+    for folder in folders:
+        try:
+            with os.scandir(folder) as entries:
+                names = [entry.name for entry in entries]
+        except OSError:
+            continue
+        for name in names:
+            match = _BEETS_PARTIAL_RE.fullmatch(name)
+            if match is None or Path(match.group(1)).suffix.lower() not in cfg.AUDIO_EXTS:
+                continue
+            path = folder / name
+            try:
+                value = os.lstat(path)
+                if not stat.S_ISREG(value.st_mode) or value.st_mtime_ns < since_ns:
+                    continue
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                with open(fd, "rb") as partial:
+                    if _staged_identity(os.fstat(fd)) != _staged_identity(value):
+                        continue
+                    head = partial.read(1 << 16)
+                if not any(_holds_start(source, value.st_size, head) for source in staged):
+                    continue
+            except OSError:
+                continue
+            if delete_verified(path, _staged_identity(value)):
+                log.info(fmt(C.GRAY, f"     Removed the partial copy Beets left at {path}."))
+
+
+def _remove_new_empty_folders(folders, since_ns):
+    """Remove the library folders among ``folders`` made since ``since_ns``
+    that hold nothing at all, deepest first, so a retry files the album
+    under its usual name rather than beside an empty folder of that name.
+    A disk that doesn't record when a folder was made keeps them."""
+    from qobuz_librarian.library.migrate import _directory_identity
+
+    root = Path(cfg.MUSIC_ROOT)
+    for folder in sorted(folders, key=lambda path: len(path.parts), reverse=True):
+        if folder.name.startswith(".") or root not in folder.parents:
+            continue
+        try:
+            parent_fd = os.open(folder.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        except OSError:
+            continue
+        try:
+            folder_fd = os.open(folder.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                                | os.O_CLOEXEC, dir_fd=parent_fd)
+            try:
+                identity = _directory_identity(folder_fd)
+                empty = not os.listdir(folder_fd)
+            finally:
+                os.close(folder_fd)
+            named = os.stat(folder.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (not empty or identity[4] * 1_000_000_000 + identity[5] < since_ns
+                    or (named.st_dev, named.st_ino) != (identity[1], identity[2])):
+                continue
+            os.rmdir(folder.name, dir_fd=parent_fd)
+        except OSError:
+            continue
+        finally:
+            os.close(parent_fd)
+        log.info(fmt(C.GRAY, f"     Removed the empty folder {folder} the import made."))
+
+
+def _holds_start(path, size, head):
+    """Whether the file at ``path`` is at least ``size`` bytes and begins
+    with ``head``."""
+    try:
+        with open(path, "rb") as source:
+            return (os.fstat(source.fileno()).st_size >= size
+                    and source.read(len(head)) == head)
+    except OSError:
+        return False
+
+
 def _prune_empty_staging_dirs(paths):
     """Remove the empty folders an import left under its staged roots, never
     a top-level per-run root or anything in the retry folder."""
@@ -5930,7 +6084,10 @@ def _beets_direct_guarded(
         else:
             _log_beets_output(fmt(C.GRAY, f"    {line}"), part)
     _report_staging_remnants()
-    return False, "error"
+    # Beets ends on a traceback, or logs "Error: ..." or "error writing ...".
+    stopped = "\n".join(line for line, part in zip(lines, parts)
+                        if part == "error" or line.lower().startswith("error"))
+    return False, "disk_full" if detect_disk_full(stopped) else "error"
 
 
 def _report_staging_remnants():

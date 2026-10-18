@@ -1,7 +1,7 @@
 """What a finished or failed download says about itself."""
 import asyncio
 
-from qobuz_librarian import download_result
+from qobuz_librarian import disk_support, download_result
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.api.auth import (
     AuthLost,
@@ -149,6 +149,9 @@ def _download_summary(r):
                 "available on Qobuz.")
     if kind == "incomplete" and r.get("upgrade_put_back"):
         return _UPGRADE_REFUSED
+    if kind == "disk_refused":
+        return " ".join(filter(None, (
+            disk_support.refusal("whole_albums"), "Nothing was downloaded.")))
     if kind in _DOWNLOAD_SUMMARY_LABELS:
         return _DOWNLOAD_SUMMARY_LABELS[kind]
     if not r.get("imported"):

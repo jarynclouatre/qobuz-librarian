@@ -44,7 +44,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
-from qobuz_librarian import config
+from qobuz_librarian import config, disk_support
+from qobuz_librarian.library.scanner import SYSTEM_FOLDER_NAMES
 from qobuz_librarian.library.tags import (
     VA_NORMALIZED,
     beets_sanitize,
@@ -291,22 +292,25 @@ def is_placeable(meta: Optional[dict]) -> bool:
     return bool(meta.get("albumartist") and meta.get("album"))
 
 
-_NAME_MAX = 255  # bytes - the per-component limit on ext4/APFS/NTFS and POSIX
+_NAME_MAX = 200  # bytes - what Beets cuts each name to by default
 
 
 def _truncate_component(name: str, *, ext: str = "", limit: int = _NAME_MAX) -> str:
-    """Cap a single path component at the filesystem's per-name BYTE limit (beets
-    caps at the same 255 by default). A tag long enough to exceed NAME_MAX would
-    otherwise raise ENAMETOOLONG from the first Path.exists()/copy and abort the
-    whole migration before any plan is built. Truncates on a UTF-8 char boundary
-    and reserves room for the extension."""
+    """Cap a single path component at the bytes Beets allows by default, so
+    a later import keeps the folder Migrate made. A tag long enough to exceed
+    the filesystem's own limit would otherwise raise ENAMETOOLONG from the
+    first Path.exists()/copy and abort the whole migration before any plan is
+    built. Truncates on a UTF-8 char boundary and reserves room for the
+    extension."""
     ext_b = ext.encode("utf-8", "surrogateescape")
     budget = max(1, limit - len(ext_b))
     b = name.encode("utf-8", "surrogateescape")
     if len(b) <= budget:
         return name + ext
-    # Drop a partial trailing multi-byte char rather than splitting it.
-    return b[:budget].decode("utf-8", "ignore") + ext
+    # Drop a partial trailing multi-byte char rather than splitting it, and
+    # clean the cut name again as Beets does, so a space or dot it ends on
+    # goes the same way.
+    return beets_sanitize(b[:budget].decode("utf-8", "ignore")) + ext
 
 
 def album_components(meta: dict) -> tuple:
@@ -1826,6 +1830,30 @@ def _is_within(child: Path, parent: Path) -> bool:
         return False
 
 
+def _sample_file(root):
+    """The stat of one file a few folders into ``root``, found without
+    walking the tree, or None."""
+    folder = root
+    for _ in range(4):
+        try:
+            with os.scandir(folder) as listing:
+                entries = sorted(listing, key=lambda entry: entry.name)
+        except OSError:
+            return None
+        for entry in entries:
+            if entry.is_file(follow_symlinks=False):
+                try:
+                    return entry.stat(follow_symlinks=False)
+                except OSError:
+                    return None
+        folders = [entry for entry in entries
+                   if entry.is_dir(follow_symlinks=False)]
+        if not folders:
+            return None
+        folder = folders[0].path
+    return None
+
+
 def validate_paths(src: Path, dest: Path, *,
                    in_place: bool = False) -> Optional[str]:
     """Reason the source/destination pair is unusable, or None if it's fine.
@@ -1846,6 +1874,11 @@ def validate_paths(src: Path, dest: Path, *,
                 "library into itself. Choose a destination outside the source.")
     if _is_within(src, dest):
         return "Source is inside the destination. Choose separate folders."
+    dest_anchor = dest if dest.exists() else existing_ancestor(dest)
+    if dest_anchor is not None and (
+            refusal := disk_support.destination_refusal(
+                dest_anchor, _sample_file(src))):
+        return refusal
     try:
         source_receipt = _capture_root_receipt(src)
         destination_receipt = _capture_root_receipt(dest, allow_missing=True)
@@ -1854,7 +1887,6 @@ def validate_paths(src: Path, dest: Path, *,
         return f"Source/destination safety could not be proved: {exc}"
     # The copy/move writes into the destination tree (created if absent), so a
     # read-only dest must fail here, not partway through with a raw OSError.
-    dest_anchor = dest if dest.exists() else existing_ancestor(dest)
     if dest_anchor is None or not os.access(str(dest_anchor), os.W_OK):
         return f"Destination isn't writable: {dest_anchor or dest}"
     return None
@@ -2030,6 +2062,8 @@ def _enumerate_source_descriptors(binding, *, cancel_check=None,
             if cancel_check is not None and cancel_check():
                 return
             name = os.fsdecode(encoded_name)
+            if name in SYSTEM_FOLDER_NAMES:
+                continue
             if not _safe_component(name):
                 raise OSError("migration source contains an unsafe filename")
             value = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)

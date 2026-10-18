@@ -2,9 +2,10 @@
 
 Things worth knowing if you edit this:
 
-- `list_library_artists` and `list_artist_album_dirs` skip dot-folders and
-  folders with no audio in their tree. Without this, hidden dirs like
-  `.Trash` and leftover empty folders get treated as content and break
+- `list_library_artists` and `list_artist_album_dirs` skip dot-folders, the
+  recycle bins and system folders NAS boxes and Windows keep, and folders
+  with no audio in their tree. Without this, hidden dirs like `.Trash`,
+  `#recycle` and leftover empty folders get treated as content and break
   later matching.
 - `list_library_artists` also excludes `STAGING_DIR` so in-progress
   downloads never get scanned as if they were library content.
@@ -157,6 +158,33 @@ def read_audio_meta(path: Path):
 
 
 # ── Album directory scan ──────────────────────────────────────────────────────
+# Paths already named in a "not valid UTF-8" notice in this run: a terminal
+# run, or a web job (see forget_named_paths).
+_UNDECODABLE_NAMED: set = set()
+
+
+def forget_named_paths() -> None:
+    """Start a run that names each non-UTF-8 path again, once."""
+    _UNDECODABLE_NAMED.clear()
+
+
+def _undecodable(path) -> bool:
+    """True, naming the path once per scan, when a name in it is not UTF-8:
+    one written in an old codepage, or read through a share mounted with
+    another charset. Such a path can't be stored in the tag cache or shown
+    on a page, so it is left out."""
+    try:
+        os.fspath(path).encode()
+    except UnicodeEncodeError:
+        shown = os.fsencode(path).decode(errors="backslashreplace")
+        if shown not in _UNDECODABLE_NAMED:
+            _UNDECODABLE_NAMED.add(shown)
+            log.info(f"  ⚠  Skipped {shown}: its name is not valid UTF-8. "
+                     "Rename it to include it.")
+        return True
+    return False
+
+
 def _is_type(path, predicate):
     try:
         return predicate(path.stat().st_mode)
@@ -196,6 +224,7 @@ def read_album_dir(album_dir: Path, walk_errors=None):
                 # A dot name is hidden: a Downsample temp or a macOS "._"
                 # resource file, never a track.
                 if (f.suffix.lower() in _exts and not f.name.startswith(".")
+                        and not _undecodable(f.parent) and not _undecodable(f)
                         and _is_type(f, stat.S_ISREG)):
                     audio_files.append(f)
             except OSError as e:
@@ -323,15 +352,23 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
     return found
 
 
+# Folders a filesystem, NAS or Windows keeps in a shared folder: recycle bins,
+# snapshots and indexes. Exact names, since real artists start with '#' or '@'.
+SYSTEM_FOLDER_NAMES = frozenset({
+    "lost+found", "@eaDir", "#recycle", "#snapshot", "@Recycle",
+    "@Recently-Snapshot", "$RECYCLE.BIN", "System Volume Information",
+})
+
+
 def is_library_system_folder(name: str) -> bool:
-    """A dot-folder, or the lost+found a filesystem keeps at its root."""
-    return name.startswith(".") or name == "lost+found"
+    """A dot-folder, or a folder in SYSTEM_FOLDER_NAMES."""
+    return name.startswith(".") or name in SYSTEM_FOLDER_NAMES
 
 
 def list_library_artists(walk_errors=None, *, on_artist_error=None):
     """List artist directories under MUSIC_ROOT.
 
-    Skips dot-folders, lost+found and the staging
+    Skips system folders (is_library_system_folder) and the staging
     directory. Sorted by name (case-insensitive). Empty artist directories
     (no audio files anywhere in the tree) are also skipped - they cost an
     API round-trip during scans for zero gain and clutter the walk output.
@@ -366,9 +403,11 @@ def list_library_artists(walk_errors=None, *, on_artist_error=None):
                 continue
             if not stat.S_ISDIR(st.st_mode):
                 continue
-            if is_library_system_folder(d.name):  # .Trash, lost+found, etc.
+            if is_library_system_folder(d.name):  # .Trash, #recycle, etc.
                 continue
             if staging is not None and os.path.samestat(st, staging):
+                continue
+            if _undecodable(d):
                 continue
             has_audio = _has_audio_anywhere(d, walk_errors=walk_errors)
             if has_audio is None:
@@ -402,8 +441,8 @@ def list_library_artists(walk_errors=None, *, on_artist_error=None):
 def list_artist_album_dirs(artist_dir: Path, walk_errors=None):
     """Album subdirectories under an artist dir, sorted by name.
 
-    Skips hidden dot-folders (.Trash, .DS_Store-style, etc.) and folders with
-    no audio anywhere in their tree. An empty album folder owns nothing to
+    Skips system folders (is_library_system_folder) and folders with no
+    audio anywhere in their tree. An empty album folder owns nothing to
     match, upgrade or repair, and resolving one by its name alone only yields a
     confusing "0 present" result; this mirrors list_library_artists, which
     drops empty artist dirs for the same reason. A short notice names anything
@@ -425,9 +464,11 @@ def list_artist_album_dirs(artist_dir: Path, walk_errors=None):
         for d in entries:
             if not _is_type(d, stat.S_ISDIR):
                 continue
-            if d.name.startswith("."):          # skip hidden dirs (.Trash, .DS_Store/, etc.)
+            if is_library_system_folder(d.name):
                 continue
             if d.name.endswith(".restore_trash"):  # leftover from an interrupted restore
+                continue
+            if _undecodable(d):
                 continue
             has_audio = _has_audio_anywhere(d, walk_errors=walk_errors)
             if has_audio is None:
@@ -473,7 +514,7 @@ def _list_artist_subdirs_cached(artist_dir: Path):
         if cached is not None and cached[0] == stamp:
             return cached[1]
         subdirs = sorted((d for d in artist_dir.iterdir()
-                          if _is_type(d, stat.S_ISDIR)),
+                          if _is_type(d, stat.S_ISDIR) and not _undecodable(d)),
                          key=lambda p: p.name.lower())
     except OSError as e:
         vlog(f"  iterdir failed for {artist_dir}: {e}")

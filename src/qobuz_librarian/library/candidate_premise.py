@@ -17,6 +17,7 @@ import stat
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import disk_support
 from qobuz_librarian.library.backup import (
     album_tree_identity,
     backup_payload,
@@ -50,7 +51,8 @@ class CandidateStale(Exception):
 class StaleCandidateIds(set):
     def __init__(self):
         super().__init__()
-        self.counts = {"changed": 0, "unreadable": 0, "older": 0, "link": 0}
+        self.counts = {"changed": 0, "unreadable": 0, "older": 0, "link": 0,
+                       "unsupported": 0}
 
 
 def _canonical_receipt(value, *, origin: str, version: int = PREMISE_VERSION):
@@ -372,10 +374,19 @@ def canonical(candidate: dict) -> dict | None:
     return premise
 
 
+def _refuse_unsupported(feature):
+    """Refuse what the music folder's disk could not seal at all."""
+    refusal = disk_support.refusal(feature)
+    if refusal:
+        raise CandidateStale(refusal, cause="unsupported")
+
+
 def validate_premise(value) -> dict:
     """Check a queued or direct action against the current files."""
     premise = canonical_premise(value)
     if premise is None or premise["version"] != PREMISE_VERSION:
+        if premise is None:
+            _refuse_unsupported("album_changes")
         raise CandidateStale(
             "This queued action is too old to verify against the current "
             "files. Refresh or rescan before changing music files.",
@@ -436,6 +447,8 @@ def _refuse_unsealed(candidate, premise, links=None):
             "then refresh; nothing was changed.",
             cause="link",
         )
+    if premise is None:
+        _refuse_unsupported("picks")
     raise CandidateStale(
         "This saved review is too old to check against the current files. "
         "Refresh it before changing music files.",

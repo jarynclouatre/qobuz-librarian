@@ -33,8 +33,8 @@ from qobuz_librarian.integrations.lyric_fetch import (
 from qobuz_librarian.integrations.rip import flac_audio_offset
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import flac_cache, scanner
+from qobuz_librarian.safefile import copy_owner, fsync_dir
 from qobuz_librarian.safefile import digest_fd as _sha256_fd
-from qobuz_librarian.safefile import fsync_dir
 from qobuz_librarian.ui_cli.errors import plural
 
 
@@ -667,9 +667,11 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             return (rel, sr, rate, None,
                     "resampled output not smaller than source; "
                     "left the original untouched")
-        # The exclusive temp starts at 0o600; carry the source's mode across the
-        # swap so a downsample doesn't quietly tighten a 0o644 library file to
-        # owner-only (an annoyance on shared/NAS libraries).
+        # The exclusive temp starts at 0o600 in the app's group; carry the
+        # source's group and mode across the swap so a downsample doesn't
+        # quietly tighten a 0o644 library file to owner-only, or take it from
+        # the group a media server reads it through.
+        copy_owner(st, temp_fd)
         try:
             os.fchmod(temp_fd, src_mode)
         except OSError:

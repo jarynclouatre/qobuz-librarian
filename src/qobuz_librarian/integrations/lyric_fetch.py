@@ -30,7 +30,6 @@ import queue
 import random
 import re
 import secrets
-import shutil
 import stat
 import threading
 import time
@@ -44,9 +43,11 @@ from typing import Callable, Iterable, Optional
 import requests
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import state_file
+from qobuz_librarian import disk_support, state_file
 from qobuz_librarian.api.client import ua_string
 from qobuz_librarian.safefile import (
+    copy_metadata,
+    copy_owner,
     delete_verified,
     fsync_dir,
     identity_record,
@@ -99,6 +100,7 @@ _OUTCOME_LABELS = {
     "already-synced": "already had synced lyrics",
     "already-plain": "already had lyrics",
     "kept-existing-plain": "kept existing lyrics",
+    "kept-plain-lrc": "kept its plain .lrc; this disk can't swap it for synced lyrics",
     "not-found": "no lyrics found",
     "providers-unavailable": "lyric providers unavailable",
     "write-error": "couldn't write lyrics",
@@ -722,9 +724,10 @@ def _named_identity(parent_fd: int, name: str):
 
 
 def _make_temp(parent_fd: int, target_name: str):
+    # Fixed length: the track's own name may already be at the disk's limit.
     flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
     for _ in range(16):
-        name = f"{target_name}.{secrets.token_hex(8)}.tmp"
+        name = f".ql-lyrics-{secrets.token_hex(8)}.tmp"
         try:
             return name, os.open(name, flags, 0o600, dir_fd=parent_fd)
         except FileExistsError:
@@ -912,8 +915,7 @@ def save_flac_tags(
         if isinstance(directory_mutation_out, dict):
             directory_mutation_out["mutated"] = True
         _copy_file_fd(source_fd, temp_fd)
-        shutil.copystat(
-            f"/proc/self/fd/{source_fd}", f"/proc/self/fd/{temp_fd}")
+        copy_metadata(source_fd, temp_fd)
         f.save(f"/proc/self/fd/{owned_parent_fd}/{temp_name}")
         _fsync_temp(temp_fd, path.name)
 
@@ -956,11 +958,13 @@ def write_lyrics(f, content: str, *, path=None, **save_kwargs) -> None:
         f, Path(f.filename) if path is None else Path(path), **save_kwargs)
 
 
-def _new_file_mode(parent_fd: int, track_name: str) -> int:
-    """Permissions for a new sidecar: the track's, else what the umask allows."""
+def _new_file_mode(parent_fd: int, track_name: str, temp_fd: int) -> int:
+    """Permissions for a new sidecar: the track's, else what the umask allows.
+    A sidecar of a track also takes its owner and group."""
     try:
         track = os.stat(track_name, dir_fd=parent_fd, follow_symlinks=False)
         if stat.S_ISREG(track.st_mode):
+            copy_owner(track, temp_fd)
             return stat.S_IMODE(track.st_mode) & 0o666
     except OSError:
         pass
@@ -1041,11 +1045,10 @@ def write_sidecar(
         temp_name, temp_fd = _make_temp(owned_parent_fd, target.name)
         if isinstance(directory_mutation_out, dict):
             directory_mutation_out["mutated"] = True
-        os.fchmod(temp_fd, (
-            stat.S_IMODE(os.fstat(existing_fd).st_mode)
-            if existing_fd is not None
-            else _new_file_mode(owned_parent_fd, path.name)
-        ))
+        if existing_fd is not None:
+            copy_metadata(existing_fd, temp_fd)
+        else:
+            os.fchmod(temp_fd, _new_file_mode(owned_parent_fd, path.name, temp_fd))
         write_all(temp_fd, content.encode("utf-8"))
         _fsync_temp(temp_fd, target.name)
 
@@ -1412,13 +1415,15 @@ class _Stopped(Exception):
 
 
 class _Pass:
-    """What one lyrics pass's lookups share: its stop request and how long
-    it waits for a provider that asked to be asked later."""
+    """What one lyrics pass's lookups share: its stop request, how long it
+    waits for a provider that asked to be asked later, and whether its disk
+    can swap a plain .lrc for a synced one."""
 
     def __init__(self, should_stop: Optional[Callable[[], bool]] = None,
-                 patience: float = BUSY_PATIENCE):
+                 patience: float = BUSY_PATIENCE, replaces_lrc: bool = True):
         self.should_stop = should_stop
         self.patience = patience
+        self.replaces_lrc = replaces_lrc
         self._busy_since: dict[str, float] = {}
         self._given_up: set[str] = set()
         self._lock = threading.Lock()
@@ -2044,6 +2049,12 @@ def _process_bound_file(
             commit(state, key, st)
             return f"already-{kind}"
         action = f"copied-{kind}"
+    elif (kinds["sidecar"] == "plain" and "sidecar" in required
+            and run is not None and not run.replaces_lrc):
+        st.status = "plain"
+        st.source = "kept-existing"
+        commit(state, key, st)
+        return "kept-plain-lrc"
     else:
         query = build_query(f)
         if not query:
@@ -2235,7 +2246,9 @@ def fetch_for_paths(
         log.warning("No known lyric provider is set in LYRICS_PROVIDERS; "
                     "no lyrics were fetched.")
 
-    run = _Pass(should_stop, busy_patience)
+    found = disk_support.support(owned_root)
+    run = _Pass(should_stop, busy_patience,
+                replaces_lrc=found is None or found.exchange)
 
     def run_one(fp: Path) -> Optional[str]:
         try:

@@ -39,13 +39,28 @@ def _legal_folder(resolved, folder):
     ]
     if resolved["asciify_paths"].get(bool):
         folder = util.asciify_path(folder)
-    folder = util.sanitize_path(folder, replacements)
     length = resolved["max_filename_length"].get(int)
-    if length:
-        folder = os.path.join(*(
-            util.truncate_str(part, length) for part in util.components(folder)
+    if not length:
+        # Beets' own default: the disk's limit, at most 200 bytes.
+        length = util.MAX_FILENAME_LENGTH
+        try:
+            length = min(length, os.statvfs(
+                resolved["directory"].as_filename()).f_namemax)
+        except OSError:
+            pass
+
+    def legal(path, rules):
+        cleaned = util.sanitize_path(path, rules)
+        cut = os.path.join(*(
+            util.truncate_str(part, length) for part in util.components(cleaned)
         ))
-    return folder
+        return cut, cut != cleaned
+
+    # As Beets does: clean again after the cut, and with its own rules
+    # if that cut again.
+    first = legal(folder, replacements)[0]
+    second, cut = legal(first, replacements)
+    return legal(first, None)[0] if cut else second
 
 
 def _inspect_config(folder=None):

@@ -12,7 +12,7 @@ import urllib.parse
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from qobuz_librarian import cli, state_file
+from qobuz_librarian import cli, disk_support, state_file
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api import search as qobuz_search
@@ -1229,8 +1229,11 @@ async def queue_download(request: Request, album_id: str = Form(""),
     loop = asyncio.get_running_loop()
     root_state, recorded_albums = await loop.run_in_executor(
         None, collection_snapshot.music_root_write_state)
-    if root_state != "ready":
-        msg = storage._music_write_target_message(root_state, recorded_albums)
+    disk_refusal = await loop.run_in_executor(
+        None, disk_support.refusal, "downloads")
+    if root_state != "ready" or disk_refusal:
+        msg = (storage._music_write_target_message(root_state, recorded_albums)
+               if root_state != "ready" else disk_refusal)
         if rendering._is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")
         return RedirectResponse(

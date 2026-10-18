@@ -32,6 +32,7 @@ from qobuz_librarian.api.auth import QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album, search_albums
 from qobuz_librarian.integrations import rip
 from qobuz_librarian.library.scanner import (
+    SYSTEM_FOLDER_NAMES,
     _list_artist_subdirs_cached,
     iter_tree_no_symlinks,
     read_album_dir,
@@ -118,8 +119,9 @@ _root_lookups: tuple = (None, {})
 
 
 def _root_dirs_matching(key, match):
-    """MUSIC_ROOT children for which ``match(name)`` holds, remembered under
-    ``key`` for as long as the cached listing stands."""
+    """MUSIC_ROOT children other than NAS and Windows system folders for
+    which ``match(name)`` holds, remembered under ``key`` for as long as the
+    cached listing stands."""
     global _root_lookups
     root_dirs = _list_artist_subdirs_cached(config.MUSIC_ROOT)
     listing, found = _root_lookups
@@ -128,8 +130,28 @@ def _root_dirs_matching(key, match):
         _root_lookups = (root_dirs, found)
     dirs = found.get(key)
     if dirs is None:
-        dirs = found[key] = [d for d in root_dirs if match(d.name)]
+        dirs = found[key] = [d for d in root_dirs
+                             if d.name not in SYSTEM_FOLDER_NAMES
+                             and match(d.name)]
     return list(dirs)
+
+
+def _listed_root_dir(name):
+    """The MUSIC_ROOT folder ``name`` opens, under the name the folder lists
+    it by, or None. A case-insensitive disk opens a folder under any case,
+    and a path built from another case would be a second name for it."""
+    folded = name.casefold()
+    try:
+        listed = _root_dirs_matching(
+            ("case", folded), lambda entry: entry.casefold() == folded)
+        exact = next((d for d in listed if d.name == name), None)
+        if exact is not None or not listed:
+            return exact
+        wanted = (config.MUSIC_ROOT / name).stat()
+        return next((d for d in listed
+                     if os.path.samestat(d.stat(), wanted)), None)
+    except OSError:
+        return None
 
 
 def _find_multi_artist_dirs(qartist):
@@ -222,7 +244,7 @@ def predicted_album_paths(qobuz_album, *, exact_edition=False):
     if not artist or not title:
         return candidates
 
-    artist_dirs = [config.MUSIC_ROOT / artist]
+    artist_dirs = [_listed_root_dir(artist) or config.MUSIC_ROOT / artist]
     artist_dirs.extend(_find_multi_artist_dirs(artist_raw))
     # Qobuz returns "Jay Z and Kanye West" on some editions while the folder
     # is "Jay Z, Kanye West"; searching multi-artist dirs under the primary
@@ -259,15 +281,14 @@ def predicted_album_paths(qobuz_album, *, exact_edition=False):
 
     if artist_raw.lower().strip() in (
             "various artists", "various", "va", "compilations", "soundtrack"):
+        various = (_listed_root_dir("Various Artists")
+                   or config.MUSIC_ROOT / "Various Artists")
         for bt in bare_titles:
             for year in years:
-                candidates.append(
-                    config.MUSIC_ROOT / "Various Artists" / f"{bt} ({year})")
-                candidates.append(
-                    config.MUSIC_ROOT / "Various Artists" / f"[{year}] {bt}")
-                candidates.append(
-                    config.MUSIC_ROOT / "Various Artists" / f"{year} - {bt}")
-            candidates.append(config.MUSIC_ROOT / "Various Artists" / bt)
+                candidates.append(various / f"{bt} ({year})")
+                candidates.append(various / f"[{year}] {bt}")
+                candidates.append(various / f"{year} - {bt}")
+            candidates.append(various / bt)
 
     return candidates
 
@@ -346,10 +367,10 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
         search_dirs.append(p)
 
     for av in artist_variants:
-        ad = config.MUSIC_ROOT / beets_sanitize(av)
-        # is_dir, not exists: a stray regular file with an artist's name would
+        # Folders only: a stray regular file with an artist's name would
         # blow up the subdir listing below with NotADirectoryError.
-        if ad.is_dir():
+        ad = _listed_root_dir(beets_sanitize(av))
+        if ad is not None:
             _push(ad)
         for ma in _find_multi_artist_dirs(av):
             _push(ma)
@@ -462,15 +483,16 @@ def _artist_dirs_for_track_signatures(signatures):
         dirs.append(path)
 
     for artist in artist_names:
-        direct = config.MUSIC_ROOT / beets_sanitize(artist)
-        if direct.exists():
+        direct = _listed_root_dir(beets_sanitize(artist))
+        if direct is not None:
             _push(direct)
 
     wanted_norms = {normalize(a) for a in artist_names if normalize(a)}
     if wanted_norms and config.MUSIC_ROOT.exists():
-        for d in _list_artist_subdirs_cached(config.MUSIC_ROOT):
-            if normalize(d.name) in wanted_norms:
-                _push(d)
+        for d in _root_dirs_matching(
+                ("folded", frozenset(wanted_norms)),
+                lambda name: normalize(name) in wanted_norms):
+            _push(d)
     return dirs
 
 

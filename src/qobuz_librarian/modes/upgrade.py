@@ -292,7 +292,7 @@ def run_upgrade_walk_mode(args, token):
                     premise = candidate_premise.validate(c)
                 except candidate_premise.CandidateStale as exc:
                     message = (
-                        str(exc) if exc.cause == "link" else
+                        str(exc) if exc.cause in ("link", "unsupported") else
                         "The local album changed after it was checked. "
                         "It was left unchanged."
                     )

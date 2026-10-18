@@ -22,6 +22,7 @@ from qobuz_librarian.api.auth import (
     QobuzEntitlementError,
     QobuzUnavailable,
 )
+from qobuz_librarian.integrations.beets import MusicDiskFull
 from qobuz_librarian.integrations.lyrics import _prune_lyric_state_orphans
 from qobuz_librarian.integrations.rip import HAVE_MUTAGEN
 from qobuz_librarian.library import missing_types
@@ -405,6 +406,14 @@ def require_music_root():
         fix = ("   Set MUSIC_ROOT to the folder that holds your artist "
                "folders, then run this again.\n")
     die(fmt(C.RED, problem + fix), EXIT_CONFIG)
+
+
+def require_disk_support(*features):
+    from qobuz_librarian import disk_support
+
+    refusal = disk_support.refusal(*features)
+    if refusal:
+        die(fmt(C.RED, block(f"\n✗  {refusal}\n")), EXIT_CONFIG)
 
 
 class _ExitOneArgParser(argparse.ArgumentParser):
@@ -962,6 +971,8 @@ def main():
         check_media_tools()
         if not args.no_import and not args.dry_run:
             check_beets()
+        if not args.dry_run:
+            require_disk_support("downloads")
         from qobuz_librarian.api.auth import (
             check_env_credentials,
             sweep_streamrip_run_copies,
@@ -1166,6 +1177,8 @@ def main():
     # providers; no streamrip, ffmpeg or Qobuz token involved.
     if args.lyrics_walk:
         require_music_root()
+        if not args.dry_run:
+            require_disk_support("lyrics")
         from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
         raise SystemExit(run_library_lyrics_mode(args))
 
@@ -1174,6 +1187,8 @@ def main():
     if args.downsample_walk:
         check_media_tools()
         require_music_root()
+        if not args.dry_run:
+            require_disk_support("downsample")
         from qobuz_librarian.modes.downsample import run_downsample_walk_mode
         raise SystemExit(run_downsample_walk_mode(args))
 
@@ -1194,6 +1209,8 @@ def main():
         raise SystemExit(run_album_walk_mode(args, catalogue_token()))
 
     if args.repair:
+        if not args.dry_run:
+            require_disk_support("repair")
         from qobuz_librarian.modes.repair import run_album_repair_mode
         raise SystemExit(run_album_repair_mode(args, catalogue_token()))
 
@@ -1207,6 +1224,8 @@ def main():
         # AUTO_UPGRADE_ENABLED must stay False as the global default; it
         # controls passive upgrades during ordinary gap-fill walks.
         args.auto_upgrade = True
+        if not args.dry_run:
+            require_disk_support("upgrade")
         from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
         raise SystemExit(run_upgrade_walk_mode(args, catalogue_token()))
 
@@ -1253,6 +1272,8 @@ def main():
             from qobuz_librarian.modes.walk import run_album_walk_mode
             run_album_walk_mode(args, catalogue_token())
         elif mode == Mode.ALBUM_REPAIR:
+            if not args.dry_run:
+                require_disk_support("repair")
             from qobuz_librarian.modes.repair import run_album_repair_mode
             run_album_repair_mode(args, catalogue_token(), loop=True)
         elif mode == Mode.UPGRADE:
@@ -1260,6 +1281,8 @@ def main():
             # upgrade-replace path for its duration regardless of the
             # AUTO_UPGRADE_ENABLED default (which only governs passive
             # upgrades during ordinary gap-fill walks).
+            if not args.dry_run:
+                require_disk_support("upgrade")
             from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
             saved = getattr(args, "auto_upgrade", cfg.AUTO_UPGRADE_ENABLED)
             args.auto_upgrade = True
@@ -1273,10 +1296,14 @@ def main():
         elif mode == Mode.DOWNSAMPLE:
             check_media_tools()
             require_music_root()
+            if not args.dry_run:
+                require_disk_support("downsample")
             from qobuz_librarian.modes.downsample import run_downsample_walk_mode
             run_downsample_walk_mode(args)
         elif mode == Mode.LYRICS:
             require_music_root()
+            if not args.dry_run:
+                require_disk_support("lyrics")
             from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
             run_library_lyrics_mode(args)
         elif mode == Mode.SETTINGS:
@@ -1413,6 +1440,8 @@ def _entry():
             die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
         except QobuzUnavailable as e:
             die(fmt(C.YELLOW, f"\n⚠  {e}\n"), EXIT_TRANSIENT)
+        except MusicDiskFull as e:
+            die(fmt(C.RED, f"\n✗  {e.strerror}.\n"), EXIT_GENERAL)
         except DownloaderNotReady:
             die(fmt(C.RED,
                 "\n✗  Your Qobuz token works, but downloads also need your "

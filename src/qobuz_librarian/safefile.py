@@ -311,10 +311,9 @@ def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None,
         separators=separators).iterencode(data), **options)
 
 
-def copy_metadata(source_fd, destination_fd) -> None:
-    """Give the copy its source's mode and times, and its owner, group and
-    xattrs, ACLs included, where the app may set them."""
-    value = os.fstat(source_fd)
+def copy_owner(value, destination_fd) -> None:
+    """Give the file the owner and group of the stat result `value`, or the
+    group alone where the app may set only that."""
     try:
         os.fchown(destination_fd, value.st_uid, value.st_gid)
     except OSError:
@@ -324,6 +323,13 @@ def copy_metadata(source_fd, destination_fd) -> None:
             os.fchown(destination_fd, -1, value.st_gid)
         except OSError:
             pass
+
+
+def copy_metadata(source_fd, destination_fd) -> None:
+    """Give the copy its source's mode and times, and its owner, group and
+    xattrs, ACLs included, where the app may set them."""
+    value = os.fstat(source_fd)
+    copy_owner(value, destination_fd)
     os.fchmod(destination_fd, stat.S_IMODE(value.st_mode))
     try:
         names = os.listxattr(source_fd)

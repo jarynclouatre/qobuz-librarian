@@ -13,11 +13,12 @@ from pathlib import Path
 from fastapi import Request
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import disk_support
 from qobuz_librarian import download as download_mod
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
-from qobuz_librarian.library import collection_snapshot
+from qobuz_librarian.library import collection_snapshot, scanner
 from qobuz_librarian.queue import startup_recovery
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.ui_cli.errors import plural
@@ -374,7 +375,8 @@ def _diagnostics():
 
     music_state, recorded_albums = collection_snapshot.music_root_write_state()
     if music_state == "ready":
-        _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True)
+        _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True,
+                   skip_names=scanner.SYSTEM_FOLDER_NAMES)
     else:
         checks.append({
             "label": "Music library",
@@ -449,6 +451,9 @@ def _diagnostics():
     _dir_check("Upgrade backups", cfg.UPGRADE_BACKUP_DIR, want_writable=True,
                show_size=True, unit=("kept backup", "kept backups"),
                dirs_only=True, note=note, skip_names=skip)
+    for label, ok, detail in disk_support.report(
+            lambda path: storage._resolve_host_path(str(path))[0]):
+        checks.append({"label": label, "ok": ok, "detail": detail})
 
     beets_db = Path(cfg.BEETS_DB_PATH)
     beets_db_display, _is_host = storage._resolve_host_path(str(beets_db))
