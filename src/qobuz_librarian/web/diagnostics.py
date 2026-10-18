@@ -898,17 +898,31 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 f'{album or dest} back? This undoes the downsample." '
                 f'data-confirm-action="Restore">Restore</button>'
                 f'</form>')
+            what = "hi-res originals"
             delete_note = (
-                " The album keeps its downsampled files, and the downsample "
-                "can no longer be undone.")
+                " They are the only copies left at the original quality. The "
+                "album keeps its downsampled files, and the downsample can no "
+                "longer be undone.")
+        elif backup_mod.downsample_left_untouched(
+                backup_mod.load_backup_result(path)):
+            detail = (
+                "Copies of this album's files from a Downsample that stopped "
+                "before it changed any of them. The album still holds every "
+                "original, so these copies are not needed.")
+            restore_form = ""
+            what = "unneeded copies"
+            delete_note = ""
         else:
             detail = (
                 "Copies of the files this album had before it was "
-                "downsampled. The album no longer holds the files Downsample "
-                "wrote, or the app can't confirm it does, so they can't be "
-                "put back.")
+                "downsampled. The app can't confirm which files Downsample "
+                "rewrote, or the album changed since, so they can't be put "
+                "back.")
             restore_form = ""
-            delete_note = ""
+            what = "hi-res originals"
+            delete_note = (
+                " Any track Downsample rewrote has no other copy at the "
+                "original quality.")
         gone = backup_mod.album_folder_gone(path)
         if gone:
             detail = (
@@ -929,9 +943,9 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 f'<input type="hidden" name="_csrf_token" value="{tok}">'
                 f'<input type="hidden" name="backup" value="{name}">'
                 f'<button type="submit" class="ql-btn ql-btn-sm" '
-                f'data-confirm="Delete the hi-res originals of '
-                f'{album or dest}? They are the only copies left at the original '
-                f'quality.{delete_note}" '
+                f'data-confirm="Delete the {what} of {album or dest}? They are '
+                f'deleted only after the app checks that the album still holds '
+                f'each of these tracks.{delete_note}" '
                 f'data-confirm-action="Delete originals" data-irreversible>'
                 f'Delete originals</button>'
                 f'</form>')

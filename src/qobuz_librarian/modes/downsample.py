@@ -38,8 +38,10 @@ from qobuz_librarian.web import settings_store
 
 def _downsample_album(album_dir, keep_originals):
     """Rewrite one album; a Ctrl-C lets it finish the tracks in flight and
-    report them before the walk stops. A second one stops sooner, and any
-    after it wait until the tracks already swapped are recorded."""
+    report them before the walk stops. A second one also cuts short a safety
+    copy still being made; the tracks in flight always finish and are
+    recorded. The encoders run in their own session, so the terminal's
+    Ctrl-C reaches only the app."""
     stop = threading.Event()
     presses = []
 

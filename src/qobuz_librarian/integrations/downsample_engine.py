@@ -21,7 +21,7 @@ import secrets
 import shutil
 import stat
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
@@ -103,6 +103,7 @@ def _soxr_available():
              "-af", _SOXR_FILTER, "-ar", "48000", "-t", "0.05", "-f", "null", "-"],
             capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
             env=cfg.child_env(),
+            start_new_session=True,
         )
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -162,7 +163,7 @@ def read_local_bit_depth(path: Path, *, pass_fds=()) -> int:
         completed = subprocess.run(
             ["metaflac", "--show-bps", str(path)],
             capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds), env=cfg.child_env())
+            pass_fds=tuple(pass_fds), env=cfg.child_env(), start_new_session=True)
         if completed.returncode != 0:
             return 0
         out = completed.stdout.strip()
@@ -211,7 +212,7 @@ def read_sample_rate(path: Path, *, pass_fds=()) -> int:
         completed = subprocess.run(
             ["metaflac", "--show-sample-rate", str(path)],
             capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds), env=cfg.child_env())
+            pass_fds=tuple(pass_fds), env=cfg.child_env(), start_new_session=True)
         if completed.returncode != 0:
             return 0
         out = completed.stdout.strip()
@@ -256,7 +257,7 @@ def read_total_samples(path: Path, *, pass_fds=()) -> int:
         completed = subprocess.run(
             ["metaflac", "--show-total-samples", str(path)],
             capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds), env=cfg.child_env())
+            pass_fds=tuple(pass_fds), env=cfg.child_env(), start_new_session=True)
         if completed.returncode != 0:
             return 0
         out = completed.stdout.strip()
@@ -323,7 +324,7 @@ def _decode_ok(path, *, pass_fds=()):
         r = subprocess.run(["flac", "-t", "-s", str(path)],
                            capture_output=True, timeout=300,
                            stdin=subprocess.DEVNULL,
-                           pass_fds=tuple(pass_fds), env=cfg.child_env())
+                           pass_fds=tuple(pass_fds), env=cfg.child_env(), start_new_session=True)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return r.returncode == 0
@@ -349,7 +350,7 @@ def _resampled_peak_dbfs(src, af_filter, rate, *, pass_fds=()):
              "-map", "0:a", "-af", f"{af_filter},astats=metadata=1:reset=0",
              "-ar", str(rate), "-c:a", "pcm_f32le", "-f", "null", "-"],
             capture_output=True, timeout=600, stdin=subprocess.DEVNULL,
-            pass_fds=tuple(pass_fds), env=cfg.child_env())
+            pass_fds=tuple(pass_fds), env=cfg.child_env(), start_new_session=True)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
@@ -385,7 +386,7 @@ def _write_seektable(target_fd: int) -> bool:
             ["metaflac", f"--add-seekpoint={_SEEKPOINT_SECONDS}s",
              f"/proc/self/fd/{target_fd}"],
             capture_output=True, timeout=120, stdin=subprocess.DEVNULL,
-            pass_fds=(target_fd,), env=cfg.child_env())
+            pass_fds=(target_fd,), env=cfg.child_env(), start_new_session=True)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return r.returncode == 0
@@ -610,6 +611,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             timeout=600,
             pass_fds=(binding.track_fd, temp_fd),
             env=cfg.child_env(),
+            start_new_session=True,
         )
         carry_error = _copy_source_metadata(binding.track_fd, temp_fd)
         if carry_error is not None:
@@ -866,8 +868,19 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             resampled += 1
             saved_total += saved
 
+    def _finishing(ex, pending):
+        # Tracks already encoding swap in moments and are left to finish;
+        # the ones still queued are dropped. Futures cancelled this way never
+        # complete, so they leave the set being waited on.
+        ex.shutdown(wait=False, cancel_futures=True)
+        running = {f for f in pending if not f.cancelled()}
+        if running:
+            log(f"  ⏹ downsample: finishing {plural(len(running), 'track')}, "
+                "then stopping.")
+        return running
+
+    futs = {}
     with ThreadPoolExecutor(max_workers=RESAMPLE_WORKERS) as ex:
-        futs = {}
         for rel, sr, rate in candidates:
             kwargs = {"base_dir": _bd}
             if keep_originals:
@@ -875,34 +888,25 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             future = ex.submit(
                 resample_one, rel, sr, rate, af_filter, **kwargs)
             futs[future] = rel
+        pending = set(futs)
         try:
-            for fut in as_completed(futs):
-                _tally(fut)
-                if (cancel_check is not None and not cancelled
+            while pending:
+                done, pending = wait(pending, timeout=0.5,
+                                     return_when=FIRST_COMPLETED)
+                for fut in done:
+                    _tally(fut)
+                if (pending and cancel_check is not None and not cancelled
                         and cancel_check()):
-                    # Must BREAK here, not keep iterating: futures cancelled
-                    # by shutdown(cancel_futures=True) never notify
-                    # as_completed's waiters (no worker ever dequeues them),
-                    # so the iterator would wait on them forever. The context
-                    # exit below waits out the in-flight encodes; they're
-                    # tallied after the block so the counts reflect disk state.
                     cancelled = True
-                    ex.shutdown(wait=False, cancel_futures=True)
-                    if verbose:
-                        log("  ⏹ downsample: stop requested; finishing the "
-                            "in-flight tracks, discarding the rest")
-                    break
+                    pending = _finishing(ex, pending)
         except KeyboardInterrupt as exc:
-            # Stop promptly: discard not-yet-started encodes instead of letting
-            # the context manager block on shutdown(wait=True) for the whole queue.
             # The tracks in flight still swap, so wait for them and record
             # what was rewritten before the interrupt goes on.
-            ex.shutdown(wait=False, cancel_futures=True)
-            running = sum(not f.done() for f in futs)
-            if running:
-                log(f"  ⏹ downsample: finishing {plural(running, 'track')}, "
-                    "then stopping.")
-            ex.shutdown(wait=True)
+            if cancelled:
+                pending = {f for f in pending if not f.cancelled()}
+            else:
+                pending = _finishing(ex, pending)
+            wait(pending)
             interrupted = exc
             cancelled = True
     if cancelled:

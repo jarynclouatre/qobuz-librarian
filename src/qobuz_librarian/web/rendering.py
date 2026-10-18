@@ -366,6 +366,14 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
         context.setdefault("job_return_href", return_href)
         context.setdefault("job_return_label", return_label)
         context.setdefault("job_pending_review", new_release_checks._pending_new_release_review(job))
+        single = getattr(job, "single", None) or {}
+        context.setdefault(
+            "single_kept_by_other",
+            bool(single.get("marked") and single.get("owned_path")
+                 and not single.get("removed")
+                 and job_persistence.single_mark_still_used(
+                     single.get("album_id"), job.id)),
+        )
         context.setdefault(
             "downsample_originals_choice",
             (

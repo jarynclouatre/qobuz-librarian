@@ -155,11 +155,14 @@ async def _restore_hidden(request, scope, redirect):
         loop = asyncio.get_running_loop()
         rejoined = await loop.run_in_executor(
             None, lambda: flows.refold_restored_missing(artists, fingerprints))
-        relisted = await loop.run_in_executor(
+        relisted, held = await loop.run_in_executor(
             None, lambda: _relist_new_releases(dismissed_ids))
         relisted_note = (
             ("It returns" if relisted == 1 else "They return")
             + " with the next new-release check.")
+        if held:
+            relisted_note = _held_note(held, len(dismissed_ids)) + " " + (
+                _relisted_note(relisted))
         waits_for_scan = False
         if rejoined is False:
             msg = ("Brought back, but the open Library review couldn't be "
@@ -174,15 +177,14 @@ async def _restore_hidden(request, scope, redirect):
         elif rejoined:
             msg = (f"Brought back {rejoined} to the Library review."
                    if rejoined != 1 else "Brought back to the Library review.")
+        elif held:
+            msg = "Brought back. " + _held_note(held, len(dismissed_ids))
         else:
             msg = "Brought back. Nothing needs adding to the Library review."
         if relisted and (rejoined == 0 or waits_for_scan):
             msg = "Brought back. " + relisted_note
         elif relisted and rejoined is not False:
-            msg += (" " + ("1 new release" if relisted == 1
-                           else f"{relisted} new releases")
-                    + (" returns" if relisted == 1 else " return")
-                    + " with the next new-release check.")
+            msg += " " + _relisted_note(relisted)
         return RedirectResponse(
             url=redirect + _hidden_query(q, msg, p), status_code=303)
     # Upgrade and Downsample scopes: nothing to fold.
@@ -192,18 +194,33 @@ async def _restore_hidden(request, scope, redirect):
         url=redirect + _hidden_query(q, msg, p), status_code=303)
 
 
+def _held_note(held, brought_back):
+    if held == brought_back:
+        return ("It is" if held == 1 else "They are") + (
+            " already offered in the Library review.")
+    return f"{held} {'is' if held == 1 else 'are'} already offered in the Library review."
+
+
+def _relisted_note(relisted):
+    return (("1 new release returns" if relisted == 1
+             else f"{relisted} new releases return")
+            + " with the next new-release check.")
+
+
 def _relist_new_releases(album_ids):
     """Let the next new-release check list again the brought-back albums no
     saved Library scan holds, as a dismissed new release is held nowhere
-    else."""
+    else. Returns how many were relisted and how many the Library review
+    already offers."""
     if not album_ids:
-        return 0
+        return 0, 0
     scanned = {
         str((candidate.get("payload") or {}).get("album_id") or "")
         for entry in library_scan_state.kind_state("missing")["artists"].values()
         for candidate in entry.get("candidates") or ()
     }
-    return new_releases.forget_albums(set(album_ids) - scanned)
+    return (new_releases.forget_albums(set(album_ids) - scanned),
+            len(set(album_ids) & scanned))
 
 
 def _hidden_ts_epoch(ts: str):

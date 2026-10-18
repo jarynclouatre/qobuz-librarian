@@ -570,7 +570,7 @@ async def library_hidden_restore_all(request: Request):
             status_code=303)
     rejoined = await loop.run_in_executor(
         None, lambda: flows.refold_restored_missing(artists, fingerprints or []))
-    relisted = await loop.run_in_executor(
+    relisted, held = await loop.run_in_executor(
         None, lambda: hidden_pages._relist_new_releases(dismissed_ids))
     # Under a filter only part of the set moved, so the message says how much
     # rather than claiming everything came back.
@@ -587,12 +587,12 @@ async def library_hidden_restore_all(request: Request):
                else f"{what}. They return the next time the library scans.")
     elif rejoined:
         msg = f"{what} to the Library review."
+    elif held:
+        msg = f"{what}. " + hidden_pages._held_note(held, len(dismissed_ids))
     else:
         msg = f"{what}. Nothing needs adding to the Library review."
     if relisted and rejoined is not False:
-        msg += (" " + ("1 new release returns" if relisted == 1
-                       else f"{relisted} new releases return")
-                + " with the next new-release check.")
+        msg += " " + hidden_pages._relisted_note(relisted)
     return RedirectResponse(
         url="/library/hidden" + hidden_pages._hidden_query(q, msg), status_code=303)
 

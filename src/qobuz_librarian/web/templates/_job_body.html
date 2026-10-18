@@ -341,7 +341,7 @@
             hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm" data-irreversible
-                data-confirm="Remove the downloaded track and undo the single?"
+                data-confirm="{% if single_kept_by_other %}Remove the downloaded track? Another track you took from this album keeps it a single.{% else %}Remove the downloaded track and undo the single?{% endif %}"
                 data-confirm-action="Remove track"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Undo (removes track)</button>
         {% include "_writes_paused_reason.html" %}
       </form>

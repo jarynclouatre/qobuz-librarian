@@ -4114,6 +4114,20 @@ def downsample_outputs_in_place(backup) -> bool:
     )
 
 
+def downsample_left_untouched(backup) -> bool:
+    """Whether the album still holds the audio of every kept original, as
+    when a Downsample stopped before it rewrote any of them."""
+    if not isinstance(backup, BackupResult) or backup.receipt is None:
+        return False
+    origin = Path(backup.receipt["origin"])
+    kept = backup_payload(backup.receipt)
+    return bool(kept) and all(
+        (streaminfo := _flac_streaminfo(backup.path / relative)) is not None
+        and _flac_streaminfo(origin / relative) == streaminfo
+        for relative in kept
+    )
+
+
 def stash_downsample_originals(files, album_dir):
     """Copy the hi-res originals about to be rewritten in place into a
     timestamped backup, so the downsample can be undone until the retention

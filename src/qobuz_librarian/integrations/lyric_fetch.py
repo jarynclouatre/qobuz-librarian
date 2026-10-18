@@ -115,7 +115,9 @@ _OUTCOME_LABELS = {
 }
 
 
-def _outcome_label(outcome):
+def _outcome_label(outcome, synced_only=False):
+    if synced_only and outcome == "not-found":
+        return "no synced lyrics found"
     return _OUTCOME_LABELS.get(
         outcome, (outcome or "").replace("-", " ").replace("_", " "))
 
@@ -2447,7 +2449,7 @@ def fetch_for_paths(
             completed += 1
             counts[outcome] += 1
             label = _track_label(fp, owned_root)
-            log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome), label)
+            log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome, synced_only), label)
             if progress_cb:
                 progress_cb(completed, total, label)
             state.save()
