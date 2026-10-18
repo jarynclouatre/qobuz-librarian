@@ -6119,6 +6119,7 @@ def _beets_direct_guarded(
     for index, (line, part) in enumerate(shown):
         if index == last_error:
             error = line.strip().partition(": ")[2] or line.strip()
+            error = re.sub(r"^\[Errno \d+\]\s*", "", error)
             log.info(fmt(C.GRAY, f"     Beets stopped on an error: {error}."))
         else:
             _log_beets_output(fmt(C.GRAY, f"    {line}"), part)

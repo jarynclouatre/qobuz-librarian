@@ -5101,6 +5101,9 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         (counts["already"],
          f"{plural(counts['already'], 'track')} already had lyrics"),
         (counts["not_found"],
+         f"no synced lyrics found for {plural(counts['not_found'], 'track')} "
+         "(a run without “Synced lyrics only” tries them again)"
+         if synced_only else
          f"no lyrics found for {plural(counts['not_found'], 'track')} "
          f"(next try after {lyric_fetch.RECHECK_AFTER_DAYS} days)"),
         (counts["missing_tags"],

@@ -1515,6 +1515,82 @@ async def job_retry(request: Request, job_id: str):
         return _land(error=message)
 
 
+def _undone_summary(single, outcome):
+    if outcome.get("single_kept"):
+        return (f"Removed “{single.get('title')}”. Another track you took "
+                "from this album keeps it a single.")
+    return f"Removed “{single.get('title')}” and undid the single."
+
+
+def _undo_root(single):
+    """The folder a track grab's Undo record is relative to, or None when
+    the music folder has moved since."""
+    owned_root = single.get("owned_root")
+    if owned_root is not None:
+        current_root = os.path.abspath(os.fspath(cfg.MUSIC_ROOT))
+        if (
+            not isinstance(owned_root, str)
+            or os.path.abspath(owned_root) != current_root
+        ):
+            return None
+        return Path(current_root)
+    return Path(single["dir"]) if isinstance(single.get("dir"), str) else None
+
+
+def _holds_audio(folder, but=None):
+    try:
+        with os.scandir(folder) as entries:
+            return any(
+                entry.name != but
+                and entry.name.lower().endswith(cfg.AUDIO_EXTS)
+                for entry in entries)
+    except OSError:
+        return True
+
+
+def _keep_shared_artwork(root, single):
+    """Leave the cover a grab brought while another track in its folder
+    still uses it; the album's last Undo removes it."""
+    owned = single.get("owned_path")
+    if not isinstance(owned, dict) or not isinstance(owned.get("relative"), str):
+        return
+    companions = owned.get("companions") or []
+    artwork = [
+        c for c in companions
+        if isinstance(c, dict) and c.get("kind") == "artwork"
+        and "deletion" not in c
+    ]
+    track = root / owned["relative"]
+    if not artwork or not _holds_audio(track.parent, but=track.name):
+        return
+    rest = [c for c in companions if c is not artwork[0]]
+    owned = {key: value for key, value in owned.items() if key != "companions"}
+    if rest:
+        owned["companions"] = rest
+    single["owned_path"] = owned
+    single["kept_artwork"] = artwork[0]
+
+
+def _clear_after_earlier_grabs(folder, others):
+    """Once a folder holds no track, remove the covers earlier Undos left in
+    it and the folders those grabs created, if empty."""
+    if _holds_audio(folder):
+        return
+    for single in others:
+        root = _undo_root(single) if single.get("removed") is True else None
+        if root is None:
+            continue
+        kept = single.get("kept_artwork")
+        if isinstance(kept, dict):
+            owned_paths._unlink_owned_path(root, copy.deepcopy(kept))
+        owned = single.get("owned_path")
+        cleanup = owned.get("directory_cleanup") if isinstance(owned, dict) else None
+        if isinstance(cleanup, dict):
+            owned = copy.deepcopy(owned)
+            owned["directory_cleanup"]["complete"] = False
+            owned_paths._remove_created_folders(root, owned, None)
+
+
 @router.post("/jobs/{job_id}/undo")
 async def job_undo(request: Request, job_id: str):
     """Reverse a single-track download whose exact owned path is still bound."""
@@ -1587,8 +1663,10 @@ async def job_undo(request: Request, job_id: str):
 
     def _clear_deliberate_single_mark() -> bool:
         """Whether the exact suppression mark is gone from the saved store."""
-        if not info.get("marked") or job_persistence.single_mark_still_used(
-                info.get("album_id"), job.id):
+        if not info.get("marked"):
+            return True
+        if job_persistence.single_mark_still_used(info.get("album_id"), job.id):
+            undo_outcome["single_kept"] = True
             return True
         try:
             hidden_mod.unmark_single(
@@ -1617,17 +1695,10 @@ async def job_undo(request: Request, job_id: str):
                 _clear_deliberate_single_mark()
             )
             return None, catalog_result
-        owned_root = info.get("owned_root")
-        if owned_root is not None:
-            current_root = os.path.abspath(os.fspath(cfg.MUSIC_ROOT))
-            if (
-                not isinstance(owned_root, str)
-                or os.path.abspath(owned_root) != current_root
-            ):
-                return None, None
-            d = Path(current_root)
-        else:
-            d = Path(info["dir"])
+        d = _undo_root(info)
+        if d is None:
+            return None, None
+        _keep_shared_artwork(d, info)
         # Every intent and state/identity refresh reaches the durable job row
         # while the direct-operation lock still excludes another library
         # writer.
@@ -1644,6 +1715,9 @@ async def job_undo(request: Request, job_id: str):
         )
         catalog_result = None
         if removed is not None:
+            _clear_after_earlier_grabs(
+                removed.parent,
+                job_persistence.other_album_grabs(info.get("album_id"), job.id))
             catalog_result = beets_mod.forget_beets_entries([removed])
             undo_outcome["single_mark_complete"] = (
                 _clear_deliberate_single_mark()
@@ -1694,9 +1768,7 @@ async def job_undo(request: Request, job_id: str):
                 job.single = completed
                 if job.attention == "catalog":
                     job.attention = ""
-                job.summary = (
-                    f"Removed “{info.get('title')}” and undid the single."
-                )
+                job.summary = _undone_summary(info, undo_outcome)
             elif catalog_complete:
                 job.single = {**info, "removed": False}
                 job.single.pop("catalog_cleanup", None)
@@ -1716,9 +1788,7 @@ async def job_undo(request: Request, job_id: str):
             refresh_needed = True
             if catalog_complete and single_mark_complete:
                 job.single = {**info, "removed": True}
-                job.summary = (
-                    f"Removed “{info.get('title')}” and undid the single."
-                )
+                job.summary = _undone_summary(info, undo_outcome)
             elif catalog_complete:
                 job.single = {**info, "removed": False}
                 job.summary = (

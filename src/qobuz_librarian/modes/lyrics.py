@@ -115,13 +115,14 @@ def run_library_lyrics_mode(args):
     finally:
         signal.signal(signal.SIGINT, previous_handler)
 
-    failed = _report_summary(res, dry_run=args.dry_run)
+    failed = _report_summary(
+        res, dry_run=args.dry_run, synced_only=args.lyrics_synced_only)
     if stop_requested.is_set():
         return EXIT_INTERRUPT
     return EXIT_GENERAL if failed else 0
 
 
-def _report_summary(res, *, dry_run):
+def _report_summary(res, *, dry_run, synced_only=False):
     total = res.get("total", 0)
     unreadable = res.get("unreadable_artists", [])
     if unreadable:
@@ -160,8 +161,9 @@ def _report_summary(res, *, dry_run):
         if summary["unfinished"] else ""
     )
     retry_part = (
-        f" (next try after {lyric_fetch.RECHECK_AFTER_DAYS} days)"
-        if summary["not_found"] and not dry_run else "")
+        " (a run without --lyrics-synced-only tries them again)" if synced_only
+        else f" (next try after {lyric_fetch.RECHECK_AFTER_DAYS} days)"
+    ) if summary["not_found"] and not dry_run else ""
     checked_part = (
         f"{processed} of {plural(summary['candidate_total'], 'track')} checked"
         if summary["stopped"] else f"{plural(processed, 'track')} checked"
@@ -170,7 +172,8 @@ def _report_summary(res, *, dry_run):
         f"     {checked_part} · {verb.lower()} "
         f"{wrote_synced} synced + {wrote_plain} plain · "
         f"{summary['already']} already had lyrics · "
-        f"{summary['not_found']} no lyrics found{retry_part}"
+        f"{summary['not_found']} no {'synced ' if synced_only else ''}"
+        f"lyrics found{retry_part}"
         f"{skipped_part}{unfinished_part}.")))
     if summary["missing_tags"]:
         log.info(fmt(C.YELLOW,

@@ -416,8 +416,13 @@ def _make_single_track_run(album, track, token):
             try:
                 hidden_mod.mark_single(artist, title, catalog.album_year(album),
                                        album.get("id"))
+                upgrade = (
+                    "Upgrade treats the album as a single."
+                    if not cfg.SUPPRESS_SINGLE_TRACK_GAPS
+                    and not cfg.UPGRADE_SINGLES_ENABLED else "")
                 j.summary = " ".join(filter(None, (
-                    got, _rest_of_album_note(landed_dir, active_token))))
+                    got, upgrade,
+                    _rest_of_album_note(landed_dir, active_token))))
             except OSError as e:
                 # The track landed fine, so don't fail the job, but don't claim
                 # the exclusion stuck either.
