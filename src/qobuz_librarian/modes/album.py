@@ -370,10 +370,10 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
                     existing_state=(existing, album_dir, missing, present),
                     already_confirmed=True,
                 )
-            except AuthLost:
-                die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
-    except AuthLost:
-        die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
+            except AuthLost as exc:
+                die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
+    except AuthLost as exc:
+        die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
     except QobuzUnavailable as e:
         log.info(fmt(C.YELLOW, f"\n⚠  {e}\n"))
     except QobuzError as e:
@@ -439,8 +439,8 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 args.query = query_args
             try:
                 album = resolve_album_from_args(args, token)
-            except AuthLost:
-                die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
+            except AuthLost as exc:
+                die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
             except CatalogMiss as e:
                 (log.info if loop else log.warning)(
                     fmt(C.YELLOW, f"\n⚠  {e}\n")
@@ -494,8 +494,8 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
             else:
                 try:
                     result = _download_album_now(album, args, token)
-                except AuthLost:
-                    die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
+                except AuthLost as exc:
+                    die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
 
             if not loop:
                 exit_code = _one_shot_exit_code(result)

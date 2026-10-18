@@ -1,9 +1,9 @@
 """Staged-rip quality checks before local rewrite hooks run."""
 from pathlib import Path
 
+from qobuz_librarian.integrations.rip import is_cancel_requested
 from qobuz_librarian.integrations.staging import (
     discard_group,
-    discard_received_audio_trees,
     park_trees,
     restore_group,
 )
@@ -122,10 +122,11 @@ def retry_preserves_track_coverage(original, retry):
 
 
 def redownload_with_staged_fallback(staged_dirs, *, run_retry,
-                                    collect_staged_dirs, collect_retry_files,
+                                    collect_staged_dirs, discard_retry,
                                     retry_preserves_original):
-    """Retry without losing the first usable staged rip if retry lands nothing
-    or lands less of the album than the first rip did.
+    """Retry without losing the first usable staged rip if retry lands nothing,
+    lands less of the album than the first rip did, or is stopped.
+    ``discard_retry`` throws the retry's own staging run away.
 
     Returns ``(staged_dirs, retry_kept)``.
     """
@@ -137,8 +138,8 @@ def redownload_with_staged_fallback(staged_dirs, *, run_retry,
     if parked is None:
         raise OSError("couldn't safely park the first staged rip for retry")
 
-    def restore_first(fresh, retry_files):
-        if fresh and not discard_received_audio_trees(fresh, retry_files):
+    def restore_first(fresh):
+        if fresh and not discard_retry():
             raise OSError(
                 "higher-quality retry output changed; both staged states were "
                 "kept for manual recovery")
@@ -151,7 +152,8 @@ def redownload_with_staged_fallback(staged_dirs, *, run_retry,
 
     try:
         run_retry()
-        fresh = collect_staged_dirs()
+        cancelled = is_cancel_requested()
+        fresh = [] if cancelled else collect_staged_dirs()
     except BaseException as exc:
         try:
             try:
@@ -160,12 +162,14 @@ def redownload_with_staged_fallback(staged_dirs, *, run_retry,
                 # run_album_download retains its exact run before propagating
                 # an abrupt failure, so its former public dirs are absent.
                 fresh = []
-            retry_files = collect_retry_files()
-            restore_first(fresh, retry_files)
+            restore_first(fresh)
         except Exception as recovery_error:
             raise recovery_error from exc
         raise
 
+    if cancelled:
+        discard_retry()
+        return restore_first([]), False
     if fresh and retry_preserves_original():
         if not discard_group(parked):
             log.info(
@@ -175,5 +179,4 @@ def redownload_with_staged_fallback(staged_dirs, *, run_retry,
     if fresh:
         log.info("  Higher-quality retry did not preserve the first rip's "
                  "Qobuz track coverage; keeping the first rip.")
-    retry_files = collect_retry_files()
-    return restore_first(fresh, retry_files), False
+    return restore_first(fresh), False

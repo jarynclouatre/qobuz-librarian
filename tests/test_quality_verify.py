@@ -11,12 +11,6 @@ class _FakeDir:
     pass
 
 
-def _receipts(*paths):
-    from qobuz_librarian.integrations.staging import capture_file
-
-    return [receipt for path in paths if (receipt := capture_file(path))]
-
-
 def _patch(monkeypatch, tracks, tier):
     monkeypatch.setattr(verify, "read_album_dir", lambda d: tracks)
     monkeypatch.setattr(config, "STREAMRIP_QUALITY", tier)
@@ -88,20 +82,32 @@ def test_redownload_fallback_restores_first_rip_when_retry_less_complete(
     for n in ("01", "02", "03"):
         (first / f"{n}.flac").write_bytes(b"first rip")
     monkeypatch.setattr(config, "STAGING_DIR", staging)
+    from qobuz_librarian.download import discard_download_staging
+    from qobuz_librarian.integrations.staging import create_staging_run
+
+    retry = {}
+    retry_album = []
 
     def run_retry():
-        first.mkdir(parents=True, exist_ok=True)
-        (first / "01.flac").write_bytes(b"retry rip")
+        run = create_staging_run()
+        retry["_staging_run"] = run.to_record()
+        album = run.path / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"retry rip")
+        # streamrip saves the cover beside the tracks on every rip.
+        (album / "cover.jpg").write_bytes(b"cover")
+        retry_album.append(album)
 
     dirs, retry_kept = verify.redownload_with_staged_fallback(
         [first],
         run_retry=run_retry,
-        collect_staged_dirs=lambda: [first],
-        collect_retry_files=lambda: _receipts(first / "01.flac"),
+        collect_staged_dirs=lambda: retry_album,
+        discard_retry=lambda: discard_download_staging(retry),
         retry_preserves_original=lambda: False)
 
     assert dirs == [first]
     assert retry_kept is False
+    assert not retry_album[0].exists()
     assert sorted(p.name for p in first.iterdir()) == [
         "01.flac", "02.flac", "03.flac"]
     assert (first / "01.flac").read_bytes() == b"first rip"

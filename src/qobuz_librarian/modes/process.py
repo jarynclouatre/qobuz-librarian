@@ -10,7 +10,7 @@ from qobuz_librarian import run_lock, safefile
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.download import (
     clear_attempts_after_import,
-    download_staged_files,
+    discard_retry_staging,
     keep_unimported_download,
     note_superseded_attempts,
     retain_download_staging,
@@ -1550,19 +1550,21 @@ def process_album(album, args, *, allow_force=True, label=None,
 
         # Cancelled mid-rip: the user hit stop, so the partial set must not be
         # imported.
-        if is_cancel_requested():
+        def cancelled_result():
             log.info(fmt(C.YELLOW,
                 "\n  Cancelled; retaining the partial download for review. "
                 "nothing imported."))
             retain_download_staging(download_result)
-            early_result = {
+            return {
                 "result": "cancelled",
                 "imported": False,
                 "n_ok": n_ok,
                 "n_lossy": n_lossy,
                 "n_fail": n_fail,
             }
-            return early_result
+
+        if is_cancel_requested():
+            return cancelled_result()
 
         # A wipe-replace (auto-upgrade or --force moved the original aside)
         # that came back partial gets rolled back to the original by the
@@ -1623,7 +1625,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                             collect_staged_dirs=lambda: (
                                 validated_staged_album_dirs(retry_result)
                                 if retry_result.get("n_ok", 0) > 0 else []),
-                            collect_retry_files=lambda: download_staged_files(
+                            discard_retry=lambda: discard_retry_staging(
                                 retry_result),
                             retry_preserves_original=lambda: (
                                 retry_preserves_track_coverage(
@@ -1698,6 +1700,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                 else:
                     log.info(fmt(C.YELLOW,
                         f"  {quality_below_line(quality_verdict)}"))
+                if is_cancel_requested():
+                    return cancelled_result()
 
         # Downsampling and lyric_fetch run on staging BEFORE beets imports.
         if n_ok > 0 and not args.no_import:

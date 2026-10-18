@@ -2038,47 +2038,6 @@ def restore_group(group, *, expected_owner=None):
     return destinations
 
 
-def discard_received_audio_trees(paths, files):
-    """Discard only retry audio proved by this run, then reclaim empty dirs.
-
-    The current tree is sealed before any mutation.  Unknown companions,
-    missing receipts, and changed identities refuse the whole operation so a
-    fallback keeps both the first rip and the uncertain retry state.
-    """
-    receipts = [capture_tree(path) for path in paths]
-    if any(receipt is None for receipt in receipts):
-        return False
-
-    owned = {
-        file.path: file.identity
-        for file in files
-        if isinstance(file, StagedFile) and file.path.suffix.lower() in cfg.AUDIO_EXTS
-    }
-    current = {}
-    for tree in receipts:
-        for relative, identity in tree.files:
-            path = tree.path / relative
-            if path.suffix.lower() not in cfg.AUDIO_EXTS:
-                return False
-            current[path] = identity
-
-    if not current or current != owned:
-        return False
-
-    sealed = []
-    for path, identity in current.items():
-        receipt = capture_file(path, expected=identity)
-        if receipt is None:
-            return False
-        sealed.append(receipt)
-    for receipt in sealed:
-        if not remove_file(receipt):
-            return False
-    for tree in receipts:
-        _prune_tree_directories(tree)
-    return all(not tree.path.exists() for tree in receipts)
-
-
 def _parked_group_matches_plan(group, plan):
     if (
         not isinstance(group, ParkedGroup)

@@ -33,7 +33,7 @@ from qobuz_librarian.integrations.beets import (
     _write_managed_snapshot,
 )
 from qobuz_librarian.recovery import decode_recovery_json
-from qobuz_librarian.safefile import rename_noreplace
+from qobuz_librarian.safefile import digest_fd, rename_noreplace
 
 _MANIFEST_FD_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_FD"
 _NONCE_ENV = "QOBUZ_LIBRARIAN_OWNERSHIP_NONCE"
@@ -88,6 +88,24 @@ def _positive_item_number(item, field):
     else:
         return None
     return number if number > 0 else None
+
+
+def _only_retimed(descriptor, held, expected, digest):
+    """Whether the held file is the moved one with the same bytes, only
+    re-timed or re-permissioned since, as the permissions and importadded
+    plugins leave it."""
+    if digest is None:
+        return False
+    current = _ownership_identity(held)
+    if any(current[key] != expected[key] for key in ("device", "inode", "size")):
+        return False
+    try:
+        return (
+            digest_fd(descriptor) == digest
+            and _ownership_identity(os.fstat(descriptor)) == current
+        )
+    except OSError:
+        return False
 
 
 def _album_scope_parts(item, destination_parts):
@@ -957,6 +975,7 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                 # that the destination descriptor stayed unchanged and that
                 # the public no-follow path still names that exact file before
                 # publishing its identity into the manifest.
+                destination_digest = digest_fd(destination_fd)
                 held_destination = os.fstat(destination_fd)
                 if (
                     not stat.S_ISREG(held_destination.st_mode)
@@ -974,6 +993,7 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                     raise ValueError("ownership destination path changed")
                 selected["destination"] = transition[1]
                 selected["destination_identity"] = destination_identity
+                selected["destination_digest"] = destination_digest
                 selected["move_proven"] = True
             except (OSError, TypeError, ValueError):
                 selected["destination"] = None
@@ -1053,7 +1073,7 @@ class QobuzOwnershipPlugin(BeetsPlugin):
 
     def _hold_relative_leaf_locked(
             self, relative, *, album_scope_parts=None,
-            expected_leaf_identity=None):
+            expected_leaf_identity=None, expected_leaf_digest=None):
         parts = _ownership_relative_parts(os.fsdecode(relative))
         if not parts or self._root_fd is None:
             raise OSError("unsafe ownership destination")
@@ -1110,6 +1130,9 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                     expected_leaf_identity is not None
                     and _ownership_identity(held)
                     != expected_leaf_identity
+                    and not _only_retimed(
+                        leaf_fd, held, expected_leaf_identity,
+                        expected_leaf_digest)
                 )
                 or not self._parent_chain_is_named_locked(chain, names)
             ):
@@ -1232,10 +1255,14 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                         expected_leaf_identity=selected.get(
                             "destination_identity"
                         ),
+                        expected_leaf_digest=selected.get(
+                            "destination_digest"
+                        ),
                     )
                 )
             except (OSError, TypeError, ValueError):
                 return []
+            selected["destination_identity"] = _ownership_identity(leaf)
             try:
                 if album_scope is None:
                     return []

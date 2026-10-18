@@ -7,6 +7,7 @@ from qobuz_librarian.api.auth import (
     AuthLost,
     CredentialChanged,
     DownloaderNotReady,
+    DownloadsRefused,
     QobuzEntitlementError,
     QobuzError,
     QobuzUnavailable,
@@ -20,6 +21,8 @@ def _download_error_message(exc, fallback: str) -> str:
     if isinstance(exc, asyncio.TimeoutError):
         return "Timed out reaching the Qobuz API. Try again."
     if isinstance(exc, QobuzUnavailable):
+        return str(exc)
+    if isinstance(exc, DownloadsRefused):
         return str(exc)
     if isinstance(exc, AuthLost):
         return "Qobuz rejected the saved token. Reconnect in Settings."

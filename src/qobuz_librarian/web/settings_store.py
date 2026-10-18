@@ -10,6 +10,7 @@ import logging
 import os
 import secrets
 import threading
+from pathlib import Path
 from typing import Optional
 
 from qobuz_librarian import config as cfg
@@ -268,11 +269,31 @@ def _available_beets_plugins():
     except Exception:
         return None
     try:
-        names = {m.name for m in pkgutil.iter_modules(beetsplug.__path__)
+        folders = list(beetsplug.__path__)
+        for folder in _config_plugin_paths():
+            folders += [str(folder), str(folder / "beetsplug")]
+        names = {m.name for m in pkgutil.iter_modules(folders)
                  if not m.name.startswith("_")}
     except Exception:
         return None
     return names or None
+
+
+def _config_plugin_paths():
+    """The plugin folders config.yaml's ``pluginpath`` names, as beets reads
+    them: plugins sit in each, or in a beetsplug folder inside it."""
+    try:
+        import yaml
+
+        with open(Path(cfg.BEETS_CONFIG_DIR) / "config.yaml", encoding="utf-8") as handle:
+            paths = (yaml.safe_load(handle) or {}).get("pluginpath") or []
+    except Exception:
+        return []
+    if isinstance(paths, str):
+        paths = [paths]
+    if not isinstance(paths, list):
+        return []
+    return [Path(path).expanduser().absolute() for path in paths if isinstance(path, str)]
 
 
 def _validate_list(key, items):

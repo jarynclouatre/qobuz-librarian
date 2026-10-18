@@ -16,7 +16,7 @@ from qobuz_librarian import (
     saved_views,
 )
 from qobuz_librarian.api import client as api_client
-from qobuz_librarian.api.auth import AuthLost
+from qobuz_librarian.api.auth import AuthLost, DownloadsRefused
 from qobuz_librarian.completion import (
     CompletionOrigin,
     CompletionOriginKind,
@@ -27,7 +27,7 @@ from qobuz_librarian.completion import (
 )
 from qobuz_librarian.download import (
     clear_attempts_after_import,
-    download_staged_files,
+    discard_retry_staging,
     keep_unimported_download,
     note_superseded_attempts,
     retain_download_staging,
@@ -2310,6 +2310,17 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 raise retention_exc
             raise retention_exc from cause
 
+    def _cancel_item(item):
+        nonlocal cancelled
+        item["result"] = "cancelled"
+        cancelled = True
+        _retained, retention_exc = _retain_failed_staging(item)
+        if retention_exc is None:
+            log.info(fmt(C.YELLOW,
+                "    Cancelled; retained this album's partial download "
+                "for review."))
+        _resolve_failed_item(item, retention_exc)
+
     def _handle_download_exception(item, exc, *, phase=None):
         nonlocal interrupted, io_error, auth_lost_exc
         if isinstance(exc, KeyboardInterrupt):
@@ -2319,8 +2330,10 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             item["result"] = "interrupted"
             interrupted = True
         elif isinstance(exc, AuthLost):
+            reason = (str(exc) if isinstance(exc, DownloadsRefused)
+                      else "Qobuz rejected the token.")
             log.info(fmt(C.RED,
-                "\n    Qobuz rejected the token. Stopping further downloads; "
+                f"\n    {reason} Stopping further downloads; "
                 "will restore upgrade backups and exit."))
             item["result"] = "auth_lost"
             auth_lost_exc = exc
@@ -2810,14 +2823,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             continue
 
         if is_cancel_requested():
-            item["result"] = "cancelled"
-            cancelled = True
-            _retained, retention_exc = _retain_failed_staging(item)
-            if retention_exc is None:
-                log.info(fmt(C.YELLOW,
-                    "    Cancelled; retained this album's partial download "
-                    "for review."))
-            _resolve_failed_item(item, retention_exc)
+            _cancel_item(item)
             continue
 
         summary_n_ok = item.get("n_ok", 0)
@@ -2848,6 +2854,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     saved_q = item.get("quality")
                     retry_item = dict(item)
                     retry_item["quality"] = 4
+                    retry_item.pop("_staging_run", None)
+                    retry_item.pop("_staging_run_retained", None)
 
                     def _run_retry():
                         _download_for_queue_item(retry_item)
@@ -2859,7 +2867,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                             collect_staged_dirs=lambda: (
                                 _staged_album_dirs(retry_item)
                                 if retry_item.get("n_ok", 0) > 0 else []),
-                            collect_retry_files=lambda: download_staged_files(
+                            discard_retry=lambda: discard_retry_staging(
                                 retry_item),
                             retry_preserves_original=lambda: (
                                 retry_preserves_track_coverage(
@@ -2903,6 +2911,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                         exempt=item.get("_cd_quality_paths", ()))
                 except (KeyboardInterrupt, AuthLost, OSError) as exc:
                     _handle_download_exception(item, exc)
+                    continue
+                if is_cancel_requested():
+                    _cancel_item(item)
                     continue
                 if item["quality_verdict"]["retried"]:
                     album_dirs = item["quality_verdict"]["staged_dirs"]

@@ -3968,6 +3968,7 @@ def _build_import_override_yaml(
     compilation=False,
     flat=False,
     places=None,
+    disc_folders=None,
 ):
     """The beets config override the import runs with, as a YAML string. Forces
     the keys the import contract depends on: library/directory, non-
@@ -3978,7 +3979,9 @@ def _build_import_override_yaml(
     tracks to, which every path template is pinned to; with ``flat`` the
     tracks go in it beside its others, without the templates' disc folders.
     ``places`` files the track with each ISRC at that path in the folder,
-    given without its extension. ``compilation`` files the album as one.
+    given without its extension. ``disc_folders`` names the album's own folder
+    for each disc number, which tracks of that disc go in, named by the
+    templates' file names. ``compilation`` files the album as one.
     """
     import re as _re
 
@@ -4044,7 +4047,16 @@ def _build_import_override_yaml(
             _isrc_query(isrc): f"{_template_literal(album_folder)}/{_template_literal(place)}"
             for isrc, place in (places or {}).items()
         }
-        for _name, _template in _effective_path_templates(plugin_config).items():
+        _templates = _effective_path_templates(plugin_config)
+        _queries = {"comp": "comp:1 ", "default": ""}
+        for _disc, _disc_folder in sorted((disc_folders or {}).items()):
+            for _name in sorted(_templates, key=lambda name: name in _queries):
+                _file = (f"%{_FILE_NAME_FUNCTION}"
+                         f"{{{_template_tail(_templates[_name])}}}")
+                _paths[f"{_queries.get(_name, _name + ' ')}disc:{_disc}"] = (
+                    f"{_template_literal(album_folder)}/"
+                    f"{_template_literal(_disc_folder)}/{_file}")
+        for _name, _template in _templates.items():
             _tail = _template_tail(_template)
             if flat:
                 _tail = f"%{_FILE_NAME_FUNCTION}{{{_tail}}}"
@@ -4228,6 +4240,10 @@ def _prepare_for_beets_run(
                     album_folder=album_folder,
                     flat=album_folder is not None and tracks_sit_flat(album_dir),
                     places=places if album_folder is not None else None,
+                    disc_folders=(
+                        _album_disc_folders(album_dir)
+                        if album_folder is not None and album_dir is not None
+                        and not tracks_sit_flat(album_dir) else None),
                     compilation=_staged_compilation(
                         path
                         for root in roots
@@ -4732,6 +4748,7 @@ def beets_import_paths(
     intended_audio = tuple(
         receipt for receipt in prepared_sources if receipt.path.suffix.lower() in cfg.AUDIO_EXTS
     )
+    last_old_id = _highest_album_id() if album_dir is not None else None
     started_ns = time.time_ns()
     ok, kind = _beets_direct(
         override_path,
@@ -4742,6 +4759,7 @@ def beets_import_paths(
     )
     if not ok:
         _clean_up_failed_import(roots, (album_dir, folder), started_ns)
+        _forget_failed_import_rows(roots)
     if kind == "disk_full":
         raise MusicDiskFull
     if ok and album_dir is not None and not _consolidation_path_is_protected(
@@ -4752,7 +4770,8 @@ def beets_import_paths(
     elif ok and album_dir is not None:
         # Beets files tracks added to an album as an album of their own.
         _consolidate_duplicate_albums(
-            protected_paths=protected_paths, folders=[album_dir])
+            protected_paths=protected_paths, folders=[album_dir],
+            last_old_id=last_old_id)
     return ok
 
 
@@ -4810,6 +4829,7 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
     intended_audio = tuple(
         receipt for receipt in prepared_sources if receipt.path.suffix.lower() in cfg.AUDIO_EXTS
     )
+    last_old_id = _highest_album_id() if album_dir is not None else None
     started_ns = time.time_ns()
     ok, kind = _beets_direct(
         override_path,
@@ -4821,11 +4841,13 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
     )
     if not ok:
         _clean_up_failed_import(album_dirs, (album_dir, folder), started_ns)
+        _forget_failed_import_rows(album_dirs)
     if ok and album_dir is not None:
         try:
             forget_replaced_beets_entries(folder=album_dir)
             # Beets files tracks added to an album as an album of their own.
-            _consolidate_duplicate_albums(folders=[album_dir])
+            _consolidate_duplicate_albums(
+                folders=[album_dir], last_old_id=last_old_id)
         except KeyboardInterrupt:
             raise ImportedThenInterrupted from None
     return "ok" if ok else kind
@@ -5494,6 +5516,20 @@ def _clean_up_failed_import(roots, folders, since_ns):
     _remove_beets_partials(roots, folders, changed_since)
     # A new folder's birth time can trail the clock read above by a tick.
     _remove_new_empty_folders(folders, since_ns - 1_000_000_000)
+
+
+def _forget_failed_import_rows(roots):
+    """Drop the rows a failed import added for the tracks staged under
+    ``roots``, which would otherwise make the next import of the album a
+    second album, filed as 'Album [2]' by a template with %aunique."""
+    try:
+        database = beets_db.path()
+        if database is None or not database.stat().st_size:
+            return
+    except OSError:
+        return
+    for root in roots:
+        forget_staged_beets_rows((), folder=root)
 
 
 def _remove_beets_partials(roots, folders, since_ns):
@@ -6218,15 +6254,36 @@ def _consolidation_item_dir(value):
     return str(directory)
 
 
-def _consolidation_disc_parent(directory):
-    path = Path(directory)
-    name = path.name.casefold()
+def _disc_folder_number(name):
+    """The disc a folder named like 'Disc 1', 'Disc 01', 'CD1' or 'CD 1' holds."""
+    name = name.casefold()
     for prefix in ("disc", "cd"):
         if name.startswith(prefix):
             number = name[len(prefix) :].strip()
             if number.isascii() and number.isdigit() and int(number) > 0:
-                return str(path.parent)
+                return int(number)
     return None
+
+
+def _album_disc_folders(album_dir):
+    """The album's own folder for each disc, by number. A number two folders
+    claim is left out."""
+    found = {}
+    try:
+        names = [entry.name for entry in os.scandir(album_dir)
+                 if entry.is_dir(follow_symlinks=False)]
+    except OSError:
+        return {}
+    for name in names:
+        number = _disc_folder_number(name)
+        if number is not None:
+            found.setdefault(number, []).append(name)
+    return {number: names[0] for number, names in found.items() if len(names) == 1}
+
+
+def _consolidation_disc_parent(directory):
+    path = Path(directory)
+    return str(path.parent) if _disc_folder_number(path.name) else None
 
 
 def _consolidation_rows_for_ids(connection, table, columns, identity_column, identities):
@@ -7357,7 +7414,74 @@ def _duplicate_album_groups(connection, folders):
                     item_attribute_columns)
 
 
-def _consolidate_duplicate_albums(protected_paths=None, folders=None):
+def _highest_album_id():
+    """The newest beets album id, 0 with no library yet, None when unreadable.
+    An import's own album entries are the ones above it."""
+    database = beets_db.path()
+    try:
+        if database is None or not database.is_file():
+            return 0
+        return beets_db.read(database, lambda connection: connection.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM albums").fetchone()[0])
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _adopt_added_album_entries(connection, album_ids, columns, last_old_id):
+    """Move the tracks an import just added to an album's folder, which beets
+    files as an album of their own, into the entry the album had before.
+
+    The fold refuses them when the album holds fields the added tracks' tags
+    don't carry, such as ReplayGain album gain or an ASIN. The tracks take the
+    album's values for every field albums and tracks share; the album keeps
+    its own and takes the new entry's cover and other fields when it has
+    none. Only one older entry with the same album and album artist is
+    joined."""
+    album_columns, item_columns = columns[:2]
+    rows = _consolidation_rows_for_ids(connection, "albums", album_columns, "id", album_ids)
+    index = {column: n for n, column in enumerate(album_columns)}
+    older = [row for row in rows if row[index["id"]] <= last_old_id]
+    newer = [row for row in rows if row[index["id"]] > last_old_id]
+    if len(older) != 1 or len(older) + len(newer) != len(album_ids) or any(
+            row[index[key]] != older[0][index[key]]
+            for row in newer for key in ("album", "albumartist") if key in index):
+        return False
+    keeper = older[0]
+    keeper_id = keeper[index["id"]]
+    newer_ids = tuple(row[index["id"]] for row in newer)
+    placeholders = ",".join("?" for _ in newer_ids)
+    shared = [column for column in album_columns
+              if column in item_columns and column not in {"id", "added", "artpath"}]
+    assignments = ", ".join(f"{_sql_identifier(column)} = ?" for column in shared)
+    connection.execute(
+        f"UPDATE items SET album_id = ?{', ' if shared else ''}{assignments} "
+        f"WHERE album_id IN ({placeholders})",
+        (keeper_id, *(keeper[index[column]] for column in shared), *newer_ids))
+    if keeper[index["artpath"]] is None:
+        connection.execute(
+            "UPDATE albums SET artpath = (SELECT artpath FROM albums WHERE id = ?) "
+            "WHERE id = ?", (newer_ids[-1], keeper_id))
+    kept = {key for (key,) in connection.execute(
+        "SELECT key FROM album_attributes WHERE entity_id = ?", (keeper_id,))}
+    for key, value in connection.execute(
+            f"SELECT key, value FROM album_attributes WHERE entity_id IN ({placeholders}) "
+            "ORDER BY id", newer_ids).fetchall():
+        if key not in kept:
+            kept.add(key)
+            connection.execute(
+                "INSERT INTO album_attributes (entity_id, key, value) VALUES (?, ?, ?)",
+                (keeper_id, key, value))
+    connection.execute(
+        f"DELETE FROM album_attributes WHERE entity_id IN ({placeholders})", newer_ids)
+    if connection.execute(
+            f"DELETE FROM albums WHERE id IN ({placeholders})", newer_ids
+    ).rowcount != len(newer_ids):
+        raise sqlite3.IntegrityError("added beets album changed")
+    return True
+
+
+def _consolidate_duplicate_albums(protected_paths=None, folders=None,
+                                  last_old_id=None):
     """Fold provably identical album rows in one rollback-safe DB transaction.
 
     The fold updates only ``items.album_id`` and removes redundant album rows
@@ -7365,7 +7489,9 @@ def _consolidate_duplicate_albums(protected_paths=None, folders=None):
     by the oldest row, which takes their art when it has none. It never
     invokes the importer, plugins, tag writers, or filesystem mutation APIs.
     Any uncertainty leaves the duplicates intact. ``folders`` limits the fold
-    to those album folders.
+    to those album folders. With ``last_old_id``, the newest album id before
+    an import into one of them, the entries it made there join the album
+    entry that was there before even when their album fields differ.
     """
     try:
         database = Path(os.fspath(cfg.BEETS_DB_PATH))
@@ -7390,7 +7516,9 @@ def _consolidate_duplicate_albums(protected_paths=None, folders=None):
                 if _consolidation_path_is_protected(directory, protected):
                     vlog(f"consolidation: keep ownership-protected folder {directory}")
                     continue
-                if _fold_duplicate_album_group(connection, ids, *columns):
+                if _fold_duplicate_album_group(connection, ids, *columns) or (
+                        last_old_id is not None and _adopt_added_album_entries(
+                            connection, ids, columns, last_old_id)):
                     merged += 1
 
             if not merged:
@@ -7674,14 +7802,52 @@ def _replaced_beets_entries(connection, item_ids, folder):
             for old_id in ids
             if old_id in retiring and old_id != newest
         )
+    if folder is None:
+        replaced.extend(_renamed_replacements(
+            connection, set(item_ids) - {old_id for old_id, _new, _album in replaced},
+            albums))
     return replaced
+
+
+def _renamed_replacements(connection, item_ids, albums):
+    """(old id, new id, old album id) for each entry in ``item_ids`` whose file
+    is gone and whose replacement Beets filed under another name in its
+    folder, as its ``replace`` rules do to a ':' or '?': the one newer entry
+    there with the same ISRC."""
+    if not item_ids or "isrc" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(items)")}:
+        return []
+    entries = []
+    for item_id, raw_path, isrc in connection.execute(
+            "SELECT id, path, isrc FROM items"):
+        try:
+            path = _catalogue_item_path(raw_path, allow_external=True)
+        except (OSError, TypeError, ValueError):
+            continue
+        isrc = str(isrc or "").replace("-", "").upper()
+        if isrc:
+            entries.append((item_id, path, isrc))
+    found = []
+    taken = set(item_ids)
+    for old_id, old_path, isrc in entries:
+        if old_id not in item_ids or os.path.lexists(old_path):
+            continue
+        newer = [item_id for item_id, path, other in entries
+                 if item_id > old_id and item_id not in taken
+                 and other == isrc and path.parent == old_path.parent]
+        if len(newer) == 1:
+            taken.add(newer[0])
+            found.append((old_id, newer[0], albums.get(old_id)))
+    return found
 
 
 def forget_replaced_beets_entries(item_ids=(), *, folder=None):
     """Drop the beets entries ``item_ids`` of tracks replaced in place.
 
     Each goes only when a newer entry has its path, the one the replacement
-    was imported as, which takes the flexible fields only the old entry had,
+    was imported as, or, when its file is gone, is the one newer entry in its
+    folder with its ISRC, as when Beets' ``replace`` rules renamed the
+    replacement. That entry takes the flexible fields only the old entry had,
     such as a rating. An album left with no tracks goes too, as `beet remove`
     would. With ``folder``, every entry under it that a newer one shares a
     path with goes: one file can't be two tracks. Returns how many entries

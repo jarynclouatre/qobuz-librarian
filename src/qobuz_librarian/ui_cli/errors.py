@@ -3,6 +3,7 @@ import errno
 import sys
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.api.auth import DownloadsRefused
 from qobuz_librarian.ui_cli.colors import block
 
 # Exit-code contract for the CLI.
@@ -56,8 +57,10 @@ def oserr_hint(e: OSError) -> str:
     return ""
 
 
-def auth_lost_msg() -> str:
+def auth_lost_msg(exc=None) -> str:
     """Multi-line block for AuthLost catch-and-die sites in CLI modes."""
+    if isinstance(exc, DownloadsRefused):
+        return f"\n✗  {exc} The run stopped.\n"
     return ("\n✗  Qobuz rejected the token, so the run stopped.\n"
             "   Paste a new token on the Settings page of the web app, or set "
             "QOBUZ_USER_AUTH_TOKEN, then run this again.\n")

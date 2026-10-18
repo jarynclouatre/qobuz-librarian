@@ -11,7 +11,12 @@ from pathlib import Path, PurePosixPath
 from qobuz_librarian import config as cfg
 from qobuz_librarian import post_job_hook
 from qobuz_librarian.api import client as api_client
-from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
+from qobuz_librarian.api.auth import (
+    AuthLost,
+    DownloadsRefused,
+    QobuzError,
+    QobuzUnavailable,
+)
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.download_result import cd_quality_note
 from qobuz_librarian.integrations.beets import (
@@ -742,19 +747,23 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             # good replacements, and moving the truncated originals back would
             # clobber them (the same reasoning as the interrupt branch below).
             # Preserve the backup and point the user at it.
+            if isinstance(exc, DownloadsRefused):
+                lost, until = "refused the download", "downloads work again"
+            else:
+                lost, until = "rejected the token", "your token is refreshed"
             if backup_path and backup_path.exists():
                 pin_repair_recovery(
                     "repair backup kept, authentication was lost mid-refill")
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Qobuz rejected the token mid-refill; damaged originals preserved at:\n"
+                    f"  ⚠  Qobuz {lost} mid-refill; damaged originals preserved at:\n"
                     f"     {backup_path}\n"
-                    f"     Re-run Repair once your token is refreshed, or restore "
+                    f"     Re-run Repair once {until}, or restore "
                     f"them by hand."))
             interrupt_with_recovery(
                 exc,
                 "refill",
-                "Authentication was lost while replacement tracks were "
-                "being downloaded.",
+                f"Qobuz {lost} while replacement tracks were being "
+                "downloaded.",
             )
         except BaseException as exc:
             # Interrupted or an unexpected failure mid-refill. Don't auto-
@@ -1277,8 +1286,8 @@ def run_album_repair_mode(args, token, *, loop=False):
                 artist_dir, album_dir = _prompt_library_album_for_repair(
                     args, token)
                 started = time.time()
-            except AuthLost:
-                die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
+            except AuthLost as exc:
+                die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
 
             if artist_dir == NO_ANSWER:
                 return EXIT_GENERAL
@@ -1326,9 +1335,9 @@ def run_album_repair_mode(args, token, *, loop=False):
                                 aldir, adir.name, args, token,
                                 deep=True, quiet=True,
                                 cd_quality=tally["cd_quality"])
-                        except AuthLost:
+                        except AuthLost as exc:
                             print()
-                            die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
+                            die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
                         except QobuzUnavailable:
                             # Finish the progress line before the transient
                             # abort propagates to the clean EXIT_TRANSIENT stop.
@@ -1400,8 +1409,8 @@ def run_album_repair_mode(args, token, *, loop=False):
                     album_dir, artist_dir.name, args, token,
                     cd_quality=cd_quality,
                 )
-            except AuthLost:
-                die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
+            except AuthLost as exc:
+                die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
             if status in {"repaired", "attention", "failed", "recovery"}:
                 _report_repair_run({status: 1, "cd_quality": cd_quality}, started, clause={
                     "attention": "the album did not finish cleanly",

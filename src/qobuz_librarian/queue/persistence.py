@@ -4,7 +4,7 @@ from datetime import datetime
 
 from qobuz_librarian import completion
 from qobuz_librarian import config as cfg
-from qobuz_librarian.api.auth import AuthLost
+from qobuz_librarian.api.auth import AuthLost, DownloadsRefused
 from qobuz_librarian.completion import CompletionOriginKind, RecoveryOwner
 from qobuz_librarian.queue.journal import (
     QueueJournalBlocked,
@@ -292,10 +292,12 @@ def offer_resume_startup_recovery(args, token_source, recovery):
             except KeyboardInterrupt:
                 log.info(fmt(C.YELLOW,
                     "\n  ⚠  Resume interrupted; saved queue kept for next launch."))
-            except AuthLost:
+            except AuthLost as exc:
+                reason = (str(exc) if isinstance(exc, DownloadsRefused)
+                          else "Qobuz rejected the token during the resume.")
                 log.info(fmt(C.RED,
-                    "  ✗ Qobuz rejected the token during the resume; the "
-                    "saved queue was kept for the next launch."))
+                    f"  ✗ {reason} The saved queue was kept for the next "
+                    "launch."))
                 raise
             except Exception as exc:
                 log.info(fmt(C.YELLOW,

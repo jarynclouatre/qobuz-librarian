@@ -46,6 +46,11 @@ class AuthLost(Exception):
         self.credential_generation = credential_generation
 
 
+class DownloadsRefused(AuthLost):
+    """Qobuz takes the token for the catalogue but refuses every download,
+    for the account or for the app id and secrets. Its text says which."""
+
+
 class CatalogMiss(Exception): pass
 class Aborted(Exception):     pass
 
@@ -603,6 +608,42 @@ def detect_auth_lost(rip_output):
                 "denied", "fail")):
             return True
     return False
+
+
+def _config_sets_app_id():
+    try:
+        qobuz = tomllib.loads(
+            config.STREAMRIP_CONFIG.read_text(encoding="utf-8")).get("qobuz") or {}
+    except (OSError, ValueError):
+        return False
+    return bool(qobuz.get("app_id") and qobuz.get("secrets"))
+
+
+def downloads_refused(rip_output):
+    """The DownloadsRefused a rip's output shows, or None. Streamrip's
+    login names the account (a free or lapsed subscription) or the app id and
+    secrets; the app's own saved ones are dropped so the next run fetches
+    new ones."""
+    o = rip_output.lower()
+    if "ineligibleerror" in o:
+        return DownloadsRefused(
+            "Qobuz accepted the token, but this account can't download "
+            "music: free and lapsed subscriptions can't. Check the Qobuz "
+            "subscription, then try again.")
+    if "invalidappiderror" not in o and "invalidappsecreterror" not in o:
+        return None
+    if _config_sets_app_id():
+        return DownloadsRefused(
+            "Qobuz refused the app id and secrets set in "
+            f"{config.STREAMRIP_CONFIG}. Empty app_id and secrets there so "
+            "the next download fetches new ones.")
+    try:
+        (_streamrip_run_dir() / _FETCHED_APP_ID).unlink(missing_ok=True)
+    except OSError:
+        pass
+    return DownloadsRefused(
+        "Qobuz refused the app id and secrets used for downloads. They were "
+        "cleared, so the next download fetches new ones; try again.")
 
 
 def detect_rate_limited(rip_output):

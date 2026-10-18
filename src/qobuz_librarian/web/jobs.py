@@ -35,6 +35,7 @@ from qobuz_librarian.api.auth import (
     AuthLost,
     CredentialChanged,
     DownloaderNotReady,
+    DownloadsRefused,
     NoCredsError,
     QobuzEntitlementError,
     QobuzError,
@@ -1091,6 +1092,8 @@ def qobuz_action_error_message(exc, *, unchanged=False) -> str:
     """Short action-gate copy shared by scans and review approvals."""
     if isinstance(exc, NoCredsError):
         message = "Connect Qobuz in Settings."
+    elif isinstance(exc, DownloadsRefused):
+        message = str(exc)
     elif isinstance(exc, AuthLost):
         message = "Qobuz rejected the saved token. Reconnect in Settings."
     elif isinstance(exc, DownloaderNotReady):
@@ -1118,6 +1121,8 @@ def _friendly_job_error(exc, fallback: str) -> str:
     job.error is what the red banner shows."""
     if isinstance(exc, NoCredsError):
         return "No Qobuz credentials set. Visit Settings."
+    if isinstance(exc, DownloadsRefused):
+        return str(exc)
     if isinstance(exc, AuthLost):
         return "Token is expired or invalid. Update it in Settings."
     if isinstance(exc, QobuzUnavailable):
@@ -1241,7 +1246,8 @@ def _run_task(job: Job, fn):
         job.status = JobStatus.FAILED
         job.error = _friendly_job_error(e, cleaned)
         job.push_line(f"[ERROR] {cleaned}")
-        if job.album_id and isinstance(e, (AuthLost, QobuzUnavailable)):
+        if (job.album_id and isinstance(e, (AuthLost, QobuzUnavailable))
+                and not isinstance(e, DownloadsRefused)):
             _start_qobuz_hold(e)
     finally:
         _TLS.current_job = None

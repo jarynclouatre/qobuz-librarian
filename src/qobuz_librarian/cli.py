@@ -1436,8 +1436,8 @@ def _entry():
             main()
         except KeyboardInterrupt:
             die(fmt(C.GRAY, "\n  Interrupted."), EXIT_INTERRUPT)
-        except AuthLost:
-            die(fmt(C.RED, auth_lost_msg()), EXIT_AUTH)
+        except AuthLost as e:
+            die(fmt(C.RED, auth_lost_msg(e)), EXIT_AUTH)
         except QobuzUnavailable as e:
             die(fmt(C.YELLOW, f"\n⚠  {e}\n"), EXIT_TRANSIENT)
         except MusicDiskFull as e:
