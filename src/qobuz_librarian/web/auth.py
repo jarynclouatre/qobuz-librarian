@@ -28,7 +28,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
-from qobuz_librarian.web.csrf import request_is_https
+from qobuz_librarian.web.csrf import cookie_name, request_is_https
 
 log = logging.getLogger("qobuz_librarian")
 
@@ -485,7 +485,9 @@ def verify_login_generation(username: str, password: str) -> str | None:
     stored_hash = d.get("password_hash") or ""
     if not stored_hash:
         return None
-    user_ok = _constant_time_eq(username, d.get("username") or "")
+    # Case is ignored, as phones capitalise the first letter of a name box.
+    user_ok = _constant_time_eq(_norm_user(username),
+                                _norm_user(d.get("username") or ""))
     pass_ok = _verify_hash(stored_hash, password)
     return str(d.get("session_secret") or "") if user_ok and pass_ok else None
 
@@ -563,13 +565,21 @@ def _secure(request) -> bool:
     return request_is_https(request)
 
 
+def session_cookie_name(request) -> str:
+    return cookie_name(SESSION_COOKIE, request)
+
+
+def session_token(request) -> str:
+    return request.cookies.get(session_cookie_name(request)) or ""
+
+
 def set_session_cookie(response, request, *, expected_generation=None) -> None:
     # SameSite=strict (matching the CSRF cookie): the session is the auth
     # credential, and no app flow needs it carried on a cross-site first hop.
     # a deep link from elsewhere just bounces once through /login, which
     # re-issues it. Strict keeps the auth cookie off every cross-site request.
     response.set_cookie(
-        SESSION_COOKIE,
+        session_cookie_name(request),
         mint_session(expected_generation=expected_generation),
         max_age=_COOKIE_MAX_AGE,
         httponly=True,
@@ -578,8 +588,8 @@ def set_session_cookie(response, request, *, expected_generation=None) -> None:
     )
 
 
-def clear_session_cookie(response) -> None:
-    response.delete_cookie(SESSION_COOKIE, samesite="strict")
+def clear_session_cookie(response, request) -> None:
+    response.delete_cookie(session_cookie_name(request), samesite="strict")
 
 
 def auth_active() -> bool:
@@ -601,19 +611,20 @@ def signed_out_target(request) -> str:
         return ""
     if not credentials_configured():
         return SETUP_PATH
-    cookie = request.cookies.get(SESSION_COOKIE)
+    cookie = session_token(request)
     if cookie and verify_session(cookie):
         return ""
     return LOGIN_PATH
 
 
 def _prune_failures(now: float) -> None:
-    """Drop buckets with no in-window failures left. Caller holds _login_lock."""
+    """Drop failures older than the window, and buckets left empty. Caller
+    holds _login_lock."""
     for bucket in (_login_failures, _user_failures):
-        stale = [k for k, ts in bucket.items()
-                 if not any(now - t < _LOGIN_WINDOW for t in ts)]
-        for k in stale:
-            del bucket[k]
+        for k, ts in list(bucket.items()):
+            ts[:] = [t for t in ts if now - t < _LOGIN_WINDOW]
+            if not ts:
+                del bucket[k]
     for k in [k for k, until in _user_paused_until.items() if until <= now]:
         del _user_paused_until[k]
 
@@ -658,8 +669,8 @@ def client_ip(request) -> str:
     its /64 for a public IPv6 client behind a trusted proxy.
 
     uvicorn resolves this from X-Forwarded-For already, but only for proxies
-    FORWARDED_ALLOW_IPS names, and its default (127.0.0.1) never matches a
-    proxy on a Docker network. Left unset, every visitor arrives as the proxy
+    FORWARDED_ALLOW_IPS names, and none by default. Left unset behind a
+    proxy, every visitor arrives as the proxy
     and the per-address throttle becomes one bucket for the whole deployment,
     so one visitor's wrong guesses can affect everyone behind it. Any visitor
     can send the header too, so a peer is named for the operator to check only
@@ -694,9 +705,10 @@ def _note_untrusted_forwarder(peer: str, client: str) -> None:
     if len(_warned_proxy_peers) > _MAX_WARNED_PROXY_PEERS:
         del _warned_proxy_peers[next(iter(_warned_proxy_peers))]
     log.warning(
-        "%s forwarded requests for %d different clients but is not a trusted "
-        "proxy, so the failed-login limit counts them as one. Add it to "
-        "FORWARDED_ALLOW_IPS only if it is your reverse proxy.",
+        "%s is passing on requests for %d different visitors but is not in "
+        "FORWARDED_ALLOW_IPS, so the sign-in limit counts them all as one "
+        "visitor. If it is your reverse proxy, add it to FORWARDED_ALLOW_IPS "
+        "and restart.",
         peer, len(clients))
 
 
@@ -951,7 +963,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return await call_next(request)
             return self._reject(request, SETUP_PATH)
 
-        cookie = request.cookies.get(SESSION_COOKIE)
+        cookie = session_token(request)
         if cookie and verify_session(cookie):
             return await call_next(request)
         if path in (LOGIN_PATH, SETUP_PATH):

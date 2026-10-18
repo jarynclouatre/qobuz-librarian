@@ -59,7 +59,7 @@ _SSE_HEARTBEAT_TICKS = cfg.SSE_HEARTBEAT_TICKS
 def _stream_session_active(request: Request) -> bool:
     if web_auth.auth_disabled():
         return True
-    token = request.cookies.get(web_auth.SESSION_COOKIE)
+    token = web_auth.session_token(request)
     return bool(token) and web_auth.verify_session(token)
 
 

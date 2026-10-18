@@ -79,6 +79,23 @@ class RequestBodyLimitMiddleware:
             await send(message)
 
 
+def cookie_name(base: str, request) -> str:
+    """``base`` with the port this request was sent to, when it names one.
+
+    Browsers keep cookies per host name, not per port, so two instances
+    reached as nas:8666 and nas:8667 would otherwise overwrite each other's
+    sign-in and form cookies.
+    """
+    port = request.headers.get("host", "").rpartition(":")[2]
+    if port.isascii() and port.isdigit() and len(port) <= 5:
+        return f"{base}_{port}"
+    return base
+
+
+def csrf_cookie_name(request) -> str:
+    return cookie_name(CSRF_COOKIE_NAME, request)
+
+
 def _new_token() -> str:
     return secrets.token_urlsafe(32)
 
@@ -129,7 +146,7 @@ def _stale_page_response(request, token):
 
 def _set_csrf_cookie(request, response, token):
     response.set_cookie(
-        CSRF_COOKIE_NAME,
+        csrf_cookie_name(request),
         token,
         max_age=60 * 60 * 24 * 30,
         samesite="strict",
@@ -184,17 +201,18 @@ def cross_origin(request) -> bool:
 
 
 def _csrf_cookie_count(request) -> int:
+    name = csrf_cookie_name(request)
     return sum(
         1
         for header in request.headers.getlist("cookie")
         for part in header.split(";")
-        if part.split("=", 1)[0].strip() == CSRF_COOKIE_NAME
+        if part.split("=", 1)[0].strip() == name
     )
 
 
 class CSRFMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
-        cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+        cookie_token = request.cookies.get(csrf_cookie_name(request))
         token = cookie_token or _new_token()
         request.state.csrf_token = token
 
@@ -259,7 +277,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         is_html = response.headers.get("content-type", "").startswith("text/html")
         if not cookie_token and is_html:
             response.set_cookie(
-                CSRF_COOKIE_NAME,
+                csrf_cookie_name(request),
                 token,
                 max_age=60 * 60 * 24 * 30,
                 samesite="strict",

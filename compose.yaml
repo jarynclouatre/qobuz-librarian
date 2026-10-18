@@ -127,7 +127,8 @@ services:
       WEB_AUTH_PASSWORD_FILE: "${WEB_AUTH_PASSWORD_FILE:-}"
       # Behind a reverse proxy, set this to the proxy's IP(s) so the failed-login
       # throttle keys on the real client IP instead of the shared proxy address.
-      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
+      # Empty trusts no proxy.
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-}"
       # Extra host names the UI answers to while login is off or not yet set
       # up, comma-separated. IP addresses, localhost, single-label names and
       # .local/.lan/.home.arpa/.internal names always work.

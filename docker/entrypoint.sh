@@ -301,7 +301,7 @@ case "${1:-web}" in
             --port "${WEB_PORT:-8666}" \
             --workers 1 \
             --proxy-headers \
-            --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-127.0.0.1}" \
+            --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-}" \
             --no-server-header
         ;;
     cli)

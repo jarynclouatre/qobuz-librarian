@@ -13,9 +13,9 @@ A read-only JSON API for job state: dashboards, monitoring, or scripts.
 
 (A few other paths live under `/api/` but serve the web pages themselves, not this API: `/api/diagnostics` returns an HTML fragment for the Settings page, and the review-stream and search-availability routes feed live pages.)
 
-With login enabled, every endpoint needs the session cookie. A missing or invalid one returns `401 {"detail": "authentication required"}` rather than a redirect, so non-browser clients can detect the auth gate cleanly.
+With login enabled, every endpoint needs the session cookie, named `ql_session_<port>` after the port in the address (plain `ql_session` on port 80 or 443). A missing or invalid one returns `401 {"detail": "authentication required"}` rather than a redirect, so non-browser clients can detect the auth gate cleanly.
 
 ```bash
 # Is any job running or scanning?
-curl -s -b 'ql_session=<your-cookie>' http://localhost:8666/api/queue/count | jq '.running'
+curl -s -b 'ql_session_8666=<your-cookie>' http://localhost:8666/api/queue/count | jq '.running'
 ```

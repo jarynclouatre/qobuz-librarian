@@ -47,7 +47,8 @@
         <div class="ql-field">
           <label class="ql-field-label" for="username">Username</label>
           <input type="text" name="username" id="username" value="{{ username | default('') }}"
-                 autocomplete="username" required
+                 autocomplete="username" autocapitalize="none" autocorrect="off"
+                 spellcheck="false" required
                  {% if not error %}autofocus{% endif %} class="ql-input">
         </div>
         <div class="ql-field">

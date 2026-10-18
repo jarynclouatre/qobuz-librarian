@@ -8,9 +8,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import rendering
+from qobuz_librarian.web.csrf import cookie_name, request_is_https
 
 router = APIRouter()
 _log = logging.getLogger("qobuz_librarian")
+_MAX_USERNAME_ECHO = 200
+_TYPED_USERNAME_COOKIE = "ql_login_user"
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -19,29 +22,42 @@ async def login_page(request: Request):
         return RedirectResponse(url="/", status_code=303)
     if not web_auth.credentials_configured():
         return RedirectResponse(url="/setup", status_code=303)
-    cookie = request.cookies.get(web_auth.SESSION_COOKIE)
+    cookie = web_auth.session_token(request)
     if cookie and web_auth.verify_session(cookie):
         return RedirectResponse(url="/", status_code=303)
-    return rendering.templates.TemplateResponse(
+    typed_cookie = cookie_name(_TYPED_USERNAME_COOKIE, request)
+    typed = urllib.parse.unquote(request.cookies.get(typed_cookie, ""))
+    resp = rendering.templates.TemplateResponse(
         request=request, name="login.html",
         context={"error": (rendering._notice_text(request.query_params.get("error"))
                            or rendering._lockout_notice(web_auth.client_ip(request))),
-                 "username": rendering._notice_text(request.query_params.get("u")),
+                 "username": typed[:_MAX_USERNAME_ECHO],
                  "changed": request.query_params.get("changed") == "1",
                  "next_path": web_auth.safe_next_path(
                      request.query_params.get("next"))})
+    if typed:
+        resp.delete_cookie(typed_cookie, path=web_auth.LOGIN_PATH, samesite="strict")
+    return resp
 
 
-def _login_again(error, username, next_path):
+def _login_again(request, error, username, next_path):
     """Send a refused sign-in back to the form by redirect, so Back from
     the page that follows never lands on a form post."""
     params = {"error": rendering._notice_key(error)}
-    if username:
-        params["u"] = rendering._notice_key(username)
     if next_path:
         params["next"] = next_path
-    return RedirectResponse(url="/login?" + urllib.parse.urlencode(params),
+    resp = RedirectResponse(url="/login?" + urllib.parse.urlencode(params),
                             status_code=303)
+    # The typed name goes back to this browser's form only: the notice store
+    # shows its text on any page that is given the key, and the address
+    # would leave it in history and proxy logs.
+    if username:
+        resp.set_cookie(
+            cookie_name(_TYPED_USERNAME_COOKIE, request),
+            urllib.parse.quote(username[:_MAX_USERNAME_ECHO], safe=""),
+            max_age=60, path=web_auth.LOGIN_PATH, httponly=True, samesite="strict",
+            secure=request_is_https(request))
+    return resp
 
 
 @router.post("/login", response_class=HTMLResponse)
@@ -59,12 +75,12 @@ async def login_submit(request: Request, username: str = Form(""),
     # A request already carrying a valid session is provably the logged-in user,
     # not the brute-forcer the throttle exists to stop, so exempt it so a remote
     # flood of failed logins for the admin username can't lock the real admin out.
-    cookie = request.cookies.get(web_auth.SESSION_COOKIE)
+    cookie = web_auth.session_token(request)
     has_session = bool(cookie) and web_auth.verify_session(cookie)
     # A submission that could never succeed shouldn't cost a strike: an empty
     # field is a slip, not an attempt, and five of them locked the owner out.
     if not username.strip() or not password:
-        return _login_again("Enter your username and password.",
+        return _login_again(request, "Enter your username and password.",
                             username.strip(), next_path)
     # Checked before the password is verified, so a correct one can't clear the
     # wait and a guess costs an attacker the wait rather than a KDF they can
@@ -101,7 +117,7 @@ async def login_submit(request: Request, username: str = Form(""),
         wait = rendering._lockout_notice(ip, username, after_failure=True)
         # Keep what they typed, as the setup screen already does.
         return _login_again(
-            "Incorrect username or password." + (f" {wait}" if wait else ""),
+            request, "Incorrect username or password." + (f" {wait}" if wait else ""),
             username.strip(), next_path)
     web_auth.clear_login_failures(ip, username)
     resp = RedirectResponse(url=next_path or "/", status_code=303)
@@ -126,9 +142,7 @@ async def login_submit(request: Request, username: str = Form(""),
 async def logout(request: Request):
     # Revoke the session server-side, not just the browser cookie; otherwise a
     # captured cookie value stays valid for its full 30-day lifetime.
-    if not web_auth.revoke_session(
-        request.cookies.get(web_auth.SESSION_COOKIE)
-    ):
+    if not web_auth.revoke_session(web_auth.session_token(request)):
         return rendering.render_error_page(
             request,
             503,
@@ -138,7 +152,7 @@ async def logout(request: Request):
         )
     resp = RedirectResponse(url="/login", status_code=303)
     resp.headers["Cache-Control"] = "no-store"
-    web_auth.clear_session_cookie(resp)
+    web_auth.clear_session_cookie(resp, request)
     return resp
 
 

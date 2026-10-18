@@ -1,5 +1,6 @@
 """FastAPI web application for Qobuz Librarian."""
 import logging
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -201,4 +202,5 @@ def start():
     # passes, so the installed qobuz-librarian-web entrypoint doesn't advertise
     # "Server: uvicorn" (a free hint to anyone scanning for framework CVEs).
     uvicorn.run("qobuz_librarian.web.app:app", host=cfg.WEB_HOST,
-                port=cfg.WEB_PORT, workers=1, server_header=False)
+                port=cfg.WEB_PORT, workers=1, server_header=False,
+                forwarded_allow_ips=os.environ.get("FORWARDED_ALLOW_IPS", ""))
