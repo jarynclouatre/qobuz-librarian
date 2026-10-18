@@ -110,6 +110,9 @@ _RETIREMENT_KEYS = frozenset({
 })
 _JOURNAL_LOCK_NAME = ".queue-journal.lock"
 _MAX_JOURNAL_BYTES = 64 * 1024 * 1024
+# A queue that grows stays well inside what a later start reads, so the
+# records a download adds to its item never push the file past that.
+_MAX_GROWING_QUEUE_BYTES = _MAX_JOURNAL_BYTES // 2
 _MANAGED_COMPLETION_REFERENCE_KIND = "managed-beets"
 _MANAGED_RESERVATION_REFERENCE_KIND = "managed-beets-reservation"
 _MANAGED_PRELAUNCH_SETTLEMENT_REFERENCE_KIND = (
@@ -183,6 +186,10 @@ class QueueJournalError(RuntimeError):
 
 class QueueJournalBlocked(QueueJournalError):
     """The saved operation cannot be changed without an explicit decision."""
+
+
+class QueueJournalFull(QueueJournalBlocked):
+    """More albums than the saved queue can hold."""
 
 
 class _QueueNamespaceBlocked(QueueJournalBlocked):
@@ -1936,6 +1943,7 @@ def save_pending_queue(items, *, mode: str) -> QueueJournal:
         raise QueueJournalBlocked(loaded.reason or "saved queue state is blocked")
     if loaded.status is QueueLoadStatus.ABSENT:
         journal = create_queue_journal(items, mode=mode)
+        _refuse_overfull(journal, 0)
         return save_queue_journal(journal)
     else:
         journal = loaded.journal
@@ -1946,7 +1954,25 @@ def save_pending_queue(items, *, mode: str) -> QueueJournal:
                 f"saved queue mode {journal.mode!r} does not match {mode!r}"
             )
         updated = _replace_pending_items(journal, items)
+        _refuse_overfull(updated, len(journal.items))
     return _compare_and_commit(journal, updated)
+
+
+def _refuse_overfull(journal: QueueJournal, saved_count: int) -> None:
+    """Refuse a queue that grew past what a later start can read. One that
+    shrank or kept its length is always saved."""
+    if len(journal.items) <= saved_count:
+        return
+    encoded = json.dumps(
+        _journal_payload(journal),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > _MAX_GROWING_QUEUE_BYTES:
+        raise QueueJournalFull(
+            f"the saved queue would exceed {_MAX_GROWING_QUEUE_BYTES} bytes")
 
 
 @_locked_transaction

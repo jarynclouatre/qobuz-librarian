@@ -120,17 +120,17 @@ docker compose run --rm qobuz-librarian cli --help
 | `--no-catalog` | Skip the missing-albums step in Artist mode and the Library walk |
 | `--[no-]include-live`, `--[no-]include-comps`, `--[no-]include-singles` | List live releases, compilations, or EPs and singles among missing albums (default: the Library review's switches) |
 | `--[no-]include-bonus` | Offer to fill albums whose only missing tracks are other versions of songs they have, in Artist mode, the Library walk and Gap fill (default: the Library review's Bonus versions switch) |
-| `--[no-]prefer-hires` | Sort 24-bit and higher sample rate results first (default: the Prefer hi-res setting) |
+| `--[no-]prefer-hires` | List each album's highest-resolution edition first, keeping the search order (default: the Prefer hi-res setting) |
 | `--dry-run` | Show the plan and change nothing; a download a restart cut off is still settled first, as at every start |
 | `--force` | Download every track of the album again (search or album URL only) |
 | `--yes` | Answer yes to the confirmations; choices still ask |
 | `--auto-safe` | With `--upgrade-walk`, confirm only the upgrades it can classify as safe |
-| `--no-import` | Download without importing; a complete download stays in staging for the `beet import` command `--help` prints, and other downloads, in the terminal or the web app, go ahead beside it and leave it there |
+| `--no-import` | Download without importing; the download stays in staging for the `beet import -m` command `--help` and the end of the run print, to run with Qobuz Librarian stopped (the web app too), and other downloads, in the terminal or the web app, go ahead beside it and leave it there |
 | `--no-upgrade` | Turn off quality upgrades for this run |
 | `--no-downsample` | Skip downsampling new downloads for this run |
 | `--[no-]consolidate` | After import, look at sibling folders and offer to merge them |
 | `--[no-]migrate-multi-artist` | After import, file 'Primary, Other' albums under 'Primary' |
 | `--lyrics-rescan`, `--lyrics-synced-only` | With `--lyrics-walk`: also look up tracks checked in the last 30 days; write only timed lyrics |
 | `--migrate-src PATH`, `--migrate-dest PATH`, `--in-place`, `--acoustid` | With `--migrate`: source, destination, move instead of copy, fingerprint untagged files (see [Existing libraries](existing-libraries.md)) |
-| `--verbose`, `--quiet` / `-q`, `--no-color` | More detail, warnings and errors only, no colours |
+| `--verbose`, `--quiet` / `-q`, `--no-color` | More detail, warnings and errors only (a search, `--artist`, `--gap-fill` or `--library-walk` also needs `--yes`), no colours |
 | `--version`, `-h` / `--help` | Print the version or the help |

@@ -8,6 +8,7 @@ from qobuz_librarian.api.auth import AuthLost, DownloadsRefused
 from qobuz_librarian.completion import CompletionOriginKind, RecoveryOwner
 from qobuz_librarian.queue.journal import (
     QueueJournalBlocked,
+    QueueJournalFull,
     QueueLoadStatus,
     QueuePhase,
     _deserialize_queue_item,
@@ -44,16 +45,26 @@ def queue_saver(mode, *, dry_run=False):
     A durable item that stops for attention stays blocked in the journal on
     purpose, and while that stands the journal refuses to be rewritten as
     pending. The run can't settle it; that happens at the next launch, so it
-    says so once and carries on rather than dying on the refusal. A dry run
-    saves nothing.
+    says so once and carries on rather than dying on the refusal. A queue
+    grown past what the next launch could read is refused the same way. A
+    dry run saves nothing. The save returns whether ``items`` is what the
+    saved queue now holds.
     """
     told = []
 
     def save(items):
         if dry_run:
-            return
+            return True
         try:
             save_pending_queue(items, mode=mode)
+        except QueueJournalFull:
+            if not told:
+                told.append(True)
+                log.info(fmt(C.YELLOW, wrap(
+                    "The saved queue is full, so the albums queued last were "
+                    "not added to it. Download the queue before queuing "
+                    "more.", indent="  ⚠  ", hanging="     ")))
+            return False
         except QueueJournalBlocked:
             if not told:
                 told.append(True)
@@ -61,8 +72,22 @@ def queue_saver(mode, *, dry_run=False):
                     "  ⚠  An album is parked for recovery, so the saved queue "
                     "is being kept exactly as it stands until the next "
                     "launch."))
+            return False
+        return True
 
     return save
+
+
+def queue_parked():
+    """Whether the saved queue holds an album stopped for recovery, which
+    only the next launch settles."""
+    loaded = load_queue_journal()
+    journal = loaded.journal
+    return loaded.status is QueueLoadStatus.BLOCKED or (
+        journal is not None and (
+            bool(journal.retirements)
+            or any(item.phase is not QueuePhase.PENDING
+                   for item in journal.items)))
 
 
 # What a run asks of the user after an upgrade whose album's own files could
@@ -79,15 +104,55 @@ def kept_queue_note(queue):
         indent="  ", hanging="  "))
 
 
+def parked_queue_note():
+    """What a run says when an album stopped for recovery holds the saved
+    queue."""
+    return fmt(C.YELLOW, wrap(
+        "An album is parked for recovery. Run Qobuz Librarian again with no "
+        "mode or search argument: it settles that album first, then offers "
+        "the saved queue.", indent="  ⚠  ", hanging="     "))
+
+
+def save_or_trim(queue, save):
+    """Save a run's queue through ``save`` (a queue_saver).
+
+    A full saved queue keeps what it already holds, so the albums it refused
+    leave ``queue``. False when an album stopped for recovery holds the saved
+    queue as it stands until the next launch.
+    """
+    if save(queue):
+        return True
+    if queue_parked():
+        return False
+    kept, _mode = load_queue_journal().pending_items()
+    held = {_queued_identity(item) for item in kept}
+    queue[:] = [item for item in queue if _queued_identity(item) in held]
+    return True
+
+
+def _queued_identity(item):
+    album_dir = item.get("album_dir")
+    return (str(item["album"].get("id")), str(album_dir) if album_dir else None,
+            item.get("label"))
+
+
+def keep_queue(queue, save):
+    """Save a run's queue and say where it waits."""
+    if not save_or_trim(queue, save):
+        log.info(parked_queue_note())
+    elif queue:
+        log.info(kept_queue_note(queue))
+
+
 # Albums a resume prompt names before it counts the rest.
 _QUEUE_ALBUMS_SHOWN = 5
 
 
-def _queued_album_lines(items):
+def _queued_album_lines(items, shown=_QUEUE_ALBUMS_SHOWN):
     """The albums a saved queue holds, a few by name and a count of the
     rest."""
     lines = []
-    for item in items[:_QUEUE_ALBUMS_SHOWN]:
+    for item in items[:shown]:
         album = item.get("album") or {}
         artist = (album.get("artist") or {}).get("name") or "?"
         title = album.get("title") or item.get("label") or "?"
@@ -95,9 +160,8 @@ def _queued_album_lines(items):
         if version and version.lower() not in title.lower():
             title = f"{title} ({version})"
         lines.append(fmt(C.WHITE, f"     • {truncate(f'{artist} - {title}', 70)}"))
-    if len(items) > _QUEUE_ALBUMS_SHOWN:
-        lines.append(fmt(C.GRAY,
-            f"     … and {len(items) - _QUEUE_ALBUMS_SHOWN} more"))
+    if len(items) > shown:
+        lines.append(fmt(C.GRAY, f"     … and {len(items) - shown} more"))
     return "\n".join(lines)
 
 
@@ -252,15 +316,19 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                 from qobuz_librarian.queue.executor import _execute_download_queue
 
                 def _save_pending_progress():
-                    save_pending_queue(items, mode=mode)
+                    try:
+                        save_pending_queue(items, mode=mode)
+                    except QueueJournalBlocked:
+                        # The interrupted album holds the saved queue until
+                        # it settles; the albums after it are saved from then.
+                        if not recovery_bearing:
+                            raise
 
                 _, drained = _execute_download_queue(
                     items,
                     args,
                     token,
-                    on_progress=(
-                        None if recovery_bearing else _save_pending_progress
-                    ),
+                    on_progress=_save_pending_progress,
                     refresh_review=True,
                     consolidate_duplicates=mode != "album-now",
                 )

@@ -1747,11 +1747,21 @@ def process_album(album, args, *, allow_force=True, label=None,
 
         imported = False
         if args.no_import:
+            # Without the import a multi-disc cover would stay in the album
+            # root, where the manual import leaves it behind.
+            try:
+                for _staged in (validated_staged_album_dirs(download_result)
+                                if n_ok > 0 else []):
+                    relocate_disc_album_artwork(_staged)
+            except Exception as _ae:
+                vlog(f"artwork relocation raised: {_ae}")
             if n_ok > 0 and not n_fail and not n_lossy:
                 keep_unimported_download(download_result)
+                kept_in = cfg.STAGING_DIR
             else:
                 retain_download_staging(download_result, label="incomplete")
-            log.info(fmt(C.YELLOW, f"\n  --no-import: skipping beets. Files remain in {cfg.STAGING_DIR}/"))
+                kept_in = cfg.STAGING_DIR / cfg.BEETS_RETRY_DIR
+            log.info(fmt(C.YELLOW, f"\n  --no-import: skipping beets. Files remain in {kept_in}/"))
         elif n_ok == 0:
             log.info(fmt(C.YELLOW, "\n  Skipping beets import: nothing succeeded."))
             retire_failed_download_staging(download_result)

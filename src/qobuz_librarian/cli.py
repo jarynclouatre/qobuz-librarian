@@ -510,7 +510,9 @@ def _beets_recovery_command(album_dirs=()):
         # named itself; importing the staging folder finds nothing. Only the
         # kept ones: a download in progress beside them has its own folder.
         targets = f"{shlex.quote(str(cfg.STAGING_DIR))}/.qobuz-run-*-no-import"
-    command = f"beet import {targets}"
+    # Moving leaves nothing behind in staging for the next run to import
+    # again, whatever the user's own beets config says about copying.
+    command = f"beet import -m {targets}"
     if _in_container():
         service = shlex.quote(_compose_service_name())
         if not album_dirs:
@@ -532,7 +534,9 @@ def _help_epilog():
         if _in_container() else "After --no-import:")
     lines.extend(("", recovery_heading))
     lines.extend(_help_example(
-        _beets_recovery_command(), "import the albums it kept in staging", width))
+        _beets_recovery_command(),
+        "with Qobuz Librarian stopped (the web app too), import the albums "
+        "it kept in staging", width))
 
     lines.extend(("", *textwrap.wrap(
         "Credentials: set them on the web UI Settings page first, or use "
@@ -577,6 +581,13 @@ def _help_epilog():
             break_on_hyphens=False,
         ))
     return "\n".join(lines)
+
+
+# Run flags whose default is a saved setting.
+_SETTING_FLAGS = (
+    ("prefer_hires", "PREFER_HIRES"),
+    ("migrate_multi_artist", "MIGRATE_MULTI_ARTIST"),
+)
 
 
 def parse_args():
@@ -670,8 +681,8 @@ def parse_args():
     # CLI and web behave the same. --no-prefer-hires overrides per-run.
     offers.add_argument("--prefer-hires", dest="prefer_hires",
                    action=argparse.BooleanOptionalAction,
-                   default=cfg.PREFER_HIRES,
-                   help="sort 24-bit / higher sample rate results first")
+                   help="list each album's highest-resolution edition first "
+                        "(search order kept)")
 
     getting.add_argument("--dry-run",      action="store_true",
                    help="show the plan and change nothing; a download a "
@@ -711,7 +722,6 @@ def parse_args():
                    help="after import, scan sibling folders and offer to consolidate")
     getting.add_argument("--migrate-multi-artist", dest="migrate_multi_artist",
                    action=argparse.BooleanOptionalAction,
-                   default=cfg.MIGRATE_MULTI_ARTIST,
                    help="after import, safely re-file 'Primary, Other' albums "
                         "under 'Primary'")
 
@@ -735,12 +745,21 @@ def parse_args():
     output.add_argument("--verbose",      action="store_true", help="show detection details")
     output.add_argument("--quiet", "-q",  action="store_true",
                    help="suppress info-level console output (warnings/errors "
-                        "still print; the log file keeps recording)")
+                        "still print; the log file keeps recording); a search, "
+                        "--artist, --gap-fill or --library-walk also needs "
+                        "--yes")
     output.add_argument("--no-color",     action="store_true", help="disable ANSI colours")
     output.add_argument("--version", action="version", version=f"qobuz-librarian {__version__}")
     output.add_argument("-h", "--help", action="help",
                    help="show this help and exit")
     args = p.parse_args()
+    # Unset ones follow the saved settings, also after the menu's Settings.
+    args.settings_given = {
+        flag for flag, _setting in _SETTING_FLAGS
+        if getattr(args, flag) is not None}
+    for flag, setting in _SETTING_FLAGS:
+        if flag not in args.settings_given:
+            setattr(args, flag, getattr(cfg, setting))
     # Per-run override of cfg.AUTO_UPGRADE_ENABLED.
     args.auto_upgrade = cfg.AUTO_UPGRADE_ENABLED
     # The walk / migrate / reset modes are whole-library or local-only runs that
@@ -810,6 +829,13 @@ def parse_args():
         p.error("--quiet is for unattended runs and silences the interactive "
                 "menu. Name a mode (a query, --artist, --upgrade-walk, …) "
                 "or drop --quiet")
+    # These ask about each album, and --quiet hides the album they ask about.
+    if args.quiet and not args.yes and (
+            args.query or args.artist is not None or args.album_gaps
+            or args.library_walk):
+        p.error("--quiet hides the album details a search, --artist, "
+                "--gap-fill or --library-walk asks about; add --yes or drop "
+                "--quiet")
     # --no-upgrade with --upgrade-walk is contradictory.
     if args.no_upgrade and args.upgrade_walk:
         p.error("--no-upgrade conflicts with --upgrade-walk")
@@ -911,7 +937,16 @@ def main():
         args.downsample_walk,
         args.upgrade_walk,
     )
+    parked = False
+
     def queue_refusal(uses_queue, other_work):
+        if parked and (uses_queue or other_work):
+            return fmt(
+                C.YELLOW,
+                "\n⚠  An album is parked for recovery.\n"
+                "   Quit and run Qobuz Librarian again; it settles that album "
+                "before other work.\n",
+            )
         if queue_started and (uses_queue or other_work):
             return fmt(
                 C.YELLOW,
@@ -1040,7 +1075,6 @@ def main():
     def offer_saved_queue():
         """Offer the saved queue: resume, keep or discard it. None when the
         prompt was abandoned."""
-        nonlocal saved_queue, queue_started
         try:
             choice = offer_resume_startup_recovery(
                 args,
@@ -1056,15 +1090,10 @@ def main():
                 f"   {exc}\n"
                 "   Its saved recovery state was left unchanged.\n",
             ), EXIT_GENERAL)
-        result = _record_startup_recovery(_lockfile)
-        if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
-            _die_unsettled_startup_recovery(_lockfile, result)
-        saved_queue = result.status is StartupRecoveryStatus.RESUME_REQUIRED
-        queue_started = saved_queue and any(
-            item.phase is not queue_state.QueuePhase.PENDING
-            for item in result.items
-        )
-        if saved_queue:
+        read_saved_queue()
+        if parked:
+            log.info(queue_refusal(True, True))
+        elif saved_queue:
             if queue_started:
                 log.info(fmt(
                     C.YELLOW,
@@ -1076,6 +1105,23 @@ def main():
                     f"Queue kept in {cfg.QUEUE_JOURNAL_DIR}. Other downloads "
                     "wait until it is resumed or discarded.")))
         return choice
+
+    def read_saved_queue():
+        """Read the saved queue again: a mode run from the menu can leave one
+        behind, or an album stopped for recovery."""
+        nonlocal saved_queue, queue_started, parked
+        result = _record_startup_recovery(_lockfile)
+        if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
+            if result.reason != "queue-item-blocked":
+                _die_unsettled_startup_recovery(_lockfile, result)
+            parked = True
+            return
+        parked = False
+        saved_queue = result.status is StartupRecoveryStatus.RESUME_REQUIRED
+        queue_started = saved_queue and any(
+            item.phase is not queue_state.QueuePhase.PENDING
+            for item in result.items
+        )
 
     # An album put back from a copy has new inodes; its saved rows are
     # sealed again so they are not refused for them.
@@ -1247,6 +1293,11 @@ def main():
                      Mode.ALBUM_WALK, Mode.ALBUM_REPAIR),
             mode in (Mode.UPGRADE, Mode.MIGRATE, Mode.DOWNSAMPLE, Mode.LYRICS),
         )
+        if any(uses):
+            read_saved_queue()
+        if parked and any(uses):
+            log.info(queue_refusal(*uses))
+            continue
         if queue_refusal(*uses):
             if offer_saved_queue() is None:
                 return
@@ -1310,6 +1361,9 @@ def main():
         elif mode == Mode.SETTINGS:
             from qobuz_librarian.modes.settings_cli import run_settings_mode
             run_settings_mode(args)
+            for flag, setting in _SETTING_FLAGS:
+                if flag not in args.settings_given:
+                    setattr(args, flag, getattr(cfg, setting))
 
 
 def _check_staging_occupied():
@@ -1319,7 +1373,10 @@ def _check_staging_occupied():
     if _RUN_LEASE is None or _RUN_LEASE.intact() is not True:
         return
     from qobuz_librarian import download
-    from qobuz_librarian.integrations.staging import kept_staging_run_names
+    from qobuz_librarian.integrations.staging import (
+        inspect_retry_groups,
+        kept_staging_run_names,
+    )
     from qobuz_librarian.queue.startup_recovery import unclaimed_staging_run_names
 
     def album_dirs_in(roots):
@@ -1342,6 +1399,9 @@ def _check_staging_occupied():
             [cfg.STAGING_DIR / name for name in kept_staging_run_names()] + [
                 d for d in sorted(cfg.STAGING_DIR.iterdir())
                 if d.is_dir() and not d.name.startswith(".")
+            ] + [
+                group.path for group in inspect_retry_groups()
+                if _NO_IMPORT_KEPT.fullmatch(group.path.name)
             ]) + unfinished
         if album_dirs:
             one = len(album_dirs) == 1
@@ -1351,8 +1411,9 @@ def _check_staging_occupied():
                 f"{plural(len(album_dirs), 'album folder')} in "
                 f"{cfg.STAGING_DIR} {'was' if one else 'were'} not imported. "
                 + (f"The next run clears incomplete downloads from staging, "
-                   f"so import {them} first{location}:"
-                   if unfinished else f"Import {them}{location} with:"),
+                   f"so import {them} first{location}"
+                   if unfinished else f"Import {them}{location}")
+                + ", with Qobuz Librarian stopped (the web app too):",
                 indent="  ⚠  ", hanging="     ")
             command = "\n".join(_wrap_shell_command(
                 _beets_recovery_command(album_dirs), text_width(),
@@ -1360,6 +1421,10 @@ def _check_staging_occupied():
             log.info(fmt(C.YELLOW, f"\n{notice}\n{command}"))
     except OSError:
         pass
+
+
+# An incomplete --no-import download kept for its manual import.
+_NO_IMPORT_KEPT = re.compile(r"\d{8}_\d{6}-incomplete-[0-9a-f]{24}")
 
 
 def _note_held_staging():

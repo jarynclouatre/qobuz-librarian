@@ -2,6 +2,7 @@
 import sys
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import download
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.api.auth import (
     Aborted,
@@ -31,9 +32,20 @@ from qobuz_librarian.queue.executor import (
     _refresh_review_state_after_downloads,
     _validate_queue_item_premise,
 )
-from qobuz_librarian.queue.journal import clear_queue_journal, save_pending_queue
+from qobuz_librarian.queue.journal import (
+    QueueLoadStatus,
+    clear_queue_journal,
+    load_queue_journal,
+    save_pending_queue,
+)
+from qobuz_librarian.queue.persistence import (
+    _queued_album_lines,
+    kept_queue_note,
+    parked_queue_note,
+    queue_parked,
+)
 from qobuz_librarian.ui_cli.ask import ask
-from qobuz_librarian.ui_cli.colors import C, banner, fmt
+from qobuz_librarian.ui_cli.colors import C, banner, fmt, wrap
 from qobuz_librarian.ui_cli.errors import (
     EXIT_AUTH,
     EXIT_GENERAL,
@@ -167,8 +179,9 @@ def _download_album_now(
 
             if not getattr(args, "dry_run", False):
                 _save_progress()
+            results = []
             try:
-                results, drained = _execute_download_queue(
+                _, drained = _execute_download_queue(
                     queue,
                     args,
                     token,
@@ -177,20 +190,22 @@ def _download_album_now(
                         else _save_progress
                     ),
                     consolidate_duplicates=False,
+                    results_out=results,
                 )
             except KeyboardInterrupt:
-                finish({"result": "interrupted"})
+                # A stop after the album landed keeps its own result.
+                finish(results[0] if results else {"result": "interrupted"})
                 raise
             if not getattr(args, "dry_run", False):
                 if drained:
                     clear_queue_journal()
+                elif queue and queue_parked():
+                    log.info(parked_queue_note())
                 elif queue:
-                    log.info(fmt(
-                        C.YELLOW,
-                        "  ⚠  Safe recovery was saved. Restart without a "
-                        "search argument and choose Resume before other work.",
-                    ))
+                    log.info(kept_queue_note(queue))
             return finish(results[0] if results else None)
+    ran_before = download.download_ran
+    download.download_ran = False
     try:
         result = process_album(
             album, args, token=token, exact_edition=True,
@@ -198,8 +213,12 @@ def _download_album_now(
             expected_gap_fill_receipts=expected_gap_fill_receipts,
             already_confirmed=already_confirmed)
     except KeyboardInterrupt:
-        finish({"result": "interrupted"})
+        # A Ctrl-C at a question, before anything downloaded, stopped nothing.
+        if download.download_ran:
+            finish({"result": "interrupted"})
         raise
+    finally:
+        download.download_ran = download.download_ran or ran_before
     return finish(result)
 
 
@@ -308,7 +327,18 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
     """Show the summary and run the [d]/[q]/[f]/[s] prompt for one album."""
     try:
         existing, album_dir, missing, present = catalog.find_edition_tracks(album)
-        print_album_summary(album, missing, present, album_dir, args.force)
+        # As process_album decides: a song the folder holds as another master
+        # is not fetched into it, and when that covers every gap this edition
+        # is a separate copy.
+        held = ([] if album_dir is None or args.force else
+                catalog.held_by_other_versions(album, existing, album_dir, missing))
+        all_held = bool(held) and len(held) == len(missing)
+        gaps = [t for t in missing if not any(t is h for h in held)]
+        tracks = (album.get("tracks") or {}).get("items") or []
+        if all_held:
+            print_album_summary(album, tracks, [], None, args.force)
+        else:
+            print_album_summary(album, gaps, present, album_dir, args.force)
 
         if not missing and not args.force:
             log.info(fmt(C.GREEN, "  ✓  Already complete; nothing to download."))
@@ -329,14 +359,14 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
                 log.info(fmt(C.GRAY, "  (already in queue; skipping duplicate)"))
             else:
                 other = catalog.other_version_dir(album)
-                separate = bool((missing or args.force) and other and album_dir is None)
-                tracks = (album.get("tracks") or {}).get("items") or []
+                separate = all_held or bool(
+                    (missing or args.force) and other and album_dir is None)
                 candidate = _build_queue_item(
                     album=album,
                     album_dir=(album_dir or other) if separate else album_dir,
                     label=(f"{(album.get('artist') or {}).get('name') or '?'}"
                            f" - {album.get('title') or '?'}"),
-                    missing=tracks if args.force or separate else missing,
+                    missing=tracks if args.force or separate else gaps,
                     present=[] if separate else present,
                     upgrade_only=False,
                     auto_upgrade=False,
@@ -395,10 +425,17 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
     flushing = False
 
     def _flush_queue():
-        nonlocal stopped, flushing
+        nonlocal flushing
         if not album_queue or stopped:
             return
         flushing = True
+        try:
+            _download_queued()
+        finally:
+            flushing = False
+
+    def _download_queued():
+        nonlocal stopped
         banner(f"Executing queue: {plural(len(album_queue), 'album')}", C.GREEN)
         while album_queue:
             item = album_queue[0]
@@ -487,8 +524,23 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
 
             if loop and not args.yes:
                 result = _interactive_album_action(album, args, token, album_queue, _flush_queue)
-                if isinstance(result, dict) and _one_shot_exit_code(result):
+                # A download that needs attention ends the search only when
+                # the saved queue now holds it; otherwise the albums queued
+                # here can still be downloaded.
+                if (isinstance(result, dict) and _one_shot_exit_code(result)
+                        and load_queue_journal().status
+                        is not QueueLoadStatus.ABSENT):
                     stopped = True
+                    if album_queue:
+                        one = len(album_queue) == 1
+                        log.info(fmt(C.YELLOW, wrap(
+                            f"{'This' if one else 'These'} queued "
+                            f"{'album was' if one else 'albums were'} not "
+                            f"downloaded; queue {'it' if one else 'them'} "
+                            "again from a new search:",
+                            indent="  ⚠  ", hanging="     ")))
+                        log.info(_queued_album_lines(
+                            album_queue, shown=len(album_queue)))
                 if stopped:
                     return EXIT_GENERAL
             else:

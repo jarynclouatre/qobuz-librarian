@@ -153,6 +153,16 @@ def _queue_album_key(item):
     return item["album"].get("id")
 
 
+def _skipped(skip_predicate, album_dir):
+    if skip_predicate is None:
+        return False
+    try:
+        return bool(skip_predicate(album_dir))
+    except Exception as _spe:
+        vlog(f"  skip_predicate raised on {album_dir.name}: {_spe}")
+        return False
+
+
 def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                       shared_queue=None, flush_callback=None,
                       skip_predicate=None, save_callback=None, fresh=False,
@@ -218,7 +228,11 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
 
     skip_set = set()  # folders set aside while picking among duplicate groups
     no_answer = False
-    sibling_groups = detect_sibling_album_groups(album_dirs)
+    # A group whose folders the walk has all settled was answered before.
+    sibling_groups = [
+        (bare, dirs) for bare, dirs in detect_sibling_album_groups(album_dirs)
+        if not all(_skipped(skip_predicate, d) for d in dirs)
+    ]
     if sibling_groups:
         log.info(fmt(C.YELLOW,
             f"\n  ⚠  Detected {plural(len(sibling_groups), 'sibling folder group')}:"))
@@ -332,12 +346,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
         if stopped_early:
             break
 
-        if skip_predicate is not None:
-            try:
-                if skip_predicate(ad):
-                    continue
-            except Exception as _spe:
-                vlog(f"  skip_predicate raised on {ad.name}: {_spe}")
+        if _skipped(skip_predicate, ad):
+            continue
 
         label = f"[{i}/{len(album_dirs)}]"
         print()
@@ -897,29 +907,43 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         pending = []
         needs_attention = False
         for i, idx in enumerate(picks, 1):
-            chosen = ordered[idx - 1].qobuz_album
+            gap = ordered[idx - 1]
+            chosen = gap.qobuz_album
             try:
                 full = get_album(chosen["id"], token)
             except QobuzError as e:
                 log.info(fmt(C.YELLOW, f"    ⚠  Couldn't fetch: {e}. Skipping."))
                 needs_attention = True
                 continue
-            full_tracks = (full.get("tracks") or {}).get("items") or []
-            pending.append(_build_queue_item(
-                album=full, album_dir=None,
-                label=f"new {i}/{len(picks)}",
-                missing=list(full_tracks), present=[],
-                upgrade_only=False, auto_upgrade=False,
-                siblings_to_delete=[],
-            ))
-            time.sleep(cfg.ARTIST_API_DELAY)
-        if pending:
+            if gap.on_disk_dir is not None:
+                # Partly filed in another folder (a collaboration), so it
+                # fills that folder's gaps, as the Library review does.
+                candidate = _build_queue_item(
+                    album=full, album_dir=gap.on_disk_dir,
+                    label=f"new {i}/{len(picks)}",
+                    missing=list(gap.missing), present=list(gap.present),
+                    upgrade_only=False, auto_upgrade=False,
+                    siblings_to_delete=[],
+                )
+            else:
+                candidate = _build_queue_item(
+                    album=full, album_dir=None,
+                    label=f"new {i}/{len(picks)}",
+                    missing=list((full.get("tracks") or {}).get("items") or []),
+                    present=[],
+                    upgrade_only=False, auto_upgrade=False,
+                    siblings_to_delete=[],
+                )
             try:
-                _admit_new_queue_items(pending, token)
+                token = _admit_new_queue_items([candidate], token)
             except CandidateStale as exc:
-                log.info(fmt(C.YELLOW, f"  ⚠  {exc}"))
-                return 0, True
-            shared_queue.extend(pending)
+                log.info(fmt(C.YELLOW,
+                    f"    ⚠  {truncate(full.get('title') or '?', 50)}: {exc}"))
+                needs_attention = True
+                continue
+            pending.append(candidate)
+            time.sleep(cfg.ARTIST_API_DELAY)
+        shared_queue.extend(pending)
         n_queued = len(pending)
         log.info(fmt(C.GREEN,
             f"  ✓ Queued {plural(n_queued, 'album')} "
@@ -1012,7 +1036,7 @@ def _report_gap_fill_summary(results):
     return counts
 
 
-def _gap_fill_exit_code(counts):
+def _gap_fill_exit_code(counts, *, stopped=False):
     needs_attention = any(
         counts[bucket]
         for bucket in _ATTENTION_BUCKETS
@@ -1025,6 +1049,8 @@ def _gap_fill_exit_code(counts):
             clauses.append(OWN_FILES_LEFT)
         log.warning(fmt(C.YELLOW,
             f"  ⚠  Needs attention: {', and '.join(clauses)}."))
+    elif stopped:
+        log.info(fmt(C.GRAY, "  Stopped."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))
     return EXIT_GENERAL if needs_attention else 0
@@ -1116,6 +1142,10 @@ def run_artist_mode(artist_name, args, token):
             return _gap_fill_exit_code(counts)
         print()
 
+        if any(r.get("result") == "user_stopped" for r in gap_fill_results):
+            log.info(fmt(C.GRAY, "\n  Stopped before the missing albums step."))
+            return _gap_fill_exit_code(counts, stopped=True)
+
         n_added, step_two_attention = run_artist_missing_albums(
             artist_name, owned_titles, args, token,
             artist_id=artist_id, handled_ids=handled_ids,
@@ -1125,7 +1155,7 @@ def run_artist_mode(artist_name, args, token):
         if n_added:
             log.info(fmt(C.GREEN, f"\n  ✓  Added {plural(n_added, 'new album')} for {artist_name}.\n"))
         if step_two_attention:
-            clause = "the missing albums step stopped before it finished"
+            clause = "review the missing albums step above and retry"
             log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
             return EXIT_GENERAL
         return _gap_fill_exit_code(counts)

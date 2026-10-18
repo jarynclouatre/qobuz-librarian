@@ -58,10 +58,12 @@ from qobuz_librarian.recovery import (
     normalise_recovery_owner,
 )
 from qobuz_librarian.safefile import (
+    AT_FDCWD,
     delete_verified,
     fsync_dir,
     named_entry_matches,
     named_entry_missing,
+    rename_noreplace,
 )
 from qobuz_librarian.safefile import identity_record as _ownership_identity
 from qobuz_librarian.safefile import stat_identity as _staged_identity
@@ -4710,11 +4712,10 @@ def relocate_disc_album_artwork(album_dir) -> bool:
     target = disc_dirs[0]
     moved = False
     for cover in covers:
-        destination = target / cover.name
-        if destination.exists():
-            continue
         try:
-            os.rename(cover, destination)
+            rename_noreplace(AT_FDCWD, cover, AT_FDCWD, target / cover.name)
+        except FileExistsError:
+            continue
         except OSError as e:
             vlog(f"couldn't move {cover.name} beside the first disc: {e}")
             continue
@@ -8065,14 +8066,26 @@ def staging_preflight(args):
     if r is None:
         r = "2"
     if r == "1":
-        # Snapshot each directory that directly holds public audio. Isolated
-        # per-rip roots stay outside every hook and the explicit beets command.
+        # Snapshot each album directory that holds public audio, a multi-disc
+        # album's discs as one album with its cover moved where beets files
+        # it, as the queue does. Isolated per-rip roots stay outside every
+        # hook and the explicit beets command.
+        from qobuz_librarian.download import _DISC_DIR_RE
+
         _pre_dirs = []
         _seen_dirs = set()
         for _file in files:
-            if _file.suffix.lower() in cfg.AUDIO_EXTS and _file.parent not in _seen_dirs:
-                _seen_dirs.add(_file.parent)
-                _pre_dirs.append(_file.parent)
+            if _file.suffix.lower() not in cfg.AUDIO_EXTS:
+                continue
+            _album_dir = _file.parent
+            if (_DISC_DIR_RE.match(_album_dir.name)
+                    and _album_dir.parent != cfg.STAGING_DIR):
+                _album_dir = _album_dir.parent
+            if _album_dir not in _seen_dirs:
+                _seen_dirs.add(_album_dir)
+                _pre_dirs.append(_album_dir)
+        for _directory in _pre_dirs:
+            relocate_disc_album_artwork(_directory)
         from qobuz_librarian.integrations.downsample_engine import (
             HAVE_DOWNSAMPLE,
             downsample_dir,

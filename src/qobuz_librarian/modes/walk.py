@@ -23,8 +23,11 @@ from qobuz_librarian.queue.executor import _execute_download_queue
 from qobuz_librarian.queue.journal import clear_queue_journal
 from qobuz_librarian.queue.persistence import (
     OWN_FILES_LEFT,
-    kept_queue_note,
+    keep_queue,
+    parked_queue_note,
+    queue_parked,
     queue_saver,
+    save_or_trim,
 )
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate, wrap
@@ -247,22 +250,25 @@ def _leftover_folder_note(label, names) -> str:
 
 
 def _download_queue(queue, args, token, save, results_out=None):
-    """Download a walk's queue and return its results and whether it drained.
-    A queue that drains is cleared; one that does not stays saved."""
-    save(queue)
+    """Download a walk's saved queue and return its results, whether it
+    drained, and whether an album stopped for recovery now holds the saved
+    queue. A queue that drains is cleared; one that does not stays saved."""
     log.info(fmt(C.CYAN,
         f"\n  ⟳  Downloading the queue ({plural(len(queue), 'album')})…"))
     results, drained = _execute_download_queue(
         queue, args, token, on_progress=lambda: save(queue),
         refresh_review=True, results_out=results_out)
+    parked = False
     if not args.dry_run:
         if drained:
             clear_queue_journal()
+        elif queue and queue_parked():
+            parked = True
         elif queue:
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {plural(len(queue), 'album')} couldn't be "
                 "downloaded; kept in the queue to retry on the next run."))
-    return results, drained
+    return results, drained, parked
 
 
 def run_album_walk_mode(args, token):
@@ -314,6 +320,7 @@ def run_album_walk_mode(args, token):
     n_artists_scanned = 0
     n_albums_complete = 0
     n_albums_skipped = 0
+    n_albums_dismissed = 0
     n_albums_unmatched = 0
     n_albums_unplaced = 0
     n_albums_unavailable = 0
@@ -328,20 +335,34 @@ def run_album_walk_mode(args, token):
     partial_completion = False
     retry_needed = False
     own_files_left = False
+    # An album stopped for recovery holds the saved queue until the next
+    # launch, and a full one takes nothing more, so the walk ends there.
+    parked = False
+    queue_full = False
 
     _save_queue = queue_saver("album_walk", dry_run=args.dry_run)
 
     def _save_now():
-        _save_queue(shared_queue)
+        nonlocal parked, queue_full
+        n_queued = len(shared_queue)
+        if not save_or_trim(shared_queue, _save_queue):
+            parked = True
+        elif len(shared_queue) < n_queued:
+            queue_full = True
 
     def _flush_queue():
         nonlocal n_albums_filled, partial_completion, retry_needed, own_files_left
+        nonlocal parked
+        if not parked:
+            _save_now()
+        if parked:
+            return
         if not shared_queue:
             log.info(fmt(C.GRAY, "    The queue is empty."))
             return
         results = []
         try:
-            _, drained = _download_queue(
+            _, drained, parked = _download_queue(
                 shared_queue, args, token, _save_queue, results_out=results)
         finally:
             n_albums_filled += sum(
@@ -387,7 +408,8 @@ def run_album_walk_mode(args, token):
                     artist_query, artist_dir, args, token,
                     shared_queue=shared_queue,
                     flush_callback=_flush_queue,
-                    skip_predicate=seen_dirs.__contains__,
+                    skip_predicate=lambda ad: (
+                        parked or queue_full or ad in seen_dirs),
                     save_callback=_save_now,
                     hidden=hidden,
                     numbered=False,
@@ -414,6 +436,8 @@ def run_album_walk_mode(args, token):
                         unmatched_names.append(_ad.name)
                     elif _result == "sibling_skipped":
                         pass  # a folded duplicate folder; recorded seen, not summarized
+                    elif _result == "dismissed":
+                        n_albums_dismissed += 1
                     elif _result == "other_edition":
                         n_albums_unavailable += 1
                         unavailable_names.append(_ad.name)
@@ -424,7 +448,14 @@ def run_album_walk_mode(args, token):
                         n_albums_unplaced += 1
                         unplaced_names.append(_ad.name)
                 n_artists_scanned += 1
-                if stopped or no_answer:
+                if queue_full:
+                    log.info(fmt(C.GRAY, wrap(
+                        "Stopping the album walk; the albums the saved queue "
+                        "had no room for are offered again on the next walk.",
+                        indent="  ", hanging="  ")))
+                    walk_stopped = True
+                    break
+                if stopped or no_answer or parked:
                     log.info(fmt(C.GRAY, "  Stopping the album walk."))
                     walk_stopped = True
                     break
@@ -433,44 +464,44 @@ def run_album_walk_mode(args, token):
                 # shared_queue (appended as decided) but save_callback only fired
                 # for completed artists, so without this the in-progress artist's
                 # approvals wouldn't actually reach disk despite the message.
-                _save_queue(shared_queue)
-                if shared_queue:
-                    log.info(kept_queue_note(shared_queue))
+                keep_queue(shared_queue, _save_queue)
                 interrupted = True
                 break
             except (AuthLost, QobuzUnavailable):
-                # Queue is already persisted via save_callback; let it propagate
-                # so the run exits with the right status and message.
-                if shared_queue:
-                    log.info(kept_queue_note(shared_queue))
+                # The artist's approvals so far are saved before the run exits
+                # with the right status and message.
+                keep_queue(shared_queue, _save_queue)
                 raise
     finally:
         args.consolidate = saved_consolidate
 
-    if shared_queue and not interrupted and not args.dry_run:
+    if parked:
+        log.info(parked_queue_note())
+    elif shared_queue and not interrupted and not args.dry_run:
         try:
-            _q = ask(
+            download_now = confirm(
                 f"\n  Walk {'stopped' if walk_stopped else 'done'}. "
                 f"{plural(len(shared_queue), 'album')} still queued. "
-                "Download now? [Y/n]: ")
+                "Download now?", default_yes=True, auto_yes=args.yes)
         except KeyboardInterrupt:
             print()
             interrupted = True
-            _q = None
-        if _q is not None and _q in ("", "y", "yes"):
+            download_now = False
+        if download_now:
             try:
                 _flush_queue()
             except KeyboardInterrupt:
                 interrupted = True
                 log.info(fmt(C.YELLOW, "\n  ⚠  Downloading the queue was interrupted."))
-                log.info(kept_queue_note(shared_queue))
+                keep_queue(shared_queue, _save_queue)
+            if parked:
+                log.info(parked_queue_note())
         else:
-            _save_queue(shared_queue)
-            log.info(kept_queue_note(shared_queue))
+            keep_queue(shared_queue, _save_queue)
 
     print()
     needs_attention = (interrupted or no_answer or partial_completion
-                       or retry_needed or own_files_left
+                       or retry_needed or own_files_left or parked
                        or bool(discovery_errors))
     log.info(fmt(C.GRAY,
         f"     Already complete: {n_albums_complete} · "
@@ -478,6 +509,8 @@ def run_album_walk_mode(args, token):
     leftovers = []
     if n_albums_skipped:
         leftovers.append(f"skipped by you: {n_albums_skipped}")
+    if n_albums_dismissed:
+        leftovers.append(f"dismissed in the Library review: {n_albums_dismissed}")
     if n_albums_unmatched:
         leftovers.append(f"no Qobuz match: {n_albums_unmatched}")
     if n_albums_unplaced:
@@ -585,16 +618,28 @@ def run_walk_queued_mode(args, token):
     partial_completion = False
     retry_needed = False
     own_files_left = False
+    # An album stopped for recovery holds the saved queue until the next
+    # launch, and a full one takes nothing more, so the walk ends there.
+    parked = False
+    queue_full = False
 
     def _save_now():
-        _save_queue(shared_queue)
+        nonlocal parked, queue_full
+        n_queued = len(shared_queue)
+        if not save_or_trim(shared_queue, _save_queue):
+            parked = True
+        elif len(shared_queue) < n_queued:
+            queue_full = True
 
     def _flush_queue():
-        nonlocal partial_completion, retry_needed, own_files_left
+        nonlocal partial_completion, retry_needed, own_files_left, parked
+        _save_now()
+        if parked:
+            return
         if not shared_queue:
             log.info(fmt(C.GRAY, "  The queue is empty."))
             return
-        results, drained = _download_queue(
+        results, drained, parked = _download_queue(
             shared_queue, args, token, _save_queue)
         if not args.dry_run:
             partial_completion = partial_completion or any(
@@ -631,6 +676,8 @@ def run_walk_queued_mode(args, token):
                 break
             if rl == "p":
                 _flush_queue()
+                if parked:
+                    break
                 continue
             if rl == "f":
                 log.info(fmt(C.GRAY,
@@ -679,7 +726,12 @@ def run_walk_queued_mode(args, token):
                             interrupted = True
                             decided = False
                             break
-                        if not args.no_catalog:
+                        if any(r.get("result") == "user_stopped"
+                               for r in step_one):
+                            # Stopped before its albums were all offered, so
+                            # the artist is offered again on the next walk.
+                            decided = False
+                        elif not args.no_catalog:
                             _, step_two_attention = run_artist_missing_albums(
                                 artist_query, owned_titles,
                                 args, token,
@@ -698,6 +750,8 @@ def run_walk_queued_mode(args, token):
                             # artist to be offered again.
                             decided = not step_two_attention
                             _save_now()
+                        if queue_full:
+                            decided = False
                     except KeyboardInterrupt:
                         log.info(fmt(C.GRAY,
                             "\n  Artist scan interrupted; stopping the walk."))
@@ -710,6 +764,16 @@ def run_walk_queued_mode(args, token):
 
                     n_scanned += 1
 
+                    if parked or queue_full:
+                        if queue_full:
+                            log.info(fmt(C.GRAY, wrap(
+                                "Stopping the walk; the albums the saved "
+                                "queue had no room for are offered again on "
+                                "the next walk.", indent="  ", hanging="  ")))
+                        walk_stopped = True
+                        if decided and not args.dry_run:
+                            record_walk_seen(d.name, seen)
+                        break
                     if shared_queue:
                         print()
                         if confirm(
@@ -717,6 +781,10 @@ def run_walk_queued_mode(args, token):
                                 default_yes=False, auto_yes=args.yes):
                             _flush_queue()
                     print()
+                    if parked:
+                        if decided and not args.dry_run:
+                            record_walk_seen(d.name, seen)
+                        break
             elif rl in ("", "n", "no"):
                 n_skipped += 1
             else:
@@ -736,14 +804,15 @@ def run_walk_queued_mode(args, token):
         interrupted = True
     finally:
         args.consolidate = saved_consolidate
-        if shared_queue and (
+        if parked:
+            log.info(parked_queue_note())
+        elif shared_queue and (
             ctrl_c
             or isinstance(sys.exc_info()[1], (AuthLost, QobuzUnavailable))
         ):
             # Ctrl-C means stop, and after a lost token or an unreachable API
             # a flush would only fail again, so keep the queue without asking.
-            _save_queue(shared_queue)
-            log.info(kept_queue_note(shared_queue))
+            keep_queue(shared_queue, _save_queue)
         elif shared_queue:
             print()
             log.info(fmt(C.YELLOW,
@@ -758,19 +827,19 @@ def run_walk_queued_mode(args, token):
                         interrupted = True
                         log.info(fmt(C.YELLOW,
                             "\n  ⚠  Downloading the queue was interrupted."))
-                        log.info(kept_queue_note(shared_queue))
+                        keep_queue(shared_queue, _save_queue)
+                    if parked:
+                        log.info(parked_queue_note())
                 else:
-                    _save_queue(shared_queue)
-                    log.info(kept_queue_note(shared_queue))
+                    keep_queue(shared_queue, _save_queue)
             except KeyboardInterrupt:
                 ctrl_c = True
                 interrupted = True
-                _save_queue(shared_queue)
-                log.info(kept_queue_note(shared_queue))
+                keep_queue(shared_queue, _save_queue)
 
     print()
     needs_attention = (interrupted or partial_completion or retry_needed
-                       or own_files_left or bool(discovery_errors))
+                       or own_files_left or parked or bool(discovery_errors))
     log.info(fmt(C.GRAY, f"     Scanned {n_scanned}, skipped {n_skipped}."))
     if (n_scanned and not needs_attention and not walk_stopped
             and not args.dry_run):
