@@ -28,6 +28,8 @@ from qobuz_librarian.library.backup import (
     BackupResult,
     _normalise_gap_fill_expected_receipts,
     backup_gap_fill_files,
+    files_replaced_in_album,
+    first_symlink,
     pin_unverified_upgrade_backup,
     restore_gap_fill_backup,
     retire_verified_repair_backup,
@@ -603,6 +605,13 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         if expected_generation:
             token = api_client.authorize_bound_download(token)
 
+        link = first_symlink(album_dir)
+        if link:
+            log.info(fmt(C.RED,
+                f"  ✗  {link} is a symbolic link, which Repair can't check or "
+                "back up safely. Replace it with a copy of its file, then "
+                "try again; nothing was changed."))
+            return {"n_ok": 0, "n_fail": len(verified_truncated), "backup": None}
         broken_paths = [b["path"] for b in verified_truncated]
         replaced_entries = beets_entry_ids(broken_paths)
         backup_path = backup_gap_fill_files(
@@ -612,9 +621,16 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             kind="repair",
         )
         if backup_path is None:
-            log.info(fmt(C.RED,
-                "  ✗  Backup could not start, aborting repair without "
-                "changing the selected files."))
+            if all(os.path.lexists(path) for path in broken_paths):
+                log.info(fmt(C.RED,
+                    "  ✗  Backup could not start, aborting repair without "
+                    "changing the selected files."))
+            else:
+                log.info(fmt(C.RED,
+                    "  ✗  The backup stopped part way and not every damaged "
+                    "file could be put back. No replacement was downloaded; "
+                    "the missing files are in the backup listed under "
+                    "Settings, Diagnostics."))
             return {"n_ok": 0, "n_fail": len(verified_truncated), "backup": None}
         _initial_recovery, recovery_saved = checkpoint_recovery(
             backup_path,
@@ -862,6 +878,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         else:
             repaired = False
 
+        partial = []
         if backup_path and backup_path.exists():
             if repaired and retag_failed:
                 # The audio is verifiably fixed, but the originals' tags/art
@@ -922,12 +939,12 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     "repair backup kept, replacement could not be verified "
                     "intact")
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  The re-download is also short of its listed length, "
-                    f"so Qobuz's own copy looks no better than yours. The "
-                    f"album now holds that download and your original is kept "
-                    f"in the backup below; restore it from Settings, "
-                    f"Diagnostics to put it back. Re-running won't change "
-                    f"this. Backup:\n     {backup_path}"))
+                    f"  ⚠  The re-download couldn't be shown to be complete: "
+                    f"it may be short of its listed length too, or Qobuz "
+                    f"couldn't confirm its recording. The album now holds "
+                    f"that download and your original is kept in the backup "
+                    f"below; restore it from Settings, Diagnostics to put it "
+                    f"back. Backup:\n     {backup_path}"))
                 checkpoint_recovery(
                     backup_path,
                     "verification",
@@ -943,8 +960,10 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 if n_fail_final > 0:
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  {plural(n_fail_final, 'track')} failed to re-download, "
-                        "restoring the damaged originals so the album isn't "
-                        "left short."))
+                        "restoring "
+                        f"{'their damaged originals' if n_fail_final > 1 else 'its damaged original'} "
+                        "so the album isn't left short. A track that did "
+                        "download keeps its place."))
                 else:
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Refill didn't return to the album folder, "
@@ -963,7 +982,41 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                         "Automatic restoration stopped before every original "
                         "was returned.",
                     )
-                if n_restored and not backup_path.exists():
+                if backup_path.exists() and n_ok_final and wanted_isrcs:
+                    replaced = files_replaced_in_album(backup_path)
+                    partial = [b for b in verified_truncated
+                               if b["source_receipt"]["relative"] in replaced]
+                landed = Counter(_norm_isrc(b.get("isrc")) for b in partial)
+                partial_ok = False
+                if partial and "" not in landed:
+                    # The tracks that did download stay in the album, so the
+                    # backup may go once they verify as a full refill does.
+                    try:
+                        partial_ok = (
+                            _refills_intact(album_dir, landed, token,
+                                            baseline_counts)
+                            and retire_verified_repair_backup(backup_path))
+                    except (AuthLost, QobuzUnavailable) as exc:
+                        pin_repair_recovery(
+                            "repair backup kept, final refill verification "
+                            "was unavailable")
+                        interrupt_with_recovery(
+                            exc,
+                            "verification",
+                            "Qobuz became unavailable before the replacement "
+                            "tracks could be verified.",
+                        )
+                if partial_ok:
+                    resolve_recovery(
+                        backup_path,
+                        "The tracks that downloaded verified, and the others' "
+                        "originals were put back.",
+                    )
+                    log.info(fmt(C.GREEN,
+                        f"  ✓  Repaired {plural(len(partial), 'track')}, "
+                        "verified; the originals of the tracks that failed "
+                        "are back in the album."))
+                elif n_restored and not backup_path.exists():
                     resolve_recovery(
                         backup_path,
                         "The refill did not complete, so every original was "
@@ -972,6 +1025,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     log.info(fmt(C.GREEN,
                         "  ✓  Restored the originals; re-run Repair to retry."))
                 else:
+                    partial = []
                     pin_repair_recovery(
                         "repair backup kept, automatic restore was partial or "
                         "failed")
@@ -986,17 +1040,17 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     )
 
         # Beets took each refill in as a new entry at its original's path.
-        if back_in_place and replaced_entries:
+        if (back_in_place or partial) and replaced_entries:
             forget_replaced_beets_entries(replaced_entries)
 
         # A verified refill is a repair whether or not the originals' backup
         # could also be retired; a kept backup rides along in "backup".
-        if repaired:
+        if repaired or partial:
             log_entries = [{
                 "artist": artist_name,
                 "album":  album_dir.name,
                 "title":  b["title"],
-            } for b in verified_truncated]
+            } for b in (verified_truncated if repaired else partial)]
             if append_repair_log(log_entries):
                 log.info(fmt(C.CYAN,
                     f"  📋  Logged {plural(len(log_entries), 'replaced track')}, "
@@ -1004,12 +1058,13 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     f"     {cfg.REPAIR_LOG_PATH}"))
 
         return {
-            "n_ok": n_ok_final if repaired else 0,
-            "n_fail": (n_fail_final if repaired
+            "n_ok": n_ok_final if repaired else len(partial),
+            "n_fail": (n_fail_final if repaired or partial
                        else max(n_fail_final, len(verified_truncated))),
-            "imported": repaired,
+            "imported": repaired or bool(partial),
             "backup": recovery_result(),
-            "cd_quality_tracks": qi.get("cd_quality_tracks", []) if repaired else [],
+            "cd_quality_tracks": (qi.get("cd_quality_tracks", [])
+                                  if repaired or partial else []),
         }
     finally:
         args.no_upgrade = saved_no_upgrade
@@ -1152,6 +1207,13 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                 "\n  ⚠  Damage was found, but no affected track was safe "
                 "to refill automatically. Follow the guidance above.",
             ))
+            matched = find_qobuz_album_for_dir(album_dir, artist_name, token)
+            if matched and matched.get("id"):
+                log.info(fmt(C.GRAY,
+                    "     To download the whole album again as "
+                    f"\"{matched.get('title') or album_dir.name}\", run:\n"
+                    "     qobuz-librarian --force "
+                    f"https://open.qobuz.com/album/{matched['id']}"))
         elif not quiet and not unverified:
             log.info(fmt(C.GREEN,
                 "\n  ✓  No damaged tracks. Nothing to repair."))
@@ -1208,13 +1270,15 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             reason=exc.recovery.reason,
         )
         raise exc.cause
-    if result and _report_repair_recovery(result.get("backup")):
-        return "recovery"
     if (result
             and result.get("n_ok", 0) > 0
             and result.get("n_fail", 0) == 0
             and result.get("imported")
             and not result.get("repair_unverified")):
+        if isinstance(result.get("backup"), BackupResult):
+            log.info(fmt(C.YELLOW,
+                "  ⚠  The repair verified, and its backup is kept for review "
+                f"in Settings, Diagnostics:\n     {result['backup'].path}"))
         _refresh_review_state_after_downloads(
             [{**result, "album": None, "dir": album_dir}],
             token,
@@ -1223,6 +1287,8 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         if cd_quality is not None:
             cd_quality.extend(result.get("cd_quality_tracks") or [])
         return "attention" if unverified else "repaired"
+    if result and _report_repair_recovery(result.get("backup")):
+        return "recovery"
     return "failed"
 
 

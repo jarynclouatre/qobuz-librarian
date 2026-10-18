@@ -724,6 +724,15 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             binding.close()
 
 
+class DownsampleInterrupted(KeyboardInterrupt):
+    """Ctrl-C during an album, raised once the tracks already swapped are
+    recorded; ``result`` is what ``downsample_dir`` would have returned."""
+
+    def __init__(self, result):
+        super().__init__()
+        self.result = result
+
+
 def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                    keep_originals=False, cancel_check=None):
     """Resample any high-sample-rate FLACs inside `directory` (recursive). Probes
@@ -829,6 +838,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     flushed_files = []
 
     cancelled = False
+    interrupted = None
     tallied = set()
 
     def _tally(fut):
@@ -882,11 +892,19 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                         log("  ⏹ downsample: stop requested; finishing the "
                             "in-flight tracks, discarding the rest")
                     break
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
             # Stop promptly: discard not-yet-started encodes instead of letting
             # the context manager block on shutdown(wait=True) for the whole queue.
+            # The tracks in flight still swap, so wait for them and record
+            # what was rewritten before the interrupt goes on.
             ex.shutdown(wait=False, cancel_futures=True)
-            raise
+            running = sum(not f.done() for f in futs)
+            if running:
+                log(f"  ⏹ downsample: finishing {plural(running, 'track')}, "
+                    "then stopping.")
+            ex.shutdown(wait=True)
+            interrupted = exc
+            cancelled = True
     if cancelled:
         for fut in futs:
             if fut not in tallied and fut.done() and not fut.cancelled():
@@ -938,10 +956,13 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
         # them here or "What's on disk" keeps reporting space that was freed.
         scanner.cache_album_tags([directory])
 
-    return {"resampled": resampled,
-            "errors": errors_total,
-            "saved_bytes": saved_total,
-            "flush_warnings": flush_warnings,
-            "failed_files": uncopied_files + failed_files,
-            "flushed_files": flushed_files,
-            "cancelled": cancelled}
+    result = {"resampled": resampled,
+              "errors": errors_total,
+              "saved_bytes": saved_total,
+              "flush_warnings": flush_warnings,
+              "failed_files": uncopied_files + failed_files,
+              "flushed_files": flushed_files,
+              "cancelled": cancelled}
+    if interrupted is not None:
+        raise DownsampleInterrupted(result) from interrupted
+    return result

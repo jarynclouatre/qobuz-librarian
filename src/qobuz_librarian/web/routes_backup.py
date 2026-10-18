@@ -389,7 +389,8 @@ async def _run_diagnostics_action(request: Request, action, arg):
     return HTMLResponse(await loop.run_in_executor(None, action, request, arg))
 
 
-def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
+def _discard_unchecked_backup_sync(request: Request, backup: str,
+                                   album_gone=False) -> str:
     target = _backup_target(backup, leftover=True)
     if target is None:
         return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
@@ -400,7 +401,19 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
             return refusal
         location, _is_host = storage._resolve_host_path(str(target))
         counts = backup_mod.files_not_back_in_album(target, exact=True)
-        if counts and counts[0]:
+        if album_gone:
+            if not backup_mod.album_folder_gone(target):
+                note = _diagnostics_result_notice(
+                    "error", "Its album folder is in your library again, so "
+                    "the backup was kept.")
+            elif backup_mod.discard_backup_unchecked(target, album_gone=True):
+                note = _diagnostics_result_notice("success", "Deleted the backup.")
+            else:
+                note = _diagnostics_result_notice(
+                    "error", "The backup was kept: its recovery record can't "
+                    "be read, a saved download still needs it, or its folder "
+                    f"couldn't be deleted. Its folder is {html.escape(location)}.")
+        elif counts and counts[0]:
             note = _diagnostics_result_notice(
                 "error", f"This backup holds {plural(counts[0], 'file')} "
                 "your album folder doesn't have, so it is their only copy "
@@ -415,6 +428,16 @@ def _discard_unchecked_backup_sync(request: Request, backup: str) -> str:
                 "error", "The app couldn't delete the folder. Remove "
                 f"{html.escape(location)} outside the app.")
     return note + diagnostics._diagnostics_fragment(request)
+
+
+def _read_only_note(names):
+    if not names:
+        return ""
+    one = len(names) == 1
+    return (f"The kept {'original' if one else 'originals'} of "
+            f"{backup_mod.some_names(names)} {'is' if one else 'are'} "
+            "read-only, so the app can't add lyrics to "
+            f"{'it' if one else 'them'}.")
 
 
 def _refresh_tool_lists(origin, reason):
@@ -473,11 +496,27 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
         ):
             note = _restore_refused_notice(
                 request, target, origin, complete=False, renamed=True)
+        elif (
+            kind == "downsample"
+            and (lyrics := backup_mod.lyrics_only_in_album(carried, origin))
+            and (why := disk_support.refusal("lyric_carry") or _read_only_note(
+                backup_mod.read_only_originals(carried, lyrics)))
+        ):
+            names = backup_mod.some_names([Path(name).name for name in lyrics])
+            note = _diagnostics_result_notice(
+                "error", f"The lyrics of {html.escape(names)} are only on "
+                "the downsampled files and can't be written onto the "
+                f"originals here. {html.escape(why)} Nothing was put back.")
         elif kind in {"gap-fill", "downsample"}:
             # These backups hold the good originals; the destination may hold a
             # partial or a rewritten copy, so the backup always wins the swap.
+            # Lyrics added since a downsample go onto the originals it puts
+            # back.
+            if kind != "downsample":
+                lyrics = {}
             n = backup_mod.restore_gap_fill_backup(
                 carried, origin, keep_larger_dst=False)
+            unwritten = backup_mod.put_lyrics_back(origin, lyrics) if n else []
             if n and kind == "downsample":
                 # Undoing a downsample has to undo everything it recorded, not
                 # just the files: the album is no longer shrunk, so the cap that
@@ -496,8 +535,14 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
             if n and not carried.exists():
                 if job_mgr.resolve_recovery_resolution(resolution_plan):
                     note = _diagnostics_result_notice(
-                        "success", f"Restored {plural(n, 'file')} to "
-                        f"{html.escape(storage._resolve_host_path(str(origin))[0])}.")
+                        "warning" if unwritten else "success",
+                        f"Restored {plural(n, 'file')} to "
+                        f"{html.escape(storage._resolve_host_path(str(origin))[0])}."
+                        + (" The lyrics of "
+                           f"{html.escape(backup_mod.some_names(unwritten))} "
+                           "couldn't be written back onto them; the log says "
+                           "why."
+                           if unwritten else ""))
                 else:
                     note = _diagnostics_result_notice(
                         "error", "The files were restored, but their saved "
@@ -683,8 +728,11 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
         else:
             note = _diagnostics_result_notice(
                 "error", "Couldn't confirm the album still holds every one of "
-                "these files, so the originals were left where they are. "
-                "Restore them instead if the album is incomplete.")
+                "these files, so the originals were left where they are."
+                + (" Restore them instead if the album is incomplete."
+                   if backup_mod.downsample_outputs_in_place(carried) else
+                   " They may be the only copy of a track the album no "
+                   "longer has."))
     return note + diagnostics._diagnostics_fragment(request)
 
 
@@ -786,6 +834,10 @@ async def release_backup_originals(request: Request, backup: str = Form("")):
 
 
 @router.post("/backups/discard-unchecked", response_class=HTMLResponse)
-async def discard_backup_unchecked(request: Request, backup: str = Form("")):
-    """Delete a backup no automatic route will touch, offered by the refusal."""
-    return await _run_diagnostics_action(request, _discard_unchecked_backup_sync, backup)
+async def discard_backup_unchecked(request: Request, backup: str = Form(""),
+                                   album_gone: str = Form("")):
+    """Delete a backup no automatic route will touch, offered by the refusal,
+    or by the row of a backup whose album folder is gone."""
+    return await _run_diagnostics_action(
+        request, lambda request, backup: _discard_unchecked_backup_sync(
+            request, backup, album_gone=album_gone == "1"), backup)

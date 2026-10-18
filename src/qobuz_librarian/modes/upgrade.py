@@ -170,6 +170,7 @@ def run_upgrade_walk_mode(args, token):
     n_catalogue_failed = 0
     n_failed_albums = 0
     n_attention_albums = 0
+    n_below_target = 0
     n_gone_albums = 0
     n_stale_albums = 0
     n_would_upgrade = 0
@@ -364,6 +365,7 @@ def run_upgrade_walk_mode(args, token):
                         "n_above": 0,
                     })
                     retry = " after retry" if verdict["retried"] else ""
+                    n_below_target += 1
                     log.info(fmt(C.YELLOW,
                         f"     ⚠  Upgrade incomplete: "
                         f"{plural(verdict['n_below'], 'track')} still below target"
@@ -387,7 +389,7 @@ def run_upgrade_walk_mode(args, token):
         args.consolidate = saved_consolidate
 
     n_failed_attempts = (n_failed_albums + n_unverified_albums
-                         + n_attention_albums
+                         + n_attention_albums + n_below_target
                          + n_catalogue_failed + n_gone_albums
                          + n_stale_albums)
     n_gone = n_stale_candidates + n_gone_albums
@@ -430,6 +432,10 @@ def run_upgrade_walk_mode(args, token):
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_attention_albums, 'album')} did not finish "
             "cleanly (see the log above)."))
+    if n_below_target:
+        log.info(fmt(C.YELLOW,
+            f"     ⚠  {plural(n_below_target, 'album')} remained below the "
+            "target quality."))
     if n_failed_albums:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_failed_albums, 'album')} couldn't be upgraded "
@@ -469,6 +475,7 @@ def run_upgrade_walk_mode(args, token):
                 (n_unverified_albums, "kept a safety backup"),
                 (n_catalogue_failed, "need Beets catalogue attention"),
                 (n_attention_albums, "did not finish cleanly"),
+                (n_below_target, "remained below the target quality"),
                 (n_gone_albums, "no longer in the library"),
                 (n_stale_albums, "changed after being checked")):
             if count:

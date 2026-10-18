@@ -549,8 +549,9 @@ def _help_epilog():
     ))
     lines.extend(("", *textwrap.wrap(
         "Only in the web app: the Library scan and its reviews, New releases "
-        "checks, Discover, dismissing and bringing back albums, putting "
-        "downsampled originals back, restoring from a collection backup, and "
+        "checks, Discover, dismissing and bringing back albums, restoring, "
+        "removing or deleting kept backups and hi-res originals (Settings > "
+        "Diagnostics), restoring from a collection backup, and "
         "the Settings fields --settings leaves out.",
         width=width,
         break_long_words=False,

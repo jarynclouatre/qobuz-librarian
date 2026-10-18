@@ -5091,11 +5091,11 @@ def _unfinished_upgrade(path) -> bool:
 
 
 def _kept_by_file(path) -> bool:
-    """Whether this is a gap-fill or repair backup, which holds only the
-    files it set aside. Metadata only."""
+    """Whether this is a gap-fill, repair or downsample backup, which holds
+    only the files it set aside. Metadata only."""
     try:
         return json.loads((path / _RECEIPT_SIDECAR).read_text(
-            encoding="utf-8"))["kind"] == "gap-fill"
+            encoding="utf-8"))["kind"] in {"gap-fill", "downsample"}
     except (OSError, TypeError, ValueError, KeyError):
         return False
 
@@ -5639,21 +5639,11 @@ def _same_decoded_audio(source: Path, destination: Path) -> bool:
 def _lyrics_rank(path: Path) -> int:
     """0 for no lyrics, 1 for plain, 2 for synced, in the tags of any format
     or a .lrc beside the track."""
-    from qobuz_librarian.integrations.lyric_fetch import classify
+    from qobuz_librarian.integrations.lyric_fetch import classify, tag_lyric_values
 
     values = []
     try:
-        parsed = _read_tags(path)
-        tags = parsed.tags if parsed is not None else None
-        for key in (tags.keys() if tags is not None else ()):
-            name = str(key).lower()
-            if name.startswith("sylt"):
-                return 2
-            if "lyrics" in name or name.startswith("uslt") or name == "\xa9lyr":
-                value = tags[key]
-                text = getattr(value, "text", value)
-                values += [str(item) for item in (
-                    text if isinstance(text, list) else [text])]
+        values += tag_lyric_values(_read_tags(path))
     except Exception:
         pass
     lrc = path.with_suffix(".lrc")
@@ -5664,6 +5654,57 @@ def _lyrics_rank(path: Path) -> int:
         pass
     return max((("none", "plain", "synced").index(classify(value))
                 for value in values), default=0)
+
+
+def lyrics_only_in_album(backup, album_dir) -> dict:
+    """{file: lyrics} for each file of this backup whose album copy has
+    better lyrics in its tags than the backed-up one, which putting the
+    backup back would drop."""
+    from qobuz_librarian.integrations.lyric_fetch import classify, tag_lyric_values
+
+    rank = ("none", "plain", "synced").index
+    found = {}
+    for relative in backup_payload(backup.receipt):
+        try:
+            values = tag_lyric_values(_read_tags(Path(album_dir) / relative))
+        except Exception:
+            continue
+        best = max(values, key=lambda value: rank(classify(value)), default="")
+        if rank(classify(best)) > _lyrics_rank(backup.path / relative):
+            found[relative] = best
+    return found
+
+
+def read_only_originals(backup, relatives) -> list:
+    """The names of these files of the backup that would come back to the
+    album read-only, so no lyrics could be written onto them."""
+    names = []
+    for relative in sorted(relatives):
+        path = backup.path / relative
+        try:
+            if not os.stat(path).st_mode & 0o222 or not os.access(path, os.W_OK):
+                names.append(path.name)
+        except OSError:
+            names.append(path.name)
+    return names
+
+
+def put_lyrics_back(album_dir, lyrics) -> list:
+    """Write lyrics from ``lyrics_only_in_album`` onto the album's tracks
+    again, and return the names of the tracks they could not be written to."""
+    from qobuz_librarian.integrations import lyric_fetch
+
+    failed = []
+    for relative, text in sorted(lyrics.items()):
+        track = Path(album_dir) / relative
+        try:
+            lyric_fetch.give_lyrics(
+                track, cfg.MUSIC_ROOT, text, cfg.LYRICS_FORMAT)
+        except Exception as exc:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  Couldn't write the lyrics of {track.name} back: {exc}"))
+            failed.append(track.name)
+    return failed
 
 
 def some_names(names) -> str:
@@ -5704,8 +5745,10 @@ def _carry_lyrics(source: Path, destination: Path, carried: list) -> bool:
     return True
 
 
-def _same_recording(replacement_view: Path, source: Path, taken):
-    """An album track, not yet matched, carrying the backup file's ISRC."""
+def _same_recording(replacement_view: Path, source: Path, taken, *,
+                    lossless=False):
+    """An album track, not yet matched, carrying the backup file's ISRC, and
+    with ``lossless`` a FLAC."""
     isrc = _audio_isrc(source)
     if isrc is None:
         return None
@@ -5713,7 +5756,8 @@ def _same_recording(replacement_view: Path, source: Path, taken):
     for candidate in sorted(entries or ()):
         if (
             candidate.is_file()
-            and candidate.suffix.lower() in cfg.AUDIO_EXTS
+            and candidate.suffix.lower() in (
+                (".flac",) if lossless else cfg.AUDIO_EXTS)
             and candidate.relative_to(replacement_view) not in taken
             and _audio_isrc(candidate) == isrc
         ):
@@ -5827,7 +5871,11 @@ def _classify_backup_contents(
                 and match_recordings
                 and source.suffix.lower() in cfg.AUDIO_EXTS
             ):
-                destination = _same_recording(replacement_view, source, taken)
+                # A smaller track stands in only when it is lossless, so a
+                # lossy copy never retires a FLAC kept here.
+                destination = _same_recording(
+                    replacement_view, source, taken,
+                    lossless=allow_smaller_audio)
                 if destination is not None:
                     taken.add(destination.relative_to(replacement_view))
             if destination is None or not destination.is_file():
@@ -6094,8 +6142,9 @@ def _dispose_consolidation_backup(candidate, refused=None) -> bool:
 def release_undo_copy(path, carried=None) -> bool:
     """Drop a downsample's kept originals now, because the user asked.
 
-    Retention has two conditions: the album must still hold every file the
-    copies do, and enough days must have passed. This applies the first one,
+    Retention has two conditions: the album must still hold every track the
+    copies do, at its place or under another name with its ISRC, and enough
+    days must have passed. This applies the first one,
     exactly as the sweep does, and lets the user waive the second. Lyrics
     only the originals have are copied onto the album's tracks first, as
     Remove does, and those tracks are added to ``carried``. It refuses
@@ -6109,7 +6158,8 @@ def release_undo_copy(path, carried=None) -> bool:
         return False
     return _carry_lyrics_and_dispose(
         candidate, Path(candidate.receipt["origin"]),
-        {"allow_smaller_audio": True}, [] if carried is None else carried)
+        {"allow_smaller_audio": True, "match_recordings": True},
+        [] if carried is None else carried)
 
 
 def retire_verified_repair_backup(backup) -> bool:
@@ -6161,10 +6211,10 @@ def _replacement_proof(candidate):
     will do.
 
     A consolidation's tracks stand in at the album it kept, under the names
-    it recorded, at any size, as the age sweep proves them. An upgrade's
-    tracks sit at the same paths. Gap Fill and Repair download the track
-    again, which Beets may file under another name, so its ISRC finds it
-    too. Repair kept damaged copies, so the proof Repair applies to
+    it recorded, at any size, as the age sweep proves them. An upgrade,
+    Gap Fill and Repair download the track again, which Beets may file
+    under another name, so its ISRC finds it too; an upgrade's track must
+    not shrink. Repair kept damaged copies, so the proof Repair applies to
     its own backup holds, whatever their size. Gap Fill kept the user's own
     tracks, which go only when the album's copy decodes to the same samples.
     """
@@ -6174,7 +6224,7 @@ def _replacement_proof(candidate):
     origin = Path(candidate.receipt["origin"])
     kind = candidate.receipt.get("kind")
     if kind == "upgrade":
-        return origin, {}
+        return origin, {"match_recordings": True}
     if kind != "gap-fill":
         return None
     if re.match(r"^\d{8}_\d{6}_\d{6}_repair_", backup_name(candidate.path)):
@@ -6273,6 +6323,16 @@ def album_tree_size(path):
     return files, total
 
 
+def files_replaced_in_album(backup) -> set:
+    """The files of this backup whose place in its album now holds another
+    file, as a refill that landed there does."""
+    origin = Path(backup.receipt["origin"])
+    return {relative for relative, (size, digest)
+            in backup_payload(backup.receipt).items()
+            if (origin / relative).is_file()
+            and not _matches(origin / relative, size, digest)}
+
+
 def album_folder_replaced(backup) -> bool:
     """Whether the album's folder is now another folder than the one this
     backup was taken from, as a later download makes it."""
@@ -6302,11 +6362,11 @@ def files_not_back_in_album(path, *, compare=False, exact=False):
     under another name counts only when its bytes are the same.
 
     None when that can't be told: the album isn't known or the backup can't
-    be read. Beside its album folder only a gap-fill or repair backup, or
-    an unfinished upgrade backup that no later backup of the album replaced,
-    counts: a finished one's album holds the new download, whose names may
-    differ, and a download an upgrade set aside holds none of the user's
-    files.
+    be read. Beside its album folder only a gap-fill, repair or downsample
+    backup, or an unfinished upgrade backup that no later backup of the
+    album replaced, counts: a finished one's album holds the new download,
+    whose names may differ, and a download an upgrade set aside holds none
+    of the user's files.
     """
     counts = _files_in_album(path, compare=compare, exact=exact)
     return None if counts is None else counts[:2]
@@ -6373,7 +6433,30 @@ def _files_in_album(path, *, compare=False, exact=False):
     return missing, different, renamed
 
 
-def discard_backup_unchecked(path) -> bool:
+def album_folder_gone(path) -> bool:
+    """Whether the album folder a finished backup was taken from, or for a
+    consolidation the album it kept, is gone from a music folder that still
+    holds other folders: it was deleted, moved or renamed, not unmounted.
+    Nothing can prove such a backup redundant again. Metadata only."""
+    path = Path(path)
+    if (_leftover_top(path) is not None or _unfinished_upgrade(path)
+            or (path / _UPGRADE_PENDING_SENTINEL).exists()):
+        return False
+    named = consolidated_into(path)
+    album = named[0] if named else _read_backup_origin(path)
+    root = Path(cfg.MUSIC_ROOT)
+    if album is None or os.path.lexists(album) or not album.is_relative_to(root):
+        return False
+    try:
+        with os.scandir(root) as entries:
+            return any(entry.is_dir(follow_symlinks=False)
+                       and not entry.name.startswith(".")
+                       for entry in entries)
+    except OSError:
+        return False
+
+
+def discard_backup_unchecked(path, *, album_gone=False) -> bool:
     """Delete a kept backup without checking anything, because the user said so.
 
     Every automatic route can refuse: an unreadable recovery record, files
@@ -6382,12 +6465,20 @@ def discard_backup_unchecked(path) -> bool:
     the row a permanent dead end with a standing alarm beside it. This is the
     deliberate override behind an explicit warning, not a shortcut anything
     else may take. A backup holding files the album doesn't have is their
-    only copy, so it is never deleted this way.
+    only copy, so it is never deleted this way, unless with ``album_gone``
+    the user was told its album folder is gone and that it may be the only
+    copy, and no saved recovery operation owns it.
     """
     target = Path(path)
-    counts = files_not_back_in_album(target, exact=True)
-    if counts is not None and counts[0]:
-        return False
+    if album_gone:
+        candidate = load_backup_result(target)
+        if (not album_folder_gone(target) or candidate is None
+                or not _backup_owner_authorized(candidate, None)):
+            return False
+    else:
+        counts = files_not_back_in_album(target, exact=True)
+        if counts is not None and counts[0]:
+            return False
     if (top := _leftover_top(target)) is not None:
         snapshot = snapshot_tree(top)
         return snapshot is not None and _delete_backup_folder(top, snapshot)
@@ -6609,7 +6700,8 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
                         f"  ⚠  Keeping undo backup {entry.name!r}: its "
                         "app-owned recovery record was unavailable."))
                 elif _dispose_retention_candidate(
-                        candidate, allow_smaller_audio=True, refused=refused):
+                        candidate, allow_smaller_audio=True,
+                        match_recordings=True, refused=refused):
                     n_removed += 1
                 else:
                     log.info(fmt(C.YELLOW,

@@ -523,6 +523,27 @@ def _decode_lrc(raw: bytes) -> str:
     return text
 
 
+def tag_lyric_values(parsed) -> list:
+    """The lyrics in a track's tags of any format: every tag named like
+    lyrics, ID3 USLT and MP4 \xa9lyr as written, and ID3 SYLT as LRC lines,
+    or as plain lines when it is not timed in milliseconds."""
+    tags = getattr(parsed, "tags", None)
+    values = []
+    for key in (tags.keys() if tags is not None else ()):
+        name = str(key).lower()
+        value = tags[key]
+        if name.startswith("sylt"):
+            timed = getattr(value, "format", None) == 2
+            values.append("\n".join(
+                f"[{ms // 60000:02d}:{ms % 60000 / 1000:05.2f}]{text}"
+                if timed else text for text, ms in value.text))
+        elif "lyrics" in name or name.startswith("uslt") or name == "\xa9lyr":
+            text = getattr(value, "text", value)
+            values += [str(item) for item in (
+                text if isinstance(text, list) else [text])]
+    return [value for value in values if value.strip()]
+
+
 def embedded_lyric_values(f):
     tags = f.tags or {}
     return [value for key in ("lyrics", "LYRICS", "unsyncedlyrics", "UNSYNCEDLYRICS")
@@ -1227,16 +1248,25 @@ def carry_lyrics(source: Path, source_root: Path, track: Path,
     stay and nothing is removed. They go where ``lyrics_format`` asks; a
     .lrc already beside the track counts as lyrics it has. Raises when they
     could not be written."""
-    rank = ("none", "plain", "synced").index
+    import mutagen
+
     with _BoundTrack(source, source_root) as held:
-        old = FLAC(f"/proc/self/fd/{held.track_fd}")
-        old_tag = get_existing_lyrics(old)
+        with open(f"/proc/self/fd/{held.track_fd}", "rb") as handle:
+            old_tag = _best_existing_lyrics(
+                *tag_lyric_values(mutagen.File(handle)))
         old_sidecar = _read_bound_sidecar(
             source, held.parent_fd, held.chain_is_named,
             held.exact_track_is_named)
     if isinstance(old_sidecar, _Undecoded):
         old_sidecar = None
-    lyrics = _best_existing_lyrics(old_tag, old_sidecar)
+    give_lyrics(track, owned_root, _best_existing_lyrics(old_tag, old_sidecar),
+                lyrics_format)
+
+
+def give_lyrics(track: Path, owned_root: Path, lyrics, lyrics_format: str) -> None:
+    """Give ``track`` these lyrics by the Lyrics pass's rule, as
+    ``carry_lyrics`` does. Raises when they could not be written."""
+    rank = ("none", "plain", "synced").index
     kind = classify(lyrics)
     if kind == "none":
         return

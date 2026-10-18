@@ -96,7 +96,7 @@ docker compose run --rm qobuz-librarian cli --help
 | Downloading without importing (`--no-import`) | New releases checks and Discover |
 | | Downloading a single track (Search's Track tab) |
 | | Dismissing and bringing back albums |
-| | Putting downsampled originals back, and restoring from a collection backup |
+| | Restoring, removing or deleting kept backups and hi-res originals (Settings > Diagnostics), and restoring from a collection backup |
 | | The Settings fields `--settings` leaves out |
 | | History entries and `POST_JOB_HOOK` reports for Lyrics and Library migration runs |
 

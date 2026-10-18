@@ -640,7 +640,8 @@ def _diagnostics():
             "detail": f"Originals of "
                       f"{plural(len(undo_copies), 'downsampled album')} "
                       f"kept, listed below. Cleared automatically after "
-                      f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}.",
+                      f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')} "
+                      "while the album still holds each track.",
         })
 
     try:
@@ -666,6 +667,21 @@ def _diagnostics():
         checks.append({"label": "Files kept in staging", "ok": True,
                        "detail": "none"})
     return {"checks": checks, **inventory}
+
+
+def _album_gone_delete_form(tok, name, action, confirm):
+    """The button that deletes a backup whose album folder is gone, which
+    nothing else will, after the user reads that it may be the only copy."""
+    return (
+        f'<form hx-post="/backups/discard-unchecked" '
+        f'hx-target="#diagnostics-list" data-busy-submit>'
+        f'<input type="hidden" name="_csrf_token" value="{tok}">'
+        f'<input type="hidden" name="backup" value="{name}">'
+        f'<input type="hidden" name="album_gone" value="1">'
+        f'<button type="submit" class="ql-btn ql-btn-sm" '
+        f'data-confirm="{confirm}" data-confirm-action="{action}" '
+        f'data-irreversible>{action}</button>'
+        f'</form>')
 
 
 def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
@@ -809,6 +825,12 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             reason = f"These tracks were merged into {checked}. {reason}"
         if by_file and not consolidated and classification.reason == "missing":
             reason += " Restore puts it back."
+        gone = backup_mod.album_folder_gone(path)
+        if gone:
+            reason += (" It was deleted, moved or renamed, so nothing can "
+                       "check this backup against it any more. Restore puts "
+                       "the files back there; Delete anyway removes the "
+                       "backup, which may be the only copy of its files.")
         lyrics = (
             f" The lyrics of its {html.escape(classification.file)} are "
             "copied onto the same track in the album first, so they are kept."
@@ -828,6 +850,12 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'data-confirm-action="Remove" data-irreversible>Remove</button>'
             f'</form>'
         ) if classification.status != "retained" else ""
+        if gone:
+            remove_form = _album_gone_delete_form(
+                tok, name, "Delete anyway",
+                f"Delete this backup? {checked} is no longer in your library, "
+                "so this may be the only copy of its files. It cannot be "
+                "undone.")
         rows.append(
             f'<div class="ql-diagnostic-row" data-backup-status="{classification.status}">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'
@@ -881,6 +909,32 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 "put back.")
             restore_form = ""
             delete_note = ""
+        gone = backup_mod.album_folder_gone(path)
+        if gone:
+            detail = (
+                f"Copies of the files this album had before it was "
+                f"downsampled. {dest} is no longer in your library: it was "
+                "deleted, moved or renamed. These originals can't be put "
+                "back or cleared automatically, and they may be the only "
+                "copy of these tracks.")
+            delete_form = _album_gone_delete_form(
+                tok, name, "Delete originals",
+                f"Delete the hi-res originals of {album or dest}? Its album "
+                "folder is gone, so they may be the only copy of these "
+                "tracks. It cannot be undone.")
+        else:
+            delete_form = (
+                f'<form hx-post="/backups/release-originals" '
+                f'hx-target="#diagnostics-list" data-busy-submit>'
+                f'<input type="hidden" name="_csrf_token" value="{tok}">'
+                f'<input type="hidden" name="backup" value="{name}">'
+                f'<button type="submit" class="ql-btn ql-btn-sm" '
+                f'data-confirm="Delete the hi-res originals of '
+                f'{album or dest}? They are the only copies left at the original '
+                f'quality.{delete_note}" '
+                f'data-confirm-action="Delete originals" data-irreversible>'
+                f'Delete originals</button>'
+                f'</form>')
         rows.append(
             f'<div class="ql-diagnostic-row">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-ok" aria-label="OK">OK</span>'
@@ -889,17 +943,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'<div class="ql-diagnostic-detail">{detail}</div>'
             f'<div class="mt-2 flex gap-2">'
             f'{restore_form}'
-            f'<form hx-post="/backups/release-originals" '
-            f'hx-target="#diagnostics-list" data-busy-submit>'
-            f'<input type="hidden" name="_csrf_token" value="{tok}">'
-            f'<input type="hidden" name="backup" value="{name}">'
-            f'<button type="submit" class="ql-btn ql-btn-sm" '
-            f'data-confirm="Delete the hi-res originals of '
-            f'{album or dest}? They are the only copies left at the original '
-            f'quality.{delete_note}" '
-            f'data-confirm-action="Delete originals" data-irreversible>'
-            f'Delete originals</button>'
-            f'</form>'
+            f'{delete_form}'
             f'</div></div></div>'
         )
     leftovers = report["leftovers"]

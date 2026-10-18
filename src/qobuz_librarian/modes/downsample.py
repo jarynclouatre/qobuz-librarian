@@ -12,7 +12,11 @@ import time
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import post_job_hook, saved_views
-from qobuz_librarian.integrations.downsample_engine import HAVE_DOWNSAMPLE, downsample_dir
+from qobuz_librarian.integrations.downsample_engine import (
+    HAVE_DOWNSAMPLE,
+    DownsampleInterrupted,
+    downsample_dir,
+)
 from qobuz_librarian.library import downsample_state, generation_state
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
@@ -33,12 +37,15 @@ from qobuz_librarian.web import settings_store
 
 
 def _downsample_album(album_dir, keep_originals):
-    """Rewrite one album; a first Ctrl-C lets it finish the tracks in flight
-    and report them before the walk stops."""
+    """Rewrite one album; a Ctrl-C lets it finish the tracks in flight and
+    report them before the walk stops. A second one stops sooner, and any
+    after it wait until the tracks already swapped are recorded."""
     stop = threading.Event()
+    presses = []
 
     def request_stop(signum, frame):
-        if stop.is_set():
+        presses.append(signum)
+        if len(presses) == 2:
             signal.default_int_handler(signum, frame)
         stop.set()
 
@@ -47,6 +54,8 @@ def _downsample_album(album_dir, keep_originals):
         res = downsample_dir(album_dir, verbose=True, base_dir=album_dir,
                              log=log.info, keep_originals=keep_originals,
                              cancel_check=stop.is_set)
+    except DownsampleInterrupted as exc:
+        return exc.result, True
     finally:
         signal.signal(signal.SIGINT, previous)
     return res, stop.is_set()

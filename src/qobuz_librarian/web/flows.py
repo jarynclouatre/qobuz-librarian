@@ -3309,6 +3309,7 @@ def execute_upgrades(job, chosen, token):
     quality_attention = 0
     processing_attention = 0
     failed = 0
+    changed = 0
     failed_cands = []
     processed = 0
     current_interrupted = False
@@ -3369,6 +3370,10 @@ def execute_upgrades(job, chosen, token):
         except (AuthLost, QobuzUnavailable, beets_mod.MusicDiskFull):
             return_unfinished(i - 1)
             raise
+        except CandidateStale as e:
+            log.info(f"  skipped: {e}")
+            changed += 1
+            continue
         except Exception as e:
             log.info(f"  failed: {e}")
             failed += 1
@@ -3449,6 +3454,8 @@ def execute_upgrades(job, chosen, token):
         parts = [f"{ok} upgraded"]
         if failed:
             parts.append(f"{failed} failed")
+        if changed:
+            parts.append(f"{changed} changed since the review")
         if current_interrupted:
             parts.append("1 interrupted")
         parts.append(f"{len(chosen) - processed} not started")
@@ -3500,6 +3507,8 @@ def execute_upgrades(job, chosen, token):
             job.error = "Post-download work needs attention; see the job log."
         elif failed:
             job.error = f"{plural(failed, 'album')} couldn't be upgraded."
+        elif changed:
+            job.error = _changed_since_review(changed) + "."
         if retry_saved is False:
             job.error = " ".join(part for part in (
                 job.error,
@@ -3511,11 +3520,14 @@ def execute_upgrades(job, chosen, token):
         return
     msg = f"Upgraded {ok}/{plural(len(chosen), 'album')}."
     if not any((failed, kept, catalogue_failed, quality_attention,
-                processing_attention)):
+                processing_attention, changed)):
         msg = "Finished. " + msg
     if kept:
-        msg += (f" {kept} kept the original (upgrade couldn't be verified "
-                f"complete; backup retained).")
+        msg += (f" {plural(kept, 'replacement')} kept a safety backup because "
+                "the replacement or recovery couldn't be verified; review it "
+                "under Settings > Diagnostics.")
+    if changed:
+        msg += f" {_changed_since_review(changed)}."
     msg += _kept_companions_note(companion_notes)
     msg += _put_back_note(put_back_notes)
     if cd_quality_tracks:
@@ -3541,7 +3553,7 @@ def execute_upgrades(job, chosen, token):
         execute_args=job.execute_args,
     )
     if any((failed, kept, catalogue_failed, quality_attention,
-            processing_attention)):
+            processing_attention, changed)):
         problems = []
         if kept:
             problems.append(
@@ -3556,6 +3568,8 @@ def execute_upgrades(job, chosen, token):
             problems.append(
                 f"{plural(failed, 'album')} couldn't be upgraded"
             )
+        if changed:
+            problems.append(_changed_since_review(changed))
         if quality_attention:
             problems.append(
                 f"{plural(quality_attention, 'album')} remained below target "
@@ -3584,6 +3598,12 @@ def execute_upgrades(job, chosen, token):
         _mark_job_failed(job)
     else:
         _close_completed_job(job)
+
+
+def _changed_since_review(n):
+    return (f"{plural(n, 'album')} changed after the review and "
+            f"{'was' if n == 1 else 'were'} left unchanged; refresh Upgrade "
+            "to check again")
 
 
 def _note_scan_wrap_up(job, done, total):
@@ -3859,7 +3879,7 @@ def execute_downsamples(
         parts.extend(skip_parts())
         parts.append(f"{plural(len(chosen) - processed, 'album')} not started")
         job.summary = "Stopped early. " + ", ".join(parts) + "."
-        job.summary += _kept_originals_note(resampled_files)
+        job.summary += _kept_originals_note(resampled_files, keep_originals)
         log.info(job.summary)
         with job._lock:
             if job.status is job_mgr.JobStatus.RUNNING:
@@ -3877,7 +3897,7 @@ def execute_downsamples(
         summary = (f"{'Partly done' if went_wrong else 'Finished'}. "
                    f"Downsampled {plural(shrunk, 'album')}, "
                    f"{format_size(total_saved)} smaller."
-                   + _kept_originals_note(resampled_files))
+                   + _kept_originals_note(resampled_files, keep_originals))
     else:
         summary = "Nothing was downsampled."
     for part in skip_parts():
@@ -3998,14 +4018,14 @@ def _lone_reason(entries, total):
     return entries[0].get("reason") or ""
 
 
-def _kept_originals_note(resampled_files):
+def _kept_originals_note(resampled_files, keep_originals):
     """The sentence that stops a downsample summary overstating what it freed.
 
     Originals are only stashed for files that were actually rewritten; a run
     that converted nothing keeps nothing, so it must not promise a restore
     that has nothing behind it.
     """
-    if not resampled_files or cfg.DOWNSAMPLE_KEEP_ORIGINALS != "keep":
+    if not resampled_files or not keep_originals:
         return ""
     days = cfg.UPGRADE_BACKUP_RETENTION_DAYS
     return (f" Your hi-res originals are kept for {plural(days, 'day')}, so "
@@ -4126,7 +4146,16 @@ def _repair_album_outcome(album_dir, name, token):
                     f"{e.get('local_title') or e.get('title') or '?'}: "
                     f"{e['diagnostic']}; couldn't match this folder to a Qobuz "
                     "album to re-download. Check by hand.")
+    if any(spec["kind"] == "redownload" for spec in out["specs"]):
+        # The whole-album re-download replaces the short tracks too, and a
+        # refill run first would change the album under it.
+        out["specs"] = [spec for spec in out["specs"]
+                        if spec["kind"] == "redownload"]
     return out
+
+
+class _RepairLink(OSError):
+    """An artist folder Repair can't seal because of a symbolic link."""
 
 
 def _scan_repair_artist(artist_dir, token, job, beat=None):
@@ -4143,6 +4172,11 @@ def _scan_repair_artist(artist_dir, token, job, beat=None):
     name = artist_dir.name
     proof_before = _capture_repair_artist_proof(artist_dir)
     if proof_before is None:
+        link = backup_mod.first_symlink(artist_dir)
+        if link:
+            raise _RepairLink(
+                f"{link} is a symbolic link, which Repair can't check or back "
+                "up safely; replace it with a copy of its file")
         raise OSError("artist files could not be recorded before Repair checked them")
     agg = {"verified_ok": 0, "unverified": 0, "failed": 0, "checked": 0,
            "specs": []}
@@ -4199,7 +4233,8 @@ def _emit_repair_heartbeat(beat, job, artist_name):
                       found=flagged, unit="artist")
 
 
-def _repair_scan_caveats(n_unverified, n_failed_albums, n_failed_artists):
+def _repair_scan_caveats(n_unverified, n_failed_albums, n_failed_artists,
+                         n_linked_artists=0):
     """Format incomplete Repair scan work without merging unlike failures."""
     parts = []
     if n_unverified:
@@ -4221,6 +4256,12 @@ def _repair_scan_caveats(n_unverified, n_failed_albums, n_failed_artists):
         parts.append(
             f"{plural(n_failed_artists, 'artist')} couldn't be scanned; "
             "re-run to retry."
+        )
+    if n_linked_artists:
+        parts.append(
+            f"{plural(n_linked_artists, 'artist')} couldn't be scanned "
+            "because of a symbolic link, named in the log; replace it with a "
+            "copy of its file."
         )
     return "" if not parts else " " + " ".join(parts)
 
@@ -4262,6 +4303,7 @@ def _scan_repairs_impl(job, token, checkpoint):
     n_unverified = 0
     n_failed_albums = 0
     n_failed_artists = len(unreadable_artists)
+    n_linked_artists = 0
     if cp:
         for artist_dir in artists:
             bundle = _validated_repair_checkpoint_bundle(
@@ -4346,7 +4388,8 @@ def _scan_repairs_impl(job, token, checkpoint):
                     if total else "Stopped before anything was flagged."
                 )
                 job.summary = stopped + _repair_scan_caveats(
-                    n_unverified, n_failed_albums, n_failed_artists)
+                    n_unverified, n_failed_albums,
+                    n_failed_artists - n_linked_artists, n_linked_artists)
                 log.info("Cancelled. Stopping scan.")
                 if job.stopping_for_restart:
                     save_checkpoint(force=True)
@@ -4375,6 +4418,7 @@ def _scan_repairs_impl(job, token, checkpoint):
                 # resume retries it rather than baking in a transient miss.
                 log.info(f"    skipped {futures[fut].name}: {e}")
                 n_failed_artists += 1
+                n_linked_artists += isinstance(e, _RepairLink)
                 with beat["lock"]:
                     beat["artists"] = done
                     albums_seen = beat["albums"]
@@ -4419,7 +4463,8 @@ def _scan_repairs_impl(job, token, checkpoint):
     # claim completeness the scan didn't earn.
     caveats = _repair_scan_caveats(
         n_unverified, n_failed_albums,
-        n_failed_artists - len(unreadable_artists))
+        n_failed_artists - len(unreadable_artists) - n_linked_artists,
+        n_linked_artists)
     if total:
         job.summary = (f"{plural(total, 'album')} flagged with damaged files. "
                        f"{plural(n_verified, 'track')} decode-verified clean."
@@ -4763,6 +4808,8 @@ def execute_repairs(job, chosen, token):
     fixed = 0
     unverified = 0
     failed = 0
+    changed = 0
+    partly = []
     cd_quality_tracks = []
     failed_cands = []
     interrupted = 0
@@ -4848,6 +4895,10 @@ def execute_repairs(job, chosen, token):
         except (AuthLost, QobuzUnavailable, beets_mod.MusicDiskFull):
             return_unfinished(i - 1)
             raise
+        except CandidateStale as e:
+            log.info(f"  skipped: {e}")
+            changed += 1
+            continue
         except Exception as e:
             log.info(f"  failed: {e}")
             failed += 1
@@ -4887,9 +4938,22 @@ def execute_repairs(job, chosen, token):
             job._imported_any = True
             _note_album_done(job)
             cd_quality_tracks.extend(result.get("cd_quality_tracks") or [])
+        elif result and result.get("n_ok", 0) > 0 and result.get("imported"):
+            # Some tracks verified and stay; the others' originals went
+            # back, and only a fresh scan can offer them again.
+            partly.append((result["n_ok"], result.get("n_fail", 0)))
+            job._imported_any = True
+            cd_quality_tracks.extend(result.get("cd_quality_tracks") or [])
         else:
             failed += 1
-            failed_cands.append(cand)
+            # Start refuses a pick whose album this run changed, even when it
+            # only put the originals back, so only a fresh scan can offer it.
+            try:
+                candidate_premise.validate(cand)
+            except CandidateStale:
+                changed += 1
+            else:
+                failed_cands.append(cand)
         if local_files_changed:
             _refresh_after_local_album_change(
                 None,
@@ -4919,6 +4983,10 @@ def execute_repairs(job, chosen, token):
             parts.append(f"{failed} failed")
         if interrupted:
             parts.append(f"{interrupted} interrupted")
+        if partly:
+            parts.append(f"{len(partly)} partly repaired")
+        if changed:
+            parts.append(f"{changed} to check again with a new Repair scan")
         if recovery_count:
             parts.append(f"{recovery_count} kept for recovery")
         parts.append(f"{len(chosen) - processed} not started")
@@ -4955,9 +5023,26 @@ def execute_repairs(job, chosen, token):
         "proven complete, so your original files were kept."
         if unverified else ""
     )
-    job.summary = (f"{'Finished. ' if not (failed or unverified) else ''}"
-                   f"Repaired {fixed}/{plural(len(chosen), 'album')}."
-                   f"{kept}{unproven}")
+    rescan = (
+        f" {plural(changed, 'album')} "
+        f"{'needs' if changed == 1 else 'need'} a new Repair scan before "
+        "another try."
+        if changed else ""
+    )
+    repaired_tracks = sum(ok for ok, _ in partly)
+    failed_tracks = sum(bad for _, bad in partly)
+    part = (
+        f" {plural(len(partly), 'album')} only in part: "
+        f"{plural(repaired_tracks, 'track')} repaired, {failed_tracks} "
+        f"failed and {'its original was' if failed_tracks == 1 else 'their originals were'} "
+        "put back; a new Repair scan can try "
+        f"{'it' if failed_tracks == 1 else 'them'} again."
+        if partly else ""
+    )
+    job.summary = (
+        f"{'Finished. ' if not (failed or unverified or changed or partly) else ''}"
+        f"Repaired {fixed + len(partly)}/{plural(len(chosen), 'album')}."
+        f"{part}{kept}{unproven}{rescan}")
     if cd_quality_tracks:
         job.summary += f" {cd_quality_note(cd_quality_tracks)}"
     log.info(job.summary)
@@ -4966,11 +5051,13 @@ def execute_repairs(job, chosen, token):
         "repair",
         execute_args=getattr(job, "execute_args", None),
     )
-    if failed:
-        job.error = (
+    if failed or changed or partly:
+        job.error = ((
             f"{failed} of {plural(len(chosen), 'album')} couldn't be repaired; "
-            "see the log."
-        )
+            "see the log." if failed else "")
+            + (f" {plural(failed_tracks, 'track')} couldn't be repaired; "
+               "see the log." if partly else "")
+            + rescan).strip()
         if failed_cands:
             job.error += (
                 f" {plural(len(failed_cands), 'album')} selected for retry."
