@@ -17,7 +17,7 @@ from qobuz_librarian.library.scanner import (
     list_artist_album_dirs,
     list_library_artists,
 )
-from qobuz_librarian.ui_cli.errors import unreadable_artist
+from qobuz_librarian.ui_cli.errors import plural, unreadable_artist
 from qobuz_librarian.ui_cli.logging import log as _default_log
 from qobuz_librarian.ui_cli.logging import report_progress
 
@@ -95,6 +95,10 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     if not total:
         return {"total": 0, "unreadable_artists": unreadable}
     paths = [p for p, _, _ in items]
+    if not dry_run:
+        cleared = lyric_fetch.clear_stale_temps(dict.fromkeys(p.parent for p in paths))
+        if cleared:
+            log.info(f"Removed {plural(cleared, 'leftover temporary lyrics file')}.")
 
     # Seed the state file with a fast, no-network classification of files that
     # already carry lyrics, so the fetch pass only queries providers for the
@@ -147,6 +151,12 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     return result
 
 
+def read_only_note(count):
+    one = count == 1
+    return (f"{plural(count, 'track')} {'is' if one else 'are'} read-only, "
+            f"so {'its' if one else 'their'} lyrics were left alone")
+
+
 def summarize_lyrics_result(result):
     """Group the fetch engine's outcomes for CLI and Web summaries."""
     total = max(0, int(result.get("total", 0)))
@@ -180,6 +190,7 @@ def summarize_lyrics_result(result):
         "missing_tags": count("skipped-tags"),
         "too_long": count("skipped-long"),
         "instrumental": count("skipped-instrumental"),
+        "read_only": count("skipped-read-only"),
         "unsafe": count("unsafe-path"),
         "unavailable": count("providers-unavailable"),
         "errors": count("write-error", "exception", "error"),
@@ -188,7 +199,7 @@ def summarize_lyrics_result(result):
         summary[key]
         for key in (
             "wrote", "already", "not_found", "missing_tags", "too_long",
-            "instrumental",
+            "instrumental", "read_only",
             "unsafe", "unavailable", "errors",
         )
     )

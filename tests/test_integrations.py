@@ -520,10 +520,10 @@ def test_lyric_sidecars_keep_the_tags_around_them(
     assert flac.FLAC(track)["lyrics"] == ["[00:00.50]line\n"]
 
 
-def test_a_grabbed_track_gets_its_sidecar_when_the_album_is_rewritten_too(
+def test_a_grabbed_track_gets_its_sidecar_and_leaves_its_album_alone(
         tmp_path, monkeypatch, tagged_flac):
-    """A single track grabbed into an album whose other tracks also lose
-    their embedded copy still gets its own .lrc in sidecar mode."""
+    """A single track grabbed into an album gets its own .lrc in sidecar
+    mode, and the album's other tracks are not rewritten."""
     from mutagen import flac
 
     from qobuz_librarian import config as cfg
@@ -560,7 +560,7 @@ def test_a_grabbed_track_gets_its_sidecar_when_the_album_is_rewritten_too(
 
     assert grabbed.with_suffix(".lrc").read_text() == "[00:01.00]grabbed"
     assert "lyrics" not in flac.FLAC(grabbed)
-    assert "lyrics" not in flac.FLAC(kept)
+    assert flac.FLAC(kept)["lyrics"] == ["[00:01.00]kept"]
 
 
 # ── beets: _beets_direct behaviour ─────────────────────────────────────────

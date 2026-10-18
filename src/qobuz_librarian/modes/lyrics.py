@@ -13,6 +13,7 @@ from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.library.lyrics import (
     HAVE_LYRICS,
+    read_only_note,
     run_library_lyrics,
     summarize_lyrics_result,
 )
@@ -183,6 +184,9 @@ def _report_summary(res, *, dry_run):
         log.info(fmt(C.YELLOW,
             f"     {plural(summary['instrumental'], 'track')} skipped as "
             "instrumental."))
+    if summary["read_only"]:
+        log.info(fmt(C.YELLOW,
+            f"     {read_only_note(summary['read_only'])}."))
     if summary["unsafe"]:
         log.warning(fmt(C.RED,
             f"     {plural(summary['unsafe'], 'track path')} refused as unsafe; "

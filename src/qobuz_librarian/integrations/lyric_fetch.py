@@ -4,8 +4,8 @@ The engine behind the import-time lyric hook and the library lyrics pass:
 writes synced (or plain) lyrics into FLAC tags or .lrc sidecars.
 
   • Asks LRCLIB first for the exact track at its length, when Lrclib is a
-    provider, and takes its search hits only at that length or under the
-    track's own title and artist.
+    provider, and takes its search hits only under the track's title, at
+    that length or by its artist.
   • Tries synced lyrics from each provider; rejects results whose timing
     doesn't fit the track length, held closer for live and remixed cuts.
   • Falls back to plain lyrics across the providers; only writes plain
@@ -22,6 +22,7 @@ writes synced (or plain) lyrics into FLAC tags or .lrc sidecars.
 
 from __future__ import annotations
 
+import codecs
 import functools
 import logging
 import math
@@ -58,6 +59,7 @@ from qobuz_librarian.safefile import (
     stat_identity,
     write_all,
 )
+from qobuz_librarian.ui_cli.logging import wrap_thread_target
 
 # mutagen and syncedlyrics are decoupled on purpose: tag-only operations
 # (classify/read/write embedded lyrics, .lrc sidecars) need only mutagen,
@@ -109,6 +111,7 @@ _OUTCOME_LABELS = {
     "skipped-long": "skipped (too long)",
     "skipped-tags": "skipped (missing tags)",
     "skipped-instrumental": "skipped (instrumental)",
+    "skipped-read-only": "left alone (read-only)",
 }
 
 
@@ -126,8 +129,9 @@ def _track_label(path: Path, root: Path) -> str:
         return Path(path).name
     return " / ".join(part for part in parts if not part.startswith("."))
 
-SYNCED_RE = re.compile(r"\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]")
-LRC_TS_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]")
+# Some tools stamp [mm:ss:xx] or [mm:ss,xx] instead of [mm:ss.xx].
+SYNCED_RE = re.compile(r"\[\d{1,2}:\d{2}(?:[.:,]\d{1,3})?\]")
+LRC_TS_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:[.:,](\d{1,3}))?\]")
 
 RECHECK_AFTER_DAYS = 30
 MAX_TRACK_SECONDS  = 60 * 20
@@ -147,8 +151,10 @@ LRC_CUT_GAP_SHARE  = 0.3    # …or within this share of the track
 
 LRCLIB_GET_URL = "https://lrclib.net/api/get"
 LRCLIB_SEARCH_URL = "https://lrclib.net/api/search"
-# A search hit this close to the track's length is taken as this recording.
-# One of another length counts only under the track's own title and artist.
+# A search hit this close to the track's length is taken as this recording
+# under the track's title, or under one that holds it or is held in it by
+# the track's artist. One of another length counts only under the track's
+# own title and artist.
 LRCLIB_SEARCH_GRACE = 3
 # LRCLIB answers a busy moment with 503, or 429 when asked too often, and a
 # Retry-After of a second or so: one request in seven asked one at a time,
@@ -157,12 +163,14 @@ LRCLIB_SEARCH_GRACE = 3
 # up to as long again, picked at random so the workers do not all ask
 # again at once, and asks again. After LRCLIB_ATTEMPTS tries each wait
 # doubles, and a request that would wait past LRCLIB_BUSY_LIMIT seconds,
-# or has been asked LRCLIB_MAX_ATTEMPTS times, goes unanswered, which is
-# no failure for the circuit breaker. A 429 holds back every worker's next
-# request too.
+# or the pass's patience when that is shorter but no shorter than
+# LRCLIB_BUSY_FLOOR, or has been asked LRCLIB_MAX_ATTEMPTS times, goes
+# unanswered, which is no failure for the circuit breaker. A 429 holds
+# back every worker's next request too.
 LRCLIB_ATTEMPTS = 8
 LRCLIB_MAX_ATTEMPTS = 30
 LRCLIB_BUSY_LIMIT = 120.0
+LRCLIB_BUSY_FLOOR = 5.0
 LRCLIB_RETRY_WAIT = 1.0
 _lrclib_busy_until = 0.0
 _lrclib_busy_lock = threading.Lock()
@@ -494,9 +502,31 @@ def classify(text: Optional[str]) -> str:
     return "synced" if SYNCED_RE.search(text) else "plain"
 
 
+class _Undecoded(str):
+    """An .lrc file in an encoding the app can't tell, read only to see
+    whether it is synced: it is never copied, replaced or removed."""
+
+
+def _decode_lrc(raw: bytes) -> str:
+    try:
+        if raw[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
+            text = raw.decode("utf-16")
+        else:
+            text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = None
+    # UTF-16 without a byte-order mark reads as UTF-8 with a NUL in every
+    # other place.
+    if text is None or "\x00" in text:
+        return _Undecoded(
+            raw.decode("utf-8", errors="replace").replace("\x00", ""))
+    return text
+
+
 def embedded_lyric_values(f):
+    tags = f.tags or {}
     return [value for key in ("lyrics", "LYRICS", "unsyncedlyrics", "UNSYNCEDLYRICS")
-            for value in f.tags.get(key, ()) if value.strip()]
+            for value in tags.get(key, ()) if value.strip()]
 
 
 def get_existing_lyrics(f, path=None, include_sidecar=False, *,
@@ -559,7 +589,7 @@ def _read_bound_sidecar(
             or _named_identity(parent_fd, target.name) != frozen
         ):
             return None
-        content = b"".join(chunks).decode("utf-8", errors="replace")
+        content = _decode_lrc(b"".join(chunks))
         return content if content.strip() else None
     except (OSError, TypeError, ValueError):
         return None
@@ -735,6 +765,36 @@ def _make_temp(parent_fd: int, target_name: str):
     raise FileExistsError(f"couldn't reserve a temporary file for {target_name}")
 
 
+_TEMP_NAME_RE = re.compile(r"\.ql-lyrics-[0-9a-f]{16}\.tmp")
+# A temp changed this recently may belong to a rewrite still running.
+STALE_TEMP_SECONDS = 3600
+
+
+def clear_stale_temps(folders: Iterable[Path]) -> int:
+    """Remove the temp copies a killed tag or sidecar rewrite left in
+    ``folders``. The file each was made for keeps its own name throughout,
+    so the copy is never the only one. Returns how many went."""
+    removed = 0
+    for folder in folders:
+        try:
+            with os.scandir(folder) as entries:
+                names = [entry.name for entry in entries
+                         if _TEMP_NAME_RE.fullmatch(entry.name)]
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                value = os.lstat(path)
+            except OSError:
+                continue
+            if (stat.S_ISREG(value.st_mode)
+                    and time.time() - value.st_ctime >= STALE_TEMP_SECONDS
+                    and delete_verified(path, stat_identity(value), sync=False)):
+                removed += 1
+    return removed
+
+
 def _fsync_temp(temp_fd: int, name: str) -> None:
     try:
         os.fsync(temp_fd)
@@ -872,6 +932,18 @@ def _exchange_existing(
     return after
 
 
+class ReadOnlyTrack(OSError):
+    """The track is read-only to the app, so its tags are left alone."""
+
+
+def is_read_only(track_fd: int) -> bool:
+    """Whether the held track has no write permission at all, or none the
+    app holds."""
+    mode = os.fstat(track_fd).st_mode
+    return (not mode & 0o222
+            or not os.access(f"/proc/self/fd/{track_fd}", os.W_OK))
+
+
 def save_flac_tags(
         f, path: Path, *, identity_change_out=None,
         directory_mutation_out=None, parent_fd=None,
@@ -910,6 +982,8 @@ def save_flac_tags(
             or not still_allowed()
         ):
             raise OSError(f"{path.name}: source changed before tag rewrite")
+        if is_read_only(source_fd):
+            raise ReadOnlyTrack(f"{path.name} is read-only")
 
         temp_name, temp_fd = _make_temp(owned_parent_fd, path.name)
         if isinstance(directory_mutation_out, dict):
@@ -985,7 +1059,8 @@ def write_sidecar(
     """Write lyrics to a .lrc file next to the track (UTF-8).
 
     A non-empty .lrc already there is replaced only when it is plain and the
-    new content is synced. Return True when a sidecar was written and False when the existing file
+    new content is synced, and never when its encoding can't be told.
+    Return True when a sidecar was written and False when the existing file
     was kept."""
     path = Path(path)
     target = path.with_suffix(".lrc")
@@ -1026,9 +1101,10 @@ def write_sidecar(
             chunks = []
             while chunk := os.read(existing_fd, 1024 * 1024):
                 chunks.append(chunk)
-            old = b"".join(chunks).decode("utf-8", errors="replace")
+            old = _decode_lrc(b"".join(chunks))
             if old.strip() and (
-                classify(old) != "plain" or classify(content) != "synced"
+                isinstance(old, _Undecoded)
+                or classify(old) != "plain" or classify(content) != "synced"
             ):
                 if (
                     _regular_identity(os.fstat(existing_fd)) != existing
@@ -1158,6 +1234,8 @@ def carry_lyrics(source: Path, source_root: Path, track: Path,
         old_sidecar = _read_bound_sidecar(
             source, held.parent_fd, held.chain_is_named,
             held.exact_track_is_named)
+    if isinstance(old_sidecar, _Undecoded):
+        old_sidecar = None
     lyrics = _best_existing_lyrics(old_tag, old_sidecar)
     kind = classify(lyrics)
     if kind == "none":
@@ -1231,11 +1309,16 @@ def _clean_title(title: str) -> str:
 
 # An instrumental has no words to find, so any provider hit for it is the
 # vocal take. The duration check cannot catch that: the two run the same length.
-_NO_VOCAL_WORDS = r"instrumentals?|backing track|no vocals?|karaoke|minus one"
+# Japanese releases also wrap the label in dashes or tildes: "Song -Live-",
+# "Song〜Instrumental〜".
+_NO_VOCAL_WORDS = (r"instrumentals?|backing track|no vocals?|off[ -]?vocal|"
+                   r"karaoke|minus one|inst\.?")
 _INSTRUMENTAL_RE = re.compile(
-    rf"\([^()]*\b(?:{_NO_VOCAL_WORDS})\b[^()]*\)|"
-    rf"\[[^\[\]]*\b(?:{_NO_VOCAL_WORDS})\b[^\[\]]*\]|"
-    rf"\s+-\s+[^-]*\b(?:{_NO_VOCAL_WORDS})\b[^-]*|"
+    rf"\([^()]*\b(?:{_NO_VOCAL_WORDS})(?!\w)[^()]*\)|"
+    rf"\[[^\[\]]*\b(?:{_NO_VOCAL_WORDS})(?!\w)[^\[\]]*\]|"
+    rf"\s+-\s+[^-]*\b(?:{_NO_VOCAL_WORDS})(?!\w)[^-]*|"
+    rf"(?:^|\s)-[^-]*\b(?:{_NO_VOCAL_WORDS})(?!\w)[^-]*-\s*$|"
+    rf"[~～〜][^~～〜]*\b(?:{_NO_VOCAL_WORDS})(?!\w)[^~～〜]*[~～〜]|"
     r"\binstrumentals\s*$",
     re.IGNORECASE,
 )
@@ -1254,6 +1337,8 @@ _OTHER_CUT_WORDS = (
 _OTHER_CUT_RE = re.compile(
     rf"[\(\[][^()\[\]]*\b(?:{_OTHER_CUT_WORDS})\b|"
     rf"\s+-\s+.*\b(?:{_OTHER_CUT_WORDS})\b|"
+    rf"(?:^|\s)-[^-]*\b(?:{_OTHER_CUT_WORDS})\b[^-]*-\s*$|"
+    rf"[~～〜][^~～〜]*\b(?:{_OTHER_CUT_WORDS})\b[^~～〜]*[~～〜]|"
     r"\b(?:remix|mix|edit)\s*$",
     re.IGNORECASE,
 )
@@ -1310,7 +1395,7 @@ def fallback_queries(f) -> list[str]:
 # colon, are headings only in lyrics that use labels outside brackets for two
 # sections or more, so a sung "Breakdown" or "Chorus: Oh Oh Oh" stays a
 # lyric.
-_LRC_LINE_RE = re.compile(r"((?:\s*\[\d{1,2}:\d{2}(?:\.\d{1,3})?\])*)\s*(.*?)\s*")
+_LRC_LINE_RE = re.compile(r"((?:\s*\[\d{1,2}:\d{2}(?:[.:,]\d{1,3})?\])*)\s*(.*?)\s*")
 _SECTION_WORD = (r"(?i:intro|outro|verse|chorus|pre-chorus|post-chorus|hook|bridge|"
                  r"refrain|interlude|breakdown)")
 _SECTION_NUMBER = r"\s+(?i:\d+|one|two|three|four|five|six)"
@@ -1653,11 +1738,12 @@ def _lrclib_get(url: str, params: dict, log: logging.Logger, what: str,
     response = None
     retry_at = 0.0
     waited = 0.0
+    busy_limit = min(LRCLIB_BUSY_LIMIT, max(LRCLIB_BUSY_FLOOR, run.patience))
     for attempt in range(1, LRCLIB_MAX_ATTEMPTS + 1):
         run.check()
         with _lrclib_busy_lock:
             held = _lrclib_busy_until
-        if held - time.monotonic() > LRCLIB_BUSY_LIMIT - waited:
+        if held - time.monotonic() > busy_limit - waited:
             break
         if held > time.monotonic():
             retry_at = max(retry_at, held + random.random())
@@ -1677,7 +1763,7 @@ def _lrclib_get(url: str, params: dict, log: logging.Logger, what: str,
                     _lrclib_busy_until, time.monotonic() + wait)
         pause = (wait * (1 + random.random())
                  * 2 ** max(0, attempt - LRCLIB_ATTEMPTS))
-        if waited + pause > LRCLIB_BUSY_LIMIT:
+        if waited + pause > busy_limit:
             break
         waited += pause
         retry_at = time.monotonic() + pause
@@ -1711,7 +1797,10 @@ def _words(text: str) -> str:
 
 
 def _song_key(title: str) -> str:
-    return _words(re.sub(r"\s*[\(\[][^()\[\]]*[\)\]]|\s+-\s+.*$", "", title or ""))
+    """The title's words without its version labels or apostrophes, so
+    "Don't Stop (Live)" and "Dont Stop" are one song."""
+    return _words(re.sub(r"\s*[\(\[][^()\[\]]*[\)\]]|\s+-\s+.*$|['’]", "",
+                         title or ""))
 
 
 def credited_names(*credits: str) -> frozenset[str]:
@@ -1723,25 +1812,39 @@ def credited_names(*credits: str) -> frozenset[str]:
 def _lrclib_search(query: str, duration: float, song: tuple[str, frozenset],
                    log: logging.Logger, run: _Pass) -> tuple[list[dict], bool]:
     """LRCLIB's search hits that can be this recording, those at its length
-    first, then those under its title and artist. syncedlyrics would take the
-    closest name at any length."""
+    under its title, or by its artist under a title that holds its title or
+    is held in it, first, then those under its title and artist at any
+    length. syncedlyrics would take the closest name at any length."""
     records, failed = _lrclib_get(
         LRCLIB_SEARCH_URL, {"q": query}, log, "search", list, run)
     if records is None:
         return [], failed
     title, artists = song
+    key = _song_key(title)
     timed, named = [], []
     for record in records:
         if not isinstance(record, dict) or record.get("instrumental"):
             continue
         length = record.get("duration")
+        name = _song_key(record.get("trackName"))
+        credited = credited_names(record.get("artistName") or "") & artists
         if (duration and isinstance(length, (int, float))
-                and abs(length - duration) <= LRCLIB_SEARCH_GRACE):
+                and abs(length - duration) <= LRCLIB_SEARCH_GRACE
+                and key and name
+                and (name == key
+                     or credited and (f" {key} " in f" {name} "
+                                      or f" {name} " in f" {key} "))):
             timed.append(record)
-        elif (_song_key(record.get("trackName")) == _song_key(title)
-              and credited_names(record.get("artistName") or "") & artists):
+        elif name == key and credited:
             named.append(record)
     return timed + named, failed
+
+
+def _without_stamps(text: str) -> str:
+    """``text`` without its LRC stamps: plain lyrics a provider made from
+    synced ones keep every stamp not followed by a space."""
+    return "\n".join(LRC_TS_RE.sub("", line).strip()
+                     for line in text.splitlines())
 
 
 def search_lyrics(
@@ -1823,6 +1926,8 @@ def search_lyrics(
                 result, failed = _query_provider(
                     query, prov, log, run, answers, plain_only=True)
                 hard += failed
+                if result and SYNCED_RE.search(result):
+                    result = _without_stamps(result)
             if result and result.strip():
                 return result, prov, "plain", tried, hard
     return None, None, "", tried, hard
@@ -1877,6 +1982,7 @@ def should_process(
     mtime: Optional[float] = None,
     size: Optional[int] = None,
     lyrics_format: str = "embed",
+    synced_only: bool = False,
 ) -> bool:
     """
     Decide whether `path` is worth (re-)processing. mtime/size may be passed
@@ -1904,6 +2010,9 @@ def should_process(
             return True
         return not _representations_cover(
             st.representations, lyrics_format)
+    if (st.status == "not_found" and st.source == "synced-only"
+            and not synced_only):
+        return True
     if st.status in ("not_found", "error", "skipped"):
         # "skipped" (long-track, missing-tags) expires like not_found
         # instead of being re-opened on every run.
@@ -1993,6 +2102,7 @@ def _process_bound_file(
         and int(track_stat.st_mtime) == int(st.mtime)
         and track_stat.st_size == st.size
     )
+    seen = st.last_seen
     st.mtime = track_stat.st_mtime
     st.size = track_stat.st_size
     st.last_seen = time.time()
@@ -2003,6 +2113,12 @@ def _process_bound_file(
         st.source = "long-track"
         commit(state, key, st)
         return "skipped-long"
+
+    if f.tags is None:
+        st.status = "skipped"
+        st.source = "missing-tags"
+        commit(state, key, st)
+        return "skipped-tags"
 
     title = (f.tags.get("title") or [""])[0]
     if is_instrumental(title):
@@ -2033,21 +2149,38 @@ def _process_bound_file(
     kinds = {"embed": classify(embedded), "sidecar": classify(sidecar)}
     present = {name for name, kind in kinds.items() if kind != "none"}
     st.representations = _representation_state(present)
-    existing = _best_existing_lyrics(embedded, sidecar)
-    existing_kind = classify(existing)
 
     def fill(kind):
         """The requested places holding weaker lyrics than ``kind``."""
         rank = ("none", "plain", "synced").index
         return [name for name in required if rank(kinds[name]) < rank(kind)]
 
+    if isinstance(sidecar, _Undecoded):
+        kind = kinds["sidecar"]
+        kinds["sidecar"] = "synced"
+        sidecar = None
+        if not fill("synced"):
+            st.status = kind
+            commit(state, key, st)
+            return f"already-{kind}"
+    existing = _best_existing_lyrics(embedded, sidecar)
+    existing_kind = classify(existing)
+
+    def read_only(kind):
+        # Not recorded, so the track is tried again once it can be written.
+        return "embed" in fill(kind) and is_read_only(binding.track_fd)
+
     lyrics, source, kind = existing, "existing-representation", existing_kind
     if existing_kind == "synced" or (
             existing_kind == "plain" and plain_waits):
+        if plain_waits:
+            st.last_seen = seen
         if not fill(kind):
             st.status = kind
             commit(state, key, st)
             return f"already-{kind}"
+        if read_only(kind):
+            return "skipped-read-only"
         action = f"copied-{kind}"
     elif (kinds["sidecar"] == "plain" and "sidecar" in required
             and run is not None and not run.replaces_lrc):
@@ -2056,6 +2189,8 @@ def _process_bound_file(
         commit(state, key, st)
         return "kept-plain-lrc"
     else:
+        if read_only("synced"):
+            return "skipped-read-only"
         query = build_query(f)
         if not query:
             st.status = "skipped"
@@ -2092,7 +2227,7 @@ def _process_bound_file(
             return "providers-unavailable"
         elif existing_kind == "none":
             st.status = "not_found"
-            st.source = ""
+            st.source = "synced-only" if synced_only else ""
             commit(state, key, st)
             return "not-found"
         elif synced_only or not fill(kind):
@@ -2147,6 +2282,7 @@ def _drain(items, worker, on_result, *, workers, should_stop,
     ``on_result`` as it lands. Returns True when ``should_stop`` ended the run
     before every item was submitted."""
     stopped = False
+    worker = wrap_thread_target(worker)
     with ThreadPoolExecutor(max_workers=workers,
                             thread_name_prefix=thread_name_prefix) as ex:
         remaining = iter(items)
@@ -2236,7 +2372,8 @@ def fetch_for_paths(
     state = _StateWriter(state_path, log, dry_run=dry_run)
     candidates = [p for p in paths
                   if should_process(p, state.get(str(p)), rescan,
-                                    lyrics_format=lyrics_format)]
+                                    lyrics_format=lyrics_format,
+                                    synced_only=synced_only)]
 
     counts: Counter = Counter()
     total = len(candidates)

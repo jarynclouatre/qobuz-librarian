@@ -5,7 +5,7 @@ import stat
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian.integrations import lyric_fetch
+from qobuz_librarian.integrations import lyric_fetch, rip
 from qobuz_librarian.safefile import identity_record
 from qobuz_librarian.safefile import same_directory as _same_directory
 from qobuz_librarian.ui_cli.colors import C, fmt
@@ -37,7 +37,7 @@ _LYRIC_RESOLVED_OUTCOMES = {
     "skipped-long",
     "skipped-tags",
 }
-_LYRIC_QUEUED_OUTCOMES = {"providers-unavailable", "unsafe-path"}
+_LYRIC_QUEUED_OUTCOMES = {"providers-unavailable", "unsafe-path", "skipped-read-only"}
 
 
 def _fetch_outcome_summary(counts, *, expected=None):
@@ -141,9 +141,12 @@ def _run_lyric_hook(album_dir):
         msg += f"; {no_tags} skipped (missing tags)"
     if unavailable:
         msg += f"; {unavailable} not answered by a provider, left to the next Lyrics run"
+    read_only = counts.get("skipped-read-only", 0)
+    if read_only:
+        msg += f"; {read_only} read-only, left alone"
     if failed:
         msg += f"; {failed} failed"
-    if failed or unavailable:
+    if failed or unavailable or read_only:
         log.info(fmt(C.YELLOW, f"  ⚠  {msg}."))
     else:
         log.info(fmt(C.GREEN, f"  ✓  {msg}."))
@@ -460,14 +463,24 @@ def _iter_secure_owned_flacs(payloads):
 
 
 def _iter_post_import_flacs(album_dirs, owned_tracks, seen):
-    excluded = {
-        target[0]
+    targets = [
+        target
         for payload in owned_tracks or ()
         if (target := _owned_track_target(payload)) is not None
+    ]
+    excluded = {path for path, _record in targets}
+    root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
+    owned_albums = {
+        root.joinpath(*PurePosixPath(scope["relative"]).parts)
+        for _path, record in targets
+        if isinstance(scope := record.get("album_scope"), dict)
+        and isinstance(scope.get("relative"), str)
     }
     yield from _iter_secure_owned_flacs(owned_tracks)
     for directory in album_dirs:
         if directory is None or not isinstance(directory, Path):
+            continue
+        if Path(os.path.abspath(os.fspath(directory))) in owned_albums:
             continue
         for path, parent_fd, parent_guard in _iter_secure_album_flacs(directory, seen):
             if path in excluded:
@@ -546,6 +559,7 @@ def write_post_import_sidecars(
     created_files_out=None,
     directory_changes_out=None,
     owned_tracks=None,
+    track_signatures=None,
 ):
     """Write .lrc sidecars next to imported FLACs when LYRICS_FORMAT
     requests them. Embedded tag is removed afterward for 'sidecar' mode,
@@ -553,8 +567,10 @@ def write_post_import_sidecars(
     the tag is synced. Optional output lists receive exact identity changes
     and sidecars that this pass can prove it created, plus exact parent-directory
     identity transitions caused by those writes. ``owned_tracks`` contains
-    sealed one-file import receipts; those leaves are excluded from album
-    scans and handled first, while their original identities still match."""
+    sealed one-file import receipts; those leaves are handled first, while
+    their original identities still match, and their albums' other tracks
+    are left alone. With ``track_signatures`` only the tracks those name
+    are handled in ``album_dirs``."""
     if not cfg.LYRICS_ENABLED or not HAVE_LYRIC_FETCH:
         return
     # Only mutagen is needed to read the embedded tag and write the .lrc -
@@ -567,12 +583,14 @@ def write_post_import_sidecars(
     if lyr_fmt not in ("sidecar", "both"):
         return
     strip_tag = lyr_fmt == "sidecar"
+    wanted = {tuple(sig) for sig in track_signatures or () if sig} or None
     seen = set()
     written = 0
     kept = 0
     stripped = 0
     failed = 0
     strip_failed = 0
+    strip_read_only = 0
     for fp, parent_fd, parent_guard, expected_track in _iter_post_import_flacs(
         album_dirs, owned_tracks, seen
     ):
@@ -616,6 +634,9 @@ def write_post_import_sidecars(
                 os.close(track_fd)
             continue
         try:
+            if (wanted is not None and expected_track is None
+                    and rip._flac_signature(f"/proc/self/fd/{track_fd}") not in wanted):
+                continue
             content = lyric_fetch.get_existing_lyrics(f)
             if not content or not content.strip():
                 continue
@@ -755,6 +776,8 @@ def write_post_import_sidecars(
                                 commit_guard=sidecar_guard,
                             )
                         stripped += 1
+                except lyric_fetch.ReadOnlyTrack:
+                    strip_read_only += 1
                 except Exception as e:
                     strip_failed += 1
                     action = "wrote" if sidecar_written else "kept"
@@ -824,6 +847,9 @@ def write_post_import_sidecars(
             if strip_failed:
                 noun = "removal" if strip_failed == 1 else "removals"
                 suffix += f"; {strip_failed} tag {noun} failed"
+            if strip_read_only:
+                suffix += (f"; {plural(strip_read_only, 'track')} read-only, "
+                           "so the lyrics stay in the tag too")
         warning = bool(failed or strip_failed)
         marker = "⚠" if warning else "✓"
         colour = C.YELLOW if warning else C.GREEN

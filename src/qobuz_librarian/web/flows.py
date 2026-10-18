@@ -5109,6 +5109,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
          f"{plural(counts['too_long'], 'track')} too long"),
         (counts["instrumental"],
          f"{plural(counts['instrumental'], 'track')} instrumental"),
+        (counts["read_only"], lyrics.read_only_note(counts["read_only"])),
         (counts["unsafe"],
          f"{plural(counts['unsafe'], 'unsafe path')} refused"),
         (counts["unavailable"],

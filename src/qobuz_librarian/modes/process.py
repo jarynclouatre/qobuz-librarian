@@ -519,6 +519,18 @@ def _original_track_tags(source):
     ]
 
 
+def _carried_track_tags(source, target):
+    """The original track's own tags to carry, without its lyrics when the
+    replacement's rank higher: synced lyrics stay over plain ones."""
+    tags = _original_track_tags(source)
+    rank = ("none", "plain", "synced").index
+    if (rank(lyric_fetch.classify(lyric_fetch.get_existing_lyrics(target)))
+            > rank(lyric_fetch.classify(lyric_fetch.get_existing_lyrics(source)))):
+        tags = [(key, value) for key, value in tags
+                if key.lower() not in _LYRIC_TAGS]
+    return tags
+
+
 def _missing_track_pictures(source, target):
     embedded = {picture.data for picture in target.pictures}
     has_front = any(picture.type == 3 for picture in target.pictures)
@@ -545,7 +557,7 @@ def _track_annotations_preserved(backup_path, replacement_path):
         try:
             source = FLAC(old["path"])
             target = FLAC(new["path"])
-            if (not _tags_present(_original_track_tags(source), target)
+            if (not _tags_present(_carried_track_tags(source, target), target)
                     or _missing_track_pictures(source, target)):
                 return False
         except Exception:
@@ -596,7 +608,7 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
             if target.tags is None:
                 target.add_tags()
             lyric_keys = _LYRIC_TAGS
-            tags = _original_track_tags(source)
+            tags = _carried_track_tags(source, target)
             pictures = _missing_track_pictures(source, target)
             if not pictures and _tags_present(tags, target):
                 continue
@@ -2212,7 +2224,9 @@ def process_album(album, args, *, allow_force=True, label=None,
             # Materialise .lrc sidecars next to the final renamed files
             # (no-op unless LYRICS_FORMAT is sidecar/both).
             try:
-                write_post_import_sidecars([post_dir, album_dir])
+                write_post_import_sidecars(
+                    [post_dir, album_dir],
+                    track_signatures=post_import_signatures)
             except Exception as _e_sc:
                 vlog(f"post-import sidecar write raised: {_e_sc}")
             # After the sidecars, because writing one can rewrite the audio
