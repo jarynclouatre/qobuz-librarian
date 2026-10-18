@@ -27,6 +27,7 @@ from qobuz_librarian.library import (
     backup,
     candidate_premise,
     generation_state,
+    library_scan_state,
     missing_types,
     new_releases,
 )
@@ -357,6 +358,13 @@ async def job_approve(request: Request, job_id: str):
                 lambda: candidate_premise.stale_candidate_ids(
                     selected_candidate_snapshot, share_artist_captures=True),
             )
+            if stale_premise_candidate_ids and job.execute_kind == "library":
+                await loop.run_in_executor(
+                    None, lambda: library_scan_state.forget_fingerprints(
+                        (c.get("payload") or {}).get("_artist_dir")
+                        or c.get("artist")
+                        for c in selected_candidate_snapshot
+                        if c.get("cid") in stale_premise_candidate_ids))
             if selected_candidate_ids <= stale_premise_candidate_ids:
                 stale_message = await loop.run_in_executor(
                     None, lambda: _all_stale_message_for(

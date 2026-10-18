@@ -474,7 +474,16 @@ async def library_scan(
                 status_code=200)
         return RedirectResponse(
             url=error_home + "?error=" + rendering._notice_key(msg), status_code=303)
+    force_full_scan = str(force_full or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
     existing = scans._active_library_scan()
+    if existing is not None and force_full_scan:
+        msg = ("A Library refresh is already running, so the full rescan did "
+               "not start. Start it from Settings once the refresh finishes.")
+        return RedirectResponse(
+            url="/library?notice=" + rendering._notice_key(msg),
+            status_code=303)
     if existing is not None:
         return RedirectResponse(url="/library", status_code=303)
     try:
@@ -493,9 +502,6 @@ async def library_scan(
     # "library" (not "album") so the review screen knows this is the paced triage
     # surface; both modes run the same album executor and resume from a matching
     # checkpoint if one's waiting (see _start_library_scan / scan_library).
-    force_full_scan = str(force_full or "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
     job = await loop.run_in_executor(
         None,
         lambda: scans._start_library_scan(
@@ -541,6 +547,9 @@ async def library_hidden_restore_all(request: Request):
     loop = asyncio.get_running_loop()
     q, fingerprints = await hidden_pages._restore_hidden_filter(
         request, hidden_mod.SCOPE_MISSING)
+    dismissed_ids = await loop.run_in_executor(
+        None, lambda: hidden_mod.album_ids(
+            hidden_mod.SCOPE_MISSING, fingerprints=fingerprints))
 
     try:
         if fingerprints is None:
@@ -561,6 +570,8 @@ async def library_hidden_restore_all(request: Request):
             status_code=303)
     rejoined = await loop.run_in_executor(
         None, lambda: flows.refold_restored_missing(artists, fingerprints or []))
+    relisted = await loop.run_in_executor(
+        None, lambda: hidden_pages._relist_new_releases(dismissed_ids))
     # Under a filter only part of the set moved, so the message says how much
     # rather than claiming everything came back.
     what = ("Brought everything back" if fingerprints is None else
@@ -578,6 +589,10 @@ async def library_hidden_restore_all(request: Request):
         msg = f"{what} to the Library review."
     else:
         msg = f"{what}. Nothing needs adding to the Library review."
+    if relisted and rejoined is not False:
+        msg += (" " + ("1 new release returns" if relisted == 1
+                       else f"{relisted} new releases return")
+                + " with the next new-release check.")
     return RedirectResponse(
         url="/library/hidden" + hidden_pages._hidden_query(q, msg), status_code=303)
 

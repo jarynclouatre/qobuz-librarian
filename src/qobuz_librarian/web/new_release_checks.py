@@ -10,7 +10,7 @@ from qobuz_librarian.api.auth import (
     QobuzEntitlementError,
     QobuzUnavailable,
 )
-from qobuz_librarian.library import new_releases, scan_checkpoint
+from qobuz_librarian.library import generation_state, new_releases, scan_checkpoint
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import flows, job_runs, qobuz_access, runtime, write_gate
 from qobuz_librarian.web import jobs as job_mgr
@@ -128,8 +128,10 @@ def _new_release_check_due():
         return False
     # And never ahead of an interrupted library scan waiting to resume: finishing
     # that takes priority (it's what the user's resume needs the scan lane for),
-    # and a delta check can wait until the library is whole again.
-    if scan_checkpoint.pending() is not None:
+    # and a delta check can wait until the library is whole again. A refresh
+    # cut short over current results waits for Resume, and checks go on.
+    if (scan_checkpoint.pending() is not None
+            and not generation_state.baseline_complete()):
         return False
     if time.time() < _auto_start_backoff["until"]:
         return False

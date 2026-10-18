@@ -64,10 +64,13 @@ def _store_lock():
 
 def _fingerprint_text(value):
     text = unicodedata.normalize("NFKD", _stored_text(value)).casefold()
-    return "".join(
+    folded = "".join(
         char for char in text
         if char.isalnum() or unicodedata.category(char).startswith("S")
     )
+    # A name of punctuation alone, such as "( )" or "!!!", keeps its own.
+    return folded or " ".join(
+        unicodedata.normalize("NFKC", _stored_text(value)).casefold().split())
 
 
 def artist_key(artist):
@@ -261,13 +264,14 @@ def is_hidden(scope, artist, title, store, *, year=None):
                for stored_year in stored_years)
 
 
-def hide(scope, items, gap_fill=None):
+def hide(scope, items, gap_fill=None, album_ids=None):
     """Record dismissals. `items` is an iterable of (artist, title, year).
 
     `gap_fill`, when given, is a matching list of booleans marking which rows
     are a Gap Fill dismissal (an album already owned, missing tracks) rather
     than a fully missing one, so the Dismissed page can say so. Missing
     entirely for an older caller, every row is treated as not Gap Fill.
+    `album_ids`, when given, is a matching list of each row's Qobuz album.
 
     Returns the number of rows newly recorded, matching the review rows removed.
     This may exceed the number of fingerprints when multiple editions of one
@@ -275,12 +279,13 @@ def hide(scope, items, gap_fill=None):
     """
     items = list(items)
     flags = list(gap_fill) if gap_fill is not None else [False] * len(items)
+    ids = list(album_ids) if album_ids is not None else [None] * len(items)
     with _store_lock():
         store = load()
         bucket = store.setdefault(scope, {})
         now = datetime.now(timezone.utc).isoformat()
         added = 0
-        for (artist, title, year), is_gap in zip(items, flags):
+        for (artist, title, year), is_gap, album_id in zip(items, flags, ids):
             title, year = _split_stored_year(title, year)
             fp = album_fingerprint(artist, title)
             if fp is None:
@@ -288,6 +293,8 @@ def hide(scope, items, gap_fill=None):
             row = {"title": title or "", "year": str(year or ""), "ts": now}
             if is_gap:
                 row["gap_fill"] = True
+            if album_id:
+                row["album_id"] = str(album_id)
             entry = bucket.get(fp)
             if entry is None:
                 bucket[fp] = {"artist": artist or "", "title": title or "",
@@ -355,6 +362,21 @@ def _restore_all(scope):
             if not save(store):
                 raise OSError(_SAVE_FAILED_MSG)
     return n, artists
+
+
+def album_ids(scope, artists=(), fingerprints=()):
+    """The Qobuz albums recorded with the dismissals `restore` and
+    `restore_albums` would bring back for these artists or fingerprints,
+    every dismissal's when `fingerprints` is None."""
+    wanted = {artist_key(artist) for artist in artists} - {""}
+    fps = set(fingerprints or ())
+    found = set()
+    for fp, entry in (load().get(scope) or {}).items():
+        if (fingerprints is None or fp in fps
+                or artist_key(entry.get("artist")) in wanted):
+            found.update(str(row["album_id"]) for row in entry.get("rows") or ()
+                         if isinstance(row, dict) and row.get("album_id"))
+    return found
 
 
 def restore_albums(scope, fingerprints):

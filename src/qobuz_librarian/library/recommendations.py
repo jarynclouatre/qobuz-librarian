@@ -40,7 +40,12 @@ from qobuz_librarian.library.scanner import (
     list_artist_album_dirs,
     list_library_artists,
 )
-from qobuz_librarian.library.tags import key_similarity, normalize
+from qobuz_librarian.library.tags import (
+    VA_NORMALIZED,
+    bare_artist_key,
+    key_similarity,
+    normalize,
+)
 from qobuz_librarian.ui_cli.logging import vlog
 
 # How much of each thing is fetched, resolved and shown. The card counts are
@@ -82,7 +87,7 @@ class Library:
     """The owned artists, in the three forms the rest of the module needs:
     normalized keys to exclude against, raw names for the exclusion cases that
     can't be normalized, seeds to ask Last.fm about, and a signature that
-    changes when the library does."""
+    changes when its artist folders do."""
 
     def __init__(self, keys, raws, seeds, signature):
         self.keys = keys
@@ -90,6 +95,7 @@ class Library:
         self.seeds = seeds
         self.signature = signature
         self._owned_names = {}
+        self._bare_keys = None
 
     def __len__(self):
         return len(self.seeds)
@@ -120,8 +126,9 @@ class Library:
             # Exact only, as tags.key_similarity scores it.
             return False
         # 'The Beatles' and 'Beatles' are the same shelf.
-        flipped = key[3:] if key.startswith("the") else "the" + key
-        if flipped and flipped in self.keys:
+        if self._bare_keys is None:
+            self._bare_keys = {bare_artist_key(raw) for raw in self.raws}
+        if bare_artist_key(name) in self._bare_keys:
             return True
         thresh = cfg.FUZZY_DIR_THRESH
         for owned in self.keys:
@@ -147,7 +154,7 @@ def read_library() -> Library:
     library holds most of.
     """
     resolutions = cached_artist_resolutions()
-    keys, raws, seeds, albums = set(), [], [], []
+    keys, raws, seeds = set(), [], []
     # An unreadable artist still counts as owned, so it is not recommended
     # back to the user, but its albums cannot be read.
     unreadable = []
@@ -179,17 +186,15 @@ def read_library() -> Library:
                 folder, "; ".join(map(str, walk_errors)))
             unreadable_names.add(folder)
             continue
-        seeds.append((len(artist_albums), canonical or folder))
-        albums.extend(
-            f"{folder.casefold()}/{album.name.casefold()}"
-            for album in artist_albums
-        )
-    signature_parts = {f"key:{key}" for key in keys}
-    signature_parts.update(f"unreadable:{name}" for name in unreadable_names)
-    signature_parts.update(
-        f"name:{name.strip().casefold()}" for name in raws if name.strip()
-    )
-    signature_parts.update(f"album:{album}" for album in albums)
+        if folder_key not in VA_NORMALIZED:
+            # Compilations have no single artist to find others like.
+            seeds.append((len(artist_albums), canonical or folder))
+    # The feeds leave owned artists and albums out as they are shown, so only
+    # a change of artist folders asks for new suggestions.
+    signature_parts = {
+        f"folder:{directory.name.casefold()}"
+        for directory in [*directories, *unreadable]
+    }
     signature = hashlib.sha1(
         "\n".join(sorted(signature_parts)).encode("utf-8")).hexdigest()
     seeds = [seed for _count, seed in sorted(seeds, key=lambda pair: -pair[0])]
@@ -477,6 +482,7 @@ def _artist_cards(
     """
     found = {} if found is None else found
     cards, attempts = [], 0
+    carded = set()
     for candidate in ranked:
         if len(cards) >= want or attempts >= want * 3:
             break
@@ -488,7 +494,10 @@ def _artist_cards(
             card = _qobuz_artist(name, token, prefer_hires=prefer_hires)
             if card:
                 found[name] = card
-        if name in found and not (hidden and hidden.covers(found[name])):
+        # Two Last.fm spellings of one artist make one card.
+        if (name in found and found[name]["artist_id"] not in carded
+                and not (hidden and hidden.covers(found[name]))):
+            carded.add(found[name]["artist_id"])
             cards.append(dict(found[name], seeds=_seed_names(candidate),
                               score=candidate.get("score", 0.0)))
         if progress is not None:
@@ -906,7 +915,10 @@ def _favourites_worker(kind: str, token, owned: Library) -> None:
         _publish(kind, checked=index)
         if index % _PUBLISH_EVERY == 0:
             _publish(kind, items=list(cards))
-    cache.put_feed(kind, cards, owned.signature)
+    if cards or not rows:
+        # A saved copy is only its cards, so an empty one would read as an
+        # account with nothing saved.
+        cache.put_feed(kind, cards, owned.signature)
     _publish(kind, phase="ready", items=cards, finished_at=time.time())
 
 
@@ -1002,12 +1014,11 @@ def feed_view(kind: str, library_sig: str, *,
             "looked_up": 0, "error": "", "items": [], "built_at": 0.0, "stale": False}
     build = build_status(kind)
     if build and build["phase"] == "building":
-        if build.get("library_sig") == library_sig:
-            view.update(phase="building", stage=build["stage"],
-                        checked=build["checked"], total=build["total"],
-                        looked_up=build["looked_up"], items=build["items"])
-        else:
-            view.update(phase="waiting", error="busy")
+        # One built for the library as it was still has the newest results;
+        # the next visit after it ends builds for the library as it is.
+        view.update(phase="building", stage=build["stage"],
+                    checked=build["checked"], total=build["total"],
+                    looked_up=build["looked_up"], items=build["items"])
         return view
     if (build and build["phase"] == "waiting"
             and build.get("library_sig") == library_sig):
@@ -1030,7 +1041,7 @@ def feed_view(kind: str, library_sig: str, *,
     if saved and saved["library_sig"] == library_sig \
             and (time.time() - saved["built_at"]) <= ttl:
         view.update(phase="ready", items=saved["payload"],
-                    built_at=saved["built_at"])
+                    total=len(saved["payload"]), built_at=saved["built_at"])
     return view
 
 

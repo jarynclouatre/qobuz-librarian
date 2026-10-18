@@ -166,6 +166,16 @@ def similarity(a, b):
 _LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
 
 
+_LEADING_THE_RE = re.compile(r"^\s*the\s+", re.IGNORECASE)
+
+
+def bare_artist_key(name):
+    """The normalized artist name without a leading "The ", so "The Beatles"
+    and "Beatles" share one while "Them" and "M" do not."""
+    name = name or ""
+    return normalize(_LEADING_THE_RE.sub("", name, count=1)) or normalize(name)
+
+
 def strip_leading_article(name):
     """Drop a leading 'the/a/an ' so 'The Wall' compares equal to a bare
     'Wall'. Left unchanged if stripping would empty it."""
@@ -292,6 +302,23 @@ def _strip_trailing_paren_tag(s):
 
 
 _TRAILING_BRACKET_CAPTURE_RE = re.compile(r"\s*\[([^\[\]]*)\]\s*$")
+# The format a folder name records in square brackets: "[FLAC]", "[WEB FLAC]",
+# "[FLAC 24bit-96kHz]", "[24-96]", "[16-44.1]", "[MP3 320]".
+_BIT_RATE_PAIR = (
+    r"(?:16|20|24|32)(?:\s*-?\s*bits?\s*[-/_ ]?\s*|\s*[-/_ ]\s*)"
+    r"(?:44[.,]1|48|88[.,]2|96|176[.,]4|192|352[.,]8|384)(?:\s*k(?:hz)?)?")
+_FORMAT_MARK = r"web|flac|alac|lossless|hi-?res|mp3|aac"
+_FORMAT_TOKEN = (
+    rf"(?:{_FORMAT_MARK}|cd|v0|{_BIT_RATE_PAIR}"
+    r"|(?:16|24|32)\s*-?\s*bits?"
+    r"|(?:44[.,]1|48|88[.,]2|96|176[.,]4|192|352[.,]8|384)\s*k(?:hz)?"
+    r"|(?:128|192|256|320)(?:\s*k(?:bps)?)?)")
+_BRACKET_FORMAT_RE = re.compile(
+    rf"{_FORMAT_TOKEN}(?:[\s\-_/+,]+{_FORMAT_TOKEN})*", re.IGNORECASE)
+_BRACKET_FORMAT_MARK_RE = re.compile(
+    rf"\b(?:{_FORMAT_MARK})\b|bits?\b|khz\b|kbps\b|{_BIT_RATE_PAIR}",
+    re.IGNORECASE)
+_DASH_YEAR_TAIL_RE = re.compile(r"(?<!\d)\s+[-–]\s+(?:19|20)\d\d\s*$")
 
 
 def _strip_trailing_bracket_tag(s):
@@ -302,6 +329,26 @@ def _strip_trailing_bracket_tag(s):
             or not _paren_tag_is_decoration(m.group(1))):
         return s
     return s[: m.start()].strip()
+
+
+def _strip_trailing_format_tag(s):
+    m = _TRAILING_BRACKET_CAPTURE_RE.search(s)
+    tag = m.group(1).strip() if m else ""
+    if not (_BRACKET_FORMAT_RE.fullmatch(tag)
+            and _BRACKET_FORMAT_MARK_RE.search(tag)):
+        return s
+    return s[: m.start()].strip()
+
+
+def strip_artist_prefix(name, *artists):
+    """An "Artist - Album" folder name without its artist part."""
+    head, sep, rest = name.partition(" - ")
+    rest = rest.strip()
+    if sep and rest and not re.fullmatch(r"(?:19|20)\d\d", rest) and any(
+            artist and normalize(head) == normalize(artist)
+            for artist in artists):
+        return rest
+    return name
 
 
 # Normalized forms of the markers above, for callers comparing already-
@@ -382,6 +429,10 @@ def strip_album_decorations(name):
     times so combined decorations like 'Foo: Deluxe Edition (2023)' fully
     strip in a single call.
     """
+    return _strip_decorations(name)
+
+
+def _strip_decorations(name, folder=False):
     s = name
     for _ in range(8):
         new = _LEADING_YEAR_RE.sub("", s).strip()
@@ -391,10 +442,31 @@ def strip_album_decorations(name):
             new = _strip_trailing_bracket_tag(s)
         if new == s:
             new = _EDITION_TAIL_RE.sub("", s).strip()
+        if folder and new == s:
+            new = _strip_trailing_format_tag(s)
+        if folder and new == s:
+            new = _DASH_YEAR_TAIL_RE.sub("", s).strip()
         if new == s or not new:
             break
         s = new
     return s or name
+
+
+@lru_cache(maxsize=2048)
+def strip_folder_decorations(name):
+    """strip_album_decorations for an album folder name, which may also end
+    in a format tag ("[WEB FLAC]", "[24-96]") or " - 2014"."""
+    return _strip_decorations(name, folder=True)
+
+
+def folder_title_forms(name, *artists):
+    """The bare titles an album folder name may stand for: the whole name
+    and, for an "Artist - Album" name, the album part alone."""
+    forms = [strip_folder_decorations(name)]
+    rest = strip_artist_prefix(name, *artists)
+    if rest != name:
+        forms.append(strip_folder_decorations(rest))
+    return forms
 
 
 # The affirmative-decoration gate for the strict variant below: a bare year,

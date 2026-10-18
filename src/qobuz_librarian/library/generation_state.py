@@ -16,6 +16,7 @@ _lock = threading.RLock()
 _UNPUBLISHED_LIBRARY_REASON = (
     "The latest Library scan stopped before this review was saved."
 )
+_ALBUM_CHANGE_LIMIT = 500
 
 
 def _empty_output():
@@ -45,6 +46,8 @@ def _empty_state():
         },
         "outputs": {surface: _empty_output() for surface in SURFACES},
         "pending_review_removals": [],
+        "album_changes": [],
+        "unlisted_change": 0,
     }
 
 
@@ -84,6 +87,27 @@ def _normalise_removals(value):
         if album_id and album_id not in cleaned:
             cleaned.append(album_id)
     return cleaned
+
+
+def _normalise_album_changes(value):
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for entry in value:
+        try:
+            changed_at, album_id = int(entry[0]), str(entry[1] or "").strip()
+        except (TypeError, ValueError, IndexError, KeyError, OverflowError):
+            continue
+        if album_id:
+            cleaned.append([changed_at, album_id])
+    return cleaned[-_ALBUM_CHANGE_LIMIT:]
+
+
+def _revision_or_zero(value):
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def load():
@@ -133,6 +157,8 @@ def load():
         "pending_review_removals": _normalise_removals(
             data.get("pending_review_removals")
         ),
+        "album_changes": _normalise_album_changes(data.get("album_changes")),
+        "unlisted_change": _revision_or_zero(data.get("unlisted_change")),
     })
     return base
 
@@ -191,6 +217,39 @@ def clear_review_removals(album_ids) -> bool:
             return True
         data["pending_review_removals"] = pending
         return _write(data)
+
+
+def note_album_change(album_id) -> bool:
+    """Remember an exact album the app just changed on disk.
+
+    A Library crawl that started before the change can then publish with
+    that album taken off its results, rather than throw the crawl away.
+    """
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        return False
+    with _lock, state_file.store_lock(cfg.LIBRARY_GENERATION_STATE_FILE):
+        data = load()
+        changes = [
+            entry for entry in data["album_changes"] if entry[1] != album_id
+        ]
+        changes.append([int(data.get("revision") or 0), album_id])
+        data["album_changes"] = changes[-_ALBUM_CHANGE_LIMIT:]
+        return _write(data)
+
+
+def _album_changes_since(data, since):
+    changes = data.get("album_changes") or []
+    if len(changes) >= _ALBUM_CHANGE_LIMIT and changes[0][0] >= since:
+        return None
+    return sorted({album_id for changed_at, album_id in changes
+                   if changed_at >= since})
+
+
+def album_changes_since(since) -> list[str] | None:
+    """The albums the app changed at or after revision ``since``, or None
+    when the record no longer reaches back that far."""
+    return _album_changes_since(load(), int(since))
 
 
 def revision() -> int:
@@ -305,20 +364,30 @@ def commit_catalog_generation(
     limited: bool = False,
     expected_revision: int | None = None,
 ):
-    """Commit a completed crawl before replacing its saved views."""
+    """Commit a completed crawl before replacing its saved views.
+
+    The result's ``changed_albums`` are the albums the app changed since
+    ``expected_revision``; the crawl's results must leave them out.
+    """
     with _lock, state_file.store_lock(cfg.LIBRARY_GENERATION_STATE_FILE):
         data = load()
         latest = data.get("latest_attempt") or {}
         if attempt_id is not None and int(latest.get("id") or 0) != int(attempt_id):
             return None
+        changed_albums = []
         if (
             expected_revision is not None
             and int(data.get("revision") or 0) != int(expected_revision)
         ):
-            # A local operation or targeted saved-view update landed after the
-            # crawl began.  Publishing this older picture would resurrect the
-            # candidate that operation just retired.
-            return None
+            # A local change landed after the crawl began. Publishing this
+            # older picture as it is would bring back the albums that change
+            # retired, so it goes out only when those albums are known and
+            # no saved view was marked out of date meanwhile.
+            if data["unlisted_change"] > int(expected_revision):
+                return None
+            changed_albums = _album_changes_since(data, int(expected_revision))
+            if changed_albums is None:
+                return None
         previous = copy.deepcopy(data)
         generation = int(data.get("generation") or 0) + 1
         commit_revision = _next_revision(data)
@@ -347,6 +416,7 @@ def commit_catalog_generation(
             "revision": commit_revision,
             "attempt_id": int(attempt_id or latest.get("id") or 0),
             "previous": previous,
+            "changed_albums": changed_albums,
         }
 
 
@@ -457,7 +527,9 @@ def mark_output_status(
         if generation is not None and current != int(generation):
             return False
         previous = output_state(surface, data)
-        _next_revision(data)
+        revision = _next_revision(data)
+        if status != "disabled":
+            data["unlisted_change"] = revision
         data.setdefault("outputs", {})[surface] = {
             **previous,
             "generation": current,
@@ -475,7 +547,7 @@ def invalidate(surfaces, reason: str) -> bool:
     with _lock, state_file.store_lock(cfg.LIBRARY_GENERATION_STATE_FILE):
         data = load()
         current = int(data.get("generation") or 0)
-        _next_revision(data)
+        data["unlisted_change"] = _next_revision(data)
         outputs = data.setdefault("outputs", {})
         for surface in wanted:
             outputs[surface] = {

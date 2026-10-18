@@ -43,6 +43,7 @@ from qobuz_librarian.library.tags import (
     canonical_track_slot,
     canonical_track_title,
     differs_by_album_variant,
+    folder_title_forms,
     known_year,
     normalize,
     similarity,
@@ -410,27 +411,30 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
                 if edition_title and folder_title == edition_title:
                     return d
                 continue
-            score = similarity(strip_album_decorations(d.name), stripped_title)
-            if score < config.FUZZY_DIR_THRESH or score <= global_best_score:
-                continue
-            # Real edition variants normalize to the same string, so require the
-            # titles to be close in length - that keeps an extra word ('Live',
-            # 'Tour') from resolving to the base album's folder on prefix alone.
-            norm_dir = normalize(strip_album_decorations(d.name))
-            coverage = (min(len(norm_dir), len(norm_title))
-                        / max(len(norm_dir), len(norm_title))
-                        if norm_dir and norm_title else 0.0)
-            if coverage < config.FUZZY_DIR_MIN_COVERAGE:
-                vlog(f"rejected {d.name}: score {score:.2f} but length "
-                     f"coverage {coverage:.2f} < {config.FUZZY_DIR_MIN_COVERAGE}")
-                continue
             folder_words = _other_release_words(d.name)
-            if (_numbers_differ(strip_album_decorations(d.name), stripped_title)
-                    or title_words - folder_words or folder_words - release_words):
-                vlog(f"rejected {d.name}: another numbered, live or remix release")
-                continue
-            global_best, global_best_score = d, score
-            vlog(f"fuzzy match: {d}  (score {score:.2f})")
+            for dir_bare in folder_title_forms(d.name, artist_dir.name, artist):
+                score = similarity(dir_bare, stripped_title)
+                if score < config.FUZZY_DIR_THRESH or score <= global_best_score:
+                    continue
+                # Real edition variants normalize to the same string, so require
+                # the titles to be close in length - that keeps an extra word
+                # ('Live', 'Tour') from resolving to the base album's folder on
+                # prefix alone.
+                norm_dir = normalize(dir_bare)
+                coverage = (min(len(norm_dir), len(norm_title))
+                            / max(len(norm_dir), len(norm_title))
+                            if norm_dir and norm_title else 0.0)
+                if coverage < config.FUZZY_DIR_MIN_COVERAGE:
+                    vlog(f"rejected {d.name}: score {score:.2f} but length "
+                         f"coverage {coverage:.2f} < {config.FUZZY_DIR_MIN_COVERAGE}")
+                    continue
+                if (_numbers_differ(dir_bare, stripped_title)
+                        or title_words - folder_words
+                        or folder_words - release_words):
+                    vlog(f"rejected {d.name}: another numbered, live or remix release")
+                    continue
+                global_best, global_best_score = d, score
+                vlog(f"fuzzy match: {d}  (score {score:.2f})")
     return global_best
 
 
@@ -1988,8 +1992,11 @@ def _catalog_candidates_for_dir(album_dir, catalog, artist_name, prefer_hires=Fa
     catalog instead of falling back to the search API."""
     if not catalog:
         return []
-    bare = strip_album_decorations(album_dir.name)
-    bare_softened = bare.replace("_", " ").replace("  ", " ").strip()
+    forms = [
+        (bare, bare.replace("_", " ").replace("  ", " ").strip(), normalize(bare))
+        for bare in folder_title_forms(
+            album_dir.name, album_dir.parent.name, artist_name)
+    ]
     dir_year = _dir_year(album_dir.name)
 
     candidates = []
@@ -2008,21 +2015,22 @@ def _catalog_candidates_for_dir(album_dir, catalog, artist_name, prefer_hires=Fa
         scores = []
         for name in names:
             r_bare = strip_album_decorations(name)
-            s1 = similarity(r_bare, bare)
-            s2 = similarity(r_bare, bare_softened) if bare_softened and bare_softened != bare else 0.0
-            # Coverage + variant guards, mirroring find_album_dir_filesystem: a
-            # 0.65-similar prefix match ('The North Borders' vs '… Tour - Live')
-            # would otherwise pull a live/tour edition onto the studio-album dir.
             norm_r = normalize(r_bare)
-            norm_b = normalize(bare)
-            if norm_r and norm_b:
-                coverage = min(len(norm_r), len(norm_b)) / max(len(norm_r), len(norm_b))
-                if coverage < config.FUZZY_DIR_MIN_COVERAGE:
-                    continue
-                shorter_n, longer_n = sorted((norm_r, norm_b), key=len)
-                if differs_by_album_variant(shorter_n, longer_n):
-                    continue
-            scores.append(max(s1, s2))
+            for bare, bare_softened, norm_b in forms:
+                s1 = similarity(r_bare, bare)
+                s2 = similarity(r_bare, bare_softened) if bare_softened and bare_softened != bare else 0.0
+                # Coverage + variant guards, mirroring find_album_dir_filesystem:
+                # a 0.65-similar prefix match ('The North Borders' vs '… Tour -
+                # Live') would otherwise pull a live/tour edition onto the
+                # studio-album dir.
+                if norm_r and norm_b:
+                    coverage = min(len(norm_r), len(norm_b)) / max(len(norm_r), len(norm_b))
+                    if coverage < config.FUZZY_DIR_MIN_COVERAGE:
+                        continue
+                    shorter_n, longer_n = sorted((norm_r, norm_b), key=len)
+                    if differs_by_album_variant(shorter_n, longer_n):
+                        continue
+                scores.append(max(s1, s2))
         if scores:
             candidates.append((max(scores), _year_proximity_bonus(dir_year, r), r))
 

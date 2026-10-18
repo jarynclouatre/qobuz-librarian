@@ -1280,7 +1280,7 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                 "  ⚠  The repair verified, and its backup is kept for review "
                 f"in Settings, Diagnostics:\n     {result['backup'].path}"))
         _refresh_review_state_after_downloads(
-            [{**result, "album": None, "dir": album_dir}],
+            [{**result, "album": None, "dir": album_dir, "in_place": True}],
             token,
             args,
         )

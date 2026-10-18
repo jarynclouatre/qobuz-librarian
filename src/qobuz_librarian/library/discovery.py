@@ -363,9 +363,9 @@ def resolve_artist_dir(artist_query, candidates=None):
         if normalize(d.name) == target:
             return d
 
-    target_alt = target[3:] if target.startswith("the") else "the" + target
+    target_bare = tags.bare_artist_key(artist_query)
     for d in candidates:
-        if normalize(d.name) == target_alt:
+        if tags.bare_artist_key(d.name) == target_bare:
             return d
 
     def base(s):
@@ -520,9 +520,11 @@ def owned_title_key(name):
 
 
 def _record_owned_title(owned_titles, album_dir):
-    key = owned_title_key(album_dir.name)
-    if key:
-        owned_titles.setdefault(key, set()).add(_dir_year(album_dir.name))
+    year = _dir_year(album_dir.name)
+    for bare in tags.folder_title_forms(album_dir.name, album_dir.parent.name):
+        key = normalize(strip_leading_article(bare))
+        if key:
+            owned_titles.setdefault(key, set()).add(year)
 
 
 def owned_album_titles(album_dirs):

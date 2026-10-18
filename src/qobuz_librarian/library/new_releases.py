@@ -245,6 +245,42 @@ def touch_run(when=None) -> bool:
         return save(state)
 
 
+def forget_albums(album_ids) -> int:
+    """Take albums out of the catalogue baseline, so the next check lists
+    them again. Returns how many it took out."""
+    album_ids = {str(album_id) for album_id in album_ids or () if album_id}
+    if not album_ids:
+        return 0
+    with _lock, state_file.store_lock(cfg.NEW_RELEASE_STATE_FILE):
+        state = load()
+        seen = dict(state.get("seen") or {})
+        taken = set()
+        for artist_id, albums in seen.items():
+            taken.update(str(a) for a in albums or () if str(a) in album_ids)
+            seen[artist_id] = [a for a in albums or ()
+                               if str(a) not in album_ids]
+        if not taken:
+            return 0
+        generation = generation_state.current_generation()
+        current = (
+            state.get("baseline_complete")
+            and int(state.get("generation") or 0) == generation
+        )
+        revision = generation_state.reserve_revision()
+        if revision is None:
+            return 0
+        state["seen"] = seen
+        if current:
+            state["revision"] = revision
+        if not save(state):
+            return 0
+        if current and not generation_state.mark_output_current(
+                "new_releases", generation=generation, revision=revision,
+                complete=True, preserve_noncurrent=True):
+            return 0
+        return len(taken)
+
+
 def note_owned_album(album) -> bool:
     """Fold one exact in-app download into the current catalogue baseline."""
     artist_id = str(((album or {}).get("artist") or {}).get("id") or "").strip()

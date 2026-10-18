@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi.responses import RedirectResponse
 
 from qobuz_librarian.library import hidden as hidden_mod
-from qobuz_librarian.library import library_scan_state
+from qobuz_librarian.library import library_scan_state, new_releases
 from qobuz_librarian.web import flows, job_labels, refusals, rendering, review_pages
 
 
@@ -137,6 +137,8 @@ async def _restore_hidden(request, scope, redirect):
     p = (form.get("p") or "").strip()[:6]
     p = p if p.isdigit() else None
     restored = 0
+    dismissed_ids = (hidden_mod.album_ids(scope, artists, fingerprints)
+                     if scope == hidden_mod.SCOPE_MISSING else set())
     try:
         if artists:
             restored += hidden_mod.restore(scope, artists)
@@ -153,6 +155,12 @@ async def _restore_hidden(request, scope, redirect):
         loop = asyncio.get_running_loop()
         rejoined = await loop.run_in_executor(
             None, lambda: flows.refold_restored_missing(artists, fingerprints))
+        relisted = await loop.run_in_executor(
+            None, lambda: _relist_new_releases(dismissed_ids))
+        relisted_note = (
+            ("It returns" if relisted == 1 else "They return")
+            + " with the next new-release check.")
+        waits_for_scan = False
         if rejoined is False:
             msg = ("Brought back, but the open Library review couldn't be "
                    "saved. Check the data folder, then refresh the review.")
@@ -160,6 +168,7 @@ async def _restore_hidden(request, scope, redirect):
             # No live parked review to fold into.
             lifted = await loop.run_in_executor(
                 None, library_scan_state.clear_review_retired)
+            waits_for_scan = not lifted
             msg = ("Brought back to the Library review." if lifted
                    else "Brought back. They return the next time the library scans.")
         elif rejoined:
@@ -167,6 +176,13 @@ async def _restore_hidden(request, scope, redirect):
                    if rejoined != 1 else "Brought back to the Library review.")
         else:
             msg = "Brought back. Nothing needs adding to the Library review."
+        if relisted and (rejoined == 0 or waits_for_scan):
+            msg = "Brought back. " + relisted_note
+        elif relisted and rejoined is not False:
+            msg += (" " + ("1 new release" if relisted == 1
+                           else f"{relisted} new releases")
+                    + (" returns" if relisted == 1 else " return")
+                    + " with the next new-release check.")
         return RedirectResponse(
             url=redirect + _hidden_query(q, msg, p), status_code=303)
     # Upgrade and Downsample scopes: nothing to fold.
@@ -174,6 +190,20 @@ async def _restore_hidden(request, scope, redirect):
            ) if restored else "Nothing to bring back."
     return RedirectResponse(
         url=redirect + _hidden_query(q, msg, p), status_code=303)
+
+
+def _relist_new_releases(album_ids):
+    """Let the next new-release check list again the brought-back albums no
+    saved Library scan holds, as a dismissed new release is held nowhere
+    else."""
+    if not album_ids:
+        return 0
+    scanned = {
+        str((candidate.get("payload") or {}).get("album_id") or "")
+        for entry in library_scan_state.kind_state("missing")["artists"].values()
+        for candidate in entry.get("candidates") or ()
+    }
+    return new_releases.forget_albums(set(album_ids) - scanned)
 
 
 def _hidden_ts_epoch(ts: str):

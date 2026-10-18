@@ -366,6 +366,60 @@ def clear_review_retired() -> bool:
         return _write_state(data)
 
 
+def _drop_albums(entry, album_ids) -> bool:
+    candidates = [
+        candidate
+        for candidate in entry["candidates"]
+        if str((candidate.get("payload") or {}).get("album_id") or "")
+        not in album_ids
+    ]
+    if len(candidates) == len(entry["candidates"]):
+        return False
+    entry["candidates"] = candidates
+    # These rows no longer describe the folder they were found in, so a
+    # refresh derives the artist again even when the folder reads as it did
+    # before, as after an Undo.
+    entry["fingerprint"] = ""
+    return True
+
+
+def without_albums(artists: dict, album_ids) -> dict:
+    """A kind's saved ``artists`` without the exact Qobuz albums in
+    ``album_ids``, ready for ``save_kind``."""
+    album_ids = {str(album_id) for album_id in album_ids or ()}
+    if not album_ids:
+        return artists
+    kept = {}
+    for name, entry in artists.items():
+        entry = {**entry, "candidates": list(entry.get("candidates") or [])}
+        _drop_albums(entry, album_ids)
+        kept[name] = entry
+    return kept
+
+
+def forget_fingerprints(artist_names) -> bool:
+    """Make the next refresh derive these artist folders again.
+
+    A saved row's seal covers more of its folder than the fingerprint a
+    refresh compares, so a row can be refused as changed while the folder
+    still reads as unchanged and the refresh would put the same row back.
+    """
+    names = {str(name) for name in artist_names or () if name}
+    if not names:
+        return True
+    with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
+        data = load()
+        changed = False
+        for bucket in data["kinds"].values():
+            artists = bucket.get("artists") if isinstance(bucket, dict) else None
+            for name in names & set(artists or ()):
+                entry = artists[name]
+                if isinstance(entry, dict) and entry.get("fingerprint"):
+                    entry["fingerprint"] = ""
+                    changed = True
+        return _write_state(data) if changed else True
+
+
 def remove_album(album_id) -> bool:
     """Remove one exact Qobuz album from the saved living Library snapshot.
 
@@ -380,6 +434,7 @@ def remove_album(album_id) -> bool:
     from qobuz_librarian.library import generation_state
 
     with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
+        generation_state.note_album_change(album_id)
         data = load()
         bucket = ((data.get("kinds") or {}).get("missing") or {})
         generation = int(bucket.get("generation") or 0)
@@ -390,19 +445,7 @@ def remove_album(album_id) -> bool:
         rebuilt = {}
         for name, entry in artists.items():
             cleaned = _clean_artist_state(entry)
-            candidates = [
-                candidate
-                for candidate in cleaned["candidates"]
-                if str((candidate.get("payload") or {}).get("album_id") or "")
-                != album_id
-            ]
-            if len(candidates) != len(cleaned["candidates"]):
-                changed = True
-                # These rows no longer describe the folder they were found
-                # in, so a refresh derives the artist again even when the
-                # folder reads as it did before, as after an Undo.
-                cleaned["fingerprint"] = ""
-            cleaned["candidates"] = candidates
+            changed = _drop_albums(cleaned, {album_id}) or changed
             rebuilt[name] = candidate_premise.compact_artist(cleaned)
         if not changed:
             return generation_state.note_review_removal(album_id)

@@ -220,8 +220,9 @@ def save(kind, scanned, seen, artists=None, meta=None, passes=None) -> bool:
 class Writer(AbstractContextManager):
     """Coalesce one scan's saves on its result-collection thread."""
 
-    def __init__(self, kind):
+    def __init__(self, kind, meta=None):
         self.kind = kind
+        self.meta = meta or {}
         self.passes = {}
         self._latest = None
         self._pending = False
@@ -249,7 +250,9 @@ class Writer(AbstractContextManager):
         if not self._pending:
             return True
         started = time.monotonic()
-        saved = save(self.kind, *self._latest, passes=self.passes)
+        scanned, seen, artists, meta = self._latest
+        saved = save(self.kind, scanned, seen, artists,
+                     meta=meta or self.meta, passes=self.passes)
         # Timed from the end of the write: from its start, a write as long as
         # the interval was followed by the next one straight away.
         self._last_write = time.monotonic()

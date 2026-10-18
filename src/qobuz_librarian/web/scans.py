@@ -335,9 +335,12 @@ def _fold_into_parked_library_review(job):
                     "Library review.")
     unchecked = job.unchecked_artists
     upgrades = getattr(job, "upgrade_finds", 0)
+    caveats = list(getattr(job, "scan_caveats", ()))
     if not bits and not upgrades:
         if unchecked:
             bits.append("No new finds from the artists that could be checked.")
+        elif caveats:
+            bits.append("No new finds.")
         else:
             bits.append("No new finds. The open Library review is up to date.")
     if upgrades:
@@ -354,6 +357,7 @@ def _fold_into_parked_library_review(job):
         no_room[folder] = no_room.get(folder, 0) + n
     if no_room:
         bits.append(flows.left_out_note(no_room, parked.CANDIDATE_CAP))
+    bits.extend(caveats)
     job.summary = " ".join(bits)
     job.push_line(job.summary)
     job.status = job_mgr.JobStatus.DONE

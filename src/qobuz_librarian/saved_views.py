@@ -137,9 +137,11 @@ def refresh_after_changes(changes, token, args, *, upgrade=True,
     Only views that are current are touched, except that the saved Library
     results always drop each exact album, so a refresh derives its artist
     again rather than reuse them. New releases drops each exact album too;
-    Upgrade and Downsample scan each changed artist again, Upgrade only when
-    ``upgrade`` is set and a token is at hand. A view that cannot be brought
-    up to date is marked for a refresh instead, and nothing here raises.
+    a change marked ``in_place`` (a repair of the album's own tracks) leaves
+    both alone. Upgrade and Downsample scan each changed artist again,
+    Upgrade only when ``upgrade`` is set and a token is at hand. A view that
+    cannot be brought up to date is marked for a refresh instead, and nothing
+    here raises.
     """
     if not changes:
         return
@@ -181,7 +183,8 @@ def refresh_after_changes(changes, token, args, *, upgrade=True,
         album = change.get("album") or {}
         album_id = str(album.get("id") or "").strip()
         artist_id = str((album.get("artist") or {}).get("id") or "").strip()
-        if (album_id, artist_id) not in seen_albums:
+        if (not change.get("in_place")
+                and (album_id, artist_id) not in seen_albums):
             seen_albums.add((album_id, artist_id))
             try:
                 updated = library_scan_state.remove_album(album_id)

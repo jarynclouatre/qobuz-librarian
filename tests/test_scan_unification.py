@@ -616,7 +616,8 @@ def _stub_new_release_scan(monkeypatch, tmp_path, found_title):
                         lambda _name, **_kwargs: SimpleNamespace(
                             artist_id="artist-id", fetch_failed=False,
                             unresolved=False, current_ids=["old", found_title],
-                            new_gaps=[object()], artist_name="Good"))
+                            new_gaps=[SimpleNamespace(qobuz_album={"id": found_title})],
+                            artist_name="Good"))
     monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
         "seen": {"artist-id": ["old"]},
         "baseline_limit": int(cfg.ARTIST_CATALOG_LIMIT),
