@@ -221,9 +221,10 @@ def read_album_dir(album_dir: Path, walk_errors=None):
     try:
         for f in iter_tree_no_symlinks(album_dir, errors=walk_errors):
             try:
-                # A dot name is hidden: a Downsample temp or a macOS "._"
+                # A hidden name is a Downsample temp or a macOS "._"
                 # resource file, never a track.
-                if (f.suffix.lower() in _exts and not f.name.startswith(".")
+                if (f.suffix.lower() in _exts
+                        and not is_library_system_folder(f.name)
                         and not _undecodable(f.parent) and not _undecodable(f)
                         and _is_type(f, stat.S_ISREG)):
                     audio_files.append(f)
@@ -361,8 +362,17 @@ SYSTEM_FOLDER_NAMES = frozenset({
 
 
 def is_library_system_folder(name: str) -> bool:
-    """A dot-folder, or a folder in SYSTEM_FOLDER_NAMES."""
-    return name.startswith(".") or name in SYSTEM_FOLDER_NAMES
+    """A hidden name, or a folder in SYSTEM_FOLDER_NAMES.
+
+    A dot followed by a letter or "_" is hidden: a desktop trash, macOS
+    "._" files, .DS_Store, and the app's own working files. Titles such as
+    ".38 Special" or "...And Justice for All" are not."""
+    second = name[1:2]
+    return (
+        name in SYSTEM_FOLDER_NAMES
+        or (name.startswith(".")
+            and (second == "_" or (second.isascii() and second.isalpha())))
+    )
 
 
 def list_library_artists(walk_errors=None, *, on_artist_error=None):

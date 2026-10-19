@@ -460,6 +460,9 @@ class Job:
         # in never passes through logging, and this is the funnel every one of
         # them reaches before it is streamed, stored or replayed.
         line = redaction.redact(self._CTRL_RE.sub("", line))
+        # A file name that is not valid UTF-8 arrives with surrogates, which
+        # the page and the saved log cannot encode.
+        line = line.encode("utf-8", "backslashreplace").decode("utf-8")
         # Mutate log_lines under the lock: subscribe()/the status API read it
         # under the same lock from request threads, and the truncation `del`
         # below would otherwise tear a concurrent reader's slice.

@@ -5286,16 +5286,29 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
 
     New placements and verified existing copies become the review list (grouped
     by artist). Files that can't be identified or have unresolved collisions
-    are reported and left untouched. A preview manifest is written to the
-    destination so the plan is reviewable before anything is copied.
+    are reported and left untouched. Nothing is written until the review is
+    approved.
     """
     from qobuz_librarian.library import migrate as engine
 
     src, dest = Path(src), Path(dest)
-    items = engine.collect_items(
-        src, use_acoustid=use_acoustid,
-        cancel_check=lambda: job.cancel_requested,
-        progress=job.push_progress)
+    try:
+        items = engine.collect_items(
+            src, use_acoustid=use_acoustid,
+            cancel_check=lambda: job.cancel_requested,
+            progress=job.push_progress)
+    except OSError as exc:
+        job.error = (
+            f"Couldn't read the source library ({exc}). Nothing was changed; "
+            "fix this and scan again.")
+        job.summary = job.error
+        _mark_job_failed(job)
+        return
+    unreadable = getattr(items, "unreadable", ())
+    for path, reason in unreadable[:50]:
+        job.push_line(f"could not be read, left where it is: {path} - {reason}")
+    if len(unreadable) > 50:
+        job.push_line(f"… and {len(unreadable) - 50} more")
     if job.cancel_requested:
         n = len(items) if items else 0
         job.summary = (f"Stopped early. {plural(n, 'file')} scanned so far."
@@ -5319,18 +5332,15 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
     if job.cancel_requested:
         job.summary = "Stopped while checking existing copies. Nothing was copied."
         return
-
-    try:
-        manifest = engine.write_manifest(plan)
-    except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
-        job.error = (
-            "The migration preview could not be recorded safely, so nothing "
-            "can be approved. Fix the destination or filename issue and "
-            "scan again.")
-        job.summary = job.error
-        _mark_job_failed(job)
-        log.info(f"{job.error} Details: {exc}")
-        return
+    reviewed = {id(entry) for entry in plan.placed + resume_entries}
+    job.execute_args["fingerprinted"] = [
+        str(entry.source) for entry in plan.placed + resume_entries
+        if entry.source_of_truth == "acoustid"]
+    job.execute_args["left_behind"] = [
+        [entry.status, entry.source_of_truth, str(entry.source),
+         str(entry.dest_rel) if entry.dest_rel is not None else "",
+         entry.reason]
+        for entry in plan.entries if id(entry) not in reviewed]
 
     groups: dict = {}
     for kind, plan_entries in (
@@ -5409,6 +5419,10 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
         parts.append("No files ready")
     if s["unplaceable"]:
         parts.append(f"{s['unplaceable']} couldn't be identified")
+    if unreadable:
+        parts.append(
+            f"{plural(len(unreadable), 'file or folder', 'files or folders')} "
+            "couldn't be read, listed in the activity log")
     unsafe_collisions = s["collision"] - len(resume_entries)
     if unsafe_collisions:
         parts.append(f"{unsafe_collisions} skipped to avoid name collisions")
@@ -5441,12 +5455,9 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
             job.push_line(f"left by an interrupted migration: {shown}")
         if len(leftovers) > 50:
             job.push_line(f"… and {len(leftovers) - 50} more")
-    # Show the manifest where the user can actually find it, the container
-    # path means nothing from a phone. Settings does the same for every path
-    # it displays.
-    manifest_display, _ = storage._resolve_host_path(str(manifest))
     job.summary = ("; ".join(parts) + ". Unidentified and skipped files stay "
-                   f"where they are. Full plan written to {manifest_display}.")
+                   "where they are. The full plan is saved at the destination "
+                   f"when you start the {verb}.")
     # Not logged here: job.summary already renders on the job page, and the
     # activity log below it would otherwise repeat the exact same sentence.
 
@@ -5534,6 +5545,10 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
                 dest_rel=Path(dest_s), reason="destination already exists",
                 source_receipt=sealed_source,
                 destination_receipt=sealed_destination))
+    fingerprinted = set((job.execute_args or {}).get("fingerprinted", ()))
+    for entry in entries:
+        entry.source_of_truth = (
+            "acoustid" if str(entry.source) in fingerprinted else "tags")
     if not entries:
         job.error = (
             "The selected migration review contains no saved files. Nothing "
@@ -5584,6 +5599,28 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
                 _mark_job_failed(job)
                 log.info(job.summary)
                 return
+            left_behind = [
+                migrate_engine.PlanEntry(
+                    source=Path(source), status=status, source_of_truth=sot,
+                    dest_rel=Path(destination) if destination else None,
+                    reason=reason)
+                for status, sot, source, destination, reason
+                in (job.execute_args or {}).get("left_behind", [])]
+            try:
+                manifest = migrate_engine.write_manifest(
+                    plan, left_behind=left_behind)
+            except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+                job.error = (
+                    f"Nothing was {'moved' if in_place else 'copied'}: "
+                    f"the plan could not be saved at "
+                    f"{dest_display} ({exc}). If that folder was moved, "
+                    "removed or remounted since the preview, scan again.")
+                job.summary = job.error
+                _mark_job_failed(job)
+                log.info(job.summary)
+                return
+            manifest_display, _ = storage._resolve_host_path(str(manifest))
+            job.push_line(f"Full plan written to {manifest_display}")
             result = migrate_engine.execute_plan(
                 plan, in_place=in_place,
                 cancel_check=lambda: job.cancel_requested,
@@ -5611,7 +5648,13 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     companion_outcomes = getattr(result, "companion_outcomes", ())
     companion_skipped = sum(
         status == migrate_engine.SKIPPED
-        for _source, _destination, status, _reason in companion_outcomes
+        and reason != migrate_engine.SAME_COMPANION
+        for _source, _destination, status, reason in companion_outcomes
+    )
+    skipped = sum(
+        status == migrate_engine.SKIPPED
+        and not reason.startswith(migrate_engine.VERIFIED_COPY)
+        for _source, _destination, status, reason in result.outcomes
     )
     companion_failed = sum(
         status in {migrate_engine.FAILED, migrate_engine.INTERRUPTED}
@@ -5621,7 +5664,8 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         if status in {migrate_engine.FAILED, migrate_engine.INTERRUPTED}:
             job.push_line(f"sidecar failed: {source} - {reason}")
     verb = "moved" if in_place else "copied"
-    has_problem = bool(failed or companion_failed or results_error)
+    has_problem = bool(
+        failed or companion_failed or results_error or result.lingered)
     if has_problem:
         lead = (
             "Migration stopped with problems"
@@ -5634,8 +5678,15 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     parts = [lead]
     if has_problem or result.cancelled:
         parts.append(f"{plural(result.copied, 'file')} {verb} into {dest_display}")
-    if result.skipped:
-        parts.append(f"{result.skipped} skipped (already present)")
+    verified = sum(
+        status == migrate_engine.SKIPPED
+        and reason.startswith(migrate_engine.VERIFIED_COPY)
+        for _source, _destination, status, reason in result.outcomes
+    )
+    if verified:
+        parts.append(f"{plural(verified, 'existing file')} verified")
+    if skipped:
+        parts.append(f"{skipped} skipped (already present)")
     if result.companions:
         parts.append(f"carried {plural(result.companions, 'cover/sidecar file')}")
     if companion_skipped:
@@ -5645,7 +5696,9 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     if companion_failed:
         parts.append(f"{plural(companion_failed, 'cover/sidecar file')} failed")
     if result.lingered:
-        parts.append(f"{result.lingered} moved but the original couldn't be removed")
+        parts.append(
+            f"{plural(result.lingered, 'original')} still at the source; "
+            "the report says why")
     if failed:
         parts.append(f"{failed} failed; see the log")
         # Set job.error too (not just the prose summary) so a migration with
@@ -5682,6 +5735,11 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     else:
         report_display, _ = storage._resolve_host_path(str(results_manifest))
         parts.append(f"report saved at {report_display}")
+    if result.lingered and not job.error:
+        job.error = (
+            "Migration needs attention: "
+            f"{plural(result.lingered, 'original')} still at the source. "
+            "See the saved report.")
     if companion_failed:
         attention = plural(companion_failed, "sidecar failure")
         if job.error:

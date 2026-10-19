@@ -3121,6 +3121,13 @@ def relocate_post_import_album(
                     root, payload, initial_authority
                 )
             except sqlite3.IntegrityError as exc:
+                if kind is RelocationKind.WHOLE_ALBUM:
+                    return RelocationResult(
+                        source_path,
+                        0,
+                        changed=False,
+                        reason="some of its tracks are not in Beets",
+                    )
                 raise PostImportRelocationUnavailable(errno.EEXIST, str(exc)) from exc
             if not initial_authority():
                 raise OSError("relocation inputs changed during preflight")

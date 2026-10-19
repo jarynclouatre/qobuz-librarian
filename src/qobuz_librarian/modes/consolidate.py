@@ -983,6 +983,34 @@ def _remove_empty_folders(album):
         ))
 
 
+def _carry_left_lyrics(binding):
+    """Give each kept track the lyrics of the .lrc its set-aside duplicate
+    left behind, by the Lyrics pass's rule, so they are not only in a folder
+    without its tracks."""
+    from qobuz_librarian.integrations import lyric_fetch
+
+    for key, standing_in in (binding.kept or {}).items():
+        sidecar = (binding.sibling.path / key).with_suffix(".lrc")
+        if Path(standing_in).suffix.lower() != ".flac":
+            continue
+        try:
+            if not stat.S_ISREG(os.lstat(sidecar).st_mode):
+                continue
+            lyric_fetch.give_lyrics(
+                binding.primary.path / standing_in, config.MUSIC_ROOT,
+                sidecar.read_text(encoding="utf-8", errors="replace"),
+                config.LYRICS_FORMAT)
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            log.info(fmt(
+                C.YELLOW,
+                f"    ⚠  Couldn't copy the lyrics in {sidecar.name} onto the "
+                f"kept album ({exc}); the file stays in "
+                f"{binding.sibling.path.name}.",
+            ))
+
+
 def execute_consolidation(summary):
     """Move the overlapping sibling tracks to a recoverable backup instead of
     hard-deleting them, then return (removed_paths, n_failed) so the caller can
@@ -1050,6 +1078,7 @@ def execute_consolidation(summary):
                      + (f" (cleared after "
                         f"{plural(config.UPGRADE_BACKUP_RETENTION_DAYS, 'day')})"
                         if expires else "")))
+    _carry_left_lyrics(binding)
     scanner.clear_scan_caches()
     _remove_empty_folders(binding.sibling)
     for path in paths:

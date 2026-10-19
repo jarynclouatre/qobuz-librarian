@@ -51,15 +51,17 @@ def _resolve_paths(args):
 
 def _progress_printer():
     """Heartbeat progress: a per-file line on a 47k-file library would bury
-    everything else, so log on each phase change and every 500 files."""
-    state = {"phase": ""}
+    everything else, so log each phase once and then every 500 files."""
+    seen = set()
 
     def report(phase, current, total, item):
-        if phase != state["phase"]:
-            state["phase"] = phase
+        if phase not in seen:
+            seen.add(phase)
             log.info(fmt(C.GRAY, f"  {phase}…"))
         if total and (current == total or current % 500 == 0):
             log.info(fmt(C.GRAY, f"    {current}/{total}"))
+        elif not total and current and current % 500 == 0:
+            log.info(fmt(C.GRAY, f"    {current}"))
 
     return report
 
@@ -163,7 +165,24 @@ def run_migrate_mode(args):
             "can't place them.")))
 
     progress = _progress_printer()
-    items = engine.collect_items(src, use_acoustid=use_acoustid, progress=progress)
+    try:
+        items = engine.collect_items(
+            src, use_acoustid=use_acoustid, progress=progress)
+    except OSError as e:
+        log.warning(fmt(C.RED,
+            f"  ✗  Couldn't read the source library ({e}). Nothing was "
+            "changed; fix this and run it again."))
+        return EXIT_GENERAL
+    unreadable = getattr(items, "unreadable", ())
+    if unreadable:
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  {plural(len(unreadable), 'file or folder', 'files or folders')} "
+            "couldn't be read and will stay where "
+            f"{'it is' if len(unreadable) == 1 else 'they are'}:"))
+        for path, reason in unreadable[:20]:
+            log.info(fmt(C.YELLOW, f"       {truncate(str(path), 60)}: {reason}"))
+        if len(unreadable) > 20:
+            log.info(fmt(C.YELLOW, f"       … and {len(unreadable) - 20} more"))
     if not items:
         # Same as the Web scan: an empty source means the wrong folder or an
         # unmounted share, not a library with nothing worth moving.
@@ -254,8 +273,15 @@ def run_migrate_mode(args):
     pruned = getattr(result, "pruned", 0)
     companion_outcomes = getattr(result, "companion_outcomes", ())
     companion_skipped = sum(
+        status == engine.SKIPPED and reason != engine.SAME_COMPANION
+        for _source, _destination, status, reason in companion_outcomes)
+    companion_present = sum(
+        status == engine.SKIPPED and reason == engine.SAME_COMPANION
+        for _source, _destination, status, reason in companion_outcomes)
+    skipped = sum(
         status == engine.SKIPPED
-        for _source, _destination, status, _reason in companion_outcomes)
+        and not reason.startswith(engine.VERIFIED_COPY)
+        for _source, _destination, status, reason in result.outcomes)
     companion_failed = sum(
         status == engine.FAILED
         for _source, _destination, status, _reason in companion_outcomes)
@@ -280,23 +306,27 @@ def run_migrate_mode(args):
             f"     ⚠  Stopped early; the library is partly moved into {dest}."
             if in_place else
             f"     ⚠  Stopped early; {dest} holds a partial copy."))
-    if result.skipped:
+    if skipped:
         log.info(fmt(C.YELLOW,
-            f"  ⚠  {result.skipped} skipped (destination already existed)."))
+            f"  ⚠  {skipped} skipped (destination already existed)."))
     if getattr(result, "companions", 0):
         log.info(fmt(C.GREEN,
             f"  ✓  {plural(result.companions, 'cover/sidecar file')} carried."))
+    if companion_present:
+        log.info(fmt(C.GRAY,
+            f"     {plural(companion_present, 'cover/sidecar file')} already in place."))
     if companion_skipped:
         log.info(fmt(C.YELLOW,
-            f"  ⚠  {plural(companion_skipped, 'cover/sidecar file')} already existed."))
+            f"  ⚠  {plural(companion_skipped, 'cover/sidecar file')} already existed "
+            "with different content."))
     if companion_failed:
         log.info(fmt(C.RED,
             f"  ✗  {plural(companion_failed, 'cover/sidecar file')} could not be "
             "carried; see the results manifest."))
     if result.lingered:
         log.info(fmt(C.YELLOW,
-            f"  ⚠  {result.lingered} moved but the original couldn't be removed "
-            f"(still at the source)."))
+            f"  ⚠  {plural(result.lingered, 'original')} still at the source; "
+            "see the results manifest for why."))
     if pruned:
         log.info(fmt(C.GRAY,
             f"  Cleared {plural(pruned, 'now-empty folder')} from the source."))
@@ -341,12 +371,15 @@ def run_migrate_mode(args):
         log.info(fmt(C.GRAY, "  Interrupted."))
     elif n_errors:
         log.warning(fmt(C.RED, f"  ✗  Finished with {plural(n_errors, 'error')}."))
+    elif result.lingered:
+        log.warning(fmt(C.YELLOW,
+            "  ⚠  Finished, but some originals are still at the source."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))
     # A run with failures or one that stopped early is not a success, however
     # much of it landed. A script chaining off this must see the difference.
     if result.interrupted:
         return EXIT_INTERRUPT
-    if result.failed or companion_failed or result.cancelled:
+    if result.failed or companion_failed or result.cancelled or result.lingered:
         return EXIT_GENERAL
     return 0
