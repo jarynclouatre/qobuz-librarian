@@ -539,7 +539,8 @@ def _help_epilog():
         "it kept in staging", width))
 
     lines.extend(("", *textwrap.wrap(
-        "Credentials: set them on the web UI Settings page first, or use "
+        "Credentials: set them on the web UI Settings page first (in terminal "
+        "mode, press Resume web app there before saving), or use "
         "QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID environment variables.",
         width=width,
         break_long_words=False,
@@ -1031,8 +1032,9 @@ def main():
             die(fmt(C.RED,
                 "\n✗  No Qobuz credentials configured.\n"
                 "   Paste your token and your email or user ID on the Settings page "
-                f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings)\n"
-                "   or set QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID in your environment.\n"),
+                f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings);\n"
+                "   in terminal mode, press Resume web app there first.\n"
+                "   Or set QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID in your environment.\n"),
                 EXIT_AUTH)
         user_id, token = credentials.user_id, credentials.token
         require_music_root()

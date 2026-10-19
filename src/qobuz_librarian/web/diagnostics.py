@@ -387,6 +387,14 @@ def _diagnostics():
         checks.append({"label": "Writes on", "ok": True,
                        "detail": "Not paused"})
 
+    for key, label in (("QOBUZ_USER_AUTH_TOKEN", "Qobuz token file"),
+                       ("LASTFM_API_KEY", "Last.fm key file")):
+        problem = cfg.SECRET_FILE_PROBLEMS.get(key)
+        if problem:
+            checks.append({"label": label, "ok": False,
+                           "detail": f"{problem} Fix the file or remove "
+                                     f"{key}_FILE, then restart."})
+
     music_state, recorded_albums = collection_snapshot.music_root_write_state()
     if music_state == "ready":
         _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True,

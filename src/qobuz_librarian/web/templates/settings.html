@@ -103,6 +103,11 @@
   <span>Qobuz rejected this token, so it was not saved. Get a fresh token from
   play.qobuz.com, then try again.</span>
 </div>
+{% elif error == "savedrejected" %}
+<div class="ql-notice ql-notice-error" data-flash>
+  <span>Qobuz no longer accepts the saved token. Get a fresh token from
+  play.qobuz.com and paste it here.</span>
+</div>
 {% elif error == "unreachable" %}
 <div class="ql-notice ql-notice-warning" data-flash>
   <span>Qobuz couldn't be reached to check this token, so it was not saved
@@ -145,9 +150,11 @@
 </div>
 {% elif error == "credsmode" %}
 <div class="ql-notice ql-notice-warning" data-flash>
-  <span>The Qobuz account was not changed because the web app does not hold
-  the run lock. Finish the other Qobuz Librarian run or resume the web app,
-  then try again.</span>
+  <span>{% if cli_mode %}The Qobuz account was not changed because terminal
+  mode is on. Press Resume web app under Mode, save the token, then switch
+  back to terminal mode.{% else %}The Qobuz account was not changed because
+  the web app does not hold the run lock. Finish the other Qobuz Librarian
+  run or resume the web app, then try again.{% endif %}</span>
 </div>
 {% endif %}
 {% endmacro %}
@@ -194,7 +201,7 @@
 </div>
 {% endmacro %}
 
-{% set _qobuz_errors = ("creds", "envcreds", "rejected", "unreachable", "envrejected",
+{% set _qobuz_errors = ("creds", "envcreds", "rejected", "savedrejected", "unreachable", "envrejected",
                         "envunreachable", "empty", "needuser", "credsbusy",
                         "credschanged", "credsmode") %}
 {% if rerendered %}{{ behaviour_notices() }}{% endif %}
@@ -291,6 +298,18 @@
       <summary class="ql-disclosure-summary">Change account or token</summary>
     {% endif %}
 
+    {% if token_file_problem %}
+    <div class="ql-notice ql-notice-warning">
+      <span class="min-w-0 break-words">The Qobuz token file set by <code>QOBUZ_USER_AUTH_TOKEN_FILE</code>
+      was not used: {{ token_file_problem }} Fix the file and restart, or
+      remove the setting and save a token here.</span>
+    </div>
+    {% endif %}
+    {% if cli_mode and not creds_from_env %}
+    <p class="ql-field-help">Terminal mode is on. To save a token here, press
+    Resume web app under Mode first, then switch back.</p>
+    {% endif %}
+
     {% if creds_from_env %}
     <div class="ql-settings-notice">
       <p class="ql-settings-notice-title">Credentials supplied by environment</p>
@@ -311,7 +330,7 @@
     </div>
     {% endif %}
 
-    <form action="/settings" method="post" class="ql-settings-form ql-credentials-form">
+    <form action="/settings" method="post" class="ql-settings-form ql-credentials-form" data-busy-submit data-busy-label="Checking…">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="credential_generation" value="{{ credential_generation }}">
       <div class="ql-field">
@@ -356,7 +375,7 @@
   </summary>
   <div class="ql-settings-section-body">
 {% if not rerendered %}{{ behaviour_notices() }}{% endif %}
-    <form action="/settings/behavior" method="post">
+    <form action="/settings/behavior" method="post" data-busy-submit data-busy-label="Saving…">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="form_complete" value="1">
       <input type="hidden" name="settings_generation" value="{{ behavior_generation }}">
@@ -416,7 +435,7 @@
   </summary>
   <div class="ql-settings-section-body">
     {% set _any_host = library_paths | selectattr('resolved') | list %}
-    {% if not _any_host %}<p class="ql-path-kind ql-path-caption">Container paths</p>{% endif %}
+    {% if in_container and not _any_host %}<p class="ql-path-kind ql-path-caption">Container paths</p>{% endif %}
     <dl class="ql-path-list">
       {% for p in library_paths %}
       <div class="ql-path-row">
@@ -435,6 +454,12 @@
       </div>
       {% endfor %}
     </dl>
+    {% if in_container and not _any_host %}
+    <p class="ql-field-help">These are paths inside the container. The host
+    folders behind them are the ones mounted there: <code>QL_MUSIC_DIR</code>
+    and <code>QL_STAGING_DIR</code> in <code>.env</code> with the bundled
+    Compose file, or your container's volume settings.</p>
+    {% endif %}
     {% if library_size or music_storage %}
     <div class="ql-storage">
       {% if library_size %}
@@ -488,7 +513,7 @@
     {% if not lastfm_check %}{{ saved_notice('discover') }}{% endif %}
     {% if lastfm_check == 'ok' %}
     <div class="ql-notice ql-notice-success mb-6">
-      <span>Last.fm accepted the key.</span>
+      <span>Last.fm accepted the key.{% if queued %} Discover turns on once no job is running.{% endif %}</span>
     </div>
     {% elif lastfm_check == 'rejected' %}
     <div class="ql-notice ql-notice-error mb-6">
@@ -496,7 +521,7 @@
     </div>
     {% elif lastfm_check == 'down' %}
     <div class="ql-notice ql-notice-warning mb-6">
-      <span>The key was saved, but Last.fm could not be reached to check it.</span>
+      <span>The key was saved, but Last.fm could not be reached to check it.{% if queued %} It takes effect once no job is running.{% endif %}</span>
     </div>
     {% endif %}
 
@@ -811,7 +836,7 @@
         CLI command
       </summary>
       <div class="ql-code-block">
-        <code id="cli-command">docker compose run --rm -it qobuz-librarian cli</code>
+        <code id="cli-command">{{ terminal_command }}</code>
         <button type="button" class="ql-btn ql-btn-sm ql-btn-secondary ql-copy-button"
                 data-copy-target="#cli-command">Copy</button>
       </div>
@@ -845,8 +870,13 @@
     {% elif not lock_unenforceable %}
     <div class="ql-mode-row">
       <div class="min-w-0">
+        {% if health_lock_busy %}
+        <p class="ql-mode-state">Another run is using the library</p>
+        <p class="ql-mode-help">Web scans and downloads are paused. The web app takes the library back within about 30 seconds of that run ending; switch to terminal mode to keep it for the terminal.</p>
+        {% else %}
         <p class="ql-mode-state">Web app active</p>
         <p class="ql-mode-help">Switch to terminal mode to run the command above. Web scans and downloads pause until you resume.</p>
+        {% endif %}
       </div>
       <form action="/settings/mode" method="post" class="w-full sm:ml-auto sm:w-auto">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">

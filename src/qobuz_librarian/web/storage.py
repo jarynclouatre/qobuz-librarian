@@ -24,8 +24,8 @@ def _unwritable_volumes() -> list[str]:
         return []
     problems = []
     # Named the way the operator would recognise the folder, not the compose
-    # env var; the path shown is the host one, since a container path means
-    # nothing on the host that actually needs fixing.
+    # env var; the path shown is the host one when the compose file names it,
+    # since a container path means nothing on the host that needs fixing.
     for friendly, path in (("Staging area", cfg.STAGING_DIR),
                            ("Music library", cfg.MUSIC_ROOT)):
         p = Path(path)
@@ -182,36 +182,33 @@ def _census_view():
     return view
 
 
+# The bundled compose file passes each bind mount's host folder in under the
+# .env name that sets it.
+_HOST_FOLDERS = (
+    ("/music", "QL_MUSIC_DIR"),
+    ("/staging", "QL_STAGING_DIR"),
+    ("/upgrade_backups", "QL_UPGRADE_BACKUPS"),
+    ("/collection_backups", "QL_COLLECTION_BACKUPS"),
+)
+
+
 def _resolve_host_path(container_path: str) -> tuple[str, bool]:
     """Return (display_path, is_host_path) for a path inside the container.
 
-    Walks /proc/self/mountinfo to find the longest-prefix bind mount, then
-    appends the remaining suffix to the host source. Falls back to the
-    container path when no bind mount covers it (anonymous volume) or the
-    file isn't available (non-Linux).
+    Only the compose file knows which host folder a mount comes from, so a
+    path is translated only under a mount whose host folder it passed in.
+    Anything else, and every path outside a container, is shown as it is.
     """
     container_path = str(container_path)
-    try:
-        with open("/proc/self/mountinfo") as f:
-            entries = []
-            for line in f:
-                parts = line.split()
-                if len(parts) < 5:
-                    continue
-                entries.append((parts[4], parts[3]))  # mount_point, host_root
-    except OSError:
+    if not cfg.in_container():
         return container_path, False
-    best = None
-    for mount_point, host_root in entries:
-        if mount_point == "/":  # container rootfs, not a user bind mount
+    for mount_point, variable in _HOST_FOLDERS:
+        host_root = os.environ.get(variable, "").strip()
+        if not host_root:
             continue
-        if (container_path == mount_point
-                or container_path.startswith(mount_point.rstrip("/") + "/")):
-            if best is None or len(mount_point) > len(best[0]):
-                best = (mount_point, host_root)
-    if best is None:
-        return container_path, False
-    mount_point, host_root = best
-    suffix = container_path[len(mount_point):]
-    host_path = host_root.rstrip("/") + suffix if suffix else host_root
-    return host_path, True
+        if container_path == mount_point:
+            return host_root, True
+        if container_path.startswith(mount_point + "/"):
+            suffix = container_path[len(mount_point):]
+            return host_root.rstrip("/") + suffix, True
+    return container_path, False

@@ -19,7 +19,15 @@ from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import diagnostics as diagnostics_mod
 from qobuz_librarian.web import jobs as job_mgr
-from qobuz_librarian.web import lifespan, qobuz_access, rendering, runtime, settings_store, storage
+from qobuz_librarian.web import (
+    lifespan,
+    qobuz_access,
+    rendering,
+    runtime,
+    settings_store,
+    storage,
+    write_gate,
+)
 
 router = APIRouter()
 _log = logging.getLogger("qobuz_librarian")
@@ -96,6 +104,10 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "auth_token_prefill": auth_token_prefill,
         "credential_generation": creds.get("_generation", ""),
         "creds_from_env": creds_from_env,
+        "token_file_problem": cfg.SECRET_FILE_PROBLEMS.get(
+            "QOBUZ_USER_AUTH_TOKEN", ""),
+        "terminal_command": write_gate._terminal_command(),
+        "in_container": cfg.in_container(),
         "env_user_id_set": bool(
             cfg.QOBUZ_USER_ID or os.environ.get("QOBUZ_USER_ID", "").strip()
         ),
@@ -163,7 +175,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
 _SETTINGS_ERROR_CODES = frozenset({
     "creds", "credsbusy", "credschanged", "credsmode", "empty", "envcreds",
     "envrejected", "envunreachable", "invalidsettings", "needuser", "persist",
-    "rejected", "settingschanged", "unreachable",
+    "rejected", "savedrejected", "settingschanged", "unreachable",
 })
 
 
@@ -186,12 +198,9 @@ async def settings_page(request: Request, saved: str = "",
 
 
 def _qobuz_token_is_env_owned() -> bool:
-    """Whether environment configuration owns the Qobuz token slot."""
-    return bool(
-        cfg.QOBUZ_USER_AUTH_TOKEN
-        or os.environ.get("QOBUZ_USER_AUTH_TOKEN", "").strip()
-        or os.environ.get("QOBUZ_USER_AUTH_TOKEN_FILE", "").strip()
-    )
+    """Whether the environment supplied the Qobuz token in use. A token file
+    that could not be read supplied nothing, so this page can still save one."""
+    return bool(cfg.QOBUZ_USER_AUTH_TOKEN)
 
 
 async def _classify_token_async(loop, token):
@@ -324,6 +333,16 @@ async def save_settings(
         )
         verdict = await _classify_token_async(loop, probe.token)
     if verdict == AuthOutcome.REJECTED:
+        saved = qobuz_access._credentials_snapshot()
+        if saved.configured and saved.token == new_token:
+            await loop.run_in_executor(
+                None, qobuz_access._on_auth_state,
+                AuthEvidence(saved.generation, verdict))
+            return _settings_response(request,
+                                      error="envrejected" if env_owned
+                                      else "savedrejected",
+                                      user_id=user_id.strip(),
+                                      diagnostics=diags)
         # Re-render with the real token still in the (password-type, so
         # visually masked) field so the user can fix a paste slip without
         # re-typing it, same as the needuser/empty/creds branches.
@@ -675,7 +694,14 @@ async def set_mode(request: Request, target: str = Form("")):
                 # /staging.
                 if job_mgr.work_in_flight():
                     runtime.set_cli_mode(False)
-                    return False
+                    jobs_running = any(
+                        job.status != job_mgr.JobStatus.AWAITING_REVIEW
+                        and not job_mgr.is_held(job)
+                        for job in job_mgr.registry.pending_and_running())
+                    operations = set(job_mgr.active_library_operations())
+                    if not jobs_running and operations == {"Startup maintenance"}:
+                        return "maintenance"
+                    return "busy"
                 if runtime.run_lock_handle() is not None:
                     try:
                         runtime.run_lock_handle().close()  # closing releases the flock
@@ -683,12 +709,17 @@ async def set_mode(request: Request, target: str = Form("")):
                         pass
                     runtime.set_run_lock_handle(None)
                 runtime.set_lock_busy_pid(None)
-                return True
+                return "done"
 
         loop = asyncio.get_running_loop()
-        if not await loop.run_in_executor(None, _handoff):
+        outcome = await loop.run_in_executor(None, _handoff)
+        if outcome != "done":
             if _TAKING_BACK.locked():
                 return _taking_back("try again")
+            if outcome == "maintenance":
+                return _mode_refused(
+                    "The web app is still tidying its caches after starting. "
+                    "This finishes on its own; try again in a minute.")
             return _mode_refused(
                 "Finish or cancel the running library work before handing off to the "
                 "terminal.")

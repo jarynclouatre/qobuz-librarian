@@ -86,7 +86,7 @@ TEXT_FIELDS = [
     ("BEETS_PLUGINS", "Beets plugins",
      "Beets plugins to enable in place of the config.yaml list; empty uses "
      "the .env value or that list, and unknown names are dropped.",
-     "list", None, "fetchart,lastgenre,replaygain"),
+     "list", None, "e.g. fetchart,embedart"),
     ("ARTIST_CATALOG_CACHE_TTL", "Album-list freshness",
      "How long Library scans, Upgrade, Discover and artist pages reuse a "
      "fetched discography.",
@@ -465,7 +465,7 @@ def _apply(values: dict):
                 items, _ = _validate_list(key, items)
             setattr(cfg, key, items)
         elif kind == "enum":
-            v = str(raw or "").strip().lower()
+            v = _field_str(raw, kind).strip().lower()
             if not v and key in UNSET_ENUM_KEYS:
                 setattr(cfg, key, None)
                 continue
@@ -543,7 +543,10 @@ def _matches_env(key, value) -> bool:
     kind = _FIELD_KINDS.get(key, "text")
     if kind == "list":
         return _same_list(key, value, env)
-    return _field_str(value, kind).strip().lower() == _field_str(env, kind).strip().lower()
+    saved, given = _field_str(value, kind).strip(), _field_str(env, kind).strip()
+    if kind == "enum":
+        return saved.lower() == given.lower()
+    return saved == given
 
 
 def _same_list(key, first, second) -> bool:

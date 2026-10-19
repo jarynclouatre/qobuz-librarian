@@ -926,7 +926,8 @@
       b.disabled = true;
       b.classList.add("is-disabled");
       b.innerHTML =
-        '<span class="ql-spinner ql-inline-spinner" aria-hidden="true"></span> Starting…';
+        '<span class="ql-spinner ql-inline-spinner" aria-hidden="true"></span> ';
+      b.appendChild(document.createTextNode(form.dataset.busyLabel || "Starting…"));
     }, 0);
   });
 

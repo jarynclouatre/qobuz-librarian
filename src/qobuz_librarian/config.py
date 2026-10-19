@@ -95,7 +95,7 @@ def _env_downsample_choice():
 
 def _env_path(key, default: Path) -> Path:
     val = os.environ.get(key)
-    return Path(val) if val else default
+    return Path(os.path.abspath(os.path.expanduser(val))) if val else default
 
 
 def _env_num_min(key, default, minimum, maximum=None):
@@ -149,10 +149,19 @@ def _resolve_secret(key: str) -> str:
     if not path:
         return ""
     try:
-        return Path(path).read_text(encoding="utf-8").strip()
-    except OSError as e:
+        val = Path(path).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as e:
         _warn(f"{key}_FILE={path!r} couldn't be read ({e}); ignoring it.")
+        reason = (e.strerror or e) if isinstance(e, OSError) else "it is not text"
+        SECRET_FILE_PROBLEMS[key] = f"{path} could not be read ({reason})."
         return ""
+    if not val:
+        SECRET_FILE_PROBLEMS[key] = f"{path} is empty."
+    return val
+
+
+# What went wrong reading a *_FILE secret, by key, for Settings and Diagnostics.
+SECRET_FILE_PROBLEMS: dict[str, str] = {}
 
 
 _SECRET_ENV = frozenset(
@@ -218,10 +227,17 @@ BEETS_CONFIG_DIR = _env_path(
     "BEETS_CONFIG_DIR",
     HOME / ".config" / "beets",
 )
-BEETS_DB_PATH = _env_path(
-    "BEETS_DB_PATH",
-    BEETS_CONFIG_DIR / "musiclibrary.db",
-)
+def _default_beets_db() -> Path:
+    """This app's own library file, or beets' default one when only that
+    exists, so a pip install joins the beets library already there."""
+    ours = BEETS_CONFIG_DIR / "musiclibrary.db"
+    theirs = BEETS_CONFIG_DIR / "library.db"
+    if not ours.exists() and theirs.is_file():
+        return theirs
+    return ours
+
+
+BEETS_DB_PATH = _env_path("BEETS_DB_PATH", _default_beets_db())
 # Normally inferred from the `beet` console script. This explicit path covers
 # uncommon launchers whose shebang does not expose their Python environment.
 BEETS_PYTHON = os.environ.get("BEETS_PYTHON", "").strip()

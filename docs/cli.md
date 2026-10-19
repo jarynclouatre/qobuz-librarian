@@ -8,7 +8,7 @@ The CLI runs from the same image and Compose service as the web UI, with no sepa
 
 The web app and CLI share one run lock, so only one runs at a time. Free it before a CLI run: switch to terminal mode from **Settings → Mode**, then click **Resume web app** after the CLI run, or stop the web container with `docker compose stop qobuz-librarian` and start it again afterward.
 
-Set `QL_CLI_ONLY=1` to start in terminal mode (the web UI still serves browsing and Settings).
+Set `QL_CLI_ONLY=1` to start in terminal mode (the web UI still serves browsing and Settings). Saving a Qobuz token on Settings needs web mode: click **Resume web app**, save, then switch back to terminal mode.
 
 ## Interactive menu
 

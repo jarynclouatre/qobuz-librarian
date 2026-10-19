@@ -86,6 +86,12 @@ services:
       # destination folders for migration; see docs/existing-libraries.md.
       MIGRATE_SRC:          "${MIGRATE_SRC:-}"
       MIGRATE_DEST:         "${MIGRATE_DEST:-}"
+      # The host folders set in .env for the volumes below, so Settings,
+      # Diagnostics and notices can name them. Unset = they show /music etc.
+      QL_MUSIC_DIR:          "${QL_MUSIC_DIR:-}"
+      QL_STAGING_DIR:        "${QL_STAGING_DIR:-}"
+      QL_UPGRADE_BACKUPS:    "${QL_UPGRADE_BACKUPS:-}"
+      QL_COLLECTION_BACKUPS: "${QL_COLLECTION_BACKUPS:-}"
 
       # beets (bundled, no separate container needed)
       BEETS_CONFIG_DIR:     /config/beets

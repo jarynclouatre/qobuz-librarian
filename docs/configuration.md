@@ -25,13 +25,18 @@ These settings apply to new jobs. A field you change on the Settings page keeps 
 | `QL_COLLECTION_BACKUPS` | `./collection_backups` | Collection snapshots used by Backup & Restore |
 | `WEB_PORT` | `8666` | Host port for the web UI |
 
+The bundled `compose.yaml` also hands the folder values you set here to the app, so Settings and Diagnostics can name the host folder. A folder left at its default, or set some other way, shows as the path inside the container, such as `/music`.
+
 Outside Docker the app reads its folders from the environment instead:
 `MUSIC_ROOT` (default `~/Music`), `STAGING_DIR` and `UPGRADE_BACKUP_DIR`
 (`.staging` and `.upgrade_backups` beside the music folder), `DATA_DIR`
 (`~/.local/share/qobuz-librarian`), `COLLECTION_BACKUP_DIR`
 (`collection-backups` in the data folder), `BEETS_CONFIG_DIR`
-(`~/.config/beets`), `BEETS_DB_PATH` (`musiclibrary.db` in the beets folder),
-and `STREAMRIP_CONFIG` (`~/.config/streamrip/config.toml`).
+(`~/.config/beets`), `BEETS_DB_PATH` (`musiclibrary.db` in the beets folder,
+or beets' own `library.db` there when only that one exists), and
+`STREAMRIP_CONFIG` (`~/.config/streamrip/config.toml`). A relative folder is
+taken from the directory you start the app in. If your beets library is
+somewhere else, set `BEETS_DB_PATH` to it.
 
 The music, staging, and upgrade-backup directories must be separate,
 non-nested trees. The app refuses to start if any one is the same as, inside,
