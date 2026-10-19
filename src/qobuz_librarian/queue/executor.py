@@ -2423,7 +2423,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             if post_dir is not None and token and item.get("n_ok", 0) > 0:
                 try:
                     warn_if_download_truncated(
-                        post_dir, token, item["album"].get("title"))
+                        post_dir, token, item["album"].get("title"),
+                        item["missing"] if item.get("present") else None)
                 except Exception as _e_rc:
                     vlog(f"post-download recheck raised: {_e_rc}")
             # Qobuz throttles sustained bulk queues. When the last rip showed

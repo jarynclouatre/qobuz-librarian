@@ -14,6 +14,7 @@ from qobuz_librarian.library import (
     scanner,
 )
 from qobuz_librarian.library import hidden as hidden_mod
+from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.quality import decision as quality_decision
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.ui_cli.logging import log, vlog
@@ -227,9 +228,12 @@ def refresh_after_changes(changes, token, args, *, upgrade=True,
                 vlog(f"Upgrade policy unavailable: {exc}")
 
     for artist_dir in artist_dirs.values():
+        # Compilations have no single artist catalogue to compare.
+        compilations = normalize(artist_dir.name) in VA_NORMALIZED
         for surface, scanned, update in (
-            ("upgrade", scan_upgrade, lambda d: upgrade_state.update_artist(
-                d, token=token, args=args, capped=capped)),
+            ("upgrade", scan_upgrade and not compilations,
+             lambda d: upgrade_state.update_artist(
+                 d, token=token, args=args, capped=capped)),
             ("downsample", was_current["downsample"],
              downsample_state.update_artist),
         ):

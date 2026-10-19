@@ -2364,7 +2364,9 @@ def process_album(album, args, *, allow_force=True, label=None,
     if (result_status in ("downloaded", "partial") and token
             and not getattr(args, "no_import", False)):
         if post_dir:
-            warn_if_download_truncated(post_dir, token, album.get("title"))
+            warn_if_download_truncated(
+                post_dir, token, album.get("title"),
+                missing if present else None)
 
     outcome = {
         "result": result_status,

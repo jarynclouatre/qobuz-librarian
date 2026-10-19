@@ -67,17 +67,27 @@ def _qobuz_track_by_isrc(isrc, token):
     return qt
 
 
-def truncated_tracks_after_download(album_dir, token):
+def truncated_tracks_after_download(album_dir, token, tracks=None):
     """Re-verify a freshly downloaded album's track lengths against Qobuz and
     return the tracks that came up short. The download already drops files that
-    won't decode, but a clean truncation (decodes fine, header rewritten to the
-    short length) only shows against the real recording length. Best-effort: a
-    lookup hiccup returns an empty list so a finished download is never failed by
-    the check. AuthLost / QobuzUnavailable propagate, though: an expired token or
-    an outage means the lengths weren't actually verified, so a caller must be
-    able to tell that apart from a clean album rather than read it as 'all fine'."""
+    won't decode, so this compares lengths only, and only for the Qobuz
+    `tracks` a gap fill fetched (every file when that is not given). A clean
+    truncation (decodes fine, header rewritten to the short length) only shows
+    against the real recording length. Best-effort: a lookup hiccup returns an
+    empty list so a finished download is never failed by the check. AuthLost /
+    QobuzUnavailable propagate, though: an expired token or an outage means
+    the lengths weren't actually verified, so a caller must be able to tell
+    that apart from a clean album rather than read it as 'all fine'."""
+    isrcs = {
+        str(track.get("isrc") or "").replace("-", "").upper().strip()
+        for track in tracks or ()
+        if isinstance(track, dict)
+    }
+    if not tracks or "" in isrcs:
+        isrcs = None
     try:
-        scan = scan_dir_for_isrc_repairs(album_dir, token, deep=True)
+        scan = scan_dir_for_isrc_repairs(
+            album_dir, token, deep=True, only_isrcs=isrcs, decode=False)
     except (AuthLost, QobuzUnavailable):
         raise
     except Exception:
@@ -85,14 +95,14 @@ def truncated_tracks_after_download(album_dir, token):
     return scan.get("verified_truncated", [])
 
 
-def warn_if_download_truncated(album_dir, token, label):
+def warn_if_download_truncated(album_dir, token, label, tracks=None):
     """Run the post-download truncation recheck and log a Repair nudge for any
     track shorter than its real Qobuz recording. Advisory only: it never alters
     or fails the download. A clean run logs nothing; a lost token or a Qobuz
     outage says so plainly (so an unverified album isn't mistaken for a clean
     one) instead of silently reporting nothing. Returns the short-track list."""
     try:
-        short = truncated_tracks_after_download(album_dir, token)
+        short = truncated_tracks_after_download(album_dir, token, tracks)
     except (AuthLost, QobuzUnavailable):
         log.info(fmt(C.YELLOW,
             f"  ⚠  {label or 'this album'} imported, but its track lengths "
@@ -441,10 +451,16 @@ def _append_verified_ok(report, source, isrc, *, record_isrc=True):
 
 def _scan_held_repair_source(
         report, source, token, *, min_short_seconds, max_ratio,
-        max_short_seconds, deep, only_isrcs):
-    """Diagnose one file while its descriptor, namespace and receipt hold."""
+        max_short_seconds, deep, only_isrcs, decode=True):
+    """Diagnose one file while its descriptor, namespace and receipt hold.
+    Without `decode` the file is taken to decode (the download already proved
+    it) and only its length is compared."""
     et = _read_held_audio_meta(source)
     path = str(source.path)
+
+    def decodes():
+        return not decode or _flac_decode_ok(path, descriptor=source.descriptor)
+
     title = et.get("title") or source.path.stem
     isrc_raw = et.get("isrc") or ""
     isrc = isrc_raw.replace("-", "").upper().strip()
@@ -459,7 +475,7 @@ def _scan_held_repair_source(
             entry["diagnostic"] = (
                 f"likely-corrupted ({source.size:,} B); hand-verify "
                 "before refilling")
-        elif not _flac_decode_ok(path, descriptor=source.descriptor):
+        elif not decodes():
             entry["diagnostic"] = (
                 "won't decode (frame-CRC or mid-file damage); "
                 "re-download or replace from another source")
@@ -504,7 +520,7 @@ def _scan_held_repair_source(
         # one belongs in the same bucket carrying a diagnostic, not under
         # "no ISRC tag", which is where the report files them by name.
         entry = {"path": path, "title": title, "isrc": isrc}
-        if not _flac_decode_ok(path, descriptor=source.descriptor):
+        if not decodes():
             entry["diagnostic"] = (
                 "won't decode (frame-CRC or mid-file damage); "
                 "re-download or replace from another source")
@@ -550,7 +566,7 @@ def _scan_held_repair_source(
             report["unverified"] += 1
 
     if qdur <= 0:
-        if not _flac_decode_ok(path, descriptor=source.descriptor):
+        if not decodes():
             damaged("decode_failed")
         else:
             _append_verified_ok(report, source, isrc)
@@ -560,7 +576,7 @@ def _scan_held_repair_source(
         expected_uncompressed = qdur * sample_rate * channels * (bits / 8)
         if (audio_size < expected_uncompressed * _BYTE_SIZE_TRUNCATED_RATIO
                 and shutil.which("flac") is not None
-                and not _flac_decode_ok(path, descriptor=source.descriptor)):
+                and not decodes()):
             damaged("byte_size_short", actual_size=actual_size)
             return
 
@@ -576,7 +592,7 @@ def _scan_held_repair_source(
     # distance between two different recordings, so it proves nothing here, but
     # the file still gets its decode check below: real damage counts however
     # badly the tag is written.
-    if not _flac_decode_ok(path, descriptor=source.descriptor):
+    if not decodes():
         damaged("decode_failed", actual_size=actual_size)
         return
 
@@ -592,7 +608,8 @@ def _scan_held_repair_source(
 
 def scan_dir_for_isrc_repairs(album_dir, token,
                               *, min_short_seconds=30, max_ratio=0.85,
-                              max_short_seconds=60, deep=True, only_isrcs=None):
+                              max_short_seconds=60, deep=True, only_isrcs=None,
+                              decode=True):
     """Pair each FLAC in album_dir to its Qobuz recording via ISRC, then flag
     truncation by duration comparison (>30 s short AND either <85% ratio or
     >60 s short, so a long track can't hide a big shortfall behind the ratio).
@@ -648,6 +665,7 @@ def scan_dir_for_isrc_repairs(album_dir, token,
                     max_short_seconds=max_short_seconds,
                     deep=deep,
                     only_isrcs=only_isrcs,
+                    decode=decode,
                 )
         except (AuthLost, QobuzUnavailable):
             raise

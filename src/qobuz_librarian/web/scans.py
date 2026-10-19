@@ -1,5 +1,6 @@
 """Finding, starting and deduplicating scan jobs."""
 import asyncio
+import time
 from pathlib import Path
 
 from fastapi.responses import RedirectResponse
@@ -153,24 +154,36 @@ def _music_root_problem():
 
 # The last folder check, keyed on the music folder's own listing.
 _last_folder_check = None
+# How long a clean folder check stands in for a new one: an artist folder
+# that becomes unreadable or loses its audio leaves the music folder's own
+# listing as it was.
+_CLEAN_CHECK_SECONDS = 180.0
 
 
 def _library_scan_state():
     """Whether a whole-library scan has something valid to scan. While a
     Library scan reads every folder anyway, pages reuse the last check until
-    an artist folder is added, removed or renamed."""
+    an artist folder is added, removed or renamed. Otherwise a clean check is
+    reused for a few minutes, until the app writes to the library, so a
+    problem shows and a fixed one clears soon after."""
     global _last_folder_check
     try:
         st = Path(cfg.MUSIC_ROOT).stat()
         key = (str(cfg.MUSIC_ROOT), st.st_dev, st.st_ino, st.st_mtime_ns)
     except OSError:
         key = None
+    now = time.monotonic()
+    cleared = scanner.scan_caches_cleared()
     last = _last_folder_check
-    if (key is not None and last is not None and last[0] == key
-            and _active_library_scan() is not None):
-        return last[1]
+    if key is not None and last is not None and last[0] == key:
+        _key, state, checked_at, cleared_then = last
+        if _active_library_scan() is not None or (
+                state["ready"] and not state["message"]
+                and cleared_then == cleared
+                and now - checked_at < _CLEAN_CHECK_SECONDS):
+            return state
     state = _check_library_folders()
-    _last_folder_check = (key, state)
+    _last_folder_check = (key, state, now, cleared)
     return state
 
 

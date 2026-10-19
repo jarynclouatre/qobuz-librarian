@@ -6464,7 +6464,7 @@ def album_folder_gone(path) -> bool:
     try:
         with os.scandir(root) as entries:
             return any(entry.is_dir(follow_symlinks=False)
-                       and not entry.name.startswith(".")
+                       and not scanner.is_library_system_folder(entry.name)
                        for entry in entries)
     except OSError:
         return False

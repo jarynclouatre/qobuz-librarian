@@ -1114,11 +1114,13 @@ def reseal_past_album_import(album_dir):
     captures = {}
 
     def fresh_seal(value):
-        premise = candidate_premise.canonical_premise(value)
-        if premise is None or premise["kind"] != "missing":
+        if (type(value) is not dict or value.get("kind") != "missing"
+                or type(value.get("path")) is not str):
             return None
-        path = Path(premise["path"])
+        path = Path(value["path"])
         if album_dir == path or not album_dir.is_relative_to(path):
+            return None
+        if candidate_premise.canonical_premise(value) is None:
             return None
         if path not in captures:
             captures[path] = candidate_premise.capture("missing", path)
@@ -1954,6 +1956,7 @@ def _scan_library_impl(
             skip_unchanged=cheap_refresh or finished_upgrade is not None,
             previous=finished_upgrade,
             persist=False,
+            known_fingerprints=downsample_refresh.fingerprints,
             on_artist=lambda ad, _specs, _err, done_i, total_i: job.push_progress(
                 _step("Checking upgrade quality"),
                 done_i, total_i, ad.name, unit="artist"),
@@ -1971,7 +1974,9 @@ def _scan_library_impl(
         if job.cancel_requested:
             break
         try:
-            fingerprints[_ad.name] = artist_fingerprint(_ad)
+            fingerprints[_ad.name] = (
+                downsample_refresh.fingerprints.get(_ad.name)
+                or artist_fingerprint(_ad))
         except OSError as exc:
             artist_read_failed(_ad, exc)
             log.warning(f"Unreadable artist {_ad.name}: {exc}. Check permissions and retry.")

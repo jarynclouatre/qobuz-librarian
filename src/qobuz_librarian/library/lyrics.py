@@ -13,6 +13,7 @@ gates the automatic import-time fetch, so an explicit backfill runs regardless.
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.library.scanner import (
+    is_library_system_folder,
     iter_tree_no_symlinks,
     list_artist_album_dirs,
     list_library_artists,
@@ -48,7 +49,7 @@ def iter_library_flacs(*, artist_dirs=None, on_artist_error=None):
                 flacs = sorted(
                     p for p in iter_tree_no_symlinks(album_dir, errors=walk_errors)
                     if p.is_file() and p.suffix.lower() == ".flac"
-                    and not any(part.startswith(".")
+                    and not any(is_library_system_folder(part)
                                 for part in p.relative_to(album_dir).parts))
             except OSError as e:
                 walk_errors.append(f"{album_dir}: {e}")

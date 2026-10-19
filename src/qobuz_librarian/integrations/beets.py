@@ -52,7 +52,10 @@ from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library import tags as tags_mod
 from qobuz_librarian.library.post_import_relocation_db import deleted_from_library
-from qobuz_librarian.library.scanner import clear_scan_caches
+from qobuz_librarian.library.scanner import (
+    clear_scan_caches,
+    is_library_system_folder,
+)
 from qobuz_librarian.recovery import (
     decode_recovery_json,
     normalise_recovery_owner,
@@ -745,7 +748,7 @@ def tracks_sit_flat(album_dir):
     try:
         return any(
             entry.is_file() and Path(entry.name).suffix.lower() in cfg.AUDIO_EXTS
-            and not entry.name.startswith(".")
+            and not is_library_system_folder(entry.name)
             for entry in os.scandir(album_dir))
     except OSError:
         return False
@@ -769,7 +772,7 @@ def fill_album_tags(album_dir):
         tracks = sorted(
             path for path in Path(album_dir).rglob("*")
             if path.suffix.lower() in cfg.AUDIO_EXTS and path.is_file()
-            and not path.name.startswith("."))
+            and not is_library_system_folder(path.name))
     except OSError:
         return None
     if not tracks:

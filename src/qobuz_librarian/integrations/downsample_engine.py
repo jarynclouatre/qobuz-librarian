@@ -292,7 +292,7 @@ def scan_dir_for_hires(directory):
     for p in directory.rglob("*"):
         # Case-insensitive: the rest of the app indexes *.FLAC too (suffix.lower),
         # so a case-sensitive glob would hide uppercase-extension files here.
-        if (p.name.startswith(".") or not p.is_file()
+        if (scanner.is_library_system_folder(p.name) or not p.is_file()
                 or p.suffix.lower() != ".flac"):
             continue
         n_flac += 1
@@ -752,7 +752,8 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
 
     candidates = []
     for p in directory.rglob("*"):
-        if p.name.startswith(".") or not p.is_file() or p.suffix.lower() != ".flac":
+        if (scanner.is_library_system_folder(p.name) or not p.is_file()
+                or p.suffix.lower() != ".flac"):
             continue
         try:
             rel = str(p.relative_to(_bd))

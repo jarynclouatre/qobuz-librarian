@@ -14,6 +14,7 @@ each hold their own connection. Delete the db file to force a full refresh.
 import json
 import math
 import sqlite3
+import threading
 import time
 
 from qobuz_librarian import config as cfg
@@ -49,23 +50,53 @@ def get(album_id) -> dict | None:
         payload = json.loads(row[0])
     except (ValueError, TypeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    with _used_lock:
+        _used.add(str(album_id))
+        due = len(_used) >= _TRIM_EVERY
+    if due:
+        _record_use()
+    return payload
 
 
 # Cap the albums table so it can't grow without bound over a library's
-# lifetime.
+# lifetime. A row's fetched_at moves forward whenever it is read, and only
+# rows unused for _KEEP_USED_SECONDS count against the cap, so a library
+# scanned at least that often keeps every album it owns however many.
 _CACHE_MAX_ALBUMS = 10000
+_KEEP_USED_SECONDS = 60 * 86400
 _TRIM_EVERY = 200
 _puts_since_trim = 0
+_used = set()
+_used_lock = threading.Lock()
+
+
+def _record_use() -> None:
+    with _used_lock:
+        ids = list(_used)
+        _used.clear()
+    if not ids:
+        return
+    now = time.time()
+    try:
+        conn = _db.conn()
+        conn.executemany("UPDATE albums SET fetched_at = ? WHERE id = ?",
+                         [(now, album_id) for album_id in ids])
+        conn.commit()
+    except sqlite3.Error as e:
+        vlog(f"album cache write failed: {e}")
+        _db.handle_db_error(e)
 
 
 def _trim_albums() -> None:
+    _record_use()
     try:
         conn = _db.conn()
         conn.execute(
-            "DELETE FROM albums WHERE id NOT IN "
+            "DELETE FROM albums WHERE fetched_at < ? AND id NOT IN "
             "(SELECT id FROM albums ORDER BY fetched_at DESC LIMIT ?)",
-            (_CACHE_MAX_ALBUMS,))
+            (time.time() - _KEEP_USED_SECONDS, _CACHE_MAX_ALBUMS))
         conn.commit()
     except sqlite3.Error as e:
         vlog(f"album cache trim failed: {e}")
@@ -147,4 +178,5 @@ def put_catalog(key, payload) -> None:
 
 
 def _reset_for_tests() -> None:
+    _used.clear()
     _db.reset_for_tests()

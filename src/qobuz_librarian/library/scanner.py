@@ -506,6 +506,7 @@ def list_artist_album_dirs(artist_dir: Path, walk_errors=None):
 # Cleared via clear_scan_caches() at every top-level mode entry so memory
 # stays bounded.
 _ARTIST_SUBDIRS_CACHE: dict = {}
+_scan_caches_cleared = 0
 
 
 def _list_artist_subdirs_cached(artist_dir: Path):
@@ -573,9 +574,17 @@ def clear_scan_caches():
     on disk before the next pass starts (the scan-end commit point - put()
     buffers rather than committing per-file to keep a cold 200k-track scan
     out of per-file disk-sync territory)."""
+    global _scan_caches_cleared
     _ARTIST_SUBDIRS_CACHE.clear()
     _HAS_AUDIO_CACHE.clear()
+    _scan_caches_cleared += 1
     flac_cache.flush_pending()
+
+
+def scan_caches_cleared() -> int:
+    """How many times clear_scan_caches ran: anything built from a folder
+    listing since the last one may be stale once this moves."""
+    return _scan_caches_cleared
 
 
 def drop_artist_subdirs_cache(artist_dir):

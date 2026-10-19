@@ -87,6 +87,11 @@ DEFAULT_STATE_FILE = Path(__file__).resolve().parent / ".lyric_fetch_state.json"
 # A crash can lose results since the last checkpoint, plus in-flight tracks.
 # Saves are checked after each result; normal exits flush pending changes.
 CHECKPOINT_INTERVAL_SECONDS = 5.0
+# A slow write waits this many times its own length before the next, and a
+# large state file a second for every megabyte it holds, so on a large library
+# rewriting it stays a small part of the pass and of the disk's time.
+CHECKPOINT_WRITE_SPACING = 20
+CHECKPOINT_BYTES_PER_SECOND = 1_000_000
 
 # Per-file outcome codes are internal vocabulary; the lyrics pass shows its log
 # to the user, so map them to plain phrases (a raw "write-error" or a
@@ -371,6 +376,7 @@ class TrackState:
     source: str = ""        # provider that succeeded
     last_seen: float = 0.0  # epoch of last attempt
     representations: str = ""  # embed | sidecar | both
+    sidecar: str = ""  # the .lrc read last time, by its file identity
 
 
 _SAVED_STATUSES = frozenset({
@@ -400,6 +406,7 @@ def _track_state_from_dict(value) -> TrackState | None:
     status = value.get("status", "")
     source = value.get("source", "")
     representations = value.get("representations", "")
+    sidecar = value.get("sidecar", "")
     return TrackState(
         mtime=float(mtime),
         size=size,
@@ -412,6 +419,7 @@ def _track_state_from_dict(value) -> TrackState | None:
             and representations in _SAVED_REPRESENTATIONS
             else ""
         ),
+        sidecar=sidecar if isinstance(sidecar, str) else "",
     )
 
 
@@ -466,6 +474,8 @@ class _StateWriter(dict[str, TrackState]):
         self.dry_run = dry_run
         self._pending: dict[str, TrackState] = {}
         self._last_write = None
+        self._interval = CHECKPOINT_INTERVAL_SECONDS
+        self._flush_lock = threading.Lock()
 
     def __setitem__(self, key: str, value: TrackState) -> None:
         super().__setitem__(key, value)
@@ -474,20 +484,33 @@ class _StateWriter(dict[str, TrackState]):
 
     def save(self) -> None:
         if (self._last_write is None
-                or time.monotonic() - self._last_write >= CHECKPOINT_INTERVAL_SECONDS):
+                or time.monotonic() - self._last_write >= self._interval):
             self.flush()
 
     def flush(self) -> None:
-        with _state_lock:
-            if not self._pending:
+        """Write the pending rows. Workers keep recording results meanwhile:
+        they wait only for the rows to be handed over, not for the disk."""
+        with self._flush_lock:
+            with _state_lock:
+                pending, self._pending = self._pending, {}
+            if not pending:
                 return
-            self._last_write = time.monotonic()
+            started = time.monotonic()
             try:
-                update_state(lambda disk: disk.update(self._pending), self.path)
+                update_state(lambda disk: disk.update(pending), self.path)
             except Exception as e:
                 self.log.warning("checkpoint failed (continuing): %s", e)
-            else:
-                self._pending.clear()
+                with _state_lock:
+                    self._pending = {**pending, **self._pending}
+            self._last_write = time.monotonic()
+            try:
+                identity = state_file.file_identity(self.path)
+            except OSError:
+                identity = None
+            self._interval = max(
+                CHECKPOINT_INTERVAL_SECONDS,
+                CHECKPOINT_WRITE_SPACING * (self._last_write - started),
+                (identity[2] if identity else 0) / CHECKPOINT_BYTES_PER_SECOND)
 
 
 def prune_missing(state: dict[str, TrackState]) -> int:
@@ -584,21 +607,48 @@ def _guard_passes(guard) -> bool:
         return False
 
 
+def _sidecar_key(identity) -> str:
+    if not identity:
+        return ""
+    return ":".join(str(identity[field]) for field in (
+        "device", "inode", "size", "modified_ns", "changed_ns"))
+
+
+def _sidecar_unchanged(path: Path, recorded: str) -> bool:
+    """Whether the .lrc beside ``path`` is still the very file last read. Its
+    change time moves with any write and cannot be set back."""
+    if not recorded:
+        return False
+    try:
+        current = _regular_identity(os.lstat(Path(path).with_suffix(".lrc")))
+    except OSError:
+        return False
+    return _sidecar_key(current) == recorded
+
+
 def _read_bound_sidecar(
         path: Path, parent_fd, parent_guard, track_guard) -> Optional[str]:
     """Read one exact regular .lrc beside one exact held track, or refuse it."""
+    return _read_bound_sidecar_with_identity(
+        path, parent_fd, parent_guard, track_guard)[0]
+
+
+def _read_bound_sidecar_with_identity(
+        path: Path, parent_fd, parent_guard, track_guard):
+    """The sidecar's text, as _read_bound_sidecar reads it, and the identity
+    of the file it came from."""
     if parent_fd is None:
-        return None
+        return None, None
     descriptor = None
     target = Path(path).with_suffix(".lrc")
     try:
         if not _guard_passes(parent_guard) or not _guard_passes(track_guard):
-            return None
+            return None, None
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         descriptor = os.open(target.name, flags, dir_fd=parent_fd)
         frozen = _regular_identity(os.fstat(descriptor))
         if frozen is None or _named_identity(parent_fd, target.name) != frozen:
-            return None
+            return None, None
         chunks = []
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
@@ -611,11 +661,11 @@ def _read_bound_sidecar(
             or _regular_identity(os.fstat(descriptor)) != frozen
             or _named_identity(parent_fd, target.name) != frozen
         ):
-            return None
+            return None, None
         content = _decode_lrc(b"".join(chunks))
-        return content if content.strip() else None
+        return (content if content.strip() else None), frozen
     except (OSError, TypeError, ValueError):
-        return None
+        return None, None
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -2036,9 +2086,11 @@ def should_process(
         # library index finds them and then like a track with none.
         return True
     if st.status in ("synced", "plain"):
-        # A cached track stat cannot prove a sibling sidecar still exists. Reopen
-        # final sidecar/both states through the held no-follow binding each run.
-        if "sidecar" in _required_representations(lyrics_format):
+        # A cached track stat cannot prove a sibling sidecar still exists.
+        # Reopen final sidecar/both states through the held no-follow binding
+        # unless the .lrc is still the very file read last time.
+        if ("sidecar" in _required_representations(lyrics_format)
+                and not _sidecar_unchanged(path, st.sidecar)):
             return True
         return not _representations_cover(
             st.representations, lyrics_format)
@@ -2165,12 +2217,13 @@ def _process_bound_file(
         return binding.exact_track_is_named()
 
     embedded = get_existing_lyrics(f)
-    sidecar = _read_bound_sidecar(
+    sidecar, sidecar_identity = _read_bound_sidecar_with_identity(
         path,
         binding.parent_fd,
         binding.chain_is_named,
         track_guard,
     )
+    st.sidecar = _sidecar_key(sidecar_identity)
     if not track_guard():
         log.warning("track changed during lyric discovery: %s", path)
         st.status = "transient"
@@ -2522,8 +2575,7 @@ def index_existing(
                         "synced", "plain", "not_found", "skipped")
                     and (
                         cached.status not in ("synced", "plain")
-                        or _representations_cover(
-                            cached.representations, "embed")
+                        or cached.representations
                     )):
                 return f"cached-{cached.status}"
             try:

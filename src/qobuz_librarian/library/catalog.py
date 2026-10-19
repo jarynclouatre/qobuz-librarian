@@ -34,6 +34,7 @@ from qobuz_librarian.integrations import rip
 from qobuz_librarian.library.scanner import (
     SYSTEM_FOLDER_NAMES,
     _list_artist_subdirs_cached,
+    is_library_system_folder,
     iter_tree_no_symlinks,
     read_album_dir,
 )
@@ -1819,7 +1820,7 @@ def _count_audio_files_in(d):
     try:
         for f in iter_tree_no_symlinks(d):
             if (f.suffix.lower() in config.AUDIO_EXTS
-                    and not f.name.startswith(".") and f.is_file()):
+                    and not is_library_system_folder(f.name) and f.is_file()):
                 n += 1
     except OSError:
         pass

@@ -40,6 +40,7 @@ def is_cancel_requested():
 
 try:
     from mutagen.flac import FLAC as MutagenFLAC
+    from mutagen.flac import VCFLACDict
     HAVE_MUTAGEN = True
 except Exception:
     MutagenFLAC = None  # type: ignore
@@ -48,22 +49,45 @@ except Exception:
 _FLAC_TRUNCATION_FLOOR = 150_000
 
 
+def _vorbis_comment(path):
+    """A plain FLAC's first Vorbis comment block, parsed as mutagen parses it
+    but without reading the blocks after it (embedded art above all). None
+    when that is not straightforward, so mutagen reads the whole file."""
+    try:
+        with open(path, "rb", buffering=4096) as fh:
+            if fh.read(4) != b"fLaC":
+                return None
+            while True:
+                header = fh.read(4)
+                if len(header) < 4:
+                    return None
+                if header[0] & 0x7F == VCFLACDict.code:
+                    return VCFLACDict(fh)
+                if header[0] & 0x80:
+                    return None
+                fh.seek(int.from_bytes(header[1:4], "big"), 1)
+    except Exception:
+        return None
+
+
 def _flac_signature(path: Path):
     """Tag-tuple identifier for a FLAC, stable across beets's move. Lyric_fetch's
     state file is keyed by absolute path.
     """
     if not HAVE_MUTAGEN:
         return None
-    try:
-        f = MutagenFLAC(str(path))
-    except Exception:
-        return None
-    if f.tags is None:
+    tags = _vorbis_comment(path)
+    if tags is None:
+        try:
+            tags = MutagenFLAC(str(path)).tags
+        except Exception:
+            return None
+    if tags is None:
         return None
 
     def _g(*keys):
         for k in keys:
-            v = f.tags.get(k)
+            v = tags.get(k)
             if v and isinstance(v, list) and v[0]:
                 return str(v[0]).strip()
         return ""

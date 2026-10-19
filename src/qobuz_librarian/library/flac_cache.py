@@ -234,16 +234,20 @@ def prune_missing(force: bool = False) -> int:
 
 
 def store_stamp():
-    """A value that changes whenever the stored rows may have."""
-    version = 0
+    """A value that changes whenever the stored rows may have, the same in
+    every thread: this process's commits, and the database and its write-ahead
+    log by size and time, which any other process's commit moves."""
+    stamp = [_writes]
     if _db.ensure():
-        try:
-            row = _db.conn().execute("PRAGMA data_version").fetchone()
-            version = row[0] if row else 0
-        except sqlite3.Error as e:
-            vlog(f"flac cache stamp read failed: {e}")
-            _db.handle_db_error(e)
-    return (_writes, version)
+        db = _db._db_path()
+        for path in (db, db.with_name(db.name + "-wal")):
+            try:
+                st = path.stat()
+            except OSError:
+                stamp.append(None)
+            else:
+                stamp.append((st.st_mtime_ns, st.st_size))
+    return tuple(stamp)
 
 
 # One row per cached file under MUSIC_ROOT: its tier, split at 48 kHz (the

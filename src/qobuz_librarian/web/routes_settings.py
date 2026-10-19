@@ -188,6 +188,8 @@ async def settings_page(request: Request, saved: str = "",
                         lastfm: str = ""):
     loop = asyncio.get_running_loop()
     diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
+    # Builds the memo the page reads, off the event loop.
+    await loop.run_in_executor(None, storage._census_view)
     if error not in _SETTINGS_ERROR_CODES:
         error = rendering._notice_text(error)
     return _settings_response(request, saved=saved, queued=queued,

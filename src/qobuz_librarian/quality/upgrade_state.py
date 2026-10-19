@@ -232,8 +232,11 @@ def refresh_for_artists(
     persist: bool = True,
     discovery_errors: dict[str, str] | None = None,
     previous: dict | None = None,
+    known_fingerprints: dict[str, str] | None = None,
 ):
-    """Refresh upgrade candidates for ``artists`` and persist review specs."""
+    """Refresh upgrade candidates for ``artists`` and persist review specs.
+    ``known_fingerprints`` are ones this refresh already took, reused instead
+    of reading the same folders again."""
     refresh_started_at = time.time()
     refresh_started_revision = generation_state.revision()
     scan_quality_signature = quality_signature()
@@ -262,7 +265,8 @@ def refresh_for_artists(
 
     for artist_dir in artist_list:
         try:
-            fingerprint = artist_fingerprint(artist_dir)
+            fingerprint = ((known_fingerprints or {}).get(artist_dir.name)
+                           or artist_fingerprint(artist_dir))
         except Exception as exc:
             fingerprint_failures.append((artist_dir, exc))
             continue
