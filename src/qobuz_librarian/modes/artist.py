@@ -68,8 +68,8 @@ from qobuz_librarian.queue.journal import (
     load_queue_journal,
 )
 from qobuz_librarian.queue.persistence import (
-    OWN_FILES_LEFT,
     kept_queue_note,
+    own_files_clause,
     parked_queue_note,
     queue_parked,
     queue_saver,
@@ -1056,7 +1056,7 @@ def _gap_fill_exit_code(counts, *, stopped=False):
         if any(counts[bucket] for bucket in retry):
             clauses.append("retry the unfinished albums above")
         if counts["own_files_left"]:
-            clauses.append(OWN_FILES_LEFT)
+            clauses.append(own_files_clause())
         log.warning(fmt(C.YELLOW,
             f"  ⚠  Needs attention: {', and '.join(clauses)}."))
     elif stopped:

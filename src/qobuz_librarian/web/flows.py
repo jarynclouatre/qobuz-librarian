@@ -992,6 +992,26 @@ def _return_picks(picks, execute_kind, execute_args=None):
     return True
 
 
+def _return_upgrade_picks(retry, refused, execute_args):
+    """Return unfinished Upgrade picks to the Upgrade list ticked, and those
+    whose new copy was refused unticked, as another try fetches the same
+    copy."""
+    if not refused:
+        return _return_picks(retry, "upgrade", execute_args)
+    picks = ([dict(c, selected=True) for c in retry]
+             + [dict(c, selected=False) for c in refused])
+    folded = refold_into_living_review(picks, "upgrade", ticked=False)
+    if folded is not None:
+        return folded is not False
+    n = len(picks)
+    summary = f"{n:,} album{'s' if n != 1 else ''} didn't upgrade last time."
+    if retry:
+        summary += f" {len(retry):,} ticked and ready to retry."
+    return _park_library_failures(
+        picks, "upgrade", ticked=False, summary=summary,
+        execute_args=execute_args) is not False
+
+
 def return_interrupted_picks(job):
     """Put the ticked albums of a run the app stopped mid-way back in its
     review, ticked. Any of them may already be done, so one whose files no
@@ -3357,6 +3377,7 @@ def execute_upgrades(job, chosen, token):
     failed = 0
     changed = 0
     failed_cands = []
+    refused_cands = []
     processed = 0
     current_interrupted = False
 
@@ -3364,11 +3385,8 @@ def execute_upgrades(job, chosen, token):
         if not job._imported_any:
             return True
         leftovers = failed_cands + chosen[current_index:]
-        saved = _return_picks(
-            leftovers,
-            "upgrade",
-            execute_args=job.execute_args,
-        )
+        saved = _return_upgrade_picks(
+            leftovers, refused_cands, job.execute_args)
         job.summary = (
             f"Qobuz stopped after {plural(ok, 'album')} upgraded. "
             f"{plural(len(leftovers), 'album')} selected for retry."
@@ -3482,7 +3500,10 @@ def execute_upgrades(job, chosen, token):
                 None, cand["payload"].get("album_dir"))
         elif _res not in _skip:
             failed += 1
-            failed_cands.append(cand)
+            if result and result.get("upgrade_refused"):
+                refused_cands.append(cand)
+            else:
+                failed_cands.append(cand)
             if result and result.get("upgrade_put_back"):
                 put_back_notes.append((
                     f"{cand.get('artist', '')} - {cand.get('title') or '?'}",
@@ -3495,8 +3516,8 @@ def execute_upgrades(job, chosen, token):
             job.cancel_requested and processed < len(chosen)):
         first_unfinished = processed - 1 if current_interrupted else processed
         leftovers = failed_cands + chosen[first_unfinished:]
-        retry_saved = _return_picks(
-            leftovers, "upgrade", execute_args=job.execute_args)
+        retry_saved = _return_upgrade_picks(
+            leftovers, refused_cands, job.execute_args)
         parts = [f"{ok} upgraded"]
         if failed:
             parts.append(f"{failed} failed")
@@ -3507,9 +3528,10 @@ def execute_upgrades(job, chosen, token):
         parts.append(f"{len(chosen) - processed} not started")
         job.summary = "Stopped early. " + ", ".join(parts) + "."
         if retry_saved is False:
+            unsaved = len(leftovers) + len(refused_cands)
             job.summary += (
-                f" {plural(len(leftovers), 'retry choice')} could not be "
-                "saved back to Upgrade."
+                f" {plural(unsaved, 'album')} could not be saved back to "
+                "Upgrade."
             )
         elif leftovers:
             job.summary += (
@@ -3593,11 +3615,8 @@ def execute_upgrades(job, chosen, token):
         )
     job.summary = msg
     log.info(msg)
-    retry_saved = _return_picks(
-        failed_cands,
-        "upgrade",
-        execute_args=job.execute_args,
-    )
+    retry_saved = _return_upgrade_picks(
+        failed_cands, refused_cands, job.execute_args)
     if any((failed, kept, catalogue_failed, quality_attention,
             processing_attention, changed)):
         problems = []
@@ -3634,13 +3653,14 @@ def execute_upgrades(job, chosen, token):
         elif processing_attention:
             job.attention = "processing"
         job.error = "; ".join(problems) + "."
-        if failed_cands:
-            retry_note = (
-                f" {plural(len(failed_cands), 'album')} selected for retry."
-                if retry_saved is not False
-                else " Retry choices could not be saved; refresh Upgrade."
-            )
-            job.error += retry_note
+        if retry_saved is False:
+            unsaved = len(failed_cands) + len(refused_cands)
+            job.error += (
+                f" {plural(unsaved, 'album')} could not be saved back to "
+                "Upgrade; refresh Upgrade.")
+        elif failed_cands:
+            job.error += (
+                f" {plural(len(failed_cands), 'album')} selected for retry.")
         _mark_job_failed(job)
     else:
         _close_completed_job(job)

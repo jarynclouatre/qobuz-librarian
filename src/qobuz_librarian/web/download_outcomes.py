@@ -308,9 +308,11 @@ def download_error(result, *, job_controls=True):
         if result.get("companions_unsettled"):
             return (
                 "The new copy is in your library, but files from the album "
-                "it replaced could not be carried into it. The next time "
-                "the app starts, it keeps that album as a backup in Settings "
-                "> Diagnostics."
+                "it replaced could not be carried into it. "
+                + ("That album is kept whole in a backup in Settings > "
+                   "Diagnostics." if result.get("companions_settled") else
+                   "The next time the app starts, it keeps that album as a "
+                   "backup in Settings > Diagnostics.")
             )
         if result.get("result") == "incomplete":
             if result.get("upgrade_put_back"):

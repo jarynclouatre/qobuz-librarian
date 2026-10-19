@@ -2383,6 +2383,9 @@ def process_album(album, args, *, allow_force=True, label=None,
         "recovery_unverified": recovery_unverified,
         "companions_kept": companions_kept,
         "upgrade_put_back": upgrade_put_back,
+        # Put back because the new copy failed its check, not because the
+        # download came up short, so another try fetches the same copy.
+        "upgrade_refused": upgrade_put_back,
         "upgrade_set_aside": str(upgrade_set_aside) if upgrade_set_aside else None,
         "auto_upgrade": bool(auto_upgrade_active),
         "quality_verdict": quality_verdict,

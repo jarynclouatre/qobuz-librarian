@@ -1,6 +1,7 @@
 """Queue executor: download, pre-import hooks, beets, backup resolution."""
 import errno
 import os
+import sqlite3
 import stat
 import sys
 import time
@@ -125,9 +126,12 @@ from qobuz_librarian.queue.durable_runner import (
     execute_durable_new_album,
 )
 from qobuz_librarian.queue.startup_recovery import (
+    BlockedItemSettlementAction,
+    BlockedItemSettlementStatus,
     StartupRecoveryAction,
     StartupRecoveryStatus,
     recover_startup_state,
+    settle_blocked_item,
 )
 from qobuz_librarian.repair_log import warn_if_download_truncated
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate, wrap
@@ -2838,15 +2842,39 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                     results[-1]["disk_full"] = True
                     _stop_for_full_disk(" during library import")
                 elif results[-1]["companions_unsettled"]:
-                    # The next start keeps it as it is, so nothing of it is
-                    # left to resume.
+                    # Kept as it is, as the next start would keep it, so
+                    # nothing of it is left to resume.
                     queue.remove(item)
+                    kept = None
+                    web_job = execution_mode.startswith("web-job:")
+                    if not web_job:
+                        try:
+                            kept = settle_blocked_item(
+                                authority=authority,
+                                operation_id=outcome.operation_id,
+                                item_id=outcome.item_id,
+                                action=BlockedItemSettlementAction.DISCARD,
+                            )
+                        except (OSError, sqlite3.Error,
+                                queue_state.QueueJournalError) as exc:
+                            vlog(f"keeping the uncarried upgrade failed: {exc}")
+                    if (kept is not None and kept.status
+                            is BlockedItemSettlementStatus.DISCARDED):
+                        durable_stopped = False
+                        results[-1]["companions_settled"] = True
+                        _persist()
+                        log.info(fmt(C.YELLOW, wrap(
+                            kept.reason, indent="    ⚠  ", hanging="       ")))
+                        continue
                     log.info(fmt(
                         C.YELLOW,
                         "    ⚠  The new copy is in your library, but files "
                         "from the album it replaced could not be carried "
-                        "into it. Stopping the queue; the next time the "
-                        "app starts, it keeps that album as a backup.",
+                        "into it. "
+                        + ("When this download ends, the app keeps that "
+                           "album as a backup." if web_job else
+                           "Stopping the queue; the next time the app "
+                           "starts, it keeps that album as a backup."),
                     ))
                 else:
                     log.info(fmt(

@@ -93,6 +93,13 @@ def queue_parked():
 # What a run asks of the user after an upgrade whose album's own files could
 # not be carried into the new copy.
 OWN_FILES_LEFT = "copy your own files from the backups the next start keeps"
+OWN_FILES_KEPT = "copy your own files from the backups in Settings > Diagnostics"
+
+
+def own_files_clause():
+    """OWN_FILES_LEFT while such an album still waits for the next start,
+    else OWN_FILES_KEPT."""
+    return OWN_FILES_LEFT if queue_parked() else OWN_FILES_KEPT
 
 
 def kept_queue_note(queue):

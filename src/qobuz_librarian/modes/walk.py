@@ -22,8 +22,8 @@ from qobuz_librarian.modes.artist import (
 from qobuz_librarian.queue.executor import _execute_download_queue
 from qobuz_librarian.queue.journal import clear_queue_journal
 from qobuz_librarian.queue.persistence import (
-    OWN_FILES_LEFT,
     keep_queue,
+    own_files_clause,
     parked_queue_note,
     queue_parked,
     queue_saver,
@@ -550,7 +550,7 @@ def run_album_walk_mode(args, token):
     elif partial_completion or retry_needed:
         clause = "some albums need a retry"
     elif own_files_left:
-        clause = OWN_FILES_LEFT
+        clause = own_files_clause()
     if interrupted:
         log.info(fmt(C.GRAY, "  Interrupted."))
     elif clause:
@@ -858,7 +858,7 @@ def run_walk_queued_mode(args, token):
     elif partial_completion or retry_needed:
         clause = "some albums need a retry"
     elif own_files_left:
-        clause = OWN_FILES_LEFT
+        clause = own_files_clause()
     if interrupted:
         log.info(fmt(C.GRAY, "  Interrupted." if ctrl_c else "  Stopped."))
     elif clause:

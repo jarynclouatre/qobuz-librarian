@@ -1497,7 +1497,7 @@ def _upgrade_backup_kept(only=None):
 
 
 _BEETS_MAY_LIST = (
-    " Beets may still list the replaced album beside the new copy; "
+    " Beets may still list the replaced album{}; "
     "`beet update` clears its entries for files that are gone."
 )
 
@@ -1534,7 +1534,7 @@ def _keep_imported_files(authority, journal, item, reference, manifest_hash):
         elif backup is not None:
             reason += _backup_sentence(backup)
     if not retired:
-        reason += _BEETS_MAY_LIST
+        reason += _BEETS_MAY_LIST.format(" beside the new copy")
     return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)
 
 
@@ -1703,7 +1703,7 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
         only = _backup_only_files(backup, Path(backup.receipt["origin"]))
         reason += f" The album it replaced is {_upgrade_backup_kept(only)}"
         if not _retire_partly_replaced_album(authority, backup, snapshot):
-            reason += _BEETS_MAY_LIST
+            reason += _BEETS_MAY_LIST.format(" beside the new copy" if moved else "")
     elif backup is not None:
         reason += _backup_sentence(backup)
     return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)
