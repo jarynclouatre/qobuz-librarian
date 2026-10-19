@@ -14,6 +14,7 @@ from qobuz_librarian.api.auth import (
 )
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import jobs as job_mgr
+from qobuz_librarian.web import storage
 
 
 def _download_error_message(exc, fallback: str) -> str:
@@ -321,6 +322,11 @@ def download_error(result, *, job_controls=True):
         if n_failed:
             return (f"{plural(n_failed, 'track')} failed."
                     + hint("See job log.") + other)
+        if result.get("import_denied"):
+            folder, _is_host = storage._resolve_host_path(
+                result["import_denied"])
+            return (f"Downloaded, but Beets was not allowed to write in "
+                    f"{folder}. Check that folder's permissions, then retry.")
         if result.get("n_ok"):
             return "Downloaded, but the import failed." + hint("See job log.")
         if retryable:

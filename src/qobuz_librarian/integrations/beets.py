@@ -4798,7 +4798,7 @@ class MusicDiskFull(OSError):
 
 
 def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
-                        places=None, folder=None):
+                        places=None, folder=None, failure_out=None):
     """Run beets import scoped to ``album_dirs`` and return one of:
 
     - ``"ok"``: import succeeded.
@@ -4816,7 +4816,8 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
     from the folder of an album ``album_dir`` adds tracks to. ``places``
     maps a track's ISRC to its path in that folder, without the extension.
     ``folder`` files the album in that library folder whether or not it
-    exists yet.
+    exists yet. ``failure_out`` gets "permission_denied", the folder beets
+    was not allowed to write in, when that stopped it.
     """
     if not album_dirs:
         return "ok"
@@ -4845,6 +4846,7 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
         ownership_capture=ownership_out,
         intended_audio=intended_audio,
         beets_runtime=runtime,
+        failure_out=failure_out,
     )
     if not ok:
         _clean_up_failed_import(album_dirs, (album_dir, folder), started_ns)
@@ -5669,6 +5671,7 @@ def _beets_direct(
     managed_capture=None,
     beets_runtime=None,
     before_managed_spawn=None,
+    failure_out=None,
 ):
     result = None
     caught = None
@@ -5681,6 +5684,7 @@ def _beets_direct(
             managed_capture=managed_capture,
             beets_runtime=beets_runtime,
             before_managed_spawn=before_managed_spawn,
+            failure_out=failure_out,
         )
     except BaseException as exc:
         caught = exc
@@ -5705,6 +5709,7 @@ def _beets_direct_guarded(
     managed_capture=None,
     beets_runtime=None,
     before_managed_spawn=None,
+    failure_out=None,
 ):
     """Call ``beet import`` as a direct subprocess (bundled mode), scoped to
     the given paths. Returns
@@ -6131,14 +6136,38 @@ def _beets_direct_guarded(
     # Beets ends on a traceback, or logs "Error: ..." or "error writing ...".
     stopped = "\n".join(line for line, part in zip(lines, parts)
                         if part == "error" or line.lower().startswith("error"))
+    denied = _permission_denied_folder(stopped)
+    if denied is not None and failure_out is not None:
+        failure_out["permission_denied"] = denied
     return False, "disk_full" if detect_disk_full(stopped) else "error"
+
+
+_DENIED_RES = (
+    re.compile(r"Permission denied while (?:moving|copying|renaming|linking"
+               r"|hardlinking|reflinking) /.+? to (?P<path>/.+?)\.?$"),
+    re.compile(r"Permission denied while (?:creating|writing|deleting|removing)"
+               r"(?: directory)? (?P<path>/.+?)\.?$"),
+    re.compile(r"\[Errno 13\] Permission denied: (['\"])(?P<path>.+)\1"),
+)
+
+
+def _permission_denied_folder(stopped):
+    """The folder beets was not allowed to write in, from its error lines,
+    or None."""
+    for line in reversed(stopped.splitlines()):
+        for pattern in _DENIED_RES:
+            match = pattern.search(line.strip())
+            if match:
+                return str(Path(match.group("path")).parent)
+    return None
 
 
 def _report_staging_remnants():
     """List the top-level album folders still in staging after a beets
     failure so the user knows exactly what didn't import. A bare
     "files remain in staging" line leaves them guessing across batches
-    of 100+ albums."""
+    of 100+ albums. A download's own run folder is left out; the queue
+    settles it."""
     audio_exts = set(cfg.AUDIO_EXTS)
 
     def tracks_in(folder):
@@ -6158,8 +6187,9 @@ def _report_staging_remnants():
     # A --no-import download a manual import emptied holds no album to list.
     counted = [
         (folder, n_audio) for folder in folders
-        if (n_audio := tracks_in(folder))
-        or not staging_mod.is_kept_staging_run_name(folder.name)
+        if not _is_isolated_run_name(folder.name)
+        and ((n_audio := tracks_in(folder))
+             or not staging_mod.is_kept_staging_run_name(folder.name))
     ]
     if not counted:
         return

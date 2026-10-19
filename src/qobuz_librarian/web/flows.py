@@ -5309,6 +5309,9 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
         job.summary = job.error
         _mark_job_failed(job)
         return
+    skipped = engine.skipped_folders_note(items)
+    if skipped:
+        job.push_line(skipped)
     unreadable = getattr(items, "unreadable", ())
     for path, reason in unreadable[:50]:
         job.push_line(f"could not be read, left where it is: {path} - {reason}")

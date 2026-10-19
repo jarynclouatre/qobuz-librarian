@@ -52,6 +52,7 @@ from qobuz_librarian.library.backup import (
     capture_album_source_receipt,
     companion_conflicts,
     library_backup_record,
+    library_backup_record_absent,
     load_backup_result,
     load_library_backup_record,
     pin_unverified_upgrade_backup,
@@ -354,7 +355,7 @@ def _classify(journals) -> tuple[StartupRecoveryItem, ...]:
                     phase=item.phase,
                     action=action,
                     reason=reason,
-                    label=_album_title(item),
+                    label=_album_label(item),
                     holds_backup=bool(_references(item, _LIBRARY_BACKUP_KINDS)),
                     holds_staging=bool(_staging_references(item)),
                 )
@@ -1213,6 +1214,17 @@ def _put_back_library_backup(authority, journal, item):
             f"the album missing from {paths['origin']} is at that path. "
             "Then restart Qobuz Librarian."
         )
+    owner = {"operation_id": journal.operation_id, "item_id": item.item_id}
+    if (reason.startswith("library-backup-restore-unsettled:")
+            and load_library_backup_record(paths, expected_owner=owner) is None
+            and not library_backup_record_absent(paths, expected_owner=owner)):
+        return _blocked_settlement(
+            f"The backup at {paths['path']} could not be read or no longer "
+            "matches the record made when it was taken, so it was not put "
+            f"back into {paths['origin']} and this item remains blocked. "
+            "Check that the backup folder is mounted and readable, then "
+            "restart Qobuz Librarian. The backup is left as it is."
+        )
     return _blocked_settlement(
         f"The tracks backed up to {paths['path']} could not be put back into "
         f"{paths['origin']}, so this item remains blocked. Check that both "
@@ -1878,12 +1890,19 @@ def settle_blocked_item(
         return _blocked_settlement("Run-lock authority was lost, so the item remains blocked.")
 
 
-def _album_title(item):
-    """The title of the album a saved item downloads, for messages; its
-    queue label is only its place in the queue."""
+def _album_label(item):
+    """"Artist · Title" of the album a saved item downloads, as the job pages
+    name it; its queue label is only its place in the queue."""
     album = item.planned.get("album")
-    title = album.get("title") if isinstance(album, dict) else None
-    return str(title or item.planned.get("label") or "download")
+    if not isinstance(album, dict):
+        album = {}
+    title = str(album.get("title") or "").strip()
+    artist = album.get("artist")
+    artist = str((artist.get("name") if isinstance(artist, dict) else "")
+                 or "").strip()
+    if title and artist:
+        return f"{artist} · {title}"
+    return title or str(item.planned.get("label") or "download")
 
 
 def _settled_download(journal, item, outcome, reason=""):
@@ -1894,7 +1913,7 @@ def _settled_download(journal, item, outcome, reason=""):
         mode=journal.mode,
         item_id=item.item_id,
         album_id=None if album_id is None else str(album_id),
-        label=_album_title(item),
+        label=_album_label(item),
         outcome=outcome,
         reason=reason,
     )
@@ -1958,7 +1977,7 @@ def _settle_next_blocked(authority, journals, tried, outcomes, said):
                 log.warning(
                     "%s: “%s”: %s",
                     BLOCKED_DOWNLOAD_LOG_ENTRY,
-                    _album_title(item),
+                    _album_label(item),
                     settled.reason,
                 )
                 said.add(key)
@@ -2142,7 +2161,7 @@ def _recover_startup_state(
                 log.warning(
                     "%s: “%s”: %s",
                     BLOCKED_DOWNLOAD_LOG_ENTRY,
-                    _album_title(settlement[1]),
+                    _album_label(settlement[1]),
                     settled.reason,
                 )
                 said.add((settlement[0].operation_id, settlement[1].item_id))

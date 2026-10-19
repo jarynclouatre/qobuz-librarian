@@ -173,6 +173,9 @@ def run_migrate_mode(args):
             f"  ✗  Couldn't read the source library ({e}). Nothing was "
             "changed; fix this and run it again."))
         return EXIT_GENERAL
+    skipped = engine.skipped_folders_note(items)
+    if skipped:
+        log.info(fmt(C.GRAY, f"  {skipped}"))
     unreadable = getattr(items, "unreadable", ())
     if unreadable:
         log.info(fmt(C.YELLOW,

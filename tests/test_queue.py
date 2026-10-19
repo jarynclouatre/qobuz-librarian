@@ -542,7 +542,7 @@ def test_executor_per_album_isolation_one_album_failure_keeps_others(monkeypatch
     by_label = {"A": "ok", "B": "error", "C": "ok"}
     seen = []
 
-    def fake_import(album_dirs):
+    def fake_import(album_dirs, **_kwargs):
         # Map back to the item by its album-dir grandparent name ("Artist-X").
         artist = album_dirs[0].parent.name.split("-")[-1]
         seen.append(artist)

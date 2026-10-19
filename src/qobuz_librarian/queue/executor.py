@@ -813,11 +813,12 @@ def _queue_outcome_needs_attention(item):
 
 def _import_album_with_retry(
         album_dirs, *, ownership_out=None, source_receipts=None, album_dir=None,
-        places=None, folder=None):
+        places=None, folder=None, failure_out=None):
     """Run beets import on ``album_dirs`` with up to ``BEETS_MAX_ATTEMPTS``
     attempts, retrying only on idle-timeout (other failures aren't transient).
     Returns True on import success, False on permanent failure, and raises
-    MusicDiskFull when beets stopped on a full disk."""
+    MusicDiskFull when beets stopped on a full disk. ``failure_out`` gets
+    what beets_import_albums says about a failure."""
     if not album_dirs:
         return True
     if ownership_out is not None:
@@ -832,6 +833,8 @@ def _import_album_with_retry(
             pin["places"] = places
         if folder is not None:
             pin["folder"] = folder
+        if failure_out is not None:
+            pin["failure_out"] = failure_out
         if ownership_out is None:
             kind = beets_import_albums(album_dirs, **pin)
             attempt_capture = None
@@ -1622,6 +1625,7 @@ def _resolve_queue_item(
         "upgrade_put_back": bool(item.get("upgrade_put_back", False)),
         "catalogue_unverified": bool(item.get("catalogue_unverified", False)),
         "recovery_unverified": bool(item.get("recovery_unverified", False)),
+        "import_denied": item.get("import_denied"),
         "quality_verdict": item.get("quality_verdict"),
         "siblings_preserved": item.get("_siblings_preserved", []),
         "siblings_kept": item.get("_siblings_kept", []),
@@ -2082,11 +2086,14 @@ def _queue_done_line(results, n_items, *, stopped=False):
     by its tracks. An album Qobuz could not deliver whole was discarded, so
     every track it asked for is still unresolved. An Upgrade that kept the
     original, and an album whose files changed after it was queued, were
-    left as they are, with nothing to retry.
+    left as they are, with nothing to retry. An Upgrade whose new copy is in
+    the library without the old album's own files has nothing to retry
+    either.
     """
     n_success = sum(1 for r in results if r.get("result") == "downloaded")
     n_cancelled = sum(1 for r in results if r.get("result") == "cancelled")
     n_left = sum(1 for r in results if _left_as_it_is(r))
+    n_own_left = sum(1 for r in results if r.get("companions_unsettled"))
     n_total_ok = n_total_missing = 0
     for r in results:
         if r.get("result") == "cancelled" or _left_as_it_is(r):
@@ -2097,9 +2104,10 @@ def _queue_done_line(results, n_items, *, stopped=False):
         else:
             n_total_ok += r.get("n_ok", 0)
         n_total_missing += missing
-    n_unfinished = max(0, n_items - n_success - n_cancelled - n_left)
+    n_unfinished = max(
+        0, n_items - n_success - n_cancelled - n_left - n_own_left)
     clear = (n_total_missing == 0 and n_unfinished == 0 and n_cancelled == 0
-             and n_left == 0)
+             and n_left == 0 and n_own_left == 0)
     text = (f"  {'✓' if clear else '⚠'} Queue {'stopped' if stopped else 'done'}: "
             f"{n_success}/{n_items} albums OK · "
             f"{n_total_ok} track{'s' if n_total_ok != 1 else ''} downloaded · "
@@ -2110,6 +2118,9 @@ def _queue_done_line(results, n_items, *, stopped=False):
     if n_left:
         text += (f" · {plural(n_left, 'album')} left as "
                  f"{'it is' if n_left == 1 else 'they are'}")
+    if n_own_left:
+        text += (f" · {plural(n_own_left, 'album')} upgraded, your own "
+                 "files from the old copy kept in a backup")
     if n_unfinished:
         text += (f" · {n_unfinished} album"
                  f"{'s' if n_unfinished != 1 else ''} unfinished")
@@ -3085,15 +3096,19 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                                     item["_replaced_beets_entries"], album_dirs):
                                 raise OSError(
                                     "couldn't record the upgrade in its backup")
+                    failure = {}
                     if ownership_capture is None:
                         item_imported = _import_album_with_retry(
-                            album_dirs, **pin)
+                            album_dirs, failure_out=failure, **pin)
                     else:
                         item_imported = _import_album_with_retry(
                             album_dirs,
                             ownership_out=ownership_capture,
+                            failure_out=failure,
                             **pin,
                         )
+                    if not item_imported and failure.get("permission_denied"):
+                        item["import_denied"] = failure["permission_denied"]
                 except ImportedThenInterrupted:
                     log.info(fmt(C.YELLOW,
                         "\n    Interrupted. Stopping further downloads."))

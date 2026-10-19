@@ -324,9 +324,11 @@ def run_album_walk_mode(args, token):
     n_albums_unmatched = 0
     n_albums_unplaced = 0
     n_albums_unavailable = 0
+    n_albums_unchecked = 0
     unmatched_names = []
     unplaced_names = []
     unavailable_names = []
+    unchecked_names = []
     n_albums_filled = 0
     n_albums_left_out = 0
     interrupted = False
@@ -441,6 +443,9 @@ def run_album_walk_mode(args, token):
                     elif _result == "other_edition":
                         n_albums_unavailable += 1
                         unavailable_names.append(_ad.name)
+                    elif _result == "unchecked":
+                        n_albums_unchecked += 1
+                        unchecked_names.append(_ad.name)
                     else:
                         # Matched a candidate then rejected it (false_match,
                         # low_overlap, predicted_path_mismatch) or it had no
@@ -517,12 +522,15 @@ def run_album_walk_mode(args, token):
         leftovers.append(f"couldn't place: {n_albums_unplaced}")
     if n_albums_unavailable:
         leftovers.append(f"nothing available on Qobuz: {n_albums_unavailable}")
+    if n_albums_unchecked:
+        leftovers.append(f"couldn't check: {n_albums_unchecked}")
     if leftovers:
         log.info(fmt(C.GRAY, "    " + " · ".join(leftovers)))
     for label, names in (
         ("No Qobuz match", unmatched_names),
         ("Couldn't place", unplaced_names),
         ("Nothing available on Qobuz", unavailable_names),
+        ("Couldn't check", unchecked_names),
     ):
         note = _leftover_folder_note(label, names)
         if note:

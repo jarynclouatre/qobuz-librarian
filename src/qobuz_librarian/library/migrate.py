@@ -2043,6 +2043,8 @@ class CollectedItems(list):
         self.companion_receipts = []
         # (path, reason) for every file or folder the scan could not read.
         self.unreadable = []
+        # Names of the hidden and system folders the scan left out.
+        self.skipped_folders = []
 
 
 def _scan_file_from_descriptor(binding, parent_fd, parent_receipts,
@@ -2091,6 +2093,7 @@ def _enumerate_source_descriptors(binding, *, cancel_check=None,
     audio_exts = set(config.AUDIO_EXTS)
     visited = 0
     unreadable = []
+    skipped_folders = []
 
     def walk(parent_fd, relative_parent, parent_receipts, parent_descriptors):
         nonlocal visited
@@ -2100,6 +2103,12 @@ def _enumerate_source_descriptors(binding, *, cancel_check=None,
                 return
             name = os.fsdecode(encoded_name)
             if is_library_system_folder(name):
+                try:
+                    if stat.S_ISDIR(os.stat(name, dir_fd=parent_fd,
+                                            follow_symlinks=False).st_mode):
+                        skipped_folders.append(name)
+                except OSError:
+                    pass
                 continue
             if not _safe_component(name):
                 raise OSError("migration source contains an unsafe filename")
@@ -2170,7 +2179,7 @@ def _enumerate_source_descriptors(binding, *, cancel_check=None,
     companions.sort(key=lambda item: tuple(
         os.fsencode(part) for part in item["relative"]))
     unreadable.sort(key=lambda item: os.fsencode(item[0]))
-    return audio, companions, unreadable
+    return audio, companions, unreadable, skipped_folders
 
 
 def _lyric_destinations(entries):
@@ -2648,6 +2657,21 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
     return True
 
 
+def skipped_folders_note(items) -> str:
+    """One line counting the hidden and system folders a scan left out, or
+    ""."""
+    names = sorted(set(getattr(items, "skipped_folders", ())))
+    if not names:
+        return ""
+    count = len(items.skipped_folders)
+    names = names[:3]
+    shown = names[0] if len(names) == 1 else (
+        ", ".join(names[:-1]) + " and " + names[-1])
+    if count == 1:
+        return f"Skipped 1 hidden or system folder: {shown}."
+    return f"Skipped {count} hidden or system folders, such as {shown}."
+
+
 def collect_items(source_root: Path, *, use_acoustid: bool = False,
                   cancel_check: Optional[Callable[[], bool]] = None,
                   progress: Optional[Callable] = None,
@@ -2664,12 +2688,12 @@ def collect_items(source_root: Path, *, use_acoustid: bool = False,
     root_binding = _open_root_receipt(root_receipt)
     try:
         items = CollectedItems(source_root, root_receipt)
-        scanned, items.companion_receipts, unreadable = \
-            _enumerate_source_descriptors(
-                root_binding,
-                cancel_check=cancel_check,
-                progress=progress,
-            )
+        (scanned, items.companion_receipts, unreadable,
+         items.skipped_folders) = _enumerate_source_descriptors(
+            root_binding,
+            cancel_check=cancel_check,
+            progress=progress,
+        )
         items.unreadable = [
             (path, exc.strerror or str(exc)) for path, exc in unreadable]
         # (path, orig_meta, receipt) - orig_meta may retain track/disc data for

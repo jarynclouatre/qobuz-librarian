@@ -70,6 +70,8 @@ from qobuz_librarian.queue.journal import (
 from qobuz_librarian.queue.persistence import (
     OWN_FILES_LEFT,
     kept_queue_note,
+    parked_queue_note,
+    queue_parked,
     queue_saver,
 )
 from qobuz_librarian.ui_cli.ask import ask
@@ -641,7 +643,9 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             else:
                 clear_queue_journal()
         elif not drained and (earlier or queue):
-            if save_own_queue is not None:
+            if save_own_queue is not None and queue_parked():
+                log.info(parked_queue_note())
+            elif save_own_queue is not None:
                 log.info(fmt(C.YELLOW, "  ⚠  Some albums couldn't be downloaded."))
                 log.info(kept_queue_note(earlier + queue))
             else:
@@ -1025,13 +1029,13 @@ def _report_gap_fill_summary(results):
         ("dry_run", C.GRAY, "dry run, not fetched:"),
         ("not_imported", C.YELLOW, "downloaded, not imported:"),
         ("stopped", C.YELLOW, "stopped, still queued:"),
-        ("own_files_left", C.YELLOW, "upgraded, own files left out:"),
+        ("own_files_left", C.YELLOW, "upgraded, own files in backup:"),
         ("failed", C.RED, "✗ failed:"),
         ("other", C.YELLOW, "other outcomes:"),
     )
     for bucket, colour, label in labels:
         if counts[bucket]:
-            padded_label = f"{label:<30}"
+            padded_label = f"{label:<32}"
             log.info(f"  {fmt(colour, padded_label)}{counts[bucket]}")
     return counts
 
@@ -1043,7 +1047,13 @@ def _gap_fill_exit_code(counts, *, stopped=False):
     )
     if needs_attention:
         clauses = []
-        if any(counts[bucket] for bucket in _ATTENTION_BUCKETS - {"own_files_left"}):
+        retry = _ATTENTION_BUCKETS - {"own_files_left"}
+        if queue_parked():
+            clauses.append(
+                "run Qobuz Librarian with no mode or search argument to "
+                "settle the stopped album")
+            retry -= {"stopped"}
+        if any(counts[bucket] for bucket in retry):
             clauses.append("retry the unfinished albums above")
         if counts["own_files_left"]:
             clauses.append(OWN_FILES_LEFT)
