@@ -1092,6 +1092,9 @@ def main():
                 f"   {exc}\n"
                 "   Its saved recovery state was left unchanged.\n",
             ), EXIT_GENERAL)
+        if choice == "blocked":
+            _report_settled_downloads(
+                _record_startup_recovery(_lockfile, settle=True))
         read_saved_queue()
         if parked:
             log.info(queue_refusal(True, True))

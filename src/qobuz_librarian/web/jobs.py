@@ -54,7 +54,7 @@ from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.post_job_hook import release_title
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import set_progress_reporter, set_thread_wrapper
-from qobuz_librarian.web import job_persistence, review_badges
+from qobuz_librarian.web import job_persistence, review_badges, storage
 
 log = logging.getLogger("qobuz_librarian")
 
@@ -1275,6 +1275,8 @@ def _run_task(job: Job, fn):
         job.status = JobStatus.FAILED
         job.error = _friendly_job_error(e, cleaned)
         job.push_line(f"[ERROR] {cleaned}")
+        if isinstance(e, beets.MusicDiskFull):
+            storage.note_music_disk_full()
         if (job.album_id and isinstance(e, (AuthLost, QobuzUnavailable))
                 and not isinstance(e, DownloadsRefused)):
             _start_qobuz_hold(e)

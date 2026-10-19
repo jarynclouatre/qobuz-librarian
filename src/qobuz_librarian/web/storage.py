@@ -1,5 +1,6 @@
 """The mounted folders: host paths, writability, the music folder and the quality census."""
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -96,6 +97,36 @@ def _music_write_target_message(state: str, recorded_albums: int = 0, *,
             "anyway before retrying."
         )
     return ""
+
+
+# When a download stopped on a full music disk, and the music folder's free
+# space then. Downloads queued before it fail at once until space is freed.
+_music_disk_full: tuple[float, int] | None = None
+
+
+def _music_free_bytes() -> int:
+    try:
+        return shutil.disk_usage(cfg.MUSIC_ROOT).free
+    except OSError:
+        return 0
+
+
+def note_music_disk_full() -> None:
+    global _music_disk_full
+    _music_disk_full = (time.time(), _music_free_bytes())
+
+
+def _refuse_behind_full_music_disk(job) -> None:
+    global _music_disk_full
+    if _music_disk_full is None:
+        return
+    stopped_at, free_then = _music_disk_full
+    if _music_free_bytes() > free_then:
+        _music_disk_full = None
+    elif job.created_at < stopped_at:
+        raise RuntimeError(
+            "Not started: the disk filled up during an earlier download. "
+            "Free some space, then retry.")
 
 
 def _require_music_write_target_for_job() -> None:

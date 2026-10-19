@@ -283,6 +283,13 @@ def _load_startup_recovery_queue(recovery):
     return loaded, items, mode, journal.saved_at, operation_id, bool(recovery_bearing)
 
 
+def _blocked_items(operation_id):
+    journal = load_queue_journal(operation_id).journal
+    return [] if journal is None else [
+        (operation_id, item.item_id) for item in journal.items
+        if item.phase is QueuePhase.BLOCKED]
+
+
 def offer_resume_startup_recovery(args, token_source, recovery):
     """Offer the exact typed CLI operation named by startup recovery."""
     (
@@ -377,6 +384,12 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                     "launch."))
                 raise
             except Exception as exc:
+                blocked = _blocked_items(operation_id) if recovery_bearing else []
+                if blocked:
+                    from qobuz_librarian.queue import startup_recovery
+
+                    startup_recovery.resume_blocked_again(blocked)
+                    return "blocked"
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Resume failed: {exc}. Saved queue kept for next launch."))
             return "resume"

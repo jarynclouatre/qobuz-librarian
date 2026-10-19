@@ -138,6 +138,7 @@ def _make_download_run(
         durable_failure = False
         durable_completion_settled = False
         with job_mgr.staging_lock_unless_cancelled(j):
+            storage._refuse_behind_full_music_disk(j)
             with qobuz_access._CREDENTIAL_LOCK:
                 if (active is not None
                         and not qobuz_access._credential_generation_is_active(
@@ -274,6 +275,8 @@ def _make_download_run(
                         )
                     if r.get("disk_full"):
                         j.error = f"{MusicDiskFull.MESSAGE}. {j.error}"
+        if r.get("disk_full"):
+            storage.note_music_disk_full()
         status, attention = download_result.download_job_outcome(r)
         if durable_failure:
             pass

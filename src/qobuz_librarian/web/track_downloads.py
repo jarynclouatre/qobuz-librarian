@@ -350,6 +350,7 @@ def _make_single_track_run(album, track, token):
         flows._note_staging_wait(j, "Downloading", 0, 1)
         owned_path = None
         with job_mgr.staging_lock_unless_cancelled(j):
+            storage._refuse_behind_full_music_disk(j)
             with qobuz_access._CREDENTIAL_LOCK:
                 if (active is not None
                         and not qobuz_access._credential_generation_is_active(
@@ -379,6 +380,8 @@ def _make_single_track_run(album, track, token):
                     j, ownership_valid=owned_path is not None)
         if not download_succeeded:
             j.status = job_mgr.JobStatus.FAILED
+            if qi.get("result") == "disk_full":
+                storage.note_music_disk_full()
             _, _, lossy_only, unavailable = download_result.track_shortfall(qi)
             if (lossy_only or unavailable) and qi.get("result") not in (
                     "disk_full", "io_error"):

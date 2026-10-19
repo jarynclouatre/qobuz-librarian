@@ -1663,6 +1663,8 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
         f"The download was cleared. Beets had moved {plural(moved, 'track')} "
         f"into your library, and {'it stays' if moved == 1 else 'they stay'} "
         "there."
+        if moved else
+        "The download was cleared. Beets had not filed any of its tracks."
     )
     listed = (
         "listed in Settings > Diagnostics as “Files from a stopped download”, "
@@ -1919,6 +1921,16 @@ def _settled_download(journal, item, outcome, reason=""):
     )
 
 
+# Filed downloads whose resume blocked again, by (operation id, item id).
+# The resume was their check, so settling keeps them as they are.
+_CHECKED_AGAIN = set()
+
+
+def resume_blocked_again(keys):
+    """Record filed downloads a resume checked again and found blocked."""
+    _CHECKED_AGAIN.update(keys)
+
+
 def _settle_choice(journal, item, tried):
     """The settlement a blocked download gets on its own, and its outcome.
 
@@ -1935,10 +1947,14 @@ def _settle_choice(journal, item, tried):
     if launched is not None and launched[0] == _IMPORT_PARTIAL:
         return BlockedItemSettlementAction.DISCARD, "set-aside"
     if launched is not None and launched[0] == _IMPORT_FILED:
-        if BlockedItemSettlementAction.RETRY in tried or item.block_reason in {
-            "completed-item-proof-unavailable",
-            "library-backup-companions-unsettled",
-        }:
+        if (
+            BlockedItemSettlementAction.RETRY in tried
+            or (journal.operation_id, item.item_id) in _CHECKED_AGAIN
+            or item.block_reason in {
+                "completed-item-proof-unavailable",
+                "library-backup-companions-unsettled",
+            }
+        ):
             return BlockedItemSettlementAction.DISCARD, "kept"
         return BlockedItemSettlementAction.RETRY, "checked"
     if journal.mode.startswith("web-job:"):
