@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from qobuz_librarian import __version__
 from qobuz_librarian import config as cfg
+from qobuz_librarian import download as download_mod
 from qobuz_librarian.library import generation_state
 from qobuz_librarian.library.tags import known_year
 from qobuz_librarian.web import auth as web_auth
@@ -453,21 +454,28 @@ _COVER_FILENAMES = ("cover.jpg", "cover.jpeg", "cover.png",
 
 
 def _local_album_art(album_dir):
-    """The cover file sitting in an album folder, or None.
+    """The cover file sitting in an album folder, or in its first disc folder
+    when the album folder has none, or None.
 
     Matched without regard to case, because a library built on a case-sensitive
     filesystem is full of Cover.jpg and Folder.jpg.
     """
     try:
+        listing = list(os.scandir(str(album_dir)))
         entries = {entry.name.lower(): entry
-                   for entry in os.scandir(str(album_dir))
-                   if entry.is_file()}
+                   for entry in listing if entry.is_file()}
+        discs = sorted(
+            (int(match.group(1)), entry.path) for entry in listing
+            if (match := download_mod._DISC_DIR_RE.match(entry.name))
+            and entry.is_dir(follow_symlinks=False))
     except OSError:
         return None
     for filename in _COVER_FILENAMES:
         entry = entries.get(filename)
         if entry is not None:
             return Path(entry.path)
+    if discs:
+        return _local_album_art(discs[0][1])
     return None
 
 
