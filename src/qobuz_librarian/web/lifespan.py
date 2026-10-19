@@ -14,6 +14,7 @@ from qobuz_librarian import beets_db, disk_support, raise_open_file_limit, run_l
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.integrations import beets as beets_mod
+from qobuz_librarian.integrations import downsample_engine
 from qobuz_librarian.integrations import lyrics as lyrics_mode
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
@@ -381,6 +382,7 @@ def _settle_interrupted_upgrades() -> tuple[list, list]:
         if beets_db.remove_old_copies():
             _log.info("Removed the beets database copies an earlier version left.")
         beets_mod.remove_stale_import_overrides()
+        beets_mod.remove_stale_ownership_folders()
         finished, put_back = process_mode.finish_interrupted_upgrades()
     except Exception:
         _log.exception("couldn't settle the upgrades a hard stop cut short")
@@ -678,6 +680,7 @@ def _put_back_albums() -> None:
     _put_back_pending = False
     try:
         backup_mod.settle_interrupted_restores()
+        downsample_engine.settle_interrupted_downsample()
         for path, origin in backup_mod.albums_left_in_backups():
             backup = backup_mod.album_backup_to_put_back(path, origin)
             if backup is None:

@@ -1138,11 +1138,13 @@ def main():
     def startup_housekeeping():
         from qobuz_librarian import beets_db
         from qobuz_librarian.integrations import beets as beets_mod
+        from qobuz_librarian.integrations import downsample_engine
         from qobuz_librarian.integrations import staging as staging_mod
         from qobuz_librarian.modes import process as process_mode
         try:
             beets_db.remove_old_copies()
             beets_mod.remove_stale_import_overrides()
+            beets_mod.remove_stale_ownership_folders()
             process_mode.finish_interrupted_upgrades()
             if not saved_queue:
                 staging_mod.remove_empty_retry_groups()
@@ -1151,6 +1153,7 @@ def main():
             vlog(f"interrupted upgrade settle error: {e}")
         try:
             backup_mod.settle_interrupted_restores()
+            downsample_engine.settle_interrupted_downsample()
             for path, origin in backup_mod.albums_left_in_backups():
                 backup = backup_mod.album_backup_to_put_back(path, origin)
                 if backup is not None and backup_mod.restore_upgrade_backup(

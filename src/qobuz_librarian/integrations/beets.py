@@ -3355,6 +3355,78 @@ def _remove_exact_ownership_marker(directory_fd, marker, expected_token):
                 pass
 
 
+_UNPUBLISHED_OWNERSHIP_NAME = re.compile(r"\.qobuz-ownership-[0-9a-f]{16}-[0-9a-f]{32}")
+
+
+def _remove_unpublished_marker(directory_fd, expected_token=None):
+    """Remove the marker of a folder an import made but never renamed into
+    place, proved by its token, or by holding only a token without one.
+    Its times are not compared: a disk that can't do that rename, such as
+    rclone, reports other ones for the marker until it is written back."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        marker_fd = os.open(_OWNERSHIP_MARKER, flags, dir_fd=directory_fd)
+        try:
+            held = os.fstat(marker_fd)
+            raw = os.pread(marker_fd, 129, 0)
+        finally:
+            os.close(marker_fd)
+        named = os.stat(_OWNERSHIP_MARKER, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
+            or not (raw == (expected_token + "\n").encode("ascii")
+                    if expected_token is not None
+                    else re.fullmatch(rb"[0-9a-f]{64}\n", raw))
+        ):
+            return False
+        os.unlink(_OWNERSHIP_MARKER, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        return True
+    except OSError:
+        return False
+
+
+def remove_stale_ownership_folders():
+    """Remove the hidden folders an import made at the top two levels of the
+    music folder and never renamed into place, as on a disk that can't, when
+    they hold nothing but their marker. Run only while no import can be.
+    Returns how many."""
+    removed = 0
+    try:
+        root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
+        parents = [root, *(entry for entry in root.iterdir()
+                           if not entry.name.startswith(".")
+                           and entry.is_dir() and not entry.is_symlink())]
+    except OSError:
+        return 0
+    for parent in parents:
+        try:
+            names = [name for name in os.listdir(parent)
+                     if _UNPUBLISHED_OWNERSHIP_NAME.fullmatch(name)]
+        except OSError:
+            continue
+        for name in names:
+            parent_fd = directory_fd = None
+            try:
+                parent_fd = _open_ownership_dir(os.fspath(parent))
+                directory_fd = _open_ownership_dir(name, dir_fd=parent_fd)
+                entries = os.listdir(directory_fd)
+                if entries and (entries != [_OWNERSHIP_MARKER]
+                                or not _remove_unpublished_marker(directory_fd)):
+                    continue
+                if _remove_empty_dir(name, dir_fd=parent_fd):
+                    os.fsync(parent_fd)
+                    removed += 1
+            except OSError:
+                pass
+            finally:
+                for descriptor in (directory_fd, parent_fd):
+                    if descriptor is not None:
+                        os.close(descriptor)
+    return removed
+
+
 def _reclaim_ownership_directories(root_fd, records, nonce):
     """Remove only exact, empty directories from one failed ownership run."""
     if not isinstance(records, list) or len(records) > 64:
@@ -3415,7 +3487,10 @@ def _reclaim_ownership_directories(root_fd, records, nonce):
                 continue
 
             entries = os.listdir(directory_fd)
-            if entries == [_OWNERSHIP_MARKER]:
+            if entries == [_OWNERSHIP_MARKER] and original_name == temporary_parts[-1]:
+                if not _remove_unpublished_marker(directory_fd, token):
+                    continue
+            elif entries == [_OWNERSHIP_MARKER]:
                 if not _read_ownership_marker(directory_fd, token, marker):
                     continue
                 marker_identity = marker or _ownership_identity(os.stat(
@@ -6969,10 +7044,11 @@ def _backup_receipt(value):
     return getattr(value, "receipt", None)
 
 
-def _backup_retirement(connection, old_paths, replacement_paths):
+def _backup_retirement(connection, old_paths, replacement_paths, whole_album):
     """The old rows ``retire_backup_beets_entries`` retires, their albums,
     the replacement album and the attribute columns, after proving the
-    replacement is catalogued exactly."""
+    replacement is catalogued exactly. With ``whole_album``, as for an
+    upgrade, the replacement can't be an album that is retired."""
     (
         album_columns,
         item_columns,
@@ -7038,6 +7114,7 @@ def _backup_retirement(connection, old_paths, replacement_paths):
         len(retiring_ids) > 4096
         or len(retiring_ids) != len(set(retiring_ids))
         or not replacement_proven
+        or whole_album and replacement_album_id in retiring_album_ids
     ):
         raise sqlite3.IntegrityError("exact Beets replacement proof failed")
     return (retiring_ids, retiring_album_ids, replacement_album_id,
@@ -7050,6 +7127,7 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
     backup_receipt = _backup_receipt(backup)
     try:
         old_root = backup_receipt["origin"]
+        whole_album = backup_receipt.get("kind") == "upgrade"
         old_paths = _receipt_audio_paths(backup_receipt, old_root)
         replacement_paths = _receipt_audio_paths(
             replacement_receipt, replacement_dir
@@ -7085,7 +7163,8 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
     try:
         if not beets_db.read(
             database,
-            lambda current: _backup_retirement(current, old_paths, replacement_paths)[0],
+            lambda current: _backup_retirement(
+                current, old_paths, replacement_paths, whole_album)[0],
         ):
             return True
         with beets_db.transaction(database) as connection:
@@ -7095,7 +7174,8 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
                 replacement_album_id,
                 album_attribute_columns,
                 item_attribute_columns,
-            ) = _backup_retirement(connection, old_paths, replacement_paths)
+            ) = _backup_retirement(
+                connection, old_paths, replacement_paths, whole_album)
             if not retiring_ids:
                 connection.rollback()
                 return True

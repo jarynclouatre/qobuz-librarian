@@ -40,6 +40,7 @@ from qobuz_librarian.safefile import (
     require_noreplace_rename,
     snapshot_tree,
     stat_identity,
+    write_atomic,
 )
 from qobuz_librarian.safefile import digest_fd as _read_file_digest_fd
 from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
@@ -4082,6 +4083,41 @@ def record_downsample_outputs(backup) -> bool:
     return _write_receipt_marker(
         backup, _DOWNSAMPLE_OUTPUTS_SENTINEL,
         json.dumps(outputs, sort_keys=True))
+
+
+def _downsample_running_note() -> Path:
+    return Path(cfg.DATA_DIR) / ".qobuz_downsample_running"
+
+
+def note_downsample_running(backup) -> None:
+    """Name the undo copy of the album Downsample is about to rewrite, so
+    a hard stop before ``record_downsample_outputs`` is finished at the
+    next start."""
+    try:
+        write_atomic(_downsample_running_note(), str(backup.path))
+    except OSError as exc:
+        vlog(f"couldn't note the running downsample: {exc}")
+
+
+def record_interrupted_downsample():
+    """Record what the album holds for the undo copy of a Downsample that
+    did not finish, so Restore can put its originals back. Returns the
+    album's folder when that copy holds its originals, else None."""
+    try:
+        path = Path(_downsample_running_note().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        return None
+    backup = load_backup_result(path)
+    if backup is not None and backup.receipt["kind"] != "downsample":
+        backup = None
+    if (backup is not None and _downsample_outputs(backup) is None
+            and not downsample_left_untouched(backup)):
+        record_downsample_outputs(backup)
+    try:
+        _downsample_running_note().unlink(missing_ok=True)
+    except OSError:
+        pass
+    return None if backup is None else Path(backup.receipt["origin"])
 
 
 def _downsample_outputs(backup):

@@ -17,6 +17,7 @@ Quality settings:
 """
 import copy
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -369,6 +370,7 @@ def _resampled_peak_dbfs(src, af_filter, rate, *, pass_fds=()):
 # beside the source, then atomically exchanged with the exact held master. The
 # dot keeps the library scanner from indexing an in-flight encode.
 _TMP_PREFIX = ".compress-"
+_TMP_NAME = re.compile(r"\.compress-[0-9a-f]{32}\.flac")
 
 # ffmpeg's FLAC muxer writes no seek table, so one is built on the encode.
 _SEEKPOINT_SECONDS = 10
@@ -741,8 +743,40 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     each file's sample rate, resamples the ones above CD rate, and leaves the
     rest untouched. `base_dir` is the root paths are taken relative to
     (defaults to MUSIC_ROOT); pass the album/staging dir when the files aren't
-    on the canonical music tree yet.
+    on the canonical music tree yet. However it ends, what a rewrite with
+    originals kept left in the album is recorded for their Restore.
     """
+    try:
+        return _downsample_dir(
+            directory, verbose=verbose, base_dir=base_dir, log=log,
+            keep_originals=keep_originals, cancel_check=cancel_check)
+    finally:
+        if keep_originals:
+            settle_interrupted_downsample()
+
+
+def settle_interrupted_downsample():
+    """Finish what a Downsample with originals kept left when it did not
+    end normally: record what the album holds for their Restore, and
+    remove its encodes left beside the tracks. Its originals are in their
+    undo copy, so even a temporary holding one just swapped out goes."""
+    album = backup_mod.record_interrupted_downsample()
+    if album is None:
+        return
+    for folder, _dirs, names in os.walk(album):
+        for name in names:
+            if not _TMP_NAME.fullmatch(name):
+                continue
+            path = Path(folder) / name
+            try:
+                if stat.S_ISREG(os.lstat(path).st_mode):
+                    path.unlink()
+            except OSError:
+                pass
+
+
+def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
+                    keep_originals=False, cancel_check=None):
     directory = Path(directory)
     if not directory.exists() or not directory.is_dir():
         return {"resampled": 0, "errors": 0, "saved_bytes": 0}
@@ -829,6 +863,7 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             _discard_unused_stash(kept_dir, log)
             return {"resampled": 0, "errors": n_uncopied, "saved_bytes": 0,
                     "failed_files": uncopied_files}
+        backup_mod.note_downsample_running(kept_dir)
 
     saved_total = 0
     errors = 0

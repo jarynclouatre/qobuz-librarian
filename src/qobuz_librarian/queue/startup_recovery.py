@@ -33,6 +33,7 @@ from qobuz_librarian.integrations.beets import (
     inspect_managed_reservation,
     managed_sources_untouched,
     reopen_managed_evidence,
+    retire_backup_beets_entries,
     retire_prelaunch_managed_carrier,
 )
 from qobuz_librarian.integrations.staging import (
@@ -1581,6 +1582,25 @@ def _backup_only_files(backup, album):
     return " and ".join(filter(None, (", ".join(left[:-1]), left[-1])))
 
 
+def _retire_partly_replaced_album(authority, backup, snapshot):
+    """Retire the Beets entries of the album an upgrade replaced, as its
+    backup holds them, for the folder Beets moved tracks to before it
+    stopped."""
+    try:
+        folder = os.path.commonpath([
+            os.path.dirname(mapping["destination"]["path"])
+            for mapping in snapshot["mappings"]])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if folder in ("", "."):
+        return False
+    album = Path(snapshot["root"]) / folder
+    receipt = capture_album_source_receipt(album)
+    _require_authority(authority)
+    return receipt is not None and retire_backup_beets_entries(
+        backup, album, receipt)
+
+
 def _set_partial_import_aside(authority, journal, item, reference, launched):
     """Clear a download Beets stopped part-way through filing.
 
@@ -1682,7 +1702,8 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
     if backup is not None and backup.receipt.get("kind") == "upgrade":
         only = _backup_only_files(backup, Path(backup.receipt["origin"]))
         reason += f" The album it replaced is {_upgrade_backup_kept(only)}"
-        reason += _BEETS_MAY_LIST
+        if not _retire_partly_replaced_album(authority, backup, snapshot):
+            reason += _BEETS_MAY_LIST
     elif backup is not None:
         reason += _backup_sentence(backup)
     return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)
