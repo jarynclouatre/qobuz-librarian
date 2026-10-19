@@ -187,6 +187,8 @@ sudo chown -R 1000:1000 ./music
 
 To run as root, set `PUID=0` and `PGID=0` explicitly. A non-numeric typo makes the container refuse to start rather than silently falling back to root.
 
+Migration keeps each file's permissions and modification time. Its copies take the app's ownership and do not carry extended attributes or Linux ACLs. Unless the app runs as root, backup copies, originals put back from them, and files rewritten by Downsample or a lyrics write belong to the app's user; they keep the file's group when that user is a member of it.
+
 ## Timezone
 
 Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in History and on job pages show your local time instead of UTC. Relative labels like "2 hr ago" are correct either way.
@@ -257,3 +259,5 @@ On first run the Search page *offers* a first Library scan (`AUTO_LIBRARY_SCAN`)
 - **Lyrics** writes tags or `.lrc` sidecars, not the audio. A track without lyrics gets synced ones, or plain ones when no synced lyrics are found and *Synced lyrics only* is off. Plain lyrics are replaced when synced ones are found. Synced lyrics are never replaced, and no lyrics are removed, though in `sidecar` format the tag lyrics of newly imported tracks move into `.lrc` files. An `.lrc` file that is neither UTF-8 nor UTF-16 is left as it is. A track that is read-only to the app keeps its tags as they are: the run says how many it left alone and tries them again once they can be written. When `LYRICS_FORMAT` asks for a tag or an `.lrc` a track lacks, the lyrics it has are copied there. A lookup that finds nothing new is repeated after 30 days, or sooner with *Re-check everything* (`--lyrics-rescan`); one a provider did not answer is repeated on the next pass.
 - **Consolidation** (`CONSOLIDATE`, off) merges duplicate folders, CLI-only (it needs per-folder confirmation). The duplicate tracks it takes out wait in the backup area and are cleared after `UPGRADE_BACKUP_RETENTION_DAYS`, as long as the album kept in their place still holds a playable track at least as long for each.
 - **`MIGRATE_MULTI_ARTIST`** (on) re-files `A, B/Album` under `A/Album` after import.
+- **Repair** backs up what it replaces. A verified replacement lets that backup be removed, and a failed refill may put the originals back on its own. Any backup still waiting is listed in Settings → Diagnostics, and the job page says where each file ended up: the replacement may already be in the album with your original only in the backup.
+- **Collection backup**: after a completed Library scan, a JSON list of every artist, album and track, with the Qobuz ids the app has resolved, goes to `COLLECTION_BACKUP_DIR`. Five dated copies are kept. A backup that comes back empty or much smaller than the last one is held until you confirm it. Upload a backup on Settings to be offered the missing albums it can match on Qobuz; unmatched entries are named in the job log.
