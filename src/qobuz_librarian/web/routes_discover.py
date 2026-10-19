@@ -88,6 +88,7 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         "tags": [],
         "tag": "",
         "query": query,
+        "searched": query,
         "poll_url": "/discover",
         "feed_age": "",
         "library_count": 0,
@@ -126,6 +127,8 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
             None, lambda: recommendations.ensure_search_feed(token, query))
         context["feed"] = feed
         context["artists"] = feed["items"]
+        context["searched"] = await loop.run_in_executor(
+            None, lambda: recommendations.searched_name(query))
         context["hidden_count"] = len(
             await loop.run_in_executor(None, _hidden_artists))
         context["poll_url"] = (

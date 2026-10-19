@@ -62,7 +62,7 @@
         {%- elif discover_tab == 'genres' and tag -%}Asking Last.fm what is tagged {{ tag | lower }}.
         {%- else -%}Reading your library.{%- endif -%}
         {%- elif discover_tab == 'search' -%}
-        Found {{ feed.checked }} of {{ feed.total }} artist{{ 's' if feed.total != 1 }} like {{ query }} in the Qobuz catalogue{% if feed.looked_up %}, {{ feed.looked_up }} looked up{% endif %}.
+        Found {{ feed.checked }} of {{ feed.total }} artist{{ 's' if feed.total != 1 }} like {{ searched }} in the Qobuz catalogue{% if feed.looked_up %}, {{ feed.looked_up }} looked up{% endif %}.
         {%- elif discover_tab == 'genres' and not tag -%}
         Read the tags on {{ feed.checked }} of {{ feed.total }} of your artists.
         {%- elif discover_tab == 'genres' -%}
@@ -95,7 +95,7 @@
       <span>Last.fm could not be reached. Try again in a few minutes.</span>
       {% elif discover_tab == 'search' %}
       {% if query %}
-      <span class="ql-status-chip is-info ql-status-chip--wrap">{{ artists | length }} artist{{ 's' if artists | length != 1 }} like {{ query }}</span>
+      <span class="ql-status-chip is-info ql-status-chip--wrap">{{ artists | length }} artist{{ 's' if artists | length != 1 }} like {{ searched }}</span>
       {% if artists %}<span>Artists Qobuz can serve that are not in your library.</span>{% endif %}
       {% endif %}
       {% elif discover_tab == 'genres' %}
@@ -134,12 +134,12 @@
     {% endif %}
     {% include "_discover_grid.html" %}
     {% if tag and not albums and feed.phase == 'ready' %}
-    <p class="ql-empty-state">Qobuz has nothing tagged {{ tag | lower }} that is not already in your library.</p>
+    <p class="ql-empty-state">Last.fm has no albums tagged {{ tag | lower }} that are on Qobuz and not in your library.</p>
     {% endif %}
     {% else %}
     {% include "_discover_feed.html" %}
     {% if not artists and feed.phase == 'ready' %}
-    <p class="ql-empty-state">{% if discover_tab == 'search' %}Last.fm has no artists like {{ query }} that Qobuz can serve.{% elif library_count %}Nothing Last.fm suggested is on Qobuz and missing from your library.{% else %}Your library has no artists to suggest from yet.{% endif %}</p>
+    <p class="ql-empty-state">{% if discover_tab == 'search' %}Last.fm has no artists like {{ searched }} that Qobuz can serve.{% elif library_count %}Nothing Last.fm suggested is on Qobuz and missing from your library.{% else %}Your library has no artists to suggest from yet.{% endif %}</p>
     {% endif %}
     {% endif %}
 

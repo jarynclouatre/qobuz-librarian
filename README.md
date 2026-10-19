@@ -16,7 +16,7 @@
 
 Qobuz Librarian downloads music from Qobuz and files it with [beets](https://beets.io/). Point it at your music folder and it works out what you're missing: albums by artists you already have, tracks missing from albums you own, better-quality versions, damaged files and lyrics.
 
-It has a web UI and a CLI that do the same things.
+It has a web UI and a CLI.
 
 <p align="center">
   <img src="assets/screenshot-search.png" alt="Search results in the web UI" width="800">
@@ -75,7 +75,7 @@ Searching and scanning need only the token. Downloading also needs your email or
 
 - **[Configuration](docs/configuration.md)**: environment variables, download quality, beets and streamrip config, NAS permissions, reverse proxies, and what the app does on its own.
 - **[Existing libraries](docs/existing-libraries.md)**: the folder layout it expects, migrating, bringing your own beets database, and the first big scan.
-- **[CLI](docs/cli.md)**: the same features from the terminal, including installing without Docker.
+- **[CLI](docs/cli.md)**: most of the same features from the terminal, including installing without Docker.
 - **[JSON API](docs/api.md)**: read-only job state for dashboards and scripts.
 - **[Troubleshooting](docs/troubleshooting.md)**: common errors and what to check.
 

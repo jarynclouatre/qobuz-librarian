@@ -41,6 +41,10 @@ def similar_key(artist_key: str) -> str:
     return f"similar:{artist_key}"
 
 
+def similar_name_key(artist_key: str) -> str:
+    return f"similar-name:{artist_key}"
+
+
 def tags_key(artist_key: str) -> str:
     return f"toptags:{artist_key}"
 

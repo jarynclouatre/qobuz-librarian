@@ -253,15 +253,25 @@ def _albums(payload: dict, container: str) -> list[dict]:
 
 def get_similar_artists(name: str, *, limit: int = 100) -> list[dict]:
     """Artists Last.fm considers similar to `name`, each with its 0-1 match."""
+    return get_similar_artists_named(name, limit=limit)[1]
+
+
+def get_similar_artists_named(name: str, *,
+                              limit: int = 100) -> tuple[str, list[dict]]:
+    """get_similar_artists, with the name Last.fm answered for. Its
+    autocorrect may have respelt the one asked about ('Radiohed')."""
     if not str(name or "").strip():
-        return []
+        return "", []
     body = lastfm_get("artist.getSimilar", {"artist": name, "limit": limit})
     out = []
     for row in _rows(body, "similarartists", "artist"):
         artist = _name(row)
         if artist:
             out.append({"name": artist, "match": _match(row)})
-    return out
+    block = body.get("similarartists")
+    attr = block.get("@attr") if isinstance(block, dict) else None
+    answered = _name(attr, "artist") if isinstance(attr, dict) else ""
+    return answered or str(name).strip(), out
 
 
 def get_artist_top_tags(name: str) -> list[dict]:

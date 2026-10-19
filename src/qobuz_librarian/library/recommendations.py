@@ -22,6 +22,7 @@ from qobuz_librarian.api.lastfm import (
     get_artist_top_albums,
     get_artist_top_tags,
     get_similar_artists,
+    get_similar_artists_named,
     get_tag_top_albums,
 )
 from qobuz_librarian.api.search import (
@@ -32,6 +33,7 @@ from qobuz_librarian.api.search import (
 )
 from qobuz_librarian.library import catalog, discover_hidden
 from qobuz_librarian.library.discovery import (
+    _titles_listed,
     cached_artist_resolutions,
     owned_title_key,
     pick_best_artist,
@@ -470,6 +472,7 @@ def _artist_cards(
     progress=None,
     found: dict | None = None,
     hidden=None,
+    skip_ids=(),
 ) -> list[dict]:
     """Work down the ranking until `want` cards are filled. Names Qobuz can't
     serve are skipped and the next candidate promoted, bounded so a run of
@@ -482,7 +485,7 @@ def _artist_cards(
     """
     found = {} if found is None else found
     cards, attempts = [], 0
-    carded = set()
+    carded = set(skip_ids)
     for candidate in ranked:
         if len(cards) >= want or attempts >= want * 3:
             break
@@ -843,7 +846,8 @@ def ensure_genre_feed(token, tag: str) -> dict:
     prefer_hires = bool(cfg.PREFER_HIRES)
     signature = _catalogue_feed_signature(owned, prefer_hires)
     kind = genre_feed_kind(tag)
-    view = _without_owned_albums(feed_view(kind, signature))
+    view = _without_dismissed_albums(
+        _without_owned_albums(feed_view(kind, signature)))
     if view["phase"] in ("building", "ready"):
         return view
     start_build(
@@ -856,7 +860,8 @@ def ensure_genre_feed(token, tag: str) -> dict:
         signature,
         library_sig=signature,
     )
-    return _without_owned_albums(feed_view(kind, signature))
+    return _without_dismissed_albums(
+        _without_owned_albums(feed_view(kind, signature)))
 
 
 def _owned_on_disk(album: dict) -> bool:
@@ -877,8 +882,15 @@ def _owned_on_disk(album: dict) -> bool:
 
 
 def _without_owned_albums(view: dict) -> dict:
-    if view["phase"] != "building":
+    if view["phase"] != "building" or view.get("previous"):
         view["items"] = [row for row in view["items"] if not _owned_on_disk(row)]
+    return view
+
+
+def _without_dismissed_albums(view: dict) -> dict:
+    hidden = discover_hidden.current()
+    view["items"] = [row for row in view["items"]
+                     if not hidden.covers_name(row.get("artist"))]
     return view
 
 
@@ -951,28 +963,77 @@ def _search_worker(
     thread like the others: one Last.fm call is quick, but resolving a dozen
     names on Qobuz is not, and a request that sat there for half a minute would
     read as a hung page."""
-    key = cache.similar_key(normalize(query) or query)
+    query_key = normalize(query) or query
+    key = cache.similar_key(query_key)
+    name_key = cache.similar_name_key(query_key)
     rows = cache.get_lastfm(key, cache.SIMILAR_TTL)
-    if rows is None:
-        rows = get_similar_artists(query)
-        cache.put_lastfm(key, rows)
+    # Rows the Similar tab saved for a library artist carry no answered name,
+    # so a search asks again for it rather than keep the typed spelling.
+    if rows is None or cache.get_lastfm(name_key, cache.SIMILAR_TTL) is None:
+        try:
+            answered, fresh = get_similar_artists_named(query)
+        except LastfmError:
+            if rows is None:
+                raise
+        else:
+            rows = fresh
+            cache.put_lastfm(key, rows)
+            cache.put_lastfm(name_key, [{"name": answered}])
+    searched = searched_name(query)
+    searched_keys = {normalize(query), normalize(searched)} - {""}
     accumulated = {}
     for row in rows:
         candidate = str(row.get("name") or "").strip()
-        if not candidate:
+        if not candidate or normalize(candidate) in searched_keys:
             continue
         match = float(row.get("match") or 0.0)
         accumulated[candidate] = {"score": match, "seeds": [(query, match)]}
     hidden = discover_hidden.current()
     ranked = rank_candidates(accumulated, owned, hidden=hidden)
     _publish(kind, total=min(len(ranked), SEARCH_CARDS))
+    searched_id = _searched_artist_id(searched, token)
     cards = _artist_cards(
         ranked, token, SEARCH_CARDS, prefer_hires=prefer_hires, hidden=hidden,
+        skip_ids={searched_id} - {""},
         progress=lambda attempts, found: _publish(kind, checked=len(found),
                                                   looked_up=attempts,
                                                   items=found))
     cache.put_feed(kind, cards, feed_signature)
     _publish(kind, phase="ready", items=cards, finished_at=time.time())
+
+
+def searched_name(query: str) -> str:
+    """The artist a Discover search is about, as Last.fm spelt it when it
+    answered, or the typed text before it has."""
+    text = str(query or "").strip()
+    rows = cache.get_lastfm(
+        cache.similar_name_key(normalize(text) or text), cache.SIMILAR_TTL,
+        allow_stale=True)
+    return str((rows or [{}])[0].get("name") or "").strip() or text
+
+
+def _searched_artist_id(name: str, token) -> str:
+    """The Qobuz artist a search is about, so it is not suggested back under
+    another spelling. A name in another script (ヨルシカ for Yorushika)
+    cannot be matched by spelling, so there Qobuz's first hit stands in, but
+    only when its catalogue lists an album Last.fm knows the name for."""
+    artist = resolve_artist(name, token)
+    if artist:
+        return artist["id"]
+    if (normalize(name) or name).isascii():
+        return ""
+    try:
+        results = search_artists(name, token, limit=1)
+        hit = str(results[0].get("id") or "") if results else ""
+        if hit and _titles_listed(hit, token, _lastfm_album_titles(name)):
+            return hit
+    except QobuzError as e:
+        vlog(f"discover: artist search failed for {name!r}: {e}")
+    except LastfmKeyRejected:
+        raise
+    except LastfmError as e:
+        vlog(f"discover: no album titles to check {name!r} against: {e}")
+    return ""
 
 
 def ensure_search_feed(token, query: str) -> dict:
@@ -1015,10 +1076,14 @@ def feed_view(kind: str, library_sig: str, *,
     build = build_status(kind)
     if build and build["phase"] == "building":
         # One built for the library as it was still has the newest results;
-        # the next visit after it ends builds for the library as it is.
+        # the next visit after it ends builds for the library as it is. Until
+        # it has as many as the last list, that list stays on screen.
         view.update(phase="building", stage=build["stage"],
                     checked=build["checked"], total=build["total"],
                     looked_up=build["looked_up"], items=build["items"])
+        saved = cache.get_feed(kind)
+        if saved and len(saved["payload"]) > len(build["items"]):
+            view.update(items=saved["payload"], previous=True)
         return view
     if (build and build["phase"] == "waiting"
             and build.get("library_sig") == library_sig):

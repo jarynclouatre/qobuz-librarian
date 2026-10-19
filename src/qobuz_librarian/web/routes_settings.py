@@ -464,6 +464,25 @@ async def save_behavior(request: Request):
             values["LASTFM_API_KEY"] = ""
         elif not str(values.get("LASTFM_API_KEY") or "").strip():
             values.pop("LASTFM_API_KEY", None)
+    # A new Last.fm key is checked before it is saved, with one cheap chart
+    # call bounded by the web timeout. A key Last.fm refuses is not saved, so
+    # a working key is not replaced by a broken one; a key that could not be
+    # checked is saved and the page says so.
+    lastfm_check = ""
+    posted_lastfm_key = str(values.get("LASTFM_API_KEY") or "").strip()
+    if anchor == "discover" and posted_lastfm_key:
+        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: lastfm.probe_key(posted_lastfm_key)),
+                timeout=cfg.WEB_FETCH_TIMEOUT)
+            lastfm_check = "ok"
+        except lastfm.LastfmKeyRejected:
+            return RedirectResponse(url="/settings?lastfm=rejected#discover",
+                                    status_code=303)
+        except (lastfm.LastfmError, asyncio.TimeoutError, OSError):
+            lastfm_check = "down"
     effective_before = settings_store.current()
     quality_before = (
         str(effective_before.get("STREAMRIP_QUALITY", "")),
@@ -531,22 +550,8 @@ async def save_behavior(request: Request):
     suffix = "&queued=1" if queued else ""
     if quality_note:
         suffix += "&quality_note=1"
-    # A freshly saved Last.fm key gets checked right away, so the section can
-    # say whether Discover will work instead of leaving that for the tab to
-    # discover later. One cheap chart call, bounded by the web timeout.
-    posted_lastfm_key = str(form.get("LASTFM_API_KEY") or "").strip()
-    if posted_lastfm_key:
-        loop = asyncio.get_running_loop()
-        try:
-            await asyncio.wait_for(
-                loop.run_in_executor(
-                    None, lambda: lastfm.probe_key(posted_lastfm_key)),
-                timeout=cfg.WEB_FETCH_TIMEOUT)
-            suffix += "&lastfm=ok"
-        except lastfm.LastfmKeyRejected:
-            suffix += "&lastfm=rejected"
-        except (lastfm.LastfmError, asyncio.TimeoutError, OSError):
-            suffix += "&lastfm=down"
+    if lastfm_check:
+        suffix += f"&lastfm={lastfm_check}"
     return RedirectResponse(url=f"/settings?saved={anchor}{suffix}#{anchor}",
                             status_code=303)
 

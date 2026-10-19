@@ -5998,6 +5998,12 @@ details[data-artist].htmx-swapping {
   .ql-discover-expand {
     padding: 0.625rem 0.78rem 0.4rem;
   }
+  .ql-dchip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
+    padding: 0 0.75rem;
+  }
   /* The badge repeats what the meta line already says; on a phone the row
      needs the width more than it needs the second copy. */
   .ql-discover-album-side > .ql-quality-badge {
