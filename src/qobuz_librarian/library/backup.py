@@ -4084,15 +4084,10 @@ def record_downsample_outputs(backup) -> bool:
         json.dumps(outputs, sort_keys=True))
 
 
-def downsample_outputs_in_place(backup) -> bool:
-    """Whether the album still holds exactly the audio Downsample left it
-    with, or the kept original a stopped put-back already returned. A later
-    Upgrade, Repair or Gap Fill replaces those files, and the kept originals
-    must not be put back over them. Tag edits keep the STREAMINFO, so
-    lyrics and retagging don't count as a change."""
+def _downsample_outputs(backup):
     opened = _validated_backup_result(backup, kinds={"downsample"})
     if opened is None:
-        return False
+        return None
     try:
         note = _receipt_marker_note(
             opened[-1][-1], _DOWNSAMPLE_OUTPUTS_SENTINEL, backup.receipt)
@@ -4101,8 +4096,18 @@ def downsample_outputs_in_place(backup) -> bool:
     try:
         outputs = json.loads(note) if note is not None else None
     except ValueError:
-        return False
-    if not isinstance(outputs, dict):
+        return None
+    return outputs if isinstance(outputs, dict) else None
+
+
+def downsample_outputs_in_place(backup) -> bool:
+    """Whether the album still holds exactly the audio Downsample left it
+    with, or the kept original a stopped put-back already returned. A later
+    Upgrade, Repair or Gap Fill replaces those files, and the kept originals
+    must not be put back over them. Tag edits keep the STREAMINFO, so
+    lyrics and retagging don't count as a change."""
+    outputs = _downsample_outputs(backup)
+    if outputs is None:
         return False
     origin = Path(backup.receipt["origin"])
     kept = backup_payload(backup.receipt)
@@ -4112,6 +4117,34 @@ def downsample_outputs_in_place(backup) -> bool:
              or _matches(origin / relative, *kept[relative]))
         for relative in kept
     )
+
+
+def restorable_after(backup, newer) -> bool:
+    """Whether ``backup`` would pass ``downsample_outputs_in_place`` once the
+    newer Downsample copy of the same album, restorable now, is put back."""
+    outputs = _downsample_outputs(backup)
+    if (outputs is None or not downsample_outputs_in_place(newer)
+            or newer.receipt["origin"] != backup.receipt["origin"]):
+        return False
+    origin = Path(backup.receipt["origin"])
+    kept = backup_payload(backup.receipt)
+    returned = backup_payload(newer.receipt)
+
+    def after(relative):
+        if relative in returned:
+            return _flac_streaminfo(newer.path / relative), returned[relative]
+        return _flac_streaminfo(origin / relative), None
+
+    def ok(relative):
+        streaminfo, payload = after(relative)
+        if streaminfo is not None and streaminfo == outputs.get(relative):
+            return True
+        if payload is not None:
+            return tuple(payload) == tuple(kept[relative])
+        return _matches(origin / relative, *kept[relative])
+
+    return bool(kept) and all(
+        outputs.get(relative) is not None and ok(relative) for relative in kept)
 
 
 def downsample_left_untouched(backup) -> bool:

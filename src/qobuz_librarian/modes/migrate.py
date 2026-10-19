@@ -187,6 +187,8 @@ def run_migrate_mode(args):
         # Same as the Web scan: an empty source means the wrong folder or an
         # unmounted share, not a library with nothing worth moving.
         log.warning(fmt(C.RED,
+            f"  ✗  The only music files left in {src} could not be read; "
+            "they are listed above." if unreadable else
             f"  ✗  No music files were found in {src}. Check that it is the "
             "folder you meant and that its drive or share is attached, then "
             "run this again."))
@@ -327,6 +329,10 @@ def run_migrate_mode(args):
         log.info(fmt(C.YELLOW,
             f"  ⚠  {plural(result.lingered, 'original')} still at the source; "
             "see the results manifest for why."))
+    if unreadable:
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  {plural(len(unreadable), 'file or folder', 'files or folders')} "
+            "could not be read and stayed at the source."))
     if pruned:
         log.info(fmt(C.GRAY,
             f"  Cleared {plural(pruned, 'now-empty folder')} from the source."))
@@ -336,8 +342,8 @@ def run_migrate_mode(args):
     if left_out:
         log.info(fmt(C.YELLOW,
             f"  ⚠  {plural(len(left_out), 'source folder')} still "
-            f"{'holds' if len(left_out) == 1 else 'hold'} files the new "
-            "library doesn't have:"))
+            f"{'holds' if len(left_out) == 1 else 'hold'} files that were "
+            "not moved:"))
         for folder, names in left_out[:20]:
             shown = ", ".join(names[:8]) + (
                 f" and {len(names) - 8} more" if len(names) > 8 else "")
@@ -374,12 +380,16 @@ def run_migrate_mode(args):
     elif result.lingered:
         log.warning(fmt(C.YELLOW,
             "  ⚠  Finished, but some originals are still at the source."))
+    elif unreadable:
+        log.warning(fmt(C.YELLOW,
+            "  ⚠  Finished, but some files could not be read."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))
     # A run with failures or one that stopped early is not a success, however
     # much of it landed. A script chaining off this must see the difference.
     if result.interrupted:
         return EXIT_INTERRUPT
-    if result.failed or companion_failed or result.cancelled or result.lingered:
+    if (result.failed or companion_failed or result.cancelled
+            or result.lingered or unreadable):
         return EXIT_GENERAL
     return 0

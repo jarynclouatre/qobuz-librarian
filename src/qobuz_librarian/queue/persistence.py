@@ -130,6 +130,15 @@ def save_or_trim(queue, save):
     return True
 
 
+def split_by_saved_queue(queue):
+    """The albums of ``queue`` the saved queue holds, and the others."""
+    journal = load_queue_journal().journal
+    held = set() if journal is None else {
+        _queued_identity(entry.planned) for entry in journal.items}
+    return ([item for item in queue if _queued_identity(item) in held],
+            [item for item in queue if _queued_identity(item) not in held])
+
+
 def _queued_identity(item):
     album_dir = item.get("album_dir")
     return (str(item["album"].get("id")), str(album_dir) if album_dir else None,

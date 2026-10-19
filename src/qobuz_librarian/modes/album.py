@@ -43,6 +43,9 @@ from qobuz_librarian.queue.persistence import (
     kept_queue_note,
     parked_queue_note,
     queue_parked,
+    queue_saver,
+    save_or_trim,
+    split_by_saved_queue,
 )
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, wrap
@@ -422,17 +425,45 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
     album_queue = []
     interrupted = False
     stopped = False
-    flushing = False
+    save = queue_saver("search", dry_run=args.dry_run)
 
     def _flush_queue():
-        nonlocal flushing
+        nonlocal interrupted
         if not album_queue or stopped:
             return
-        flushing = True
+        n_queued = len(album_queue)
         try:
             _download_queued()
-        finally:
-            flushing = False
+        except KeyboardInterrupt:
+            interrupted = True
+            n_done = n_queued - len(album_queue)
+            log.info(fmt(C.YELLOW,
+                "\n  ⚠  Downloading the queue was interrupted after "
+                f"{n_done} of {plural(n_queued, 'album')}."))
+            _say_what_is_left()
+            raise
+
+    def _say_what_is_left():
+        if args.dry_run or not album_queue:
+            return
+        if queue_parked():
+            log.info(parked_queue_note())
+            return
+        kept, lost = split_by_saved_queue(album_queue)
+        if kept:
+            log.info(kept_queue_note(kept))
+        if lost:
+            _not_downloaded_note(lost)
+
+    def _not_downloaded_note(items):
+        one = len(items) == 1
+        log.info(fmt(C.YELLOW, wrap(
+            f"{'This' if one else 'These'} queued "
+            f"{'album was' if one else 'albums were'} not "
+            f"downloaded; queue {'it' if one else 'them'} "
+            "again from a new search:",
+            indent="  ⚠  ", hanging="     ")))
+        log.info(_queued_album_lines(items, shown=len(items)))
 
     def _download_queued():
         nonlocal stopped
@@ -458,15 +489,21 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 count = next((i for i, queued in enumerate(album_queue)
                               if queued.get("keep_edition")), len(album_queue))
                 batch = album_queue[:count]
-                _, drained = _execute_download_queue(batch, args, token, refresh_review=True)
-                album_queue[:count] = [] if args.dry_run else batch
+                if not save_or_trim(batch, save):
+                    stopped = True
+                    break
+                try:
+                    _, drained = _execute_download_queue(
+                        batch, args, token, refresh_review=True,
+                        on_progress=lambda: save(batch))
+                finally:
+                    album_queue[:count] = [] if args.dry_run else batch
+                if drained and not args.dry_run:
+                    clear_queue_journal()
                 if not drained:
                     stopped = True
                     break
-        if not args.dry_run and album_queue:
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  {plural(len(album_queue), 'album')} couldn't be downloaded; "
-                f"re-run the command to try them again."))
+        _say_what_is_left()
 
     try:
         while True:
@@ -532,15 +569,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                         is not QueueLoadStatus.ABSENT):
                     stopped = True
                     if album_queue:
-                        one = len(album_queue) == 1
-                        log.info(fmt(C.YELLOW, wrap(
-                            f"{'This' if one else 'These'} queued "
-                            f"{'album was' if one else 'albums were'} not "
-                            f"downloaded; queue {'it' if one else 'them'} "
-                            "again from a new search:",
-                            indent="  ⚠  ", hanging="     ")))
-                        log.info(_queued_album_lines(
-                            album_queue, shown=len(album_queue)))
+                        _not_downloaded_note(album_queue)
                 if stopped:
                     return EXIT_GENERAL
             else:
@@ -560,11 +589,11 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                     log.info(fmt(C.GREEN, "  ✓  Done."))
                 return exit_code
     except KeyboardInterrupt:
-        interrupted = True
-        if album_queue and not flushing:
+        if album_queue and not interrupted:
             log.info(fmt(C.YELLOW,
                 f"\n  ⚠  Interrupted with {plural(len(album_queue), 'album')} queued; "
                 "discarding queue (Ctrl+C means abort)."))
+        interrupted = True
         raise
     finally:
         # Flush only on a clean exit.

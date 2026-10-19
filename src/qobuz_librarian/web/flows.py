@@ -5324,6 +5324,9 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
         # did not mount. Reporting it as a finished scan with a manifest of
         # nothing sent people away believing their library had been read.
         job.error = (
+            "The only music files left in the source folder could not be "
+            "read; they are listed in the activity log. Nothing was copied "
+            "and no plan was written." if unreadable else
             "No music files were found in the source folder. Check that it is "
             "the folder you meant and that its drive or share is attached, "
             "then scan again. Nothing was copied and no plan was written.")
@@ -5378,10 +5381,9 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
             detail = (f"{plural(len(entries), 'track')} → "
                       f"{artist}/{album}")
         elif in_place:
-            detail = f"{resumed} · finish cover art and sidecars"
+            detail = resumed
         else:
-            detail = (f"{plural(len(resumes), 'track')} already copied · "
-                      "finish cover art and sidecars")
+            detail = f"{plural(len(resumes), 'track')} already copied"
         payload = {
             "entries": [
                 (str(e.source), str(e.dest_rel), e.source_receipt,
@@ -5465,6 +5467,11 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
                    f"when you start the {verb}.")
     # Not logged here: job.summary already renders on the job page, and the
     # activity log below it would otherwise repeat the exact same sentence.
+
+
+def _unreadable_left(count):
+    return (f"{plural(count, 'file or folder', 'files or folders')} could "
+            "not be read and stayed at the source")
 
 
 def execute_migration(job, chosen, dest, *, in_place, src=None,
@@ -5668,9 +5675,15 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     for source, _destination, status, reason in companion_outcomes:
         if status in {migrate_engine.FAILED, migrate_engine.INTERRUPTED}:
             job.push_line(f"sidecar failed: {source} - {reason}")
+    unreadable = sum(
+        status == migrate_engine.UNPLACEABLE
+        and reason.startswith(migrate_engine.UNREADABLE)
+        for status, _sot, _source, _destination, reason
+        in (job.execute_args or {}).get("left_behind", []))
     verb = "moved" if in_place else "copied"
     has_problem = bool(
-        failed or companion_failed or results_error or result.lingered)
+        failed or companion_failed or results_error or result.lingered
+        or unreadable)
     if has_problem:
         lead = (
             "Migration stopped with problems"
@@ -5704,6 +5717,8 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         parts.append(
             f"{plural(result.lingered, 'original')} still at the source; "
             "the report says why")
+    if unreadable:
+        parts.append(_unreadable_left(unreadable))
     if failed:
         parts.append(f"{failed} failed; see the log")
         # Set job.error too (not just the prose summary) so a migration with
@@ -5718,8 +5733,8 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     if left_out:
         parts.append(
             f"{plural(len(left_out), 'source folder')} still "
-            f"{'holds' if len(left_out) == 1 else 'hold'} files the new "
-            "library doesn't have, listed in the activity log")
+            f"{'holds' if len(left_out) == 1 else 'hold'} files that were "
+            "not moved, listed in the activity log")
         for folder, names in left_out[:50]:
             shown = ", ".join(names[:20]) + (
                 f" and {len(names) - 20} more" if len(names) > 20 else "")
@@ -5745,6 +5760,10 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
             "Migration needs attention: "
             f"{plural(result.lingered, 'original')} still at the source. "
             "See the saved report.")
+    if unreadable and not job.error:
+        job.error = (
+            f"Migration needs attention: {_unreadable_left(unreadable)}. "
+            "See the activity log.")
     if companion_failed:
         attention = plural(companion_failed, "sidecar failure")
         if job.error:

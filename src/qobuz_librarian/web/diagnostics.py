@@ -677,6 +677,16 @@ def _diagnostics():
     return {"checks": checks, **inventory}
 
 
+def _newer_downsample_first(path, origin, undo):
+    """Whether this undo copy becomes restorable once the next newer one of
+    the same album is put back."""
+    newer = sorted(other for other, other_origin, _ in undo
+                   if other_origin == origin and other.name > path.name)
+    return bool(origin and newer) and backup_mod.restorable_after(
+        backup_mod.load_backup_result(path),
+        backup_mod.load_backup_result(newer[0]))
+
+
 def _album_gone_delete_form(tok, name, action, confirm):
     """The button that deletes a backup whose album folder is gone, which
     nothing else will, after the user reads that it may be the only copy."""
@@ -911,6 +921,17 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 " They are the only copies left at the original quality. The "
                 "album keeps its downsampled files, and the downsample can no "
                 "longer be undone.")
+        elif _newer_downsample_first(path, origin, undo):
+            detail = (
+                "Copies of the files this album had before it was "
+                "downsampled. Downsample ran on it again later, so these "
+                "can't be put back yet. Restore the newer Downsample copy of "
+                "this album first.")
+            restore_form = ""
+            what = "hi-res originals"
+            delete_note = (
+                " Any track Downsample rewrote has no other copy at the "
+                "original quality.")
         elif backup_mod.downsample_left_untouched(
                 backup_mod.load_backup_result(path)):
             detail = (
