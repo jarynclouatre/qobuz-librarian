@@ -20,11 +20,11 @@
 
   <div class="ql-work-status">
     <span class="ql-status-chip {% if lyrics_running %}is-info{% elif lyrics_failed %}is-error{% elif have_lyrics %}is-neutral{% else %}is-warning{% endif %}">
-      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Queued{% elif lyrics_running %}Scanning{% elif lyrics_failed %}Failed{% elif not have_lyrics %}Not installed{% elif last_run %}Ready{% else %}Not scanned yet{% endif %}
+      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Queued{% elif lyrics_running %}Scanning{% elif lyrics_failed %}Failed{% elif not have_lyrics %}Not installed{% elif lyrics_stopped %}{% if lyrics_stopped.interrupted_by_restart %}Interrupted{% else %}Stopped{% endif %}{% elif last_run %}Ready{% else %}Not scanned yet{% endif %}
     </span>
-    {% if lyrics_running or lyrics_failed or (have_lyrics and last_run) %}
+    {% if lyrics_running or lyrics_failed or (have_lyrics and (last_run or lyrics_stopped)) %}
     <span>
-      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% else %}Last lyrics scan {{ last_run }}.{% endif %}
+      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% elif lyrics_stopped %}The next scan carries on from where it stopped.{% else %}Last lyrics scan {{ last_run }}.{% endif %}
     </span>
     {% endif %}
     {% if have_lyrics and not lyrics_running %}
@@ -46,6 +46,11 @@
   <div class="ql-tool-note ql-tool-note-warning" role="alert">
     <p class="ql-tool-note-title">Last lyrics scan failed</p>
     <p>{{ lyrics_failed.error or lyrics_failed.summary }} <a href="/jobs/{{ lyrics_failed.id }}" class="ql-inline-link">Open details →</a></p>
+  </div>
+  {% elif lyrics_stopped and lyrics_stopped.summary %}
+  <div class="ql-tool-note ql-tool-note-info">
+    <p class="ql-tool-note-title">Last lyrics scan {% if lyrics_stopped.interrupted_by_restart %}interrupted{% else %}stopped{% endif %}</p>
+    <p>{{ lyrics_stopped.summary }} <a href="/jobs/{{ lyrics_stopped.id }}" class="ql-inline-link">Open details →</a></p>
   </div>
   {% endif %}
   <form action="/lyrics" method="post" data-busy-submit>

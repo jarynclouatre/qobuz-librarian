@@ -26,6 +26,12 @@ async def lyrics_page(request: Request):
         and latest_lyrics.status == job_mgr.JobStatus.FAILED
         else None
     )
+    lyrics_stopped = (
+        latest_lyrics
+        if latest_lyrics is not None
+        and latest_lyrics.status == job_mgr.JobStatus.CANCELED
+        else None
+    )
     return rendering._tr(request, "lyrics.html", {
         "page": "lyrics",
         "have_lyrics": lyric_fetch.AVAILABLE,
@@ -36,6 +42,7 @@ async def lyrics_page(request: Request):
         "lyrics_running": scans._active_scan(
             "lyrics", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING)),
         "lyrics_failed": lyrics_failed,
+        "lyrics_stopped": lyrics_stopped,
         "lyrics_format": lyrics_format_label,
         "providers": providers,
     })

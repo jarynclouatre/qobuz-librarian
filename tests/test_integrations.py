@@ -214,7 +214,7 @@ def test_lyrics_fill_gaps_upgrade_plain_and_never_remove(
 
     counts = lyric_fetch.fetch_for_paths(tracks, **options)
 
-    assert counts == {"wrote-synced": 2, "already-synced": 1,
+    assert counts == {"wrote-synced": 1, "upgraded-synced": 1, "already-synced": 1,
                       "skipped-instrumental": 1, "kept-existing-plain": 1}
     assert sorted(asked) == ["Empty Artist", "Plain Artist", "Typed Artist"]
     lyrics = [flac.FLAC(track)["lyrics"] for track in tracks]
@@ -232,7 +232,7 @@ def test_lyrics_fill_gaps_upgrade_plain_and_never_remove(
         assert [flac.FLAC(track)["lyrics"] for track in tracks] == lyrics
     monkeypatch.setattr(lyric_fetch, "search_lyrics", answer(
         {"Plain Artist": synced}))
-    assert lyric_fetch.fetch_for_paths(tracks, **options) == {"wrote-synced": 1}
+    assert lyric_fetch.fetch_for_paths(tracks, **options) == {"upgraded-synced": 1}
 
 
 def test_synced_lyrics_must_fit_the_length_of_this_cut(

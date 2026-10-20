@@ -138,18 +138,56 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
         state_path=cfg.LYRIC_FETCH_STATE_FILE,
         log=log,
         should_stop=should_stop,
-        progress_cb=lambda c, t, name: report_progress("Fetching lyrics", c, t, name),
+        # The job page's chip already says "Fetching lyrics".
+        progress_cb=lambda c, t, name, note: report_progress(
+            note[:1].upper() + note[1:] or "Fetching lyrics", c, t, name),
     )
     result = dict(counts)
     result["unreadable_artists"] = unreadable
     result["total"] = total
     result["processed"] = sum(
         count for outcome, count in counts.items()
-        if outcome not in {"stopped", "stop-total"})
+        if outcome not in {"stopped", "stop-total", "stop-deferred"})
     if counts.get("stopped"):
         result["stop_total"] = counts.get("stop-total", result["processed"])
+        result["stop_deferred"] = counts.get("stop-deferred", 0)
         result["stop_stage"] = "fetch"
     return result
+
+
+STOPPED = "Stopped after "
+
+
+def copied_place(lyrics_format):
+    """Where a pass in ``lyrics_format`` copies the lyrics a track has."""
+    return {"embed": "tags", "sidecar": ".lrc files"}.get(
+        (lyrics_format or "embed").lower(), "tags or .lrc files")
+
+
+def copied_note(count, lyrics_format):
+    return (f"lyrics copied to {copied_place(lyrics_format)} for "
+            f"{plural(count, 'track')}")
+
+
+def stop_summary(summary, lyrics_format):
+    """What a stopped pass checked and wrote."""
+    done = []
+    added = summary["wrote"] - summary["upgraded"]
+    if added:
+        done.append(f"added lyrics to {plural(added, 'track')}")
+    if summary["upgraded"]:
+        done.append(f"upgraded {plural(summary['upgraded'], 'track')} "
+                    "from plain to synced lyrics")
+    if summary["copied"]:
+        done.append(copied_note(summary["copied"], lyrics_format))
+    wrote = "; ".join(done) + "." if done else "nothing was written."
+    left = summary["deferred"]
+    waiting = (f" {plural(left, 'track')} left for NetEase "
+               f"{'is' if left == 1 else 'are'} looked up again by the next run."
+               if left else "")
+    return (f"{STOPPED}checking {summary['processed'] + left} of "
+            f"{plural(summary['candidate_total'], 'track')}. "
+            f"{wrote[0].upper()}{wrote[1:]}{waiting}")
 
 
 def read_only_note(count):
@@ -178,14 +216,21 @@ def summarize_lyrics_result(result):
         "candidate_total": candidate_total,
         "already_checked": max(0, total - candidate_total),
         "unfinished": max(0, candidate_total - processed),
+        # Tracks a stop left for NetEase after the other providers found
+        # nothing synced for them; the next run looks them up again.
+        "deferred": max(0, int(result.get("stop_deferred", 0))),
         "wrote": count(
-            "wrote-synced", "wrote-plain",
-            "dry:wrote-synced", "dry:wrote-plain",
+            "wrote-synced", "wrote-plain", "upgraded-synced",
+            "dry:wrote-synced", "dry:wrote-plain", "dry:upgraded-synced",
+        ),
+        "upgraded": count("upgraded-synced", "dry:upgraded-synced"),
+        "copied": count(
+            "copied-synced", "copied-plain",
+            "dry:copied-synced", "dry:copied-plain",
         ),
         "already": count(
             "already-synced", "already-plain", "kept-existing-plain",
-            "copied-synced", "copied-plain",
-            "dry:copied-synced", "dry:copied-plain",
+            "kept-plain-lrc",
         ),
         "not_found": count("not-found"),
         "missing_tags": count("skipped-tags"),
@@ -199,7 +244,8 @@ def summarize_lyrics_result(result):
     accounted = sum(
         summary[key]
         for key in (
-            "wrote", "already", "not_found", "missing_tags", "too_long",
+            "wrote", "copied", "already", "not_found", "missing_tags",
+            "too_long",
             "instrumental", "read_only",
             "unsafe", "unavailable", "errors",
         )
@@ -210,10 +256,12 @@ def summarize_lyrics_result(result):
         + summary["errors"] + summary["other_errors"]
         + len(result.get("unreadable_artists", []))
     )
-    # A track no provider answered for is tried again by the next pass. A
-    # pass that leaves one in a hundred of the tracks it checked, or fewer,
-    # finished; one that leaves more, or failed in any other way, did not.
+    # A track no provider answered for is tried again by the next pass, so
+    # a pass that leaves some finished. One that no provider answered at
+    # all, or that failed in any other way, did not.
+    answered = (summary["wrote"] + summary["not_found"]
+                + summary["instrumental"] + count("kept-existing-plain"))
     summary["failed"] = (
         summary["failures"] > summary["unavailable"]
-        or summary["unavailable"] * 100 > processed)
+        or summary["unavailable"] > 0 and not answered)
     return summary

@@ -4,8 +4,8 @@ The engine behind the import-time lyric hook and the library lyrics pass:
 writes synced (or plain) lyrics into FLAC tags or .lrc sidecars.
 
   • Asks LRCLIB first for the exact track at its length, when Lrclib is a
-    provider, and takes its search hits only under the track's title, at
-    that length or by its artist.
+    provider, and takes any provider's search hits only under the track's
+    title, at that length or by its artist.
   • Tries synced lyrics from each provider; rejects results whose timing
     doesn't fit the track length, held closer for live and remixed cuts.
   • Falls back to plain lyrics across the providers; only writes plain
@@ -13,7 +13,7 @@ writes synced (or plain) lyrics into FLAC tags or .lrc sidecars.
   • Replaces plain lyrics with synced ones when a provider has them, and
     never replaces synced lyrics or removes any.
   • Drops the headings, credits, section labels and page trailers lyric
-    sites add around the words.
+    sites add around the words, and takes nothing when that is all there is.
   • Per-run circuit breaker disables a provider after several consecutive
     failures.
   • State file tracks per-file status so subsequent passes only re-check
@@ -34,6 +34,7 @@ import secrets
 import stat
 import threading
 import time
+import unicodedata
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
@@ -59,6 +60,7 @@ from qobuz_librarian.safefile import (
     stat_identity,
     write_all,
 )
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import wrap_thread_target
 
 # mutagen and syncedlyrics are decoupled on purpose: tag-only operations
@@ -100,6 +102,8 @@ _OUTCOME_LABELS = {
     "wrote-synced": "added synced lyrics", "wrote-plain": "added lyrics",
     "dry:wrote-synced": "would add synced lyrics",
     "dry:wrote-plain": "would add lyrics",
+    "upgraded-synced": "replaced its plain lyrics with synced ones",
+    "dry:upgraded-synced": "would replace its plain lyrics with synced ones",
     "copied-synced": "copied its synced lyrics to the other format",
     "copied-plain": "copied its lyrics to the other format",
     "dry:copied-synced": "would copy its synced lyrics to the other format",
@@ -327,10 +331,110 @@ def _remembered_lrc(provider, get_lrc, search_term):
     if answers is not None and key in answers:
         return answers[key]
     noted = _ChatterCapture.count()
-    lrc = get_lrc(search_term)
+    _asked.fit = None
+    lrc = _fitting(get_lrc(search_term))
     if answers is not None and _ChatterCapture.count() == noted:
         answers[key] = lrc
     return lrc
+
+
+_checks_log = logging.getLogger("qobuz_librarian")
+
+
+# A provider's pick is held to the checks LRCLIB's search hits get: the
+# track's title and artist, and its length. The track being looked up rides
+# on _asked.song as (title, credited names, length), and how the record the
+# provider took fits it on _asked.fit. Lyrics from a record that can't be
+# told to fit are not taken.
+def _fitting(lrc):
+    song = getattr(_asked, "song", None)
+    if lrc is None or song is None:
+        return lrc
+    fit = getattr(_asked, "fit", None)
+    if fit not in _FITS:
+        return None
+    if fit != "named" or not lrc.synced:
+        return lrc
+    ok, reason = lrc_duration_sane(lrc.synced, song[2], other_cut=True)
+    if not ok:
+        _checks_log.debug("synced lyrics for %r of another length kept as "
+                          "plain: %s", song[0], reason)
+        return type(lrc)(synced=None,
+                         unsynced=lrc.unsynced or _without_stamps(lrc.synced))
+    return lrc
+
+
+def _netease_fit(track, song):
+    length = track.get("duration")
+    return _hit_fit(track.get("name"),
+                    [artist.get("name") or "" for artist in track.get("artists") or ()],
+                    length / 1000 if isinstance(length, (int, float)) else None,
+                    song)
+
+
+def _musixmatch_fit(item, song):
+    track = item.get("track") or {}
+    return _hit_fit(track.get("track_name"), [track.get("artist_name") or ""],
+                    track.get("track_length"), song)
+
+
+_LISTED_LENGTH_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:[.:]\d+)?\]")
+
+
+def _megalobiz_fit(link, song):
+    """Megalobiz lists a lyric as one line of text naming the song, its
+    artist and its length."""
+    text = link.get_text()
+    length = _LISTED_LENGTH_RE.search(text)
+    words = f" {_words(_LISTED_LENGTH_RE.sub(' ', text))} "
+    key = _song_key(song[0])
+    if not key or f" {key} " not in words or not any(
+            f" {name} " in words for name in song[1]):
+        _checks_log.debug("not taken for %r: Megalobiz %r", song[0],
+                          " ".join(text.split()))
+        return None
+    if length and _at_length(int(length[1]) * 60 + int(length[2]), song[2]):
+        return "timed"
+    return "named"
+
+
+def _checked_best_match(fit, best_match, results, search_term,
+                        compare_key="name", min_score=65):
+    """syncedlyrics' pick among a provider's search results, made only among
+    those that fit the track, the best fitting first (see _hit_fit)."""
+    song = getattr(_asked, "song", None)
+    if song is None:
+        return best_match(results, search_term, compare_key, min_score)
+    fitting = {kind: [] for kind in _FITS}
+    for result in results or ():
+        try:
+            kind = fit(result, song)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            kind = None
+        if kind:
+            fitting[kind].append(result)
+    for kind, found in fitting.items():
+        if found:
+            _asked.fit = kind
+            return best_match(found, search_term, compare_key, 0)
+    return None
+
+
+def _note_genius_pick(response, *_args, **_kwargs):
+    """Genius takes its first search hit as it is."""
+    song = getattr(_asked, "song", None)
+    if song is None or "/api/search" not in str(response.url):
+        return
+    try:
+        sections = response.json()["response"]["sections"]
+        hit = sections[1]["hits"][0]["result"]
+        _asked.fit = _hit_fit(
+            hit.get("title"),
+            [(hit.get("primary_artist") or {}).get("name") or "",
+             hit.get("artist_names") or ""],
+            None, song)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        _asked.fit = None
 
 
 if AVAILABLE:
@@ -345,12 +449,27 @@ if AVAILABLE:
         def _quiet_lrc_init(self):  # type: ignore[no-redef]
             _orig_lrc_init(self)
             self.session.hooks["response"].append(_note_refused_response)
+            if str(self) == "Genius":
+                self.session.hooks["response"].append(_note_genius_pick)
             self.get_lrc = functools.partial(_remembered_lrc, self, self.get_lrc)
             for h in list(self.logger.handlers):
                 if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
                     self.logger.removeHandler(h)
 
         _LRCProvider.__init__ = _quiet_lrc_init  # type: ignore[assignment]
+    except Exception:
+        pass
+
+    try:
+        from syncedlyrics.providers import megalobiz as _megalobiz
+        from syncedlyrics.providers import musixmatch as _musixmatch
+        from syncedlyrics.providers import netease as _netease
+
+        for _module, _fit in ((_netease, _netease_fit),
+                              (_musixmatch, _musixmatch_fit),
+                              (_megalobiz, _megalobiz_fit)):
+            _module.get_best_match = functools.partial(
+                _checked_best_match, _fit, _module.get_best_match)
     except Exception:
         pass
 
@@ -614,6 +733,10 @@ def _sidecar_key(identity) -> str:
         "device", "inode", "size", "modified_ns", "changed_ns"))
 
 
+# Marks a recorded .lrc that holds synced lyrics, or is never replaced.
+_SYNCED_LRC = ":synced"
+
+
 def _sidecar_unchanged(path: Path, recorded: str) -> bool:
     """Whether the .lrc beside ``path`` is still the very file last read. Its
     change time moves with any write and cannot be set back."""
@@ -623,7 +746,7 @@ def _sidecar_unchanged(path: Path, recorded: str) -> bool:
         current = _regular_identity(os.lstat(Path(path).with_suffix(".lrc")))
     except OSError:
         return False
-    return _sidecar_key(current) == recorded
+    return _sidecar_key(current) == recorded.removesuffix(_SYNCED_LRC)
 
 
 def _read_bound_sidecar(
@@ -1493,7 +1616,16 @@ _SECTION_NAME_RE = re.compile(rf"({_SECTION})")
 _HEADER_RE = re.compile(
     r"\d+\s+Contributors?|(?:作词|作曲|编曲|制作人|词|曲|(?i:lyricist|lyrics by|"
     r"written by|composer|composed by|music by|arranger|arranged by|producer|"
-    r"produced by))\s*[:：]")
+    r"produced by))\s*[:：]|纯音乐")
+# A "Credits" line opens a block that runs to the first empty line, and a
+# name with a part played, "Jane Doe: lead vocals", is a credit too.
+_CREDITS_RE = re.compile(r"(?i:credits?)\s*[:：]?")
+_ROLE = (r"(?:lead |backing )?(?:vocals?|voice|guitars?|bass|drums|percussion|"
+         r"keys|keyboards?|piano|synths?|programming|strings|horns|"
+         r"mix(?:ing|ed by)?|master(?:ing|ed by)?|engineer(?:ing|ed by)?|"
+         r"record(?:ing|ed by))")
+_ROLE_RE = re.compile(
+    rf"[^:：]{{1,40}}[:：]\s*(?i:{_ROLE}(?:\s*(?:,|&|/|and)\s*{_ROLE})*)")
 _PAGE_RE = re.compile(
     r"(?:See .*? LiveGet tickets as low as \$\d+)?(?:You might also like)?(?=\S|$)")
 _EMBED_RE = re.compile(r"(?:^|(?<=\S))\d*Embed$")
@@ -1510,13 +1642,22 @@ def clean_lyrics(text: str, title: str) -> str:
     headed = len(sections) > 1
     kept = []
     head = True
+    credits = False
     for i, line in enumerate(lines):
         stamps, body = _LRC_LINE_RE.fullmatch(line).groups()
         words = _PAGE_RE.sub("", body, count=1)
         if i == last:
             words = _EMBED_RE.sub("", words)
+        if head and _CREDITS_RE.fullmatch(words):
+            credits = True
+            continue
+        if credits:
+            credits = bool(words)
+            if credits:
+                continue
         if (words != body and not words
-                or head and (_words(words) in heading or _HEADER_RE.match(words))
+                or head and (_words(words) in heading or _HEADER_RE.match(words)
+                             or _ROLE_RE.fullmatch(words))
                 or _HEADING_RE.fullmatch(words)
                 or _SECTION_LABEL_RE.fullmatch(words)
                 and (headed or words.endswith(":"))):
@@ -1583,14 +1724,17 @@ class _Stopped(Exception):
 
 class _Pass:
     """What one lyrics pass's lookups share: its stop request, how long it
-    waits for a provider that asked to be asked later, and whether its disk
-    can swap a plain .lrc for a synced one."""
+    waits for a provider that asked to be asked later, whether its disk can
+    swap a plain .lrc for a synced one, and, while only the providers ahead
+    of a paced one are asked, those providers."""
 
     def __init__(self, should_stop: Optional[Callable[[], bool]] = None,
-                 patience: float = BUSY_PATIENCE, replaces_lrc: bool = True):
+                 patience: float = BUSY_PATIENCE, replaces_lrc: bool = True,
+                 ahead: Optional[list[str]] = None):
         self.should_stop = should_stop
         self.patience = patience
         self.replaces_lrc = replaces_lrc
+        self.ahead = ahead
         self._busy_since: dict[str, float] = {}
         self._given_up: set[str] = set()
         self._lock = threading.Lock()
@@ -1629,7 +1773,7 @@ class _Pass:
 
 def _bounded_provider_search(query: str, prov: str, run: _Pass, *,
                              budget: float, answers: Optional[dict] = None,
-                             **kwargs):
+                             song: Optional[tuple] = None, **kwargs):
     """Run one third-party provider lookup behind an application deadline.
 
     syncedlyrics providers do not share one reliable timeout contract. Use a
@@ -1643,6 +1787,7 @@ def _bounded_provider_search(query: str, prov: str, run: _Pass, *,
     def invoke():
         _ChatterCapture.begin()
         _asked.answers = answers
+        _asked.song = song
         result = None
         error = None
         try:
@@ -1698,6 +1843,7 @@ def _hold_busy_provider(prov: str) -> None:
 
 def _query_provider(query: str, prov: str, log: logging.Logger,
                     run: _Pass, answers: Optional[dict] = None,
+                    song: Optional[tuple] = None,
                     **kwargs) -> tuple[Optional[str], bool]:
     """
     Wrap syncedlyrics.search() for a single provider. Provider errors come
@@ -1722,7 +1868,7 @@ def _query_provider(query: str, prov: str, log: logging.Logger,
             return None, True
         result, error, chatter = _bounded_provider_search(
             query, prov, run, budget=cfg.LYRICS_PROVIDER_TIMEOUT,
-            answers=answers, **kwargs
+            answers=answers, song=song, **kwargs
         )
         if not any(line.startswith("busy:") for line in chatter.splitlines()):
             break
@@ -1774,6 +1920,24 @@ def _lrclib_session() -> requests.Session:
         session.headers.update({"User-Agent": ua_string()})
         _http.session = session
     return session
+
+
+def _lrclib_request(url: str, params: dict):
+    """One GET to LRCLIB. A kept-alive connection LRCLIB has since closed,
+    as one left idle while NetEase's pace holds a worker can be, fails with
+    a reset; the request is made once more on a new connection."""
+    try:
+        return _lrclib_session().get(
+            url, params=params, timeout=cfg.LYRICS_PROVIDER_TIMEOUT)
+    except requests.ConnectionError as e:
+        if isinstance(e, requests.Timeout):
+            raise
+        session = getattr(_http, "session", None)
+        if session is not None:
+            _http.session = None
+            session.close()
+    return _lrclib_session().get(
+        url, params=params, timeout=cfg.LYRICS_PROVIDER_TIMEOUT)
 
 
 def lrclib_signature(f, duration: float) -> Optional[dict]:
@@ -1831,8 +1995,7 @@ def _lrclib_get(url: str, params: dict, log: logging.Logger, what: str,
             retry_at = max(retry_at, held + random.random())
         run.sleep_until(retry_at)
         try:
-            response = _lrclib_session().get(
-                url, params=params, timeout=cfg.LYRICS_PROVIDER_TIMEOUT)
+            response = _lrclib_request(url, params)
         except requests.RequestException as e:
             _provider_failed("Lrclib", log, f"{what}: {e}")
             return None, True
@@ -1901,25 +2064,79 @@ def _lrclib_search(query: str, duration: float, song: tuple[str, frozenset],
         LRCLIB_SEARCH_URL, {"q": query}, log, "search", list, run)
     if records is None:
         return [], failed
-    title, artists = song
-    key = _song_key(title)
-    timed, named = [], []
+    fitting = {kind: [] for kind in _FITS}
     for record in records:
         if not isinstance(record, dict) or record.get("instrumental"):
             continue
-        length = record.get("duration")
-        name = _song_key(record.get("trackName"))
-        credited = credited_names(record.get("artistName") or "") & artists
-        if (duration and isinstance(length, (int, float))
-                and abs(length - duration) <= LRCLIB_SEARCH_GRACE
-                and key and name
-                and (name == key
-                     or credited and (f" {key} " in f" {name} "
-                                      or f" {name} " in f" {key} "))):
-            timed.append(record)
-        elif name == key and credited:
-            named.append(record)
-    return timed + named, failed
+        fit = _hit_fit(record.get("trackName"), [record.get("artistName") or ""],
+                       record.get("duration"), (*song, duration))
+        if fit:
+            fitting[fit].append(record)
+    return [record for found in fitting.values() for record in found], failed
+
+
+def _lrclib_album_search(signature: dict, duration: float,
+                         log: logging.Logger, run: _Pass) -> tuple[list[dict], bool]:
+    """LRCLIB's records of the track's exact title on its album, two seconds
+    either side of its length, by an artist written in another script than
+    the track's, as one written in Latin letters and the other in Cyrillic."""
+    records, failed = _lrclib_get(
+        LRCLIB_SEARCH_URL, {"track_name": signature["track_name"],
+                            "album_name": signature["album_name"]},
+        log, "album search", list, run)
+    title = _words(signature["track_name"])
+    album = _words(signature["album_name"])
+    latin = _latin(signature["artist_name"])
+    return [record for record in records or ()
+            if isinstance(record, dict) and not record.get("instrumental")
+            and latin is not None
+            and _latin(record.get("artistName")) not in (None, latin)
+            and _words(record.get("trackName")) == title
+            and _words(record.get("albumName")) == album
+            and isinstance(record.get("duration"), (int, float))
+            and abs(record["duration"] - duration) <= 2], failed
+
+
+def _latin(text) -> Optional[bool]:
+    """Whether every letter of ``text`` is a Latin one, or None without
+    letters."""
+    letters = [char for char in str(text or "") if char.isalpha()]
+    if not letters:
+        return None
+    return all(unicodedata.name(char, "").startswith("LATIN") for char in letters)
+
+
+def _at_length(length, duration) -> bool:
+    return (bool(duration) and isinstance(length, (int, float))
+            and abs(length - duration) <= LRCLIB_SEARCH_GRACE)
+
+
+# How a record fits a track, best first.
+_FITS = ("timed", "named", "loose")
+
+
+def _hit_fit(name, artists, length, song) -> Optional[str]:
+    """How a provider's record fits the track ``song``, its (title, credited
+    names, length): "timed" by its artist at its length under its title, or
+    under one that holds its title or is held in it, "named" under its
+    title and by its artist at another length, "loose" under its title at
+    its length by another artist, or None."""
+    title, credits, duration = song
+    record = name
+    key = _song_key(title)
+    name = _song_key(name)
+    credited = credited_names(*artists) & credits
+    at_length = _at_length(length, duration) and key and name
+    if at_length and credited and (name == key or f" {key} " in f" {name} "
+                                   or f" {name} " in f" {key} "):
+        return "timed"
+    if name == key and credited:
+        return "named"
+    if at_length and name == key:
+        return "loose"
+    _checks_log.debug("not taken for %r: %r by %s, %s s", title, record,
+                      ", ".join(artists), length)
+    return None
 
 
 def _without_stamps(text: str) -> str:
@@ -1941,8 +2158,9 @@ def search_lyrics(
     lrclib_signature) comes first: it matches the track's length, so its
     timing is this cut's. Each query then runs only when every provider
     missed the ones before it; ``other_cut`` holds synced results to the
-    track's length. Lrclib's search hits are held to the track's length, or
-    to its title and artist in ``song``.
+    track's length. Every provider's search hits are held to the track's
+    length, or to its title and artist in ``song``, and synced lyrics from a
+    hit at another length to the track's length as for ``other_cut``.
     Returns (lyrics, provider_name, kind, providers_tried, failed_hard) where
     kind is 'synced', 'plain', or 'instrumental' when LRCLIB's exact record
     says the track has no words, and providers_tried counts the lookups due,
@@ -1953,9 +2171,11 @@ def search_lyrics(
     """
     run = run or _Pass()
     answers: dict = {}
+    track = (*song, duration)
     tried = 0
     hard = 0
     exact_plain = None
+    exact_missed = False
     if exact and "Lrclib" in providers:
         tried += 1
         if _is_provider_dead("Lrclib", log):
@@ -1963,6 +2183,7 @@ def search_lyrics(
         else:
             record, failed = _lrclib_exact(exact, log, run)
         hard += failed
+        exact_missed = record is None and not failed
         if record is not None:
             if record.get("instrumental"):
                 return None, "Lrclib", "instrumental", tried, hard
@@ -1980,17 +2201,24 @@ def search_lyrics(
             if prov == "Lrclib":
                 lrclib_hits, failed = _lrclib_search(
                     query, duration, song, log, run)
-                results = [hit.get("syncedLyrics") for hit in lrclib_hits]
+                if (exact_missed and query == queries[0]
+                        and not lrclib_hits and not failed):
+                    lrclib_hits, failed = _lrclib_album_search(
+                        exact, duration, log, run)
+                results = [(hit.get("syncedLyrics"),
+                            not _at_length(hit.get("duration"), duration))
+                           for hit in lrclib_hits]
             else:
                 result, failed = _query_provider(
-                    query, prov, log, run, answers, synced_only=True)
-                results = [result]
+                    query, prov, log, run, answers, song=track,
+                    synced_only=True)
+                results = [(result, False)]
             hard += failed
-            for result in results:
+            for result, held in results:
                 if not result or not SYNCED_RE.search(result):
                     continue
                 ok, reason = lrc_duration_sane(
-                    result, duration, other_cut=other_cut)
+                    result, duration, other_cut=other_cut or held)
                 if not ok:
                     log.debug("rejected %s synced result: %s", prov, reason)
                     continue
@@ -2006,7 +2234,8 @@ def search_lyrics(
             else:
                 tried += 1
                 result, failed = _query_provider(
-                    query, prov, log, run, answers, plain_only=True)
+                    query, prov, log, run, answers, song=track,
+                    plain_only=True)
                 hard += failed
                 if result and SYNCED_RE.search(result):
                     result = _without_stamps(result)
@@ -2089,8 +2318,12 @@ def should_process(
         # A cached track stat cannot prove a sibling sidecar still exists.
         # Reopen final sidecar/both states through the held no-follow binding
         # unless the .lrc is still the very file read last time.
+        # A synced track recorded without the mark may have a plain .lrc
+        # beside it to upgrade.
         if ("sidecar" in _required_representations(lyrics_format)
-                and not _sidecar_unchanged(path, st.sidecar)):
+                and (not _sidecar_unchanged(path, st.sidecar)
+                     or st.status == "synced"
+                     and not st.sidecar.endswith(_SYNCED_LRC))):
             return True
         return not _representations_cover(
             st.representations, lyrics_format)
@@ -2233,12 +2466,22 @@ def _process_bound_file(
         return "write-error"
     kinds = {"embed": classify(embedded), "sidecar": classify(sidecar)}
     present = {name for name, kind in kinds.items() if kind != "none"}
+    if kinds["sidecar"] == "synced" or isinstance(sidecar, _Undecoded):
+        st.sidecar += _SYNCED_LRC
     st.representations = _representation_state(present)
+
+    rank = ("none", "plain", "synced").index
 
     def fill(kind):
         """The requested places holding weaker lyrics than ``kind``."""
-        rank = ("none", "plain", "synced").index
         return [name for name in required if rank(kinds[name]) < rank(kind)]
+
+    def holding(kind):
+        """The places holding lyrics as good as ``kind``, as recorded for a
+        track of that kind: a plain .lrc beside synced tag lyrics is still
+        to be upgraded."""
+        return {name for name, held in kinds.items()
+                if held != "none" and rank(held) >= rank(kind)}
 
     if isinstance(sidecar, _Undecoded):
         kind = kinds["sidecar"]
@@ -2255,6 +2498,8 @@ def _process_bound_file(
         # Not recorded, so the track is tried again once it can be written.
         return "embed" in fill(kind) and is_read_only(binding.track_fd)
 
+    keeps_lrc = (kinds["sidecar"] == "plain" and "sidecar" in required
+                 and run is not None and not run.replaces_lrc)
     lyrics, source, kind = existing, "existing-representation", existing_kind
     if existing_kind == "synced" or (
             existing_kind == "plain" and plain_waits):
@@ -2262,13 +2507,18 @@ def _process_bound_file(
             st.last_seen = seen
         if not fill(kind):
             st.status = kind
+            st.representations = _representation_state(holding(kind))
             commit(state, key, st)
             return f"already-{kind}"
+        if kind == "synced" and keeps_lrc:
+            st.status = kind
+            st.representations = _representation_state(holding(kind))
+            commit(state, key, st)
+            return "kept-plain-lrc"
         if read_only(kind):
             return "skipped-read-only"
         action = f"copied-{kind}"
-    elif (kinds["sidecar"] == "plain" and "sidecar" in required
-            and run is not None and not run.replaces_lrc):
+    elif keeps_lrc:
         st.status = "plain"
         st.source = "kept-existing"
         commit(state, key, st)
@@ -2283,10 +2533,14 @@ def _process_bound_file(
             commit(state, key, st)
             return "skipped-tags"
 
-        # Plain lyrics already there are only replaced by synced ones.
+        # Plain lyrics already there are only replaced by synced ones. The
+        # providers ahead of a paced one settle a track alone only with
+        # synced lyrics they find first, as the full lookup would.
+        ahead = run.ahead if run is not None else None
         found, prov, found_kind, tried, failed_hard = search_lyrics(
-            [query, *fallback_queries(f)], providers, duration, log,
-            skip_plain=synced_only or existing_kind == "plain",
+            [query] if ahead else [query, *fallback_queries(f)],
+            ahead or providers, duration, log,
+            skip_plain=bool(ahead) or synced_only or existing_kind == "plain",
             exact=lrclib_signature(f, duration),
             other_cut=is_other_cut(title),
             song=(title, credited_names(*f.tags.get("artist", ()),
@@ -2299,6 +2553,8 @@ def _process_bound_file(
             commit(state, key, st)
             return "skipped-instrumental"
         found = clean_lyrics(found, title) if found else None
+        if ahead and not found:
+            return "deferred"
         if found:
             lyrics, source, kind = found, prov, found_kind
             action = f"wrote-{kind}"
@@ -2324,6 +2580,8 @@ def _process_bound_file(
             action = "copied-plain"
     targets = fill(kind)
     write_format = "both" if len(targets) == 2 else targets[0]
+    if action == "wrote-synced" and any(kinds[name] == "plain" for name in targets):
+        action = "upgraded-synced"
 
     if dry_run:
         return f"dry:{action}"
@@ -2356,9 +2614,79 @@ def _process_bound_file(
         return "write-error"
     st.mtime = final_identity["modified_ns"] / 1_000_000_000
     st.size = final_identity["size"]
-    st.representations = _representation_state(present.union(targets))
+    st.representations = _representation_state(holding(kind).union(targets))
     commit(state, key, st)
     return action
+
+
+# A pass's time left is told once it has run this long, and logged this
+# often.
+ETA_AFTER_SECONDS = 30
+ETA_LOG_SECONDS = 300
+
+
+def _time_left(seconds: float) -> str:
+    minutes = round(seconds / 60)
+    if minutes < 1:
+        return "under a minute left"
+    if minutes < 60:
+        return f"about {plural(minutes, 'minute')} left"
+    hours, minutes = divmod(5 * round(minutes / 5), 60)
+    return f"about {hours} h {minutes} min left" if minutes else f"about {hours} h left"
+
+
+class _Progress:
+    """How far a pass has got over ``total`` tracks and roughly how long it
+    has left. With ``paced`` set, the tracks the providers ahead of it leave
+    take at least its interval each."""
+
+    def __init__(self, total: int, paced: Optional[str], *, split: bool):
+        self.total = total
+        self.paced = paced
+        self.split = split
+        self.started = self.logged = time.monotonic()
+        self.done = 0
+        self.deferred = 0
+        self.second: Optional[tuple[float, int]] = None
+
+    def seconds_left(self) -> Optional[float]:
+        now = time.monotonic()
+        interval = PROVIDER_MIN_INTERVAL.get(self.paced, 0.0)
+        if self.second is not None:
+            began, done_then = self.second
+            finished = self.done - done_then
+            left = self.total - self.done
+            return (left * (now - began) / finished if finished >= 5
+                    else left * interval)
+        visited = self.done + self.deferred
+        elapsed = now - self.started
+        if elapsed < ETA_AFTER_SECONDS or visited < 10:
+            return None
+        left = (self.total - visited) * elapsed / visited
+        if self.split:
+            left += self.deferred * self.total / visited * interval
+        return left
+
+    def note(self) -> str:
+        left = self.seconds_left()
+        parts = []
+        if self.paced and (self.second is not None or not self.split):
+            parts.append(f"waiting on {self.paced}, "
+                         f"{60 / PROVIDER_MIN_INTERVAL[self.paced]:.0f} "
+                         "lookups a minute")
+        if left is not None:
+            parts.append(_time_left(left))
+        return " · ".join(parts)
+
+    def due_line(self) -> Optional[str]:
+        """A line for the log every ETA_LOG_SECONDS, once the time left can
+        be told."""
+        now = time.monotonic()
+        if self.seconds_left() is None or now - self.logged < ETA_LOG_SECONDS:
+            return None
+        self.logged = now
+        return (f"{self.done} of {plural(self.total, 'track')} checked; "
+                f"{self.note().replace(' · ', '; ')}.")
 
 
 def _drain(items, worker, on_result, *, workers, should_stop,
@@ -2418,7 +2746,7 @@ def fetch_for_paths(
     workers: int = 8,
     synced_only: bool = False,
     lyrics_format: str = "embed",
-    progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    progress_cb: Optional[Callable[[int, int, str, str], None]] = None,
     *,
     owned_root: Path,
     busy_patience: float = BUSY_PATIENCE,
@@ -2435,6 +2763,9 @@ def fetch_for_paths(
 
     `busy_patience` is how many seconds the pass waits for a provider that
     asked to be asked later before leaving the tracks that need it.
+
+    `progress_cb` gets the tracks done, their total, the track last seen
+    and a note of the paced provider being waited on and the time left.
 
     `workers` controls per-file concurrency. Each file's work is dominated
     by network I/O (multi-provider HTTP), which releases the GIL - so
@@ -2469,8 +2800,14 @@ def fetch_for_paths(
                     "no lyrics were fetched.")
 
     found = disk_support.support(owned_root)
+    # A paced provider is asked only about the tracks the providers ahead
+    # of it could not settle, once they have been through every track.
+    paced = next((i for i, prov in enumerate(providers)
+                  if prov in PROVIDER_MIN_INTERVAL), 0)
     run = _Pass(should_stop, busy_patience,
-                replaces_lrc=found is None or found.exchange)
+                replaces_lrc=found is None or found.exchange,
+                ahead=providers[:paced] or None)
+    deferred: list[Path] = []
 
     def run_one(fp: Path) -> Optional[str]:
         try:
@@ -2489,23 +2826,39 @@ def fetch_for_paths(
             outcome = "exception"
         return outcome
 
-    completed = 0
+    progress = _Progress(
+        total, next((prov for prov in providers
+                     if prov in PROVIDER_MIN_INTERVAL), None),
+        split=run.ahead is not None)
 
     def take(fp, outcome):
-        nonlocal completed
         if outcome is None:
             return
         # Every submitted worker is drained, and counted unless a stop cut
         # its lookups short. Once a stop is observed no replacement work is
         # queued, so a returned summary cannot omit a worker that may write.
+        # The first part counts every track it has been through, and the
+        # part for a paced provider the tracks left to it.
         try:
-            completed += 1
-            counts[outcome] += 1
             label = _track_label(fp, owned_root)
-            log.info("[%d/%d] %s - %s", completed, total, _outcome_label(outcome, synced_only), label)
+            if progress.second is None:
+                at, of = progress.done + progress.deferred + 1, total
+            else:
+                at, of = progress.done - progress.second[1] + 1, len(deferred)
+            if outcome == "deferred":
+                deferred.append(fp)
+                progress.deferred += 1
+                said = f"left for {progress.paced}"
+            else:
+                progress.done += 1
+                counts[outcome] += 1
+                said = _outcome_label(outcome, synced_only)
+                state.save()
+            log.info("[%d/%d] %s - %s", at, of, said, label)
+            if line := progress.due_line():
+                log.info(line)
             if progress_cb:
-                progress_cb(completed, total, label)
-            state.save()
+                progress_cb(at, of, label, progress.note())
         except Exception as e:
             log.exception("post-process error on %s: %s", fp, e)
 
@@ -2513,12 +2866,26 @@ def fetch_for_paths(
         stopped = _drain(candidates, run_one, take, workers=workers,
                          should_stop=should_stop, thread_name_prefix="lyrics",
                          log=log)
+        if deferred and not stopped:
+            order = {fp: i for i, fp in enumerate(candidates)}
+            deferred.sort(key=order.__getitem__)
+            run.ahead = None
+            progress.second = (time.monotonic(), progress.done)
+            log.info("%s left for %s; %s is asked at most %.0f times a minute.",
+                     plural(len(deferred), "track"),
+                     " and ".join(providers[paced:]), providers[paced],
+                     60 / PROVIDER_MIN_INTERVAL[providers[paced]])
+            stopped = _drain(deferred, run_one, take, workers=workers,
+                             should_stop=should_stop,
+                             thread_name_prefix="lyrics", log=log)
     finally:
         state.flush()
 
     if stopped:
         counts["stopped"] = 1
         counts["stop-total"] = total
+        if run.ahead is not None and deferred:
+            counts["stop-deferred"] = len(deferred)
     return counts
 
 
@@ -2599,21 +2966,14 @@ def index_existing(
 
     log.info("indexing %d files with %d workers (no provider calls)",
              total, workers)
-    progress_every = max(25, min(250, total // 50))
     completed = 0
-    last_log = time.monotonic()
 
     def take(fp, outcome):
-        nonlocal completed, last_log
+        nonlocal completed
         completed += 1
         counts[outcome] += 1
         if progress_cb:
             progress_cb(completed, total, fp.name)
-        if completed % progress_every == 0:
-            now = time.monotonic()
-            rate = progress_every / max(0.001, now - last_log)
-            last_log = now
-            log.info("[%d/%d] · %.0f tracks/s", completed, total, rate)
         state.save()
 
     try:

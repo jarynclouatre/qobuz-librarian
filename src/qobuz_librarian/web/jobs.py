@@ -50,6 +50,7 @@ from qobuz_librarian.completion import (
 from qobuz_librarian.integrations import beets
 from qobuz_librarian.integrations import rip as rip_module
 from qobuz_librarian.library import library_scan_state, scan_checkpoint, scanner
+from qobuz_librarian.library import lyrics as library_lyrics
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.post_job_hook import release_title
 from qobuz_librarian.ui_cli.errors import plural
@@ -2482,6 +2483,19 @@ def restore_jobs(
                                "before it stopped. The rest did not finish.")
             else:
                 job.summary = restart.rstrip()
+            job.finished_at = job.finished_at or time.time()
+            interrupted += 1
+            _persist_restored_transition(job, previous_status)
+        elif status == JobStatus.RUNNING and job.execute_kind == "lyrics":
+            # Every lyric written stays, and the next run skips the tracks
+            # this one checked.
+            job.status = JobStatus.CANCELED
+            stopped = next((line for line in reversed(job.log_lines)
+                            if line.startswith(library_lyrics.STOPPED)), "")
+            job.summary = (
+                job_persistence.RESTART_INTERRUPTED + " "
+                + (stopped or "The lyrics it wrote are kept, and the next "
+                   "run looks up the tracks it had not checked."))
             job.finished_at = job.finished_at or time.time()
             interrupted += 1
             _persist_restored_transition(job, previous_status)

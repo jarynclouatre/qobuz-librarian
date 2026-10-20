@@ -13,6 +13,7 @@ from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.library.lyrics import (
     HAVE_LYRICS,
+    copied_place,
     read_only_note,
     run_library_lyrics,
     summarize_lyrics_result,
@@ -150,28 +151,38 @@ def _report_summary(res, *, dry_run, synced_only=False):
         log.info(fmt(C.GRAY, "  Nothing to do."))
         return False
 
-    wrote_synced = res.get("wrote-synced", 0) + res.get("dry:wrote-synced", 0)
     wrote_plain  = res.get("wrote-plain", 0) + res.get("dry:wrote-plain", 0)
+    wrote_synced = summary["wrote"] - wrote_plain
+    upgraded_part = (f" ({summary['upgraded']} upgraded from plain)"
+                     if summary["upgraded"] else "")
+    copied_part = (
+        f"{summary['copied']} "
+        f"{'would be copied' if dry_run else 'copied'} to "
+        f"{copied_place(cfg.LYRICS_FORMAT)} · "
+        if summary["copied"] else "")
 
     verb = "Would write" if dry_run else "Wrote"
     skipped_part = (f" · {skipped} skipped (already checked)" if skipped else "")
+    unchecked = summary["unfinished"] - summary["deferred"]
     unfinished_part = (
-        f" · {summary['unfinished']} "
-        f"{'not checked' if dry_run else 'left for the next run'}"
-        if summary["unfinished"] else ""
+        (f" · {summary['deferred']} left for NetEase next run" if summary["deferred"]
+         else "")
+        + (f" · {unchecked} {'not checked' if dry_run else 'left for the next run'}"
+           if unchecked else "")
     )
     retry_part = (
         " (a run without --lyrics-synced-only tries them again)" if synced_only
         else f" (next try after {lyric_fetch.RECHECK_AFTER_DAYS} days)"
     ) if summary["not_found"] and not dry_run else ""
     checked_part = (
-        f"{processed} of {plural(summary['candidate_total'], 'track')} checked"
+        f"{processed + summary['deferred']} of "
+        f"{plural(summary['candidate_total'], 'track')} checked"
         if summary["stopped"] else f"{plural(processed, 'track')} checked"
     )
     log.info(block(fmt(C.GRAY,
         f"     {checked_part} · {verb.lower()} "
-        f"{wrote_synced} synced + {wrote_plain} plain · "
-        f"{summary['already']} already had lyrics · "
+        f"{wrote_synced} synced + {wrote_plain} plain{upgraded_part} · "
+        f"{copied_part}{summary['already']} already had lyrics · "
         f"{summary['not_found']} no {'synced ' if synced_only else ''}"
         f"lyrics found{retry_part}"
         f"{skipped_part}{unfinished_part}.")))
@@ -196,9 +207,9 @@ def _report_summary(res, *, dry_run, synced_only=False):
             "check the library path and symlinks."))
     if summary["unavailable"]:
         log.warning(fmt(C.YELLOW,
-            f"     {plural(summary['unavailable'], 'track')} couldn't reach a "
-            "provider (rate-limited or down); re-run later to pick "
-            f"{'it' if summary['unavailable'] == 1 else 'them'} up."))
+            f"     {plural(summary['unavailable'], 'track')} could not be "
+            "checked, as no lyric provider answered; the next run tries "
+            f"{'it' if summary['unavailable'] == 1 else 'them'} again."))
     if summary["errors"]:
         log.warning(fmt(C.YELLOW,
             f"     {plural(summary['errors'], 'track')} hit an error while "

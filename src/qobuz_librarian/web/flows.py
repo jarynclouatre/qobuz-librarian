@@ -5221,12 +5221,16 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         log.info(job.summary)
         _close_completed_job(job)
         return
-    if res.get("stopped"):
-        stop_total = max(0, int(res.get("stop_total", total)))
-        processed = min(stop_total, max(0, int(res.get("processed", 0))))
+    if res.get("stopped") and res.get("stop_stage") == "index":
         job.summary = (
-            f"Stopped after processing {processed} of "
-            f"{plural(stop_total, 'track')}.")
+            f"{lyrics.STOPPED}reading the lyrics of "
+            f"{min(total, int(res.get('processed', 0)))} of "
+            f"{plural(total, 'track')}, before any lookup. Nothing was written.")
+        log.info(job.summary)
+        return
+    if res.get("stopped"):
+        job.summary = lyrics.stop_summary(
+            lyrics.summarize_lyrics_result(res), cfg.LYRICS_FORMAT)
         log.info(job.summary)
         return
 
@@ -5245,12 +5249,16 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         return
     parts = [
         f"{plural(processed, 'track')} checked",
-        f"{plural(counts['wrote'], 'track')} got lyrics",
+        f"{plural(counts['wrote'], 'track')} got lyrics"
+        + (f" ({counts['upgraded']} upgraded from plain to synced)"
+           if counts["upgraded"] else ""),
     ]
     if unreadable:
         parts.append("unreadable artists: " + ", ".join(unreadable)
                      + "; retry after checking permissions")
     for count, phrase in (
+        (counts["copied"],
+         lyrics.copied_note(counts["copied"], cfg.LYRICS_FORMAT)),
         (counts["already"],
          f"{plural(counts['already'], 'track')} already had lyrics"),
         (counts["not_found"],
@@ -5269,8 +5277,8 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         (counts["unsafe"],
          f"{plural(counts['unsafe'], 'unsafe path')} refused"),
         (counts["unavailable"],
-         f"{plural(counts['unavailable'], 'track')} couldn't reach a provider "
-         "(re-run later)"),
+         f"{plural(counts['unavailable'], 'track')} could not be checked "
+         "(the next run tries again)"),
         (counts["errors"],
          f"{plural(counts['errors'], 'track')} hit an error"),
         (counts["other_errors"],
@@ -5286,9 +5294,13 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
         if counts["unsafe"]:
             failures.append(
                 f"{plural(counts['unsafe'], 'unsafe track path')} refused")
-        if counts["unavailable"]:
+        if counts["unavailable"] and counts["failures"] == counts["unavailable"]:
             failures.append(
-                f"{plural(counts['unavailable'], 'track')} couldn't reach a provider")
+                "no lyric provider answered, so "
+                f"{plural(counts['unavailable'], 'track')} could not be checked")
+        elif counts["unavailable"]:
+            failures.append(
+                f"{plural(counts['unavailable'], 'track')} could not be checked")
         if counts["errors"]:
             failures.append(f"{plural(counts['errors'], 'track')} hit an error")
         if counts["other_errors"]:

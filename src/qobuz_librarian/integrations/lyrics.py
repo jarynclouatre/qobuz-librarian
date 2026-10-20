@@ -25,6 +25,8 @@ _LYRIC_RESOLVED_OUTCOMES = {
     "wrote-plain",
     "dry:wrote-synced",
     "dry:wrote-plain",
+    "upgraded-synced",
+    "dry:upgraded-synced",
     "copied-synced",
     "copied-plain",
     "dry:copied-synced",
@@ -32,6 +34,7 @@ _LYRIC_RESOLVED_OUTCOMES = {
     "already-synced",
     "already-plain",
     "kept-existing-plain",
+    "kept-plain-lrc",
     "not-found",
     "skipped-instrumental",
     "skipped-long",
@@ -45,7 +48,7 @@ def _fetch_outcome_summary(counts, *, expected=None):
     values = {
         str(outcome): max(0, int(count))
         for outcome, count in (counts or {}).items()
-        if outcome not in {"stopped", "stop-total"}
+        if outcome not in {"stopped", "stop-total", "stop-deferred"}
     }
     resolved = sum(values.get(outcome, 0) for outcome in _LYRIC_RESOLVED_OUTCOMES)
     queued = sum(values.get(outcome, 0) for outcome in _LYRIC_QUEUED_OUTCOMES)
@@ -106,19 +109,21 @@ def _run_lyric_hook(album_dir):
             providers=cfg.LYRICS_PROVIDERS or None,
             lyrics_format="embed",
             state_path=cfg.LYRIC_FETCH_STATE_FILE,
-            progress_cb=lambda c, t, name: report_progress("Fetching lyrics", c, t, name),
+            progress_cb=lambda c, t, name, note: report_progress(
+                " · ".join(filter(None, ("Fetching lyrics", note))), c, t, name),
             busy_patience=0,
         )
     except Exception as e:
         log.info(fmt(C.YELLOW, f"  ⚠  Lyric hook failed: {e}."))
         return
-    synced = counts.get("wrote-synced", 0)
+    synced = counts.get("wrote-synced", 0) + counts.get("upgraded-synced", 0)
     plain = counts.get("wrote-plain", 0)
     nofnd = counts.get("not-found", 0)
     already = sum(
         counts.get(outcome, 0)
         for outcome in (
             "already-synced", "already-plain", "kept-existing-plain",
+            "kept-plain-lrc",
             "copied-synced", "copied-plain",
         )
     )
