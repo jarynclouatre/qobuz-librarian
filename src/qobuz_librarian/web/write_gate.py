@@ -61,13 +61,15 @@ def _writes_paused_notice(*, log_details: bool = False,
         msg = ("Another Qobuz Librarian run is using the library, so downloads "
                "and scans here are paused until it ends.")
     elif (unwritable := storage._unwritable_volumes()):
-        reason = "A folder Qobuz Librarian must write to is read-only."
         action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
-        advice = ("Check the folder paths in your .env, then run "
-                  "docker compose up -d."
-                  if all(storage.DOCKER_MADE in p for p in unwritable)
-                  else "On a NAS, set PUID/PGID to the share owner and "
-                  "confirm the host directories exist.")
+        if all(storage.DOCKER_MADE in p for p in unwritable):
+            reason = "A folder path in .env looks mistyped."
+            advice = ("Check the folder paths in your .env, then run "
+                      "docker compose up -d.")
+        else:
+            reason = "A folder Qobuz Librarian must write to is read-only."
+            advice = ("On a NAS, set PUID/PGID to the share owner and "
+                      "confirm the host directories exist.")
         msg = ("Qobuz Librarian can't write where it needs to: "
                f"{'; '.join(unwritable)}. {advice} Downloads can't run "
                "until fixed.")

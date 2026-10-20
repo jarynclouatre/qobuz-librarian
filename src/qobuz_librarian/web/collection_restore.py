@@ -15,6 +15,7 @@ from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.web import flows
 
 ISRC_OWNED_RATIO = 0.5
+ISRC_SHARED_ENOUGH = 3
 
 # How many of an album's ISRCs are worth spending a Qobuz lookup on before
 # giving up and searching by name.
@@ -147,7 +148,14 @@ def _owned_folder(disk, artist_dir, album):
             wanted_year is None or held_year is None or held_year == wanted_year)
         have = disk.isrcs(d)
         overlap = sum(1 for code in wanted if code in have)
-        if not same_name and not (wanted and overlap / len(wanted) >= ISRC_OWNED_RATIO):
+        # A single sharing a recording or two with a full album is neither
+        # that album's folder nor what is left of it; a deluxe folder holding
+        # the whole album is.
+        if not same_name and not (
+                wanted and have
+                and overlap / len(wanted) >= ISRC_OWNED_RATIO
+                and (overlap / len(have) >= ISRC_OWNED_RATIO
+                     or overlap >= ISRC_SHARED_ENOUGH)):
             continue
         if not album.get("tracks"):
             if d.name == name:

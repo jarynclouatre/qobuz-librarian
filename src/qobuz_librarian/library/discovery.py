@@ -273,8 +273,19 @@ def resolve_artist(query, token, owned_titles=None):
                 _resolve_unchecked.discard(query)
                 _resolve_cache_dirty = True
             return hit[0], hit[1]
+    # Qobuz finds nothing for ".38 Special", only for "38 Special". Without
+    # the dot a name can match another artist, so the bare name is trusted
+    # only when that artist's catalog lists one of the folder's albums.
+    lookup = query
     try:
         results = search_artists(query, token, limit=cfg.ARTIST_LOOKUP_LIMIT)
+        bare = query.strip().lstrip("._-").strip()
+        if (owned_titles and bare and bare != query.strip()
+                and not _close_artists(results, query)):
+            lookup = bare
+            results = [a for a in search_artists(
+                bare, token, limit=cfg.ARTIST_LOOKUP_LIMIT)
+                if _titles_listed(a.get("id"), token, owned_titles)]
     except (AuthLost, QobuzUnavailable):
         raise
     except Exception as e:
@@ -282,7 +293,7 @@ def resolve_artist(query, token, owned_titles=None):
         if hit is not None:
             return hit[0], hit[1]
         raise ArtistSearchUnavailable(str(e)) from e
-    close = _close_artists(results, query)
+    close = _close_artists(results, lookup)
     if not close:
         if hit is not None:
             return hit[0], hit[1]

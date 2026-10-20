@@ -14,6 +14,7 @@ from qobuz_librarian.queue import builder as queue_builder
 from qobuz_librarian.queue import executor as queue_executor
 from qobuz_librarian.ui_cli.logging import vlog
 from qobuz_librarian.web import (
+    download_outcomes,
     flows,
     job_persistence,
     owned_paths,
@@ -395,7 +396,10 @@ def _make_single_track_run(album, track, token):
                 return
             broken = qi.get("n_broken") and not qi.get("n_fail")
             j.error = _SINGLE_TRACK_FAILURES.get(qi.get("result"))
-            if not j.error or broken and qi.get("result") == "incomplete":
+            if (qi.get("import_denied") and not qi.get("n_fail")
+                    and qi.get("result") not in _SINGLE_TRACK_FAILURES):
+                j.error = download_outcomes.import_denied_text(qi["import_denied"])
+            elif not j.error or broken and qi.get("result") == "incomplete":
                 j.error = (
                     "Downloaded, but the import failed. See job log."
                     if qi.get("n_ok")

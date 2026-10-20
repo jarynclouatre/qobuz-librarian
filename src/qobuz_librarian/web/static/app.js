@@ -3610,12 +3610,19 @@
     // which: "push" for a tab, "filter" for the filter box, "none" when the
     // browser has already moved us, and "replace" for a reload that did not
     // change where the user is standing.
-    function reviewEntry(tab, query, filter) {
-      return { ql: { review: id, tab: tab || "", q: query || "", filter: !!filter } };
+    function reviewEntry(tab, query, filter, from) {
+      return { ql: { review: id, tab: tab || "", q: query || "", filter: !!filter,
+                     from: from || "" } };
     }
     function onFilterEntry() {
       var st = window.history.state && window.history.state.ql;
       return !!(st && st.review === id && st.filter);
+    }
+    // The query of the entry the filter stepped off; Back from the filter
+    // lands on it.
+    function filterFrom() {
+      var st = window.history.state && window.history.state.ql;
+      return st && st.review === id ? st.from || "" : "";
     }
     function syncUrl(tab, query, mode) {
       if (mode === "none") return;
@@ -3628,12 +3635,16 @@
       else url.searchParams.delete("q");
       url.searchParams.delete("page");
       var onFilter = onFilterEntry();
+      var st = window.history.state && window.history.state.ql;
       var filterStep = mode === "filter" ? !!query : (mode !== "push" && onFilter);
       var push = mode === "push" || (filterStep && !onFilter);
+      var from = !filterStep ? ""
+        : onFilter ? filterFrom()
+        : (st && st.review === id ? st.q || "" : "");
       if (push && window.history.pushState) {
-        window.history.pushState(reviewEntry(tab, query, filterStep), "", url);
+        window.history.pushState(reviewEntry(tab, query, filterStep, from), "", url);
       } else {
-        window.history.replaceState(reviewEntry(tab, query, filterStep), "", url);
+        window.history.replaceState(reviewEntry(tab, query, filterStep, from), "", url);
       }
     }
 
@@ -3942,8 +3953,9 @@
     function applyFilter() {
       var query = inputQuery();
       // Emptying the box steps back off the entry the filter pushed, so one
-      // Back press undoes the query whatever its length.
-      if (!query && onFilterEntry()) { window.history.back(); return; }
+      // Back press undoes the query whatever its length, unless that entry
+      // held another filter (a tab switch since); then it is replaced.
+      if (!query && onFilterEntry() && !filterFrom()) { window.history.back(); return; }
       loadPage(1, query, pendingTab === null ? curTab() : pendingTab, "filter");
     }
     if (filterInput) {

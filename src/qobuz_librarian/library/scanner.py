@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import stat
+import threading
 from pathlib import Path
 
 from qobuz_librarian import config
@@ -168,6 +169,27 @@ def forget_named_paths() -> None:
     _UNDECODABLE_NAMED.clear()
 
 
+# Every non-UTF-8 path skipped since a Library scan began, for its summary.
+# Download jobs run alongside a scan and add to it rather than reset it.
+_SKIPPED_SINCE_SCAN: set = set()
+_SKIPPED_LOCK = threading.Lock()
+
+
+def start_skip_record() -> None:
+    with _SKIPPED_LOCK:
+        _SKIPPED_SINCE_SCAN.clear()
+
+
+def undecodable_named() -> list[str]:
+    """The non-UTF-8 paths skipped since the Library scan began, relative to
+    the music folder where they are inside it."""
+    with _SKIPPED_LOCK:
+        skipped = list(_SKIPPED_SINCE_SCAN)
+    root = os.fsencode(config.MUSIC_ROOT).decode(errors="backslashreplace").rstrip("/") + "/"
+    return sorted(shown[len(root):] if shown.startswith(root) else shown
+                  for shown in skipped)
+
+
 def _undecodable(path) -> bool:
     """True, naming the path once per scan, when a name in it is not UTF-8:
     one written in an old codepage, or read through a share mounted with
@@ -177,10 +199,12 @@ def _undecodable(path) -> bool:
         os.fspath(path).encode()
     except UnicodeEncodeError:
         shown = os.fsencode(path).decode(errors="backslashreplace")
+        with _SKIPPED_LOCK:
+            _SKIPPED_SINCE_SCAN.add(shown)
         if shown not in _UNDECODABLE_NAMED:
             _UNDECODABLE_NAMED.add(shown)
             log.info(f"  ⚠  Skipped {shown}: its name is not valid UTF-8. "
-                     "Rename it to include it.")
+                     "Rename it so scans include it.")
         return True
     return False
 

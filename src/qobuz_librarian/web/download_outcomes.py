@@ -325,10 +325,7 @@ def download_error(result, *, job_controls=True):
             return (f"{plural(n_failed, 'track')} failed."
                     + hint("See job log.") + other)
         if result.get("import_denied"):
-            folder, _is_host = storage._resolve_host_path(
-                result["import_denied"])
-            return (f"Downloaded, but Beets was not allowed to write in "
-                    f"{folder}. Check that folder's permissions, then retry.")
+            return import_denied_text(result["import_denied"])
         if result.get("n_ok"):
             return "Downloaded, but the import failed." + hint("See job log.")
         if retryable:
@@ -343,6 +340,12 @@ def download_error(result, *, job_controls=True):
         return (f"{plural(result['n_fail'], 'track')} failed."
                 + hint("See job log."))
     return None
+
+
+def import_denied_text(path):
+    folder, _is_host = storage._resolve_host_path(path)
+    return (f"Downloaded, but Beets was not allowed to write in {folder}. "
+            "Check that folder's permissions, then retry.")
 
 
 def _mark_download_attention(job, result):

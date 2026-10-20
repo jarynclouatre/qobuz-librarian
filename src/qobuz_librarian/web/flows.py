@@ -65,6 +65,8 @@ from qobuz_librarian.library.scanner import (
     is_library_system_folder,
     list_artist_album_dirs,
     list_library_artists,
+    start_skip_record,
+    undecodable_named,
 )
 from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
 from qobuz_librarian.modes import process as process_mode
@@ -505,13 +507,15 @@ def named_albums(candidates, limit=3):
 
 
 def fold_key(c):
-    """A candidate's merge identity: Qobuz album id, falling back to
-    artist+title for keyless carry-overs. Shared by the fold and its caller's
-    before/after arithmetic so the summary counts what actually changed."""
+    """A candidate's merge identity: its artist and Qobuz album id, falling
+    back to artist+title for keyless carry-overs. The artist is part of it
+    because one album can be listed under two artists, as one's album and
+    another's compilation."""
+    artist = (c.get("artist") or "").lower()
     album_id = str((c.get("payload") or {}).get("album_id") or "")
     if album_id:
-        return album_id
-    return ((c.get("artist") or "").lower(), (c.get("title") or "").lower())
+        return artist, album_id
+    return artist, (c.get("title") or "").lower()
 
 
 def _fold_row(c):
@@ -579,8 +583,8 @@ def _music_root_listed():
 
 def fold_new_candidates(parked, cands, *, review_generation=None,
                         coverage=None):
-    """Merge a refresh's finds into a parked review, keyed by Qobuz album id
-    (falling back to artist+title for keyless carry-overs).
+    """Merge a refresh's finds into a parked review, keyed by artist and
+    Qobuz album id (see fold_key).
 
     Entries the refresh didn't touch, and the user's ticks on them, are
     never changed. A same-key row found by the refresh takes its fresh title,
@@ -699,6 +703,24 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
             if (_row_shows_change(_fold_row(fresh), _fold_row(c))
                     and (listed(fresh) or listed(c))):
                 updated += 1
+        # Older builds matched rows by album id alone and could leave an
+        # album listed under two artists as two missing-album rows under one
+        # of them. Keep the first, with either row's tick.
+        first_at = {}
+        unique = []
+        for c in keep:
+            key = _key(c) if library and not is_gap_candidate(c) else None
+            at = first_at.get(key) if key is not None else None
+            if at is None:
+                if key is not None:
+                    first_at[key] = len(unique)
+                unique.append(c)
+                continue
+            if c.get("selected") and not unique[at].get("selected"):
+                unique[at] = {**unique[at], "selected": True}
+            if listed(c):
+                removed += 1
+        keep = unique
         parked.candidates = keep
         seen = {_key(c) for c in keep}
         listed_rows = sum(1 for c in keep if listed(c))
@@ -1767,6 +1789,7 @@ def _apply_saved_refresh_settings(job):
 
 
 def scan_library(job, token, partial_only=False, force_full=False):
+    start_skip_record()
     if not _apply_saved_refresh_settings(job):
         job.summary = "Stopped before anything turned up."
         return
@@ -2475,6 +2498,8 @@ def _scan_library_impl(
             f"{' and '.join(stale_tabs)} results were not updated because "
             "this scan did not finish cleanly."
         )
+    if not job.cancel_requested and (skipped := undecodable_named()):
+        caveats.append(undecodable_note(skipped))
     if baseline_save_failed:
         caveats.append("New releases could not be updated; the next "
                        "complete scan tries again.")
@@ -2510,6 +2535,16 @@ def _offered_upgrades():
     return {((c.get("payload") or {}).get("album_id"),
              (c.get("payload") or {}).get("album_dir"))
             for c in upgrade_state.visible_candidates()}
+
+
+def undecodable_note(paths):
+    one = len(paths) == 1
+    names = ", ".join(paths[:3]) + (f" and {len(paths) - 3} more"
+                                    if len(paths) > 3 else "")
+    return (f"Skipped {names}: {'its name is' if one else 'their names are'} "
+            f"not valid UTF-8, so {'it reads' if one else 'they read'} as "
+            f"missing. Rename {'it' if one else 'them'} so scans include "
+            f"{'it' if one else 'them'}.")
 
 
 def upgrade_finds_note(n, first=False):
