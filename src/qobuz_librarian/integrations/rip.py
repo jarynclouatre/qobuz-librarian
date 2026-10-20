@@ -1,9 +1,11 @@
 """Streamrip download wrapper and staging utilities."""
+import importlib.util
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -252,6 +254,14 @@ def _terminate(proc, reader):
     reader.join(timeout=5)
 
 
+def rip_command():
+    """streamrip through the launcher when it shares this interpreter (the
+    image), else whatever `rip` is on PATH."""
+    if importlib.util.find_spec("streamrip") is not None:
+        return [sys.executable, "-m", "qobuz_librarian.integrations.rip_launch"]
+    return ["rip"]
+
+
 def rip_url(url, timeout=None, live_output=False, quality=None,
             staging_dir=None):
     """Run `rip url <url>`, returning (returncode, combined_output_string).
@@ -268,7 +278,7 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
         timeout = cfg.RIP_TIMEOUT
     if quality is None:
         quality = cfg.STREAMRIP_QUALITY
-    cmd = ["rip"]
+    cmd = rip_command()
     # The librarian does its own missing-track bookkeeping (it re-rips for
     # quality upgrades, truncation repair, and broken-FLAC retries), so
     # streamrip's downloads database - which silently skips any URL it has

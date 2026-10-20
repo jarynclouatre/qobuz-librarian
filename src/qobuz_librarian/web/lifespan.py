@@ -16,6 +16,7 @@ from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.integrations import beets as beets_mod
 from qobuz_librarian.integrations import downsample_engine
 from qobuz_librarian.integrations import lyrics as lyrics_mode
+from qobuz_librarian.integrations import rip as rip_mod
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import flac_cache, repair_cache
@@ -589,7 +590,7 @@ async def _lifespan(_app: FastAPI):
                     job_mgr.end_library_operation(maintenance_token)
 
             maintenance_task = asyncio.create_task(_registered_cache_prune())
-        if not shutil.which("rip"):
+        if rip_mod.rip_command() == ["rip"] and not shutil.which("rip"):
             _log.warning("`rip` (streamrip) not found in PATH; downloads will fail")
         _beets_python, beets_failure = diagnostics._beets_runtime_diagnostic()
         if _beets_python is None:

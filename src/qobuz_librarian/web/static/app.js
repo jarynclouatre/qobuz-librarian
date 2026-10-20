@@ -3214,6 +3214,14 @@
       }
       master.checked = tc.total > 0 && tc.selected >= tc.total;
       master.indeterminate = tc.selected > 0 && tc.selected < tc.total;
+      // The button takes every pick on the tab, filter or not.
+      var offscreen = form.querySelector("[data-review-offscreen]");
+      if (offscreen) {
+        var outside = curQuery() ? tabCounts(lastCounts).selected - tc.selected : 0;
+        offscreen.textContent = outside > 0
+          ? formatCount(outside) + " more selected outside this filter"
+          : "";
+      }
     }
 
     function post(url, body) {
@@ -3478,6 +3486,14 @@
           det.dataset.groupSelected = String(picked);
         }
       });
+      var pageBtn = cont.querySelector("[data-select-page]");
+      if (pageBtn) {
+        var checks = Array.from(box.querySelectorAll("[data-artist-select]"));
+        var allPicked = checks.length > 0 && checks.every(function (cb) { return cb.checked; });
+        pageBtn.setAttribute("data-select-page", allPicked ? "0" : "1");
+        pageBtn.textContent = allPicked ? "Deselect page" : "Select page";
+        pageBtn.setAttribute("aria-label", (allPicked ? "Deselect" : "Select") + " everything on this page only");
+      }
     }
 
     function loadGroupItems(det, force) {
@@ -3699,7 +3715,9 @@
       var moveEvents = ["wheel", "touchmove", "pointerdown", "keydown"];
       if (preservePlace) {
         var sticky = cont.querySelector(".ql-review-sticky");
-        var top = sticky ? sticky.getBoundingClientRect().bottom : 0;
+        var bar = document.querySelector(".ql-mobilebar");
+        var top = Math.max(sticky ? sticky.getBoundingClientRect().bottom : 0,
+                           bar ? bar.getBoundingClientRect().bottom : 0);
         var groups = Array.from(cont.querySelectorAll("details[data-artist]"));
         var index = groups.findIndex(function (d) { return d.getBoundingClientRect().bottom > top; });
         if (index >= 0) {
@@ -3827,7 +3845,7 @@
       var allBtn = t.closest("[data-select-all]");
       if (allBtn) { bulkSelect(allBtn.getAttribute("data-select-all") === "1", "all"); return; }
       var pageBtn = t.closest("[data-select-page]");
-      if (pageBtn) { bulkSelect(true, "page"); return; }
+      if (pageBtn) { bulkSelect(pageBtn.getAttribute("data-select-page") === "1", "page"); return; }
       var more = t.closest("[data-load-more]");
       if (more) { loadMore(parseInt(more.getAttribute("data-next-page") || "2", 10)); return; }
       var switchBtn = t.closest("[data-review-switch]");

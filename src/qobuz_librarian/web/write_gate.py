@@ -63,10 +63,14 @@ def _writes_paused_notice(*, log_details: bool = False,
     elif (unwritable := storage._unwritable_volumes()):
         reason = "A folder Qobuz Librarian must write to is read-only."
         action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
+        advice = ("Check the folder paths in your .env, then run "
+                  "docker compose up -d."
+                  if all(storage.DOCKER_MADE in p for p in unwritable)
+                  else "On a NAS, set PUID/PGID to the share owner and "
+                  "confirm the host directories exist.")
         msg = ("Qobuz Librarian can't write where it needs to: "
-               f"{'; '.join(unwritable)}. On a NAS, set "
-               "PUID/PGID to the share owner and confirm the host "
-               "directories exist. Downloads can't run until fixed.")
+               f"{'; '.join(unwritable)}. {advice} Downloads can't run "
+               "until fixed.")
     elif runtime._LOCK_UNENFORCEABLE and isinstance(run_lock.unavailable_reason,
                                             PermissionError):
         reason = "The run lock file can't be opened."

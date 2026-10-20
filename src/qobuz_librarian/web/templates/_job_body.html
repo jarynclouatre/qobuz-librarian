@@ -109,7 +109,7 @@
     {% set _job_summary = job.summary %}
     {% endif %}
     {% if _job_summary %}
-    <div class="ql-job-summary ql-job-summary--review"><span>{{ _job_summary }}</span></div>
+    <div class="ql-job-summary ql-job-summary--review"><span>{{ _job_summary }}{% if job.execute_kind == 'library' and 'can be upgraded' in _job_summary %} <a href="/upgrade" class="ql-inline-link">Open Upgrade</a>{% endif %}</span></div>
     {% endif %}
 
     {# Tab scoping: on a library review the bulk bar acts on the ACTIVE tab
@@ -160,6 +160,7 @@
             {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-irreversible
             {%- else %} data-confirm-action="Download"
             {%- endif %}>{% if _bar_selected %}{{ job.review_verb }} {{ labels.format_count(_bar_selected) }} selected{% else %}{{ labels.review_empty_label(job) }}{% endif %}</button>
+          <span data-review-offscreen class="ql-review-reclaimable" aria-live="polite"></span>
           {% if job.execute_kind == 'downsample' %}<span data-downsample-total class="ql-review-reclaimable">{% if review_reclaimable_label %}~{{ review_reclaimable_label }} smaller{% endif %}</span>{% endif %}
           {# A spent review has nothing to download, so the way out takes the
              bar's place. #}

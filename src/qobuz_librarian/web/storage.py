@@ -9,6 +9,20 @@ from qobuz_librarian import disk_support
 from qobuz_librarian.library import collection_snapshot, flac_cache
 from qobuz_librarian.ui_cli.colors import format_size
 
+# Docker makes a missing bind-mount source as an empty root-owned folder, so a
+# mistyped path in .env looks like a permissions problem.
+DOCKER_MADE = ("is an empty folder only root can write to, the kind Docker "
+               "makes when the host folder named in .env does not exist")
+
+
+def _docker_made_folder(path: Path) -> bool:
+    try:
+        return (cfg.in_container() and os.geteuid() != 0
+                and path.stat().st_uid == 0 and not os.access(path, os.W_OK)
+                and not any(path.iterdir()))
+    except OSError:
+        return False
+
 
 def _unwritable_volumes() -> list[str]:
     """Live probe of the critical mounts; empty means writes may run.
@@ -39,6 +53,7 @@ def _unwritable_volumes() -> list[str]:
                 f"{friendly} ({display})"
                 + (" is missing" if unreachable
                    else " is not a folder" if not_a_dir
+                   else f" {DOCKER_MADE}" if _docker_made_folder(p)
                    else " is read-only"))
     return problems
 

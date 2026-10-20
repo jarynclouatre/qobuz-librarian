@@ -219,6 +219,14 @@ def _check_library_folders():
                 "message": storage._music_write_target_message(
                     write_state, recorded, diagnostic=True),
             }
+        if storage._docker_made_folder(root):
+            return {
+                "ready": False,
+                "empty": False,
+                "count": 0,
+                "message": "The music folder " + storage.DOCKER_MADE
+                + ". Check QL_MUSIC_DIR in your .env.",
+            }
         if cfg.in_container():
             elsewhere = ("If your music is already on this machine, map its "
                          f"folder onto {root} with QL_MUSIC_DIR in your .env.")

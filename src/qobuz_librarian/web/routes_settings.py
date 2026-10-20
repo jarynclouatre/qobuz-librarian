@@ -45,7 +45,7 @@ def _web_login_env_managed() -> bool:
 
 
 def _settings_response(request, *, saved=False, queued=False, connected=False,
-                       unverified=False, envchecked=False,
+                       account=False, unverified=False, envchecked=False,
                        rerendered=False,
                        error="", mode="", user_id=None,
                        auth_token_prefill="", diagnostics=None, warnings=None,
@@ -90,6 +90,8 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
     return rendering._tr(request, "settings.html", {
         "music_storage": music_storage,
         "library_size": library_size,
+        "library_baseline_exists": generation_state.library_snapshot_available(
+            generation_state.load()),
         # True once Qobuz has accepted the saved token, False once it has
         # rejected it, None when it has never been asked.
         "token_verified": qobuz_access._token_valid_for(),
@@ -117,6 +119,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "queued": queued,
         "quality_note": quality_note,
         "connected": connected,
+        "account_saved": account,
         "unverified": unverified,
         "envchecked": envchecked,
         "rerendered": rerendered,
@@ -182,7 +185,7 @@ _SETTINGS_ERROR_CODES = frozenset({
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, saved: str = "",
                         queued: bool = False, connected: bool = False,
-                        unverified: bool = False, envchecked: bool = False,
+                        account: bool = False, unverified: bool = False, envchecked: bool = False,
                         error: str = "",
                         mode: str = "", quality_note: bool = False,
                         lastfm: str = ""):
@@ -193,8 +196,8 @@ async def settings_page(request: Request, saved: str = "",
     if error not in _SETTINGS_ERROR_CODES:
         error = rendering._notice_text(error)
     return _settings_response(request, saved=saved, queued=queued,
-                              connected=connected, unverified=unverified,
-                              envchecked=envchecked,
+                              connected=connected, account=account,
+                              unverified=unverified, envchecked=envchecked,
                               error=error, mode=mode, diagnostics=diags,
                               quality_note=quality_note, lastfm_check=lastfm)
 
@@ -427,6 +430,8 @@ async def save_settings(
         if verdict in {AuthOutcome.TEMPORARY, AuthOutcome.INCONCLUSIVE}
         else ""
     )
+    if not auth_token.strip() and user_id.strip():
+        suffix += "&account=1"
     return RedirectResponse(url=f"/settings?connected=1{suffix}#qobuz", status_code=303)
 
 

@@ -310,8 +310,10 @@ def _missing_tool_hint(tool: str, install_hint: str) -> str:
 
 
 def check_rip():
+    from qobuz_librarian.integrations.rip import rip_command
+
     try:
-        r = subprocess.run(["rip", "--version"], capture_output=True, text=True, timeout=10,
+        r = subprocess.run([*rip_command(), "--version"], capture_output=True, text=True, timeout=10,
                            env=cfg.child_env())
         if r.returncode != 0:
             # rip is on PATH (no FileNotFoundError) but exited nonzero; it is
@@ -1000,6 +1002,7 @@ def main():
     # Keep the interactive menu and saved-work choices available on a local-
     # only box.
     download_stack = {}
+    in_menu = []
 
     def prepare_download_stack():
         if download_stack.get("tools_ready"):
@@ -1029,13 +1032,16 @@ def main():
 
             credentials = authorize_qobuz_action(access)
         except NoCredsError:
-            die(fmt(C.RED,
+            message = fmt(C.RED,
                 "\n✗  No Qobuz credentials configured.\n"
                 "   Paste your token and your email or user ID on the Settings page "
                 f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings);\n"
                 "   in terminal mode, press Resume web app there first.\n"
-                "   Or set QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID in your environment.\n"),
-                EXIT_AUTH)
+                "   Or set QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID in your environment.\n")
+            if in_menu:
+                log.info(message)
+                raise _BackToMenu from None
+            die(message, EXIT_AUTH)
         user_id, token = credentials.user_id, credentials.token
         require_music_root()
         if not HAVE_MUTAGEN:
@@ -1292,6 +1298,7 @@ def main():
     # token or downloader; network-backed choices initialise that stack lazily.
     from qobuz_librarian.ui_cli.menu import interactive_session_mode
     from qobuz_librarian.ui_cli.sentinels import Mode
+    in_menu.append(True)
     while True:
         mode = interactive_session_mode()
         if mode == Mode.QUIT:
@@ -1301,77 +1308,84 @@ def main():
                      Mode.ALBUM_WALK, Mode.ALBUM_REPAIR),
             mode in (Mode.UPGRADE, Mode.MIGRATE, Mode.DOWNSAMPLE, Mode.LYRICS),
         )
-        if any(uses):
-            read_saved_queue()
-        if parked and any(uses):
-            log.info(queue_refusal(*uses))
-            continue
-        if queue_refusal(*uses):
-            if offer_saved_queue() is None:
-                return
-            if queue_refusal(*uses):
+        try:
+            if any(uses):
+                read_saved_queue()
+            if parked and any(uses):
+                log.info(queue_refusal(*uses))
                 continue
-        if mode == Mode.ALBUM:
-            # Loop inside album mode so the user can search album after album
-            # without bouncing back to the top menu each time.
-            from qobuz_librarian.modes.album import run_album_mode
-            run_album_mode(args, catalogue_token(), query_args=[], loop=True)
-        elif mode == Mode.ARTIST:
-            from qobuz_librarian.modes.artist import run_artist_mode
-            from qobuz_librarian.ui_cli.prompts import prompt_artist_name
-            while True:
-                artist = prompt_artist_name()
-                if artist is None:
-                    log.info(fmt(C.GRAY, "  Cancelled."))
-                    break
-                run_artist_mode(artist, args, catalogue_token())
-        elif mode == Mode.WALK_QUEUE:
-            from qobuz_librarian.modes.walk import run_walk_queued_mode
-            run_walk_queued_mode(args, catalogue_token())
-        elif mode == Mode.ALBUM_WALK:
-            from qobuz_librarian.modes.walk import run_album_walk_mode
-            run_album_walk_mode(args, catalogue_token())
-        elif mode == Mode.ALBUM_REPAIR:
-            if not args.dry_run:
-                require_disk_support("repair")
-            from qobuz_librarian.modes.repair import run_album_repair_mode
-            run_album_repair_mode(args, catalogue_token(), loop=True)
-        elif mode == Mode.UPGRADE:
-            # Explicit upgrade walk: the user chose this, so enable the
-            # upgrade-replace path for its duration regardless of the
-            # AUTO_UPGRADE_ENABLED default (which only governs passive
-            # upgrades during ordinary gap-fill walks).
-            if not args.dry_run:
-                require_disk_support("upgrade")
-            from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
-            saved = getattr(args, "auto_upgrade", cfg.AUTO_UPGRADE_ENABLED)
-            args.auto_upgrade = True
-            try:
-                run_upgrade_walk_mode(args, catalogue_token())
-            finally:
-                args.auto_upgrade = saved
-        elif mode == Mode.MIGRATE:
-            from qobuz_librarian.modes.migrate import run_migrate_mode
-            run_migrate_mode(args)
-        elif mode == Mode.DOWNSAMPLE:
-            check_media_tools()
-            require_music_root()
-            if not args.dry_run:
-                require_disk_support("downsample")
-            from qobuz_librarian.modes.downsample import run_downsample_walk_mode
-            run_downsample_walk_mode(args)
-        elif mode == Mode.LYRICS:
-            require_music_root()
-            if not args.dry_run:
-                require_disk_support("lyrics")
-            from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
-            run_library_lyrics_mode(args)
-        elif mode == Mode.SETTINGS:
-            from qobuz_librarian.modes.settings_cli import run_settings_mode
-            run_settings_mode(args)
-            for flag, setting in _SETTING_FLAGS:
-                if flag not in args.settings_given:
-                    setattr(args, flag, getattr(cfg, setting))
+            if queue_refusal(*uses):
+                if offer_saved_queue() is None:
+                    return
+                if queue_refusal(*uses):
+                    continue
+            if mode == Mode.ALBUM:
+                # Loop inside album mode so the user can search album after album
+                # without bouncing back to the top menu each time.
+                from qobuz_librarian.modes.album import run_album_mode
+                run_album_mode(args, catalogue_token(), query_args=[], loop=True)
+            elif mode == Mode.ARTIST:
+                from qobuz_librarian.modes.artist import run_artist_mode
+                from qobuz_librarian.ui_cli.prompts import prompt_artist_name
+                while True:
+                    artist = prompt_artist_name()
+                    if artist is None:
+                        log.info(fmt(C.GRAY, "  Cancelled."))
+                        break
+                    run_artist_mode(artist, args, catalogue_token())
+            elif mode == Mode.WALK_QUEUE:
+                from qobuz_librarian.modes.walk import run_walk_queued_mode
+                run_walk_queued_mode(args, catalogue_token())
+            elif mode == Mode.ALBUM_WALK:
+                from qobuz_librarian.modes.walk import run_album_walk_mode
+                run_album_walk_mode(args, catalogue_token())
+            elif mode == Mode.ALBUM_REPAIR:
+                if not args.dry_run:
+                    require_disk_support("repair")
+                from qobuz_librarian.modes.repair import run_album_repair_mode
+                run_album_repair_mode(args, catalogue_token(), loop=True)
+            elif mode == Mode.UPGRADE:
+                # Explicit upgrade walk: the user chose this, so enable the
+                # upgrade-replace path for its duration regardless of the
+                # AUTO_UPGRADE_ENABLED default (which only governs passive
+                # upgrades during ordinary gap-fill walks).
+                if not args.dry_run:
+                    require_disk_support("upgrade")
+                from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
+                saved = getattr(args, "auto_upgrade", cfg.AUTO_UPGRADE_ENABLED)
+                args.auto_upgrade = True
+                try:
+                    run_upgrade_walk_mode(args, catalogue_token())
+                finally:
+                    args.auto_upgrade = saved
+            elif mode == Mode.MIGRATE:
+                from qobuz_librarian.modes.migrate import run_migrate_mode
+                run_migrate_mode(args)
+            elif mode == Mode.DOWNSAMPLE:
+                check_media_tools()
+                require_music_root()
+                if not args.dry_run:
+                    require_disk_support("downsample")
+                from qobuz_librarian.modes.downsample import run_downsample_walk_mode
+                run_downsample_walk_mode(args)
+            elif mode == Mode.LYRICS:
+                require_music_root()
+                if not args.dry_run:
+                    require_disk_support("lyrics")
+                from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
+                run_library_lyrics_mode(args)
+            elif mode == Mode.SETTINGS:
+                from qobuz_librarian.modes.settings_cli import run_settings_mode
+                run_settings_mode(args)
+                for flag, setting in _SETTING_FLAGS:
+                    if flag not in args.settings_given:
+                        setattr(args, flag, getattr(cfg, setting))
+        except _BackToMenu:
+            continue
+
+
+class _BackToMenu(BaseException):
+    """A menu choice that needs Qobuz, picked before a token was saved."""
 
 
 def _check_staging_occupied():

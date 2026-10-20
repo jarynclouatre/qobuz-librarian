@@ -70,7 +70,7 @@
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
-  <span>Connected. Your Qobuz token was saved.
+  <span>{% if account_saved and user_id %}Saved. Downloads sign in as {{ user_id }}.{% else %}Connected. Your Qobuz token was saved.{% endif %}
     <a href="/" class="ql-link font-semibold">Go to Search</a></span>
 </div>
 {% endif %}
@@ -267,7 +267,7 @@
       {# "Connected" is a claim about Qobuz accepting the token, so it waits for
          Qobuz to have accepted it. A saved-but-unproven token says so. #}
       {% if auth_token_set and token_verified is not sameas false %}
-      <span class="ql-conn-line"><span class="ql-conn-dot"></span>{% if token_verified %}Connected{% else %}Token saved{% endif %}{% if user_id %} <span class="ql-conn-who">{{ user_id }}</span>{% endif %}</span>
+      <span class="ql-conn-line"><span class="ql-conn-dot"></span>{% if token_verified %}Connected{% else %}Token saved{% endif %}{% if user_id %}, downloads as <span class="ql-conn-who">{{ user_id }}</span>{% endif %}</span>
       {% elif auth_token_set %}
       <span class="ql-conn-line ql-conn-line--stale"><span class="ql-conn-dot"></span>Token not authenticating{% if user_id %} <span class="ql-conn-who">{{ user_id }}</span>{% endif %}</span>
       {% else %}
@@ -478,6 +478,7 @@
   </div>
 </details>
 
+{% if library_baseline_exists %}
 <details class="ql-settings-section">
   <summary class="ql-settings-summary">
     <h2 id="library-maintenance" tabindex="-1" class="ql-anchor-target">Library maintenance</h2>
@@ -503,6 +504,7 @@
     </div>
   </div>
 </details>
+{% endif %}
 
 <details class="ql-settings-section"{% if settings_section == 'discover' %} open{% endif %}>
   <summary class="ql-settings-summary">

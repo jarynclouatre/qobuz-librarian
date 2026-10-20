@@ -3381,6 +3381,25 @@ details.ql-mobile-drawer[open]::before {
     top: var(--ql-mobilebar-h, 4rem);
   }
 }
+/* On a phone the whole tool block took a third of the screen. The tools
+   scroll away instead, and each artist name stays above its own albums. */
+@media (max-width: 639.98px) {
+  .ql-review-sticky {
+    position: static;
+  }
+  .ql-review-group {
+    overflow: clip;
+  }
+  .ql-review-group[open] > .ql-review-summary {
+    position: sticky;
+    top: var(--ql-mobilebar-h, 4rem);
+    z-index: 5;
+    background-color: var(--ql-bg);
+  }
+  .ql-group-dismiss {
+    z-index: 6;
+  }
+}
 @media (min-width: 640px) {
   .ql-review-candidates {
     padding-bottom: 5rem;

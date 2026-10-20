@@ -2364,6 +2364,7 @@ def _scan_library_impl(
                 if not upgrade_save_failed:
                     saved_views.sync_badge("upgrade")
                     job.upgrade_finds = len(_offered_upgrades() - offered_before)
+                    job.upgrade_finds_first = not offered_before
             elif upgrade_refresh is None:
                 generation_state.mark_output_status(
                     "upgrade",
@@ -2419,7 +2420,8 @@ def _scan_library_impl(
     else:
         job.summary = "No missing albums found for artists in your library."
     if getattr(job, "upgrade_finds", 0) and not job.cancel_requested:
-        job.summary += " " + upgrade_finds_note(job.upgrade_finds)
+        job.summary += " " + upgrade_finds_note(
+            job.upgrade_finds, first=getattr(job, "upgrade_finds_first", False))
     # Artists that errored or came back with a short catalog page aren't in
     # state_artists; the checkpoint stays for them and the last-scan stamp is
     # withheld.
@@ -2510,8 +2512,8 @@ def _offered_upgrades():
             for c in upgrade_state.visible_candidates()}
 
 
-def upgrade_finds_note(n):
-    return f"{plural(n, 'new album')} can be upgraded."
+def upgrade_finds_note(n, first=False):
+    return f"{plural(n, 'album' if first else 'new album')} can be upgraded."
 
 
 def _parked_new_release_review(exclude=None):

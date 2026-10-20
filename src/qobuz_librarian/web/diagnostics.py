@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import disk_support
 from qobuz_librarian import download as download_mod
 from qobuz_librarian.integrations import beets as beets_mod
+from qobuz_librarian.integrations import rip as rip_mod
 from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import collection_snapshot, scanner
@@ -352,6 +354,11 @@ def _diagnostics():
             checks.append({"label": label, "ok": False,
                            "detail": f"{display} exists but is not a directory"})
             return
+        if want_writable and storage._docker_made_folder(p):
+            checks.append({"label": label, "ok": False,
+                           "detail": f"{display} {storage.DOCKER_MADE}. "
+                           "Check the path in your .env"})
+            return
         if want_writable and not os.access(p, os.W_OK):
             checks.append({"label": label, "ok": False,
                            "detail": f"{display} is not writable by the container user. "
@@ -398,7 +405,8 @@ def _diagnostics():
     music_state, recorded_albums = collection_snapshot.music_root_write_state()
     if music_state == "ready":
         _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True,
-                   skip_names=scanner.SYSTEM_FOLDER_NAMES)
+                   skip_names=scanner.SYSTEM_FOLDER_NAMES,
+                   unit=("artist folder", "artist folders"), dirs_only=True)
     else:
         checks.append({
             "label": "Music library",
@@ -431,7 +439,8 @@ def _diagnostics():
     if blocking:
         checks.append({"label": "Staging files", "ok": False,
                        "detail": str(beets_mod.StagingNotEmpty(blocking))})
-    _dir_check("Data folder", cfg.DATA_DIR, want_writable=True)
+    _dir_check("Data folder", cfg.DATA_DIR, want_writable=True,
+               unit=("item", "items"))
     # A single file left owned by another user, as a command run as root or a
     # PUID change leaves behind, passes the folder check above.
     try:
@@ -496,8 +505,9 @@ def _diagnostics():
                         if cfg.in_container()
                         else "See Quick start in the README.")
     for binary in ("rip", "ffmpeg", "flac"):
-        found = shutil.which(binary)
-        checks.append({"label": f"{binary} binary",
+        found = (sys.executable if binary == "rip" and rip_mod.rip_command() != ["rip"]
+                 else shutil.which(binary))
+        checks.append({"label": "streamrip" if binary == "rip" else binary,
                        "ok": bool(found), "mono": bool(found),
                        "detail": found or f"{binary} was not found. "
                        f"{missing_tool_fix}"})
