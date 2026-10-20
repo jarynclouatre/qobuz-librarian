@@ -64,9 +64,8 @@ TEXT_FIELDS = [
      "enum", ["sidecar", "embed", "both"], ""),
     ("LYRICS_PROVIDERS", "Lyrics providers",
      "Providers to try in order, from Lrclib, NetEase, Megalobiz, Musixmatch "
-     "and Genius; empty uses the .env value, or Lrclib, NetEase and "
-     "Musixmatch.",
-     "list", LYRICS_PROVIDER_CHOICES, "e.g. Lrclib, NetEase"),
+     "and Genius; empty uses the .env value, or Lrclib and Musixmatch.",
+     "list", LYRICS_PROVIDER_CHOICES, "e.g. Lrclib, Musixmatch"),
     ("LASTFM_API_KEY", "Last.fm API key",
      "Turns on the Discover tab, which suggests artists and albums like the "
      "ones in your library.",

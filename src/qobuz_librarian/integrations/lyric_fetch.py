@@ -83,7 +83,7 @@ except Exception as _e:  # missing deps shouldn't crash the ingest pipeline
     AVAILABLE = False
     IMPORT_ERROR = _e
 
-DEFAULT_PROVIDERS  = ["Lrclib", "NetEase", "Musixmatch"]
+DEFAULT_PROVIDERS  = ["Lrclib", "Musixmatch"]
 DEFAULT_STATE_FILE = Path(__file__).resolve().parent / ".lyric_fetch_state.json"
 
 # A crash can lose results since the last checkpoint, plus in-flight tracks.
