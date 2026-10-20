@@ -2,6 +2,19 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.4.1] - 2026-10-19
+
+Lyrics runs suited to a whole library, steadier Discover, and cleaner recovery after hard stops.
+
+- Every lyrics provider's match must fit the track's title, artist and length, and synced lyrics from a recording of another length must end with the track. Credits headings are left out. A track whose artist is tagged in another script is also looked up on LRCLIB by its exact title, album and length.
+- The default lyrics providers are Lrclib and Musixmatch. NetEase is available through `LYRICS_PROVIDERS` or Settings; when listed, it is asked only about the tracks the providers before it could not settle, at 15 lookups a minute.
+- Long Lyrics runs show progress, time left and any wait on NetEase. A run that leaves a few tracks unchecked finishes and tries them next time, a stopped run says what it wrote, and a plain `.lrc` beside synced tag lyrics gets the synced lyrics.
+- Discover keeps its last list on screen while it rebuilds, leaves the searched artist out of similar-artist results and shows Last.fm's spelling of the name, and hides Not interested artists in Genres too. A Last.fm key that Last.fm rejects is not saved, and genre and decade chips have full tap height on phones.
+- Search downloads and track grabs queued before a run stopped on a full disk are not started; they say the disk filled up and can be retried once space is freed. A filed download that blocks again on resume is settled in one go.
+- After a hard stop, Downsample's Restore works and its temporary files are cleared, an Upgrade cut off while filing retires the old album's beets entries where they can be told apart, and the hidden folder a grab can leave on an rclone mount is removed.
+- In a terminal queue, an Upgrade that keeps the old album's own files in a backup lets the other albums carry on. An Upgrade put back because its new copy could not be verified returns to the Upgrade list unticked.
+- Job and terminal messages say what happened, and multi-disc albums show the cover from their first disc folder.
+
 ## [1.4.0] - 2026-10-18
 
 Interrupted work settles itself, every run reports what it did, and network shares and unusual disks are checked before anything is written.
