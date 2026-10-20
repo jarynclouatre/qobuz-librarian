@@ -1140,6 +1140,18 @@ def album_tracks_complete(album: dict) -> bool:
         return False
 
 
+def titled_as_searched(album, query):
+    """Whether ``album`` is titled exactly what was searched, so it leads
+    the results wherever Qobuz ranked it."""
+    def key(text):
+        return normalize(strip_leading_article(text.strip()))
+
+    wanted = key(query)
+    title = album.get("title") or ""
+    return bool(wanted) and wanted in (
+        key(title), key(strip_album_decorations(title)))
+
+
 def search_result_ownership(album, fetch_album):
     """How the library holds an album search result, as Search marks it.
 

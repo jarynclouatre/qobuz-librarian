@@ -153,13 +153,14 @@ def prompt_album_selection(albums, prefer_hires=False, can_load_more=False,
         track_word = "track" if tracks == 1 else "tracks"
         qual   = album_quality_label(a)
         marker = fmt(C.YELLOW, " ⚠ lossy") if not is_lossless_album(a) else ""
+        explicit = " • Explicit" if a.get("parental_warning") else ""
 
         line1 = (f"  {fmt(C.BOLD, str(i).rjust(2))}.  "
                  f"{fmt(C.WHITE, truncate(artist, title_max // 2))} "
                  f"{fmt(C.GRAY, '-')} "
                  f"{fmt(C.WHITE, truncate(title, title_max))}")
         owned = _ownership_note((ownership or {}).get(a.get("id")) or {})
-        line2 = (f"      {fmt(C.GRAY, f'{year} • {tracks} {track_word} • {qual}')}"
+        line2 = (f"      {fmt(C.GRAY, f'{year} • {tracks} {track_word} • {qual}{explicit}')}"
                  f"{marker}{owned}")
         print(line1)
         print(line2)

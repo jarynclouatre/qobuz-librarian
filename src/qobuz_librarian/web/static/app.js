@@ -1898,7 +1898,7 @@
           preserveSavedAt || searchSnapshotsInvalidated
         );
       }
-      // The last album of the batches loaded so far, so coming back to the
+      // The last record of the batches loaded so far, so coming back to the
       // search loads them again.
       function loadedThrough() {
         var button = root.querySelector("[data-search-more-url]");
@@ -2004,7 +2004,7 @@
             return !el.closest("[data-version-panel]")
               && !(on && el.dataset.owned === "1");
           }).length : 0;
-        // Batches not loaded yet hold no album already in the library.
+        // Batches not loaded yet hold no record already in the library.
         var more = root.querySelector("[data-search-more]");
         if (more) shown += parseInt(more.dataset.searchMoreLeft || "0", 10);
         if (meta) {
@@ -2065,9 +2065,9 @@
         initCoverFallbacks();
         try { localStorage.setItem("ql-search-view", name); } catch (e) {}
       }
-      // A long artist list comes a batch at a time. Each batch carries rows
-      // for both views, and a parked view takes its rows into its template.
-      // Albums already in the library came with the first batch, so a batch
+      // A long list comes a batch at a time. Each batch carries rows for
+      // both views, and a parked view takes its rows into its template.
+      // Records already in the library came with the first batch, so a batch
       // goes in around them, by each row's place in the list.
       function insertInOrder(target, rows) {
         var placed = Array.prototype.filter.call(target.children, function (el) {
@@ -2105,7 +2105,7 @@
             if (!batches.length) {
               button.disabled = false;
               showToast(reply.content.textContent.trim()
-                || "Couldn't load more albums. Try again.", "error");
+                || "Couldn't load more results. Try again.", "error");
               return false;
             }
             batches.forEach(function (batch) {
@@ -2132,7 +2132,7 @@
           .catch(function (why) {
             button.disabled = false;
             if (why !== "navigation") {
-              showToast("Couldn't load more albums. Check your connection.", "error");
+              showToast("Couldn't load more results. Check your connection.", "error");
             }
             return false;
           })

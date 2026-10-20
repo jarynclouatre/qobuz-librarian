@@ -2360,6 +2360,14 @@ details.ql-mobile-drawer[open]::before {
   color: var(--ql-text-2);
   font-size: 0.8125rem;
 }
+.ql-search-notes {
+  margin-top: var(--ql-space-3);
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
+}
+.ql-search-notes p {
+  margin: 0 0 var(--ql-space-1);
+}
 .ql-search-select-all.hidden {
   display: none;
 }
@@ -6126,7 +6134,7 @@ details[data-artist].htmx-swapping {
     min-height: 2.75rem;
   }
   .ql-segmented span {
-    padding-block: 0.8rem 0.87rem;
+    padding-block: 0.85rem 0.9rem;
   }
   .ql-work-status a {
     display: inline-flex;

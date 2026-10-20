@@ -581,8 +581,10 @@ LYRICS_PROVIDER_TIMEOUT = _env_num_min("LYRICS_PROVIDER_TIMEOUT", 30.0, 1.0)
 # ── Timeouts / delays ─────────────────────────────────────────────────────────
 # Results shown on the user-facing Search page. 8 was too few for a major
 # artist (a "Paul McCartney" search surfaced almost nothing); 25 shows a useful
-# page. The CLI fetches more; a web "load more" beyond this is a future add.
-SEARCH_LIMIT     = 25
+# page. Search, on the web page and in the terminal, asks Qobuz for
+# SEARCH_FETCH_LIMIT and lists SEARCH_LIMIT at a time.
+SEARCH_LIMIT       = 25
+SEARCH_FETCH_LIMIT = 100
 # Per-context search depth for internal matchers. ARTIST_LOOKUP_LIMIT scores
 # this many artist-search hits when resolving a name to an id; 5 was too few for
 # common names (the right artist could rank 6th+ and silently resolve to

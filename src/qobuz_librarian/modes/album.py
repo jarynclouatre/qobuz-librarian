@@ -253,7 +253,7 @@ def resolve_album_from_args(args, token):
         artist, album = args.query[0], " ".join(args.query[1:])
         query = f"{artist} {album}".strip()
     elif len(args.query) == 1:
-        query = args.query[0].strip()
+        query = album = args.query[0].strip()
     else:
         sel = interactive_query()
         if sel is None:
@@ -273,54 +273,57 @@ def resolve_album_from_args(args, token):
             return get_album(parsed[1], token)
         artist, album = sel
         query = f"{artist} {album}".strip()
+        album = album or query
 
     if not query:
         die(fmt(C.RED, "✗  Empty query."), EXIT_GENERAL)
 
-    search_limit = cfg.SEARCH_LIMIT
-    first_search = True
+    results = search_albums(query, token, limit=cfg.SEARCH_FETCH_LIMIT)
+    if not results:
+        raise CatalogMiss(f"No Qobuz match for: {query}")
+    results.sort(key=lambda a: not catalog.titled_as_searched(a, album))
+    # A mark Qobuz can't answer for in time is left off, as on the web
+    # Search page; once Qobuz fails, the rest are left off without waiting.
+    unavailable = []
+
+    def fetch_album(album_id):
+        if unavailable:
+            raise unavailable[0]
+        try:
+            return api_client.call_within(
+                cfg.WEB_FETCH_TIMEOUT, get_album, album_id, token)
+        except QobuzUnavailable as exc:
+            unavailable.append(exc)
+            raise
+
     ownership = {}
+    for result in results:
+        try:
+            ownership[result.get("id")] = catalog.search_result_ownership(
+                result, fetch_album)
+        except AuthLost:
+            raise
+        except Exception as exc:
+            vlog(f"ownership check failed for album {result.get('id')}: {exc}")
+
+    def in_library(result):
+        res = ownership.get(result.get("id")) or {}
+        return bool(res.get("owned") or res.get("folder"))
+
+    # As on the web page: 25 at a time, and every match already in the
+    # library from the start.
+    shown = cfg.SEARCH_LIMIT
     while True:
-        if not first_search:
-            log.info(fmt(C.GRAY, f"  ⟳  Loading more results (up to {search_limit}) …"))
-        results = search_albums(query, token, limit=search_limit)
-        first_search = False
-        if not results:
-            raise CatalogMiss(f"No Qobuz match for: {query}")
-        can_load_more = (len(results) >= search_limit and search_limit < 50)
-        # A mark Qobuz can't answer for in time is left off, as on the web
-        # Search page; once Qobuz fails, the rest are left off without waiting.
-        unavailable = []
-
-        def fetch_album(album_id):
-            if unavailable:
-                raise unavailable[0]
-            try:
-                return api_client.call_within(
-                    cfg.WEB_FETCH_TIMEOUT, get_album, album_id, token)
-            except QobuzUnavailable as exc:
-                unavailable.append(exc)
-                raise
-
-        for result in results:
-            if result.get("id") in ownership:
-                continue
-            try:
-                ownership[result.get("id")] = catalog.search_result_ownership(
-                    result, fetch_album)
-            except AuthLost:
-                raise
-            except Exception as exc:
-                vlog(f"ownership check failed for album {result.get('id')}: {exc}")
-        chosen = prompt_album_selection(results, prefer_hires=args.prefer_hires,
-                                        can_load_more=can_load_more,
+        listed = results[:shown] + [r for r in results[shown:] if in_library(r)]
+        chosen = prompt_album_selection(listed, prefer_hires=args.prefer_hires,
+                                        can_load_more=len(listed) < len(results),
                                         ownership=ownership)
         if chosen is None:
             raise Aborted("user cancelled at album selection")
         if chosen == NO_ANSWER:
             raise Aborted("no answer at album selection")
         if chosen == MORE:
-            search_limit = min(search_limit * 2, 50)
+            shown += cfg.SEARCH_LIMIT
             continue
         break
     return get_album(chosen["id"], token)

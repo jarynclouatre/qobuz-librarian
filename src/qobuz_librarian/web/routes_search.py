@@ -312,11 +312,11 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     search_kind = str(kind or "").strip().lower()
     if search_kind not in ("artist", "album", "track"):
         search_kind = "artist"
-    search_q = str(q or "").strip()[:200]
+    search_q = str(q or "").strip()[:500]
     search_artist_id = str(artist_id or "").strip()[:64]
     search_artist_name = str(artist_name or "").strip()[:200]
     search_album_id = str(album_id or "").strip()[:64] if search_kind == "album" else ""
-    search_back = _search_origin(back_kind, back_q[:200]) if search_artist_id else None
+    search_back = _search_origin(back_kind, back_q[:500]) if search_artist_id else None
     pending = job_mgr.registry.pending_and_running()
     return rendering._tr(request, "index.html", {
         "pending": pending,
@@ -391,7 +391,10 @@ def _filter_artist_only_albums(albums, query):
 
 
 def _qobuz_url(query):
-    """Whether ``query`` is a qobuz.com URL, and the (kind, id) it names."""
+    """Whether ``query`` is a qobuz.com URL, and the (kind, id) it names.
+    A link pasted without its ``https://`` counts too."""
+    if re.match(r"(?:[\w-]+\.)*qobuz\.com/", query, re.IGNORECASE):
+        query = "https://" + query
     try:
         parts = urllib.parse.urlsplit(query)
         netloc = parts.netloc.lower()
@@ -400,7 +403,8 @@ def _qobuz_url(query):
                              or netloc.endswith(".qobuz.com")))
     except ValueError:
         is_qobuz_url = False
-    parsed = cli.parse_qobuz_url(query) if is_qobuz_url else None
+    parsed = (cli.parse_qobuz_url(parts._replace(netloc=netloc).geturl())
+              if is_qobuz_url else None)
     return is_qobuz_url, parsed
 
 
@@ -516,7 +520,7 @@ def _section_headings(groups, batch, shown=()):
     position in ``shown``."""
     sections = {}
     for g in groups:
-        if g["section"] is None:
+        if g.get("section") is None:
             return
         s = sections.setdefault(g["section"], {
             "label": _ARTIST_SECTIONS[g["section"]], "order": g["index"],
@@ -564,34 +568,24 @@ async def _search_artists(query, token):
 
 async def _search_catalog(kind, query, token):
     """Albums or tracks matching ``query``, without the albums that match it
-    only by artist name."""
+    only by artist name, and whether Qobuz had more than the search asks
+    for."""
     raw = []
     artist_only_count = 0
     error = None
     _search_fn = qobuz_search.search_tracks if kind == "track" else qobuz_search.search_albums
     try:
         raw = await qobuz_access._qobuz_call(
-            _search_fn, query, token, limit=cfg.SEARCH_LIMIT)
+            _search_fn, query, token, limit=cfg.SEARCH_FETCH_LIMIT)
     except asyncio.TimeoutError:
         error = "Timed out reaching the Qobuz API."
 
+    capped = len(raw) >= cfg.SEARCH_FETCH_LIMIT
     if kind == "album":
         kept = _filter_artist_only_albums(raw, query)
         artist_only_count = len(raw) - len(kept)
-        raw = sorted(kept, key=lambda a: not _titled(a, query))
-    return raw, artist_only_count, error
-
-
-def _titled(album, query):
-    """Whether ``album`` is titled exactly what was searched, so it leads
-    the results wherever Qobuz ranked it."""
-    def key(text):
-        return tags.normalize(tags.strip_leading_article(text.strip()))
-
-    wanted = key(query)
-    title = album.get("title") or ""
-    return bool(wanted) and wanted in (
-        key(title), key(tags.strip_album_decorations(title)))
+        raw = sorted(kept, key=lambda a: not catalog.titled_as_searched(a, query))
+    return raw, artist_only_count, capped, error
 
 
 async def _track_results(raw, query, token, queued_tracks):
@@ -631,10 +625,13 @@ async def _track_results(raw, query, token, queued_tracks):
                            in queued_tracks,
             "scanning":    False,
             "unavailable": catalog.unstreamable(t),
+            "explicit":    bool(t.get("parental_warning")),
         })
         _track_raws.append(t)
 
     if _track_raws:
+        stop = threading.Event()
+
         def _annotate_owned_tracks():
             albums = {}
             for res, track in zip(results, _track_raws):
@@ -645,6 +642,8 @@ async def _track_results(raw, query, token, queued_tracks):
                 group["results"].append(res)
 
             for album_id, group in albums.items():
+                if stop.is_set():
+                    return
                 try:
                     folder = (catalog.find_album_dir_filesystem(group["album"])
                               or catalog.find_album_dir_filesystem(group["album"], exact_edition=True))
@@ -674,6 +673,7 @@ async def _track_results(raw, query, token, queued_tracks):
                 loop.run_in_executor(None, _annotate_owned_tracks),
                 timeout=_OWNERSHIP_TIMEOUT)
         except asyncio.TimeoutError:
+            stop.set()
             _log.warning(
                 "track ownership annotation timed out (%ss) for %r; "
                 "results shown without Owned marks",
@@ -683,6 +683,11 @@ async def _track_results(raw, query, token, queued_tracks):
         except Exception:
             _log.exception(
                 "track ownership annotation failed for %r", query)
+    # Each track is one record to _album_batch, under its search key.
+    for index, res in enumerate(results):
+        res["index"] = index
+        res["editions"] = [{"id": f"{res['album_id']}-{res['track_id']}",
+                            "owned": res["owned"], "folder": ""}]
     return results
 
 
@@ -719,6 +724,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
             "ownership_unknown": True,
             "queued":  str(a.get("id")) in queued_albums,
             "scanning": str(a.get("id")) in scanning_albums,
+            "explicit": bool(a.get("parental_warning")),
         })
         _album_raws.append(a)
 
@@ -806,6 +812,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                 "lossy": res["lossy"], "bit_depth": res["bit_depth"],
                 "sample_rate": res["sample_rate"],
                 "cover": res["cover"],
+                "explicit": res["explicit"],
                 "owned": bool(res["owned"]),
                 "bonus_versions": res.get("bonus_versions", 0),
                 "as_new_edition": res["as_new_edition"],
@@ -853,7 +860,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
                       "quality", "hires", "lossy", "bit_depth",
                       "sample_rate", "cover", "version", "queued", "scanning",
                       "as_new_edition", "folder", "ownership_unknown",
-                      "bonus_versions", "unavailable"):
+                      "bonus_versions", "unavailable", "explicit"):
                 g[f] = rep[f]
             g["partial"] = rep["partial"] and not g["owned"]
             g["have_tracks"] = rep["have_tracks"]
@@ -876,10 +883,10 @@ def _in_library(group):
     return any(e["owned"] or e["folder"] for e in group["editions"])
 
 
-def _album_batch(groups, through=(), listed=None):
-    """The records an artist's next batch lists, and the next batch's start,
-    count, how many records are left after this one and the token naming
-    every record on the page by then.
+def _album_batch(groups, through=(), listed=None, size=_ARTIST_ALBUM_BATCH):
+    """The records the next batch of an artist page or search lists, and the
+    next batch's start, count, how many records are left after this one and
+    the token naming every record on the page by then.
 
     The first batch, with ``listed`` None, also lists every record with a
     copy in the library. A later batch takes the next records that are not
@@ -895,14 +902,14 @@ def _album_batch(groups, through=(), listed=None):
         on_page = {g["index"] for g in groups
                    if any(str(e["id"]) in listed_ids for e in g["editions"])}
         remaining = [g for g in groups if g["index"] not in on_page]
-    end = _ARTIST_ALBUM_BATCH
+    end = size
     wanted = {str(album_id) for album_id in through}
     if wanted:
         last = max((i for i, g in enumerate(remaining)
                     if any(str(e["id"]) in wanted for e in g["editions"])),
                    default=-1)
         while end <= last:
-            end += _ARTIST_ALBUM_BATCH
+            end += size
     batch = remaining[:end]
     if listed is None:
         batch = [g for g in groups if g["index"] < end or _in_library(g)]
@@ -911,7 +918,7 @@ def _album_batch(groups, through=(), listed=None):
     left = len(groups) - len(on_page)
     if not left:
         return batch, None
-    return batch, {"start": remaining[end - 1]["index"] + 1, "count": min(left, _ARTIST_ALBUM_BATCH),
+    return batch, {"start": remaining[end - 1]["index"] + 1, "count": min(left, size),
                    "left": left, "total": len(groups),
                    "listed": _listed_token(groups, on_page)}
 
@@ -974,6 +981,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     album_groups = []
     artist_results = []
     artist_only_count = 0
+    capped = False
+    guidance = False
     selected_artist = None
     sectioned = False
     error = None
@@ -996,14 +1005,17 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             elif parsed and parsed[0] == "album" and kind == "track":
                 error = ("That's an album URL. Switch to Album to download it, "
                          "or paste a single track to download one track.")
+                guidance = True
             elif parsed and parsed[0] == "album" and kind == "artist":
                 error = "That's an album URL. Switch to Album to download it."
+                guidance = True
             elif parsed and parsed[0] == "track" and kind == "track":
                 raw, error = await _fetch_track(parsed[1], token)
             elif parsed and parsed[0] == "track":
                 # Album mode: a track URL points the user at the Track toggle.
                 error = ("That's a track URL. Switch to Track to download one "
                          "track, or paste the album URL in Album mode.")
+                guidance = True
             elif parsed or is_qobuz_url:
                 # Another Qobuz URL kind (artist, playlist), or a qobuz.com URL
                 # in no recognised format.
@@ -1012,13 +1024,14 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 else:
                     error = ("Only Qobuz album and track URLs are supported. "
                              "Search for an artist by name instead.")
+                guidance = True
             elif kind == "artist" and artist_id:
                 raw, selected_artist, error = await _fetch_artist_albums(
                     artist_id, artist_name, query, token)
             elif kind == "artist":
                 artist_results, error = await _search_artists(query, token)
             else:
-                raw, artist_only_count, error = await _search_catalog(
+                raw, artist_only_count, capped, error = await _search_catalog(
                     kind, query, token)
 
             queued_albums, queued_tracks, scanning_albums = (
@@ -1034,6 +1047,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
         except Exception as exc:
             error = _search_error(exc, query)
     album_total = len(album_groups)
+    track_total = len(results)
     album_more = None
     if selected_artist and album_total > _ARTIST_ALBUMS_AT_ONCE:
         album_groups, album_more = _album_batch(album_groups)
@@ -1041,6 +1055,12 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
             artist_id, artist_name, query, album_more["listed"], sectioned)
     elif selected_artist:
         _section_headings(album_groups, album_groups)
+    elif kind == "album" and album_total > cfg.SEARCH_LIMIT:
+        album_groups, album_more = _album_batch(album_groups, size=cfg.SEARCH_LIMIT)
+        album_more["url"] = _search_batch_url(kind, query, album_more["listed"])
+    elif kind == "track" and track_total > cfg.SEARCH_LIMIT:
+        results, album_more = _album_batch(results, size=cfg.SEARCH_LIMIT)
+        album_more["url"] = _search_batch_url(kind, query, album_more["listed"])
     creds_ok = qobuz_access._creds_ok()
     search_state = f"{kind}|{query}"
     if artist_id:
@@ -1048,12 +1068,14 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     if kind == "album" and album_id:
         search_state += f"|album:{album_id}"
     search_result_count = len(results) if results else len(artist_results)
-    if album_more:
+    if album_more and kind == "album":
         search_result_count = sum(len(g["editions"]) for g in album_groups)
-    search_count = (len(album_groups) if kind == "album" else
-                    len(artist_results) if kind == "artist" else len(results))
+    search_count = (album_total if kind == "album" else
+                    len(artist_results) if kind == "artist" else track_total)
     search_count_label = plural(search_count, kind)
-    if kind == "album":
+    if capped:
+        search_count_label += " · top matches"
+    elif kind == "album":
         search_count_label += " on Qobuz"
     search_cacheable = search_result_count <= _SEARCH_SNAPSHOT_RESULT_LIMIT
     ctx = {"q": query, "results": results, "album_groups": album_groups,
@@ -1064,6 +1086,8 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
            "search_count_label": search_count_label,
            "artist_only_count": artist_only_count,
            "artist_only_label": plural(artist_only_count, "album"),
+           "capped": capped,
+           "guidance": guidance,
            "search_state": search_state,
            "search_cacheable": search_cacheable,
            "defer_search_views": not search_cacheable or album_more is not None,
@@ -1095,6 +1119,55 @@ def _album_batch_url(artist_id, artist_name, query, listed, sectioned):
          "listed": listed, "sections": 1 if sectioned else 0})
 
 
+def _search_batch_url(kind, query, listed):
+    return "/search/more?" + urllib.parse.urlencode(
+        {"kind": kind, "q": query, "listed": listed})
+
+
+@router.get("/search/more", response_class=HTMLResponse)
+async def search_more(request: Request, kind: str = "album", q: str = "",
+                      start: int = 0, listed: str = "",
+                      through: list[str] = Query(default=[])):
+    """The next batch of an album or track search, rows for both views."""
+    kind = "track" if kind == "track" else "album"
+    query = q.strip()[:500]
+    if not query or start <= 0:
+        return HTMLResponse("")
+    results = []
+    album_groups = []
+    try:
+        token = qobuz_access._get_token()
+        raw, _artist_only, _capped, error = await _search_catalog(
+            kind, query, token)
+        if not error:
+            queued_albums, queued_tracks, scanning_albums = (
+                download_admission._active_search_downloads())
+            if kind == "track":
+                results = await _track_results(raw, query, token, queued_tracks)
+            else:
+                _results, album_groups = await _album_results(
+                    raw, query, token, queued_albums, scanning_albums)
+    except Exception as exc:
+        error = _search_error(exc, query)
+    if error:
+        return HTMLResponse(rendering._ql_notice_html("error", html.escape(error)))
+    through = [key.removeprefix("track-") for key in through]
+    batch, more = _album_batch(results if kind == "track" else album_groups,
+                               through, listed[:6 * cfg.SEARCH_FETCH_LIMIT],
+                               size=cfg.SEARCH_LIMIT)
+    if not batch:
+        return HTMLResponse(rendering._ql_notice_html(
+            "error", "Couldn't load more results. Try again."))
+    if more:
+        more["url"] = _search_batch_url(kind, query, more["listed"])
+    return rendering._tr(request, "_search_results.html", {
+        "album_batch": kind == "album", "track_batch": kind == "track",
+        "album_groups": batch if kind == "album" else [],
+        "results": batch if kind == "track" else [],
+        "album_more": more, "selected_artist": None, "kind": kind,
+        "list_kind": kind, "q": query, "page": "search"})
+
+
 @router.get("/search/artist-albums", response_class=HTMLResponse)
 async def search_artist_albums(request: Request, artist_id: str = "",
                                artist_name: str = "", q: str = "",
@@ -1104,7 +1177,7 @@ async def search_artist_albums(request: Request, artist_id: str = "",
     """The next batch of a long artist list, rows for both views."""
     artist_id = artist_id.strip()[:64]
     artist_name = artist_name.strip()[:200]
-    query = q.strip()[:200]
+    query = q.strip()[:500]
     if not artist_id or start <= 0:
         return HTMLResponse("")
     album_groups = []
