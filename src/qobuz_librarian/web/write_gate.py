@@ -36,6 +36,32 @@ def _terminal_queue_notice():
     }
 
 
+def _read_only_library_notice():
+    """Why downloads are off for a music folder mounted read-only, or None."""
+    if not storage.music_mounted_read_only():
+        return None
+    return {
+        "reason": "Your music folder is mounted read-only.",
+        "msg": ("Downloads are off: your music folder is mounted read-only, "
+                "so nothing can be added to it. Library scans still run, and "
+                "the tools skip files they can't change."),
+        "action": None,
+    }
+
+
+def _review_downloads(job) -> bool:
+    """Whether approving ``job`` downloads. An Upgrade downloads too, but only
+    a read-only library stops it; a queue held in the terminal does not."""
+    return queue_recovery._downloads_albums(job) or (
+        job is not None and job.execute_kind == "upgrade"
+        and storage.music_mounted_read_only())
+
+
+def _downloads_held_notice():
+    """Why downloads alone are paused, or None."""
+    return _read_only_library_notice() or _terminal_queue_notice()
+
+
 def _writes_paused_notice(*, log_details: bool = False,
                           downloads: bool = False):
     """Why downloads and scans are paused, in the user's words, or None.
@@ -197,6 +223,8 @@ def _writes_paused_notice(*, log_details: bool = False,
                "finish. Other library changes are paused. Switch to terminal "
                f"mode in Settings, then run “{_terminal_command()}”; it offers "
                "to resume it.")
+    elif storage.music_mounted_read_only():
+        return _read_only_library_notice() if downloads else None
     else:
         return None
     return {"reason": reason, "msg": msg, "action": action}
@@ -232,7 +260,8 @@ def _web_writes_paused() -> bool:
 def _web_downloads_paused() -> bool:
     """_web_writes_paused, or a queue the terminal saved holding downloads."""
     return (_web_writes_paused()
-            or bool(queue_recovery._terminal_queue_waiting()))
+            or bool(queue_recovery._terminal_queue_waiting())
+            or storage.music_mounted_read_only())
 
 
 def _readiness_report() -> tuple[int, dict]:

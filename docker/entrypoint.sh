@@ -273,7 +273,9 @@ for d in /music /staging /data /upgrade_backups /collection_backups \
     else
         ok=no
     fi
-    if [ "$ok" != "yes" ]; then
+    if [ "$ok" != "yes" ] && [ "$d" = /music ] && awk '$2 == "/music" { split($4, o, ","); ro = (o[1] == "ro") } END { exit !ro }' /proc/mounts; then
+        echo "[info] /music is mounted read-only: scans run, downloads are off." >&2
+    elif [ "$ok" != "yes" ]; then
         echo "[warn] $d is not writable by ${APP_USER}." >&2
         echo "       On a NAS: set PUID/PGID to the share owner and grant" >&2
         echo "       that user write access, or downloads/imports will fail." >&2

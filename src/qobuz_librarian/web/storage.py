@@ -24,6 +24,14 @@ def _docker_made_folder(path: Path) -> bool:
         return False
 
 
+def music_mounted_read_only() -> bool:
+    """Whether the music folder is a read-only mount (`:ro`)."""
+    try:
+        return bool(os.statvfs(cfg.MUSIC_ROOT).f_flag & os.ST_RDONLY)
+    except OSError:
+        return False
+
+
 def _unwritable_volumes() -> list[str]:
     """Live probe of the critical mounts; empty means writes may run.
 

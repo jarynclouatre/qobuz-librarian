@@ -1,5 +1,6 @@
 """Finding, starting and deduplicating scan jobs."""
 import asyncio
+import re
 import time
 from pathlib import Path
 
@@ -17,11 +18,13 @@ from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import (
     flows,
+    job_persistence,
     job_runs,
     qobuz_access,
     refusals,
     rendering,
     review_badges,
+    review_pages,
     runtime,
     storage,
     write_gate,
@@ -279,6 +282,32 @@ def _start_library_scan(credentials, partial_only=False, force_full=False):
         )
 
 
+_UPGRADE_NOTE = re.compile(r"[0-9][0-9,]* (?:new )?albums? can be upgraded\.")
+
+
+def _restate_parked_status(parked, unchecked, upgrades, status):
+    """Library shows the open review's summary, so it says what the newest
+    scan left unchecked or unsaved, not what an earlier one did."""
+    summary = str(parked.summary or "")
+    count = review_pages._COUNT_ONLY_SUMMARY.match(summary)
+    if count is None:
+        return
+    head = [summary[:count.end()].rstrip(".") + "."]
+    head += _UPGRADE_NOTE.findall(summary[count.end():])
+    if upgrades:
+        head.append(flows.upgrade_finds_note(upgrades))
+    restated = " ".join(head + status)
+    if restated == summary and parked.unchecked_artists == unchecked:
+        return
+
+    def _restate():
+        parked.summary = restated
+        flows._record_unchecked_artists(parked, unchecked)
+
+    with job_mgr._library_review_state_guard(parked):
+        job_persistence.persist_review_mutation(parked, _restate)
+
+
 def _fold_into_parked_library_review(job):
     """A refresh that finishes while a Library review is parked folds its
     finds into it; the scan job then finishes with a summary."""
@@ -366,19 +395,22 @@ def _fold_into_parked_library_review(job):
             bits.append("No new finds. The open Library review is up to date.")
     if upgrades:
         bits.append(flows.upgrade_finds_note(upgrades))
+    status = []
     if unchecked:
-        bits.append(f"{plural(unchecked, 'artist')} couldn't be checked; "
-                    "scan again to resume from where it left off.")
+        status.append(f"{plural(unchecked, 'artist')} couldn't be checked; "
+                      "scan again to resume from where it left off.")
     elif (left_out := unreadable_artists_mod.load()):
-        bits.append(f"{plural(len(left_out), 'artist folder')} couldn't be "
-                    "read and "
-                    f"{'was' if len(left_out) == 1 else 'were'} left out.")
+        status.append(f"{plural(len(left_out), 'artist folder')} couldn't be "
+                      "read and "
+                      f"{'was' if len(left_out) == 1 else 'were'} left out.")
     no_room = dict(job.scan_left_out)
     for folder, n in fold_left_out.items():
         no_room[folder] = no_room.get(folder, 0) + n
     if no_room:
-        bits.append(flows.left_out_note(no_room, parked.CANDIDATE_CAP))
-    bits.extend(caveats)
+        status.append(flows.left_out_note(no_room, parked.CANDIDATE_CAP))
+    status.extend(caveats)
+    bits.extend(status)
+    _restate_parked_status(parked, unchecked, upgrades, status)
     job.summary = " ".join(bits)
     job.push_line(job.summary)
     job.status = job_mgr.JobStatus.DONE

@@ -126,9 +126,9 @@ def _unreadable_recheck_pending():
     )
 
 
-# A scan started automatically that then fails holds off the next automatic
-# start on the same schedule as a failed live check, instead of starting
-# again on every Search visit.
+# A scan started automatically that then fails, or ends with artists it could
+# not check, holds off the next automatic start on the same schedule as a
+# failed live check, instead of starting again on every Search visit.
 _auto_scan = {"job": None, "until": 0.0, "delay": 0.0}
 
 
@@ -137,7 +137,8 @@ def _auto_scan_backing_off():
     job = _auto_scan["job"]
     if job is not None and job.status in job_mgr.TERMINAL:
         _auto_scan["job"] = None
-        if job.status is job_mgr.JobStatus.FAILED:
+        if (job.status is job_mgr.JobStatus.FAILED
+                or scan_checkpoint.pending() is not None):
             delay = min(max(_auto_scan["delay"] * 2,
                             new_release_checks._AUTO_START_RETRY_FIRST),
                         new_release_checks._AUTO_START_RETRY_MAX)

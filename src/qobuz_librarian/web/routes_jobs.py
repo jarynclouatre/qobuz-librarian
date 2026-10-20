@@ -255,7 +255,7 @@ def _build_unapproved_review(job, tab, *, admission_filter=None,
 @router.post("/jobs/{job_id}/approve")
 async def job_approve(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id)
-    downloads = queue_recovery._downloads_albums(job)
+    downloads = write_gate._review_downloads(job)
     busy = refusals._lock_busy_response(request, downloads=downloads)
     if busy is not None:
         return busy

@@ -315,13 +315,43 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
                 for album in cached_items:
                     _normalize_album_fields(album)
                 return cached_items, cached_total
+    items, qobuz_total, asked_to = _walk_artist_albums(artist_id, token, limit)
+    if (items and qobuz_total is not None and asked_to >= qobuz_total
+            and len(items) < min(qobuz_total, limit)):
+        # Qobuz counts a few albums it never hands out for some artists. The
+        # same list twice, short only on the last page, is the whole
+        # discography, not a dropped page.
+        try:
+            again, again_total, again_to = _walk_artist_albums(
+                artist_id, token, limit)
+        except QobuzError:
+            again, again_total, again_to = [], qobuz_total, 0
+        if (again_to >= qobuz_total and {str(a.get("id")) for a in again}
+                == {str(a.get("id")) for a in items}):
+            qobuz_total = len(items)
+        elif len(again) > len(items):
+            items, qobuz_total = again, again_total
+    # Only persist a discography we believe is whole.
+    complete = (qobuz_total is None
+                or len(items) >= qobuz_total
+                or len(items) >= limit)
+    # Never cache an empty discography unless Qobuz explicitly said the artist
+    # has none (total == 0).
+    if complete and (items or qobuz_total == 0):
+        album_cache.put_catalog(cache_key, {"items": items, "total": qobuz_total})
+    return items, qobuz_total
+
+
+def _walk_artist_albums(artist_id, token, limit):
     items = []
     seen_album_ids = set()
     offset = 0
     qobuz_total = None
     page_size = config.ARTIST_CATALOG_PAGE
+    asked_to = 0
     while len(items) < limit:
         want = min(page_size, limit - len(items))
+        asked_to = offset + want
         data = _expect_dict(qobuz_get("artist/get", {
             "artist_id": artist_id,
             "extra": "albums",
@@ -366,15 +396,7 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
         # raw entries, matching how Qobuz reports `total`).
         if qobuz_total is not None and offset >= qobuz_total:
             break
-    # Only persist a discography we believe is whole.
-    complete = (qobuz_total is None
-                or len(items) >= qobuz_total
-                or len(items) >= limit)
-    # Never cache an empty discography unless Qobuz explicitly said the artist
-    # has none (total == 0).
-    if complete and (items or qobuz_total == 0):
-        album_cache.put_catalog(cache_key, {"items": items, "total": qobuz_total})
-    return items, qobuz_total
+    return items, qobuz_total, asked_to
 
 
 # The lists artist/getReleasesList files an artist's releases under that

@@ -22,10 +22,10 @@ from qobuz_librarian.web import (
     job_persistence,
     new_release_checks,
     qobuz_access,
-    queue_recovery,
     review_badges,
     runtime,
     settings_store,
+    storage,
     write_gate,
 )
 from qobuz_librarian.web import jobs as job_mgr
@@ -108,7 +108,7 @@ def _recovery_missing(recovery) -> bool:
 
 
 templates.env.globals["recovery_on_disk"] = _recovery_on_disk
-templates.env.globals["downloads_albums"] = queue_recovery._downloads_albums
+templates.env.globals["downloads_albums"] = write_gate._review_downloads
 
 
 def _retire_gone_recoveries(rows: list[dict]) -> list[dict]:
@@ -295,10 +295,12 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
             paused["reason"] if paused else "Downloads and scans are paused.",
         )
     else:
-        held = write_gate._terminal_queue_notice()
-        # Only downloads wait, so the tools that still run leave it out.
-        if held is not None and context.get("page") not in {
-                "lyrics", "downsample", "upgrade"}:
+        held = write_gate._downloads_held_notice()
+        # Only downloads wait, so the tools that still run leave it out. A
+        # read-only library is said everywhere: the tools skip every file.
+        if held is not None and (
+                context.get("page") not in {"lyrics", "downsample", "upgrade"}
+                or storage.music_mounted_read_only()):
             context.setdefault("writes_paused_notice", held)
     context.setdefault("downloads_paused",
                        context["writes_paused"] or held is not None)

@@ -359,6 +359,13 @@ def _diagnostics():
                            "detail": f"{display} {storage.DOCKER_MADE}. "
                            "Check the path in your .env"})
             return
+        if (want_writable and label == "Music library"
+                and storage.music_mounted_read_only()
+                and not storage._unwritable_volumes()):
+            checks.append({"label": label, "ok": False,
+                           "detail": f"{display} is mounted read-only. "
+                           "Scans run; downloads are off"})
+            return
         if want_writable and not os.access(p, os.W_OK):
             checks.append({"label": label, "ok": False,
                            "detail": f"{display} is not writable by the container user. "
@@ -381,7 +388,7 @@ def _diagnostics():
     # started, and a pause is the most direct reason there is. It was the one
     # thing missing: every row could read OK while nothing could run at all.
     paused = write_gate._writes_paused_notice()
-    held = write_gate._terminal_queue_notice()
+    held = write_gate._downloads_held_notice()
     if paused is not None:
         # The banner at the top of this same page already carries the whole
         # sentence; the row names the cause so the panel reads as a checklist.
