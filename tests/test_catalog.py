@@ -283,6 +283,7 @@ def test_album_folders_are_found_by_what_they_hold(tmp_path, monkeypatch, tagged
                     ["Lost Boys (Acoustic) (2026)", "Lost Boys (2026)"]):
         for name in folders:
             (artist / name).mkdir(parents=True, exist_ok=True)
+            (artist / name / "01.flac").touch()
         scanner.clear_scan_caches()
         assert find_album_dir_filesystem(acoustic).name == folders[0]
         for name in folders:

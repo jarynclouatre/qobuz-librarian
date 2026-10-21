@@ -33,6 +33,7 @@ from qobuz_librarian.api.search import get_album, search_albums
 from qobuz_librarian.integrations import rip
 from qobuz_librarian.library.scanner import (
     SYSTEM_FOLDER_NAMES,
+    _has_audio_anywhere,
     _list_artist_subdirs_cached,
     is_library_system_folder,
     iter_tree_no_symlinks,
@@ -295,7 +296,13 @@ def predicted_album_paths(qobuz_album, *, exact_edition=False):
     return candidates
 
 
-def _predicted_album_dir(qobuz_album, *, exact_edition=False):
+def _holds_audio(folder):
+    """False only for a folder with no audio in it, such as the cover left
+    behind when an album moved to a folder of another year."""
+    return _has_audio_anywhere(folder, walk_errors=[]) is not False
+
+
+def _predicted_album_dir(qobuz_album, *, exact_edition=False, audio_only=False):
     candidates = predicted_album_paths(qobuz_album, exact_edition=exact_edition)
     vlog(f"predicted {plural(len(candidates), 'candidate path')}")
 
@@ -311,19 +318,23 @@ def _predicted_album_dir(qobuz_album, *, exact_edition=False):
                 # A predicted artist dir can be a stray regular FILE with that
                 # name; that's "no albums here", not a scan-stopping error.
                 _parent_kid_names[p_str] = set()
-        if c.name in _parent_kid_names[p_str]:
+        if c.name in _parent_kid_names[p_str] and (
+                not audio_only or _holds_audio(c)):
             vlog(f"exact match: {c}")
             return c
     return None
 
 
-def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
+def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
+                              audio_only=False):
     """Resolve a Qobuz album dict to its on-disk directory.
 
     Fast path: check predicted_album_paths() against cached subdir listings.
     Fuzzy path: expand artist variants ('The X' / 'X' / comma-prefix) and
     scan each parent dir for the best-scoring album folder. exact_edition
     keeps the version label and requires a title match, ignoring folder years.
+    audio_only passes over folders with no audio, as a scan matching what is
+    owned must: a cover left in "Album (1992)" is not the album in "Album (2014)".
     """
     title = qobuz_album.get("title") or ""
     version = (qobuz_album.get("version") or "").strip()
@@ -335,12 +346,15 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
         # A folder named for this version is its own, even beside the plain
         # one: "Lost Boys (Acoustic)" is never filed in "Lost Boys". One of
         # another year gives way to the folder the release's download got.
-        own = find_album_dir_filesystem(qobuz_album, exact_edition=True)
+        own = find_album_dir_filesystem(qobuz_album, exact_edition=True,
+                                        audio_only=audio_only)
         if own is not None and (
                 _decoration_year(own.name) in ("", _listed_year(qobuz_album))
-                or _predicted_album_dir(qobuz_album) is None):
+                or _predicted_album_dir(qobuz_album,
+                                        audio_only=audio_only) is None):
             return own
-    predicted = _predicted_album_dir(qobuz_album, exact_edition=exact_edition)
+    predicted = _predicted_album_dir(qobuz_album, exact_edition=exact_edition,
+                                     audio_only=audio_only)
     if predicted is not None:
         return predicted
 
@@ -409,7 +423,8 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
         for d in subdirs:
             if exact_edition:
                 folder_title = canonical_track_title(_DECORATION_YEAR_RE.sub("", d.name))
-                if edition_title and folder_title == edition_title:
+                if (edition_title and folder_title == edition_title
+                        and (not audio_only or _holds_audio(d))):
                     return d
                 continue
             folder_words = _other_release_words(d.name)
@@ -433,6 +448,8 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False):
                         or title_words - folder_words
                         or folder_words - release_words):
                     vlog(f"rejected {d.name}: another numbered, live or remix release")
+                    continue
+                if audio_only and not _holds_audio(d):
                     continue
                 global_best, global_best_score = d, score
                 vlog(f"fuzzy match: {d}  (score {score:.2f})")
@@ -2207,7 +2224,7 @@ def _pick_best_target_dir_match(cands, target_dir):
 
     resolving = []
     for index, cand in enumerate(cands):
-        predicted = find_album_dir_filesystem(cand)
+        predicted = find_album_dir_filesystem(cand, audio_only=True)
         if predicted is not None and _paths_equal(predicted, target_dir):
             resolving.append((index, cand))
     if not resolving:

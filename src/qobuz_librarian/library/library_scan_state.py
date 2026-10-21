@@ -239,6 +239,9 @@ def _clean_artist_state(entry):
         "artist_id": entry.get("artist_id") or "",
         "catalog_ids": (list(catalog_ids) if isinstance(catalog_ids, list)
                         else None),
+        "owned_ids": (
+            {str(k): str(v) for k, v in entry["owned_ids"].items()}
+            if isinstance(entry.get("owned_ids"), dict) else {}),
     }
 
 

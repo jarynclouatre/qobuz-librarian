@@ -220,15 +220,31 @@ def pick_best_artist(results, query, token=None, fetch_titles=None):
     return close[0]
 
 
-def _titles_listed(artist_id, token, owned_titles):
+# How a folder and Qobuz join two acts: "A, B", "A and B", "A & B", "A with B".
+_ACT_JOINER_RE = re.compile(r"\s*(?:,|&|\+|\band\b|\bwith\b)\s*", re.IGNORECASE)
+
+
+def _same_name(name, query):
+    """Whether an artist name is the query itself, not just close to it."""
+    def key(text):
+        text = strip_leading_article(_NAMESAKE_TAG_RE.sub("", text or ""))
+        return normalize(_ACT_JOINER_RE.sub(" ", text))
+    return bool(key(query)) and key(name) == key(query)
+
+
+def _titles_listed(artist_id, token, owned_titles, *, strict=False):
     """How many of the owned album titles the artist's Qobuz catalog lists.
-    Reads through the shared catalog cache the scan itself uses."""
+    Reads through the shared catalog cache the scan itself uses. ``strict``
+    raises ArtistSearchUnavailable when the catalog can't be read, where a 0
+    would be taken for an answer."""
     if not artist_id:
         return 0
     try:
         catalog, _total = get_artist_albums(artist_id, token,
                                             limit=cfg.ARTIST_CATALOG_LIMIT)
-    except QobuzError:
+    except QobuzError as e:
+        if strict:
+            raise ArtistSearchUnavailable(str(e)) from e
         return 0
     listed = {owned_title_key(a.get("title")) for a in catalog}
     return sum(1 for key in owned_titles if key in listed)
@@ -266,12 +282,15 @@ def resolve_artist(query, token, owned_titles=None):
     cache = _load_resolve_cache()
     hit = cache.get(query)
     if hit is not None:
-        if not owned_titles or query not in _resolve_unchecked:
+        unchecked = query in _resolve_unchecked
+        if not owned_titles or (not unchecked and _same_name(hit[1], query)):
             return hit[0], hit[1]
-        if _titles_listed(hit[0], token, owned_titles) >= len(owned_titles):
-            with _resolve_cache_lock:
-                _resolve_unchecked.discard(query)
-                _resolve_cache_dirty = True
+        held = _titles_listed(hit[0], token, owned_titles)
+        if held >= len(owned_titles) or (held and not unchecked):
+            if unchecked:
+                with _resolve_cache_lock:
+                    _resolve_unchecked.discard(query)
+                    _resolve_cache_dirty = True
             return hit[0], hit[1]
     # Qobuz finds nothing for ".38 Special", only for "38 Special". Without
     # the dot a name can match another artist, so the bare name is trusted
@@ -305,6 +324,20 @@ def resolve_artist(query, token, owned_titles=None):
     best = close[0]
     if owned_titles and len(close) > 1:
         best = _artist_holding_titles(close, owned_titles, token)
+    # A near name ("Burning Witches" for "Burning Witch") is another act unless
+    # its catalog lists one of the folder's albums.
+    if (owned_titles and not _same_name(best.get("name"), lookup)
+            and not _titles_listed(best.get("id"), token, owned_titles,
+                                   strict=True)):
+        best = next((a for a in close if _same_name(a.get("name"), lookup)),
+                    None)
+    if best is None:
+        if hit is not None:
+            with _resolve_cache_lock:
+                cache.pop(query, None)
+                _resolve_unchecked.discard(query)
+                _resolve_cache_dirty = True
+        return None, None
     aid, aname = best.get("id"), best.get("name")
     # A name match with no id is a malformed/partial result, not a usable hit -
     # the callers need the id, so caching [None, name] would skip the artist on
@@ -656,7 +689,7 @@ def _held_edition(album, existing, album_dir, artist_name, token, catalog,
             album_dir, catalog, artist_name, prefer_hires):
         if str(other.get("id")) == str(album.get("id")):
             continue
-        predicted = find_album_dir_filesystem(other)
+        predicted = find_album_dir_filesystem(other, audio_only=True)
         if predicted is None or not _paths_equal(predicted, album_dir):
             continue
         try:
@@ -718,7 +751,7 @@ def match_album_dir(album_dir, artist_name, token, *, catalog, prefer_hires):
         catalog=catalog, target_dir=album_dir)
     if album is None:
         return DirMatch("no_match", album_dir)
-    predicted = find_album_dir_filesystem(album)
+    predicted = find_album_dir_filesystem(album, audio_only=True)
     if predicted is None or not _paths_equal(predicted, album_dir):
         return DirMatch("predicted_path_mismatch", album_dir, album)
     tracks = (album.get("tracks") or {}).get("items") or []

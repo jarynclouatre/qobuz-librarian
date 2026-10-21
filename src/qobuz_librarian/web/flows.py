@@ -2078,6 +2078,7 @@ def _scan_library_impl(
                 "candidates": candidates,
                 "artist_id": saved.get("artist_id") or "",
                 "catalog_ids": list(saved["catalog_ids"]),
+                "owned_ids": dict(saved.get("owned_ids") or {}),
             }
         recheck = len(artists) - len(scanned)
         log.info(
@@ -2091,12 +2092,21 @@ def _scan_library_impl(
     reused = 0
     scan_errors = discovery_errors
     read_errors = 0
-    # Ids for the collection snapshot written when the scan finishes. Artists
-    # whose folders haven't changed are skipped by the scan and so aren't here;
-    # the snapshot carries their ids forward from the last one.
+    # Ids for the collection snapshot written when the scan finishes. An
+    # artist reused from saved state brings the ids saved with it; one saved
+    # before they were kept is carried forward from the last snapshot.
     owned_qobuz = {}
     snapshot_artist_ids = {}
     on_disk_ids = set()
+
+    def _reuse_owned(name, entry):
+        if entry.get("owned_ids"):
+            owned_qobuz[name] = dict(entry["owned_ids"])
+        if entry.get("artist_id"):
+            snapshot_artist_ids[name] = str(entry["artist_id"])
+
+    for name, entry in state_artists.items():
+        _reuse_owned(name, entry)
     for artist_dir in artists:
         if artist_dir.name in scanned:
             continue
@@ -2133,7 +2143,9 @@ def _scan_library_impl(
                     "candidates": candidates,
                     "artist_id": saved.get("artist_id") or "",
                     "catalog_ids": list(saved_catalog_ids or []),
+                    "owned_ids": dict(saved.get("owned_ids") or {}),
                 }
+                _reuse_owned(artist_dir.name, state_artists[artist_dir.name])
             hit = ({"artist": artist_dir.name, "albums": shown}
                    if shown else None)
             job.push_progress(_step(_finding), done, n, artist_dir.name,
@@ -2231,6 +2243,7 @@ def _scan_library_impl(
                     "candidates": artist_candidates,
                     "artist_id": artist_id or "",
                     "catalog_ids": list(catalog_ids or []),
+                    "owned_ids": dict(owned_ids or {}),
                 }
             # Add the albums before the progress tick so a hit lands the live
             # preview the same moment the running total moves.
@@ -2500,6 +2513,11 @@ def _scan_library_impl(
         )
     if not job.cancel_requested and (skipped := undecodable_named()):
         caveats.append(undecodable_note(skipped))
+    if not job.cancel_requested and not partial_only and (
+            no_artist := new_releases_mod.unresolved_note(
+                [name for name, entry in state_artists.items()
+                 if not entry.get("artist_id")])):
+        caveats.append(no_artist)
     if baseline_save_failed:
         caveats.append("New releases could not be updated; the next "
                        "complete scan tries again.")

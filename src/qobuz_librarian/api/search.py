@@ -318,19 +318,23 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
     items, qobuz_total, asked_to = _walk_artist_albums(artist_id, token, limit)
     if (items and qobuz_total is not None and asked_to >= qobuz_total
             and len(items) < min(qobuz_total, limit)):
-        # Qobuz counts a few albums it never hands out for some artists. The
-        # same list twice, short only on the last page, is the whole
-        # discography, not a dropped page.
+        # Qobuz counts a few albums it never hands out for some artists, and
+        # its pages can repeat one album and skip another at the same page
+        # break every time. A second walk in smaller pages breaks elsewhere;
+        # the same list from both, short only on the last page, is the whole
+        # discography, and two different lists are merged.
         try:
-            again, again_total, again_to = _walk_artist_albums(
-                artist_id, token, limit)
+            again, _again_total, again_to = _walk_artist_albums(
+                artist_id, token, limit,
+                page_size=max(1, config.ARTIST_CATALOG_PAGE * 2 // 3))
         except QobuzError:
-            again, again_total, again_to = [], qobuz_total, 0
-        if (again_to >= qobuz_total and {str(a.get("id")) for a in again}
-                == {str(a.get("id")) for a in items}):
+            again, again_to = [], 0
+        have = {str(a.get("id")) for a in items}
+        if again_to >= qobuz_total and {str(a.get("id")) for a in again} == have:
             qobuz_total = len(items)
-        elif len(again) > len(items):
-            items, qobuz_total = again, again_total
+        else:
+            items = (items + [a for a in again
+                              if str(a.get("id")) not in have])[:limit]
     # Only persist a discography we believe is whole.
     complete = (qobuz_total is None
                 or len(items) >= qobuz_total
@@ -342,12 +346,12 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
     return items, qobuz_total
 
 
-def _walk_artist_albums(artist_id, token, limit):
+def _walk_artist_albums(artist_id, token, limit, page_size=None):
     items = []
     seen_album_ids = set()
     offset = 0
     qobuz_total = None
-    page_size = config.ARTIST_CATALOG_PAGE
+    page_size = page_size or config.ARTIST_CATALOG_PAGE
     asked_to = 0
     while len(items) < limit:
         want = min(page_size, limit - len(items))
