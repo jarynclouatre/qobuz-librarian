@@ -28,7 +28,9 @@ history updates degrade to a no-op.  Job admission is stricter: work that can
 change the library is not allowed to enter a worker unless its owner row is
 durable first.
 """
+import bisect
 import copy
+import hashlib
 import json
 import logging
 import math
@@ -37,6 +39,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from array import array
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Optional
@@ -180,7 +183,7 @@ def _artist_of(row):
     return key if isinstance(key, str) and key else None
 
 
-def _compact_candidates(rows):
+def _shared_premises(rows):
     """Keep one copy of an artist's receipt instead of one on every row.
 
     A row's receipt seals its whole artist folder, and every missing album
@@ -194,16 +197,7 @@ def _compact_candidates(rows):
         if (key and key not in premises and isinstance(value, dict)
                 and value.get("kind") == "missing"):
             premises[key] = value
-    if not premises:
-        return rows
-    return {
-        "version": 2,
-        "premises": premises,
-        "rows": [candidate_premise.compact_candidate(
-                     row, premises.get(_artist_of(row)))
-                 if isinstance(row, dict) else row
-                 for row in rows],
-    }
+    return premises
 
 
 def _expand_candidates(value):
@@ -220,11 +214,25 @@ def _expand_candidates(value):
             for row in rows]
 
 
-def _decode_candidates(value, status) -> tuple[list[dict], bool]:
-    if status not in ("awaiting_review", "pending", "running"):
+# Statuses whose review rows are read back. Other jobs keep none on disk.
+_ROW_STATUSES = ("awaiting_review", "pending", "running")
+_NO_ROWS = ((), {})
+
+
+def _decode_candidates(value, status, stored=_NO_ROWS) -> tuple[list[dict], bool]:
+    """A saved review's rows, from the jobs row's own column when an older
+    build left them there, otherwise from ``stored``: the rows and premises
+    read from their tables, or None when they could not be parsed."""
+    if status not in _ROW_STATUSES:
         return [], False
     try:
-        candidates = _expand_candidates(json.loads(value or "[]"))
+        if (value or "[]") != "[]":
+            candidates = _expand_candidates(json.loads(value))
+        elif stored is None:
+            return [], True
+        else:
+            candidates = _expand_candidates(
+                {"version": 2, "premises": stored[1], "rows": list(stored[0])})
     except (TypeError, ValueError):
         return [], True
     if type(candidates) is not list:
@@ -408,6 +416,40 @@ CREATE TABLE IF NOT EXISTS jobs (
 )
 """
 
+# A review's rows, one each, so a change rewrites the rows it touched and
+# not the list. ``pos`` orders them and leaves gaps so a row can be added
+# between two others without renumbering the rest. Each row's tick is kept
+# apart from its body, so selecting a whole review rewrites only the ticks.
+# Bodies and premises run to kilobytes, which pack better in rowid tables.
+_CANDIDATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_candidates (
+    job_id TEXT NOT NULL,
+    cid    TEXT NOT NULL,
+    pos    INTEGER NOT NULL,
+    body   TEXT NOT NULL,
+    PRIMARY KEY (job_id, cid)
+)
+"""
+
+_TICK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_ticks (
+    job_id   TEXT NOT NULL,
+    cid      TEXT NOT NULL,
+    selected INTEGER,
+    PRIMARY KEY (job_id, cid)
+) WITHOUT ROWID
+"""
+
+# The receipt every missing album of one artist shares (_shared_premises).
+_PREMISE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_premises (
+    job_id TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    body   TEXT NOT NULL,
+    PRIMARY KEY (job_id, artist)
+)
+"""
+
 _DURABLE_COMPLETION_SCHEMA = """
 CREATE TABLE IF NOT EXISTS durable_job_completions (
     job_id        TEXT NOT NULL,
@@ -422,7 +464,7 @@ CREATE TABLE IF NOT EXISTS durable_job_completions (
 """
 
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 
 def scrub_stored_secrets() -> int | None:
@@ -449,8 +491,25 @@ def scrub_stored_secrets() -> int | None:
                 conn.execute(f"UPDATE jobs SET {assignments} WHERE id=?",
                              (*cleaned, row[0]))
                 changed += 1
-            if changed:
-                conn.commit()
+            touched = set()
+            for table, key in (("job_candidates", "cid"),
+                               ("job_premises", "artist")):
+                cleaned = []
+                for job_id, name, body in conn.execute(
+                        f"SELECT job_id, {key}, body FROM {table}"):
+                    clean = (redaction.redact(body) if isinstance(body, str)
+                             else body)
+                    if clean != body:
+                        cleaned.append((clean, job_id, name))
+                        touched.add(job_id)
+                if cleaned:
+                    conn.executemany(
+                        f"UPDATE {table} SET body=? WHERE job_id=? AND {key}=?",
+                        cleaned)
+            changed += len(touched)
+            conn.commit()
+            for job_id in touched:
+                _saved_rows.pop(job_id, None)
         except sqlite3.Error:
             _rollback_failed_write(conn)
             return None
@@ -466,6 +525,9 @@ def init() -> None:
             return
         try:
             conn.execute(_SCHEMA)
+            conn.execute(_CANDIDATE_SCHEMA)
+            conn.execute(_TICK_SCHEMA)
+            conn.execute(_PREMISE_SCHEMA)
             conn.execute(_DURABLE_COMPLETION_SCHEMA)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_durable_job_completion_album "
@@ -477,6 +539,9 @@ def init() -> None:
                 "CREATE INDEX IF NOT EXISTS idx_jobs_terminal "
                 "ON jobs(status, finished_at, created_at)"
             )
+            # load_all reads the jobs in this order without a sort.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)")
             # Ask the table what it has; user_version is only a stamp. Gating
             # these on the number leaves a db already carrying it unable to
             # gain a missing column, and every persist() then fails into
@@ -503,11 +568,27 @@ def init() -> None:
                         f"ALTER TABLE jobs ADD COLUMN {column} {definition}")
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version != _SCHEMA_VERSION:
+                # Another build may have deleted jobs without their rows.
+                for table in _ROW_TABLES:
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE job_id NOT IN "
+                        "(SELECT id FROM jobs)")
+            moved = _move_saved_reviews(conn)
+            if version != _SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
+            for job_id, saved in moved.items():
+                _remember(job_id, saved)
+            if moved:
+                try:
+                    # Give back the pages the old lists filled.
+                    conn.execute("VACUUM")
+                except sqlite3.Error as e:
+                    _log.debug("jobs.db vacuum after moving reviews failed: %s",
+                               e)
             _schema_ready = True
             _admission_ready = True
-        except sqlite3.Error as e:
+        except _WRITE_ERRORS as e:
             _rollback_failed_write(conn)
             _schema_ready = False
             _admission_ready = False
@@ -520,6 +601,31 @@ def init() -> None:
             _log.warning("job persistence schema/migration failed; running "
                          "without crash durability until the volume recovers "
                          "and the app restarts: %s", e)
+
+
+def _move_saved_reviews(conn) -> dict:
+    """Move reviews an older build kept in the jobs row into their own tables,
+    in the caller's transaction, and return what each now holds. A list that
+    does not parse stays where it is and still loads as unreadable."""
+    moved = {}
+    legacy = [job_id for (job_id,) in conn.execute(
+        "SELECT id FROM jobs WHERE candidates != '[]'")]
+    for job_id in legacy:
+        status, value = conn.execute(
+            "SELECT status, candidates FROM jobs WHERE id=?",
+            (job_id,)).fetchone()
+        rows, unreadable = _decode_candidates(value, status)
+        # Rows are stored by id, so two sharing one would lose a row; such a
+        # list keeps loading from the column as before.
+        if unreadable or len({row["cid"] for row in rows}) != len(rows):
+            continue
+        # The jobs row is newer than any rows this id has in the table.
+        _saved_rows.pop(job_id, None)
+        moved[job_id] = _write_rows(conn, _encode_rows(
+            job_id, status, rows, [row.get("selected") for row in rows],
+            None))
+        conn.execute("UPDATE jobs SET candidates='[]' WHERE id=?", (job_id,))
+    return moved
 
 
 def _is_damage(exc) -> bool:
@@ -608,9 +714,10 @@ def _job_snapshot(job, *, single=_CURRENT_JOB_SINGLE):
     return job._persist_serial, rows, [row.get("selected") for row in rows], (
         job.id, job.title or "", job.artist or "",
         job.album_id or "", job.kind or "download",
-        job.status.value if hasattr(job.status, "value") else str(job.status),
+        status_value,
         job.phase or "",
-        None,
+        # The rows live in job_candidates.
+        "[]",
         job.error,
         job.summary or "",
         job.review_verb or "Download",
@@ -628,32 +735,281 @@ def _job_snapshot(job, *, single=_CURRENT_JOB_SINGLE):
     )
 
 
-def _json_list(items, chunk=500):
-    """json.dumps of a list, a slice at a time. One call over a large review
-    holds the interpreter for the whole encode, and the web app with it."""
-    return "[" + ", ".join(
-        json.dumps(items[i:i + chunk], default=str)[1:-1]
-        for i in range(0, len(items), chunk)) + "]"
+_TICKS = (None, False, True)
+
+
+class _RowTable:
+    """Each saved row's digest, place and tick by cid, read like a dict of
+    those tuples. Kept in a few flat buffers: three small objects a row,
+    made again by every save after a scan, held on to memory the scan had
+    freed."""
+
+    __slots__ = ("_cids", "_digests", "_places", "_ticks")
+
+    def __init__(self, rows):
+        cids = sorted(rows)
+        self._cids = cids
+        self._digests = b"".join(rows[cid][0] for cid in cids)
+        self._places = array("q", [rows[cid][1] for cid in cids])
+        self._ticks = bytes(_TICKS.index(rows[cid][2]) for cid in cids)
+
+    def get(self, cid, default=None):
+        i = bisect.bisect_left(self._cids, cid)
+        if i == len(self._cids) or self._cids[i] != cid:
+            return default
+        return (self._digests[i * _DIGEST_SIZE:(i + 1) * _DIGEST_SIZE],
+                self._places[i], _TICKS[self._ticks[i]])
+
+    def __iter__(self):
+        return iter(self._cids)
+
+    def __len__(self):
+        return len(self._cids)
+
+
+@dataclass(frozen=True)
+class _SavedRows:
+    """What the row tables hold for one job: each row's digest, place and
+    tick by cid, and each premise's digest by artist."""
+
+    rows: dict
+    premises: dict
+
+
+@dataclass(frozen=True)
+class _RowsWrite:
+    """One job's encoded rows, with the text of those ``base`` lacks or holds
+    otherwise. ``source`` encodes them again against a newer base."""
+
+    job_id: str
+    base: Optional[_SavedRows]
+    order: list
+    bodies: dict
+    premises: dict
+    source: tuple
+
+
+# What each job's rows are on disk, replaced whole after the commit that
+# changed them, so a save can be compared against it without _lock. A job
+# missing here has its rows replaced outright.
+_saved_rows: dict[str, _SavedRows] = {}
+
+
+def _remember(job_id, saved) -> None:
+    """Note what a committed write left on disk; called under _lock."""
+    if saved is not None and (saved.rows or saved.premises):
+        _saved_rows[job_id] = saved
+    else:
+        _saved_rows.pop(job_id, None)
+
+# Errors that end a write; encoding a review again under _lock can raise the
+# last two.
+_WRITE_ERRORS = (sqlite3.Error, TypeError, ValueError)
+
+_POS_GAP = 1024
+
+
+_DIGEST_SIZE = 16
+
+
+def _digest(text) -> bytes:
+    return hashlib.blake2b(text.encode(), digest_size=_DIGEST_SIZE).digest()
+
+
+def _encode_rows(job_id, status, rows, ticks, base) -> _RowsWrite:
+    if status not in _ROW_STATUSES:
+        rows, ticks = [], []
+    premises = _shared_premises(rows)
+    known = base.rows if base is not None else {}
+    order, bodies = [], {}
+    for row, tick in zip(rows, ticks):
+        if "selected" in row:
+            row = dict(row)
+            del row["selected"]
+        premise = premises.get(_artist_of(row))
+        if premise is not None:
+            row = candidate_premise.compact_candidate(row, premise)
+        text = json.dumps(row, default=str)
+        digest = _digest(text)
+        cid = row["cid"]
+        order.append((cid, digest, None if tick is None else bool(tick)))
+        if known.get(cid, (None,))[0] != digest:
+            bodies[cid] = text
+    shared = {}
+    for artist, premise in premises.items():
+        text = json.dumps(premise, default=str)
+        digest = _digest(text)
+        unchanged = base is not None and base.premises.get(artist) == digest
+        shared[artist] = (digest, None if unchanged else text)
+    return _RowsWrite(job_id, base, order, bodies, shared,
+                      (status, rows, ticks))
+
+
+def _positions(order, saved):
+    """Each row's place. A saved row keeps its own while the order allows, so
+    adding or removing rows moves no other row."""
+    places = [None] * len(order)
+    last = 0
+    for i, (cid, *_rest) in enumerate(order):
+        old = saved.get(cid)
+        if old is not None and old[1] > last:
+            places[i] = last = old[1]
+    prev, i = 0, 0
+    while i < len(places):
+        if places[i] is not None:
+            prev = places[i]
+            i += 1
+            continue
+        end = i
+        while end < len(places) and places[end] is None:
+            end += 1
+        if end == len(places):
+            step = _POS_GAP
+        else:
+            step = (places[end] - prev) // (end - i + 1)
+            if step < 1:
+                return [(n + 1) * _POS_GAP for n in range(len(places))]
+        for n in range(i, end):
+            prev += step
+            places[n] = prev
+        i = end
+    return places
+
+
+def _write_rows(conn, write) -> _SavedRows:
+    """Bring one job's saved rows to ``write`` in the open transaction and
+    return what they hold once it commits."""
+    current = _saved_rows.get(write.job_id)
+    if current is not None and len(write.order) < len(current.rows) // 2:
+        # Most rows are leaving, as when an approved run keeps only its
+        # picks: clearing the job's rows and adding back the few is quicker
+        # than deleting each.
+        current = None
+    if current is not write.base:
+        write = _encode_rows(write.job_id, *write.source, current)
+    job_id, base = write.job_id, write.base
+    if base is None:
+        _delete_rows(conn, (job_id,))
+        base = _SavedRows({}, {})
+    rows, changed, moved, ticked = {}, [], [], []
+    for (cid, digest, tick), pos in zip(write.order,
+                                        _positions(write.order, base.rows)):
+        rows[cid] = (digest, pos, tick)
+        old = base.rows.get(cid)
+        if old is None or old[0] != digest:
+            changed.append((job_id, cid, pos, write.bodies[cid]))
+        elif old[1] != pos:
+            moved.append((pos, job_id, cid))
+        if old is None or old[2] != tick:
+            ticked.append((job_id, cid, tick))
+    gone = [(job_id, cid) for cid in base.rows if cid not in rows]
+    conn.executemany(
+        "DELETE FROM job_candidates WHERE job_id=? AND cid=?", gone)
+    conn.executemany("DELETE FROM job_ticks WHERE job_id=? AND cid=?", gone)
+    conn.executemany(
+        "INSERT OR REPLACE INTO job_candidates (job_id, cid, pos, body) "
+        "VALUES (?,?,?,?)", changed)
+    conn.executemany(
+        "UPDATE job_candidates SET pos=? WHERE job_id=? AND cid=?", moved)
+    conn.executemany(
+        "INSERT OR REPLACE INTO job_ticks (job_id, cid, selected) "
+        "VALUES (?,?,?)", ticked)
+    premises = {artist: digest
+                for artist, (digest, _text) in write.premises.items()}
+    conn.executemany(
+        "DELETE FROM job_premises WHERE job_id=? AND artist=?",
+        [(job_id, artist) for artist in base.premises
+         if artist not in premises])
+    conn.executemany(
+        "INSERT OR REPLACE INTO job_premises (job_id, artist, body) "
+        "VALUES (?,?,?)",
+        [(job_id, artist, text)
+         for artist, (_digest, text) in write.premises.items()
+         if text is not None])
+    return _SavedRows(_RowTable(rows), premises)
+
+
+_ROW_TABLES = ("job_candidates", "job_ticks", "job_premises")
+
+
+def _delete_rows(conn, job_ids) -> None:
+    ids = [(job_id,) for job_id in job_ids]
+    for table in _ROW_TABLES:
+        conn.executemany(f"DELETE FROM {table} WHERE job_id=?", ids)
+
+
+def _save_job(conn, values, rows) -> _SavedRows:
+    """Write one job row and its review rows in the open transaction."""
+    conn.execute(_PERSIST_SQL, values)
+    return _write_rows(conn, rows)
+
+
+_READ_BATCH = 2048
+
+
+def _parse_batch(bodies, seen):
+    """Parse saved rows as one document, so they share one copy of each key,
+    and point repeated text, such as an artist's name, at one copy."""
+    if any(type(body) is not str for body in bodies):
+        raise TypeError("a saved row is not text")
+    values = json.loads("[" + ",".join(bodies) + "]")
+    if len(values) != len(bodies):
+        raise ValueError("a saved row is not one value")
+    for value in values:
+        for part in (value, value.get("payload")) if type(value) is dict else ():
+            if type(part) is dict:
+                for key, text in part.items():
+                    if type(text) is str:
+                        part[key] = seen.setdefault(text, text)
+    return values
+
+
+def _read_rows(conn, job_id):
+    """One job's saved rows in order and its premises, and what they hold;
+    (None, None) when they do not parse."""
+    found, premises, saved, shared = [], {}, {}, {}
+    seen = {}
+    try:
+        ticks = {cid: None if selected is None else bool(selected)
+                 for cid, selected in conn.execute(
+                     "SELECT cid, selected FROM job_ticks WHERE job_id=?",
+                     (job_id,))}
+        cursor = conn.execute(
+            "SELECT cid, pos, body FROM job_candidates WHERE job_id=?",
+            (job_id,))
+        while batch := cursor.fetchmany(_READ_BATCH):
+            rows = _parse_batch([body for _cid, _pos, body in batch], seen)
+            for (cid, pos, body), row in zip(batch, rows):
+                cid = seen.setdefault(cid, cid)
+                tick = ticks.get(cid)
+                if tick is not None and type(row) is dict:
+                    row["selected"] = tick
+                found.append((pos, row))
+                saved[cid] = (_digest(body), pos, tick)
+        cursor = conn.execute(
+            "SELECT artist, body FROM job_premises WHERE job_id=?",
+            (job_id,))
+        while batch := cursor.fetchmany(_READ_BATCH):
+            values = _parse_batch([body for _artist, body in batch], seen)
+            for (artist, body), value in zip(batch, values):
+                premises[artist] = value
+                shared[artist] = _digest(body)
+        found.sort(key=lambda item: item[0])
+    except (TypeError, ValueError):
+        return None, None
+    return ([row for _pos, row in found], premises), _SavedRows(_RowTable(saved), shared)
 
 
 def _encode_snapshot(job, snapshot):
-    """The row values for a _job_snapshot, or None."""
+    """The row values and review rows for a _job_snapshot, or None."""
     _serial, rows, ticks, values = snapshot
-    rows = [row if row.get("selected") == tick else {**row, "selected": tick}
-            for row, tick in zip(rows, ticks)]
     try:
-        compact = _compact_candidates(rows)
-        if isinstance(compact, dict):
-            head = json.dumps({key: value for key, value in compact.items()
-                               if key != "rows"}, default=str)
-            candidates_json = (head[:-1] + ', "rows": '
-                               + _json_list(compact["rows"]) + "}")
-        else:
-            candidates_json = _json_list(compact)
+        write = _encode_rows(values[0], values[5], rows, ticks,
+                             _saved_rows.get(values[0]))
     except (TypeError, ValueError) as e:
         _note_write_failure(f"serialize {job.id}", e)
         return None
-    return values[:7] + (candidates_json,) + values[8:]
+    return values, write
 
 
 def _write_snapshot(job, snapshot) -> bool:
@@ -662,8 +1018,8 @@ def _write_snapshot(job, snapshot) -> bool:
     A snapshot taken after this one wins, so this one is then not written; a
     job retired meanwhile, its row merged or deleted, is not written back.
     """
-    values = _encode_snapshot(job, snapshot)
-    if values is None:
+    encoded = _encode_snapshot(job, snapshot)
+    if encoded is None:
         return False
     with job._lock:
         _lock.acquire()
@@ -678,10 +1034,11 @@ def _write_snapshot(job, snapshot) -> bool:
         if conn is None:
             return False
         try:
-            conn.execute(_PERSIST_SQL, values)
+            saved = _save_job(conn, *encoded)
             conn.commit()
+            _remember(job.id, saved)
             return True
-        except sqlite3.Error as e:
+        except _WRITE_ERRORS as e:
             _rollback_failed_write(conn)
             _note_write_failure(f"persist {job.id}", e)
             return False
@@ -775,8 +1132,8 @@ def record_terminal_run(*, kind, title, status, summary, started_at,
 def _persist_locked(job, *, admission=False) -> bool:
     """Write one ordinary snapshot while the caller holds ``job._lock``."""
     global _admission_ready
-    values = _job_values(job)
-    if values is None:
+    encoded = _job_values(job)
+    if encoded is None:
         return False
     with _lock:
         conn = _get_conn()
@@ -785,12 +1142,13 @@ def _persist_locked(job, *, admission=False) -> bool:
                 _admission_ready = False
             return False
         try:
-            conn.execute(_PERSIST_SQL, values)
+            saved = _save_job(conn, *encoded)
             conn.commit()
+            _remember(job.id, saved)
             if admission:
                 _admission_ready = True
             return True
-        except sqlite3.Error as e:
+        except _WRITE_ERRORS as e:
             _rollback_failed_write(conn)
             if admission:
                 _admission_ready = False
@@ -948,9 +1306,10 @@ def mark_retried(job_id: str, retry_id: str) -> bool:
 def _persist_preserving_single_locked(job, *, admission=False) -> bool:
     """Save while preserving Undo; the caller holds ``job._lock``."""
     global _admission_ready
-    values = _job_values(job)
-    if values is None:
+    encoded = _job_values(job)
+    if encoded is None:
         return False
+    values, rows = encoded
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -976,6 +1335,7 @@ def _persist_preserving_single_locked(job, *, admission=False) -> bool:
                 conn.rollback()
                 job._single_undo_unavailable = True
                 return False
+            saved = _write_rows(conn, rows)
             row = conn.execute(
                 "SELECT single FROM jobs "
                 "WHERE id=? AND created_at=? AND album_id=?",
@@ -986,6 +1346,7 @@ def _persist_preserving_single_locked(job, *, admission=False) -> bool:
             except (IndexError, TypeError, ValueError):
                 durable_single = None
             conn.commit()
+            _remember(job.id, saved)
             if type(durable_single) is dict:
                 job.single = durable_single
                 job.__dict__.pop("_single_undo_unavailable", None)
@@ -995,7 +1356,7 @@ def _persist_preserving_single_locked(job, *, admission=False) -> bool:
             if admission:
                 _admission_ready = True
             return True
-        except sqlite3.Error as exc:
+        except _WRITE_ERRORS as exc:
             _rollback_failed_write(conn)
             if admission:
                 _admission_ready = False
@@ -1039,8 +1400,8 @@ def admit_review_transition(job, parked_jobs=()) -> bool:
         for other in parked:
             locks.enter_context(other._lock)
         ordered = [job, *parked]
-        values = [_job_values(other) for other in ordered]
-        if any(value is None for value in values):
+        encoded = [_job_values(other) for other in ordered]
+        if any(value is None for value in encoded):
             return False
         with _lock:
             conn = _get_conn()
@@ -1049,13 +1410,14 @@ def admit_review_transition(job, parked_jobs=()) -> bool:
                 return False
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                conn.executemany(_PERSIST_SQL, values)
+                saved = [_save_job(conn, *value) for value in encoded]
                 conn.commit()
-                for other in ordered:
+                for other, rows in zip(ordered, saved):
+                    _remember(other.id, rows)
                     other._durability_required = True
                 _admission_ready = True
                 return True
-            except sqlite3.Error as e:
+            except _WRITE_ERRORS as e:
                 _rollback_failed_write(conn)
                 _admission_ready = False
                 _note_write_failure("admit related jobs", e)
@@ -1070,8 +1432,8 @@ def restore_split_review(job, parked_job) -> bool:
     happened before any selected work changed files.
     """
     global _admission_ready
-    value = _job_values(job)
-    if value is None or parked_job is job:
+    encoded = _job_values(job)
+    if encoded is None or parked_job is job:
         return False
     with _lock:
         conn = _get_conn()
@@ -1080,17 +1442,20 @@ def restore_split_review(job, parked_job) -> bool:
             return False
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(_PERSIST_SQL, value)
+            saved = _save_job(conn, *encoded)
             conn.execute(
                 "DELETE FROM durable_job_completions WHERE job_id=?",
                 (parked_job.id,),
             )
             conn.execute("DELETE FROM jobs WHERE id=?", (parked_job.id,))
+            _delete_rows(conn, (parked_job.id,))
             conn.commit()
+            _remember(job.id, saved)
+            _saved_rows.pop(parked_job.id, None)
             job._durability_required = True
             _admission_ready = True
             return True
-        except sqlite3.Error as exc:
+        except _WRITE_ERRORS as exc:
             _rollback_failed_write(conn)
             _admission_ready = False
             _note_write_failure("restore split review", exc)
@@ -1504,7 +1869,9 @@ def delete(job_id: str) -> None:
                 "DELETE FROM durable_job_completions WHERE job_id=?",
                 (job_id,),
             )
+            _delete_rows(conn, (job_id,))
             conn.commit()
+            _saved_rows.pop(job_id, None)
         except sqlite3.Error as exc:
             _rollback_failed_write(conn)
             _log.debug("delete job %s failed: %s", job_id, exc)
@@ -1526,23 +1893,27 @@ def load_one(job_id: str) -> Optional[dict]:
                 "FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
+            stored = (_read_rows(conn, job_id)[0]
+                      if row is not None and row[5] in _ROW_STATUSES
+                      and row[7] == "[]" else _NO_ROWS)
         except sqlite3.Error as e:
             _log.debug("load_one failed for %s: %s", job_id, e)
             return None
     if row is None:
         return None
-    return _decode_row(row, decode_logs=True)
+    return _decode_row(row, decode_logs=True, stored=stored)
 
 
-def _decode_row(r, *, decode_logs):
+def _decode_row(r, *, decode_logs, stored=_NO_ROWS):
     """One saved row as a job dict, or None when its recoveries are unreadable.
 
-    Without ``decode_logs`` the log stays encoded under ``log_lines_json``."""
+    Without ``decode_logs`` the log stays encoded under ``log_lines_json``.
+    ``stored`` is what _read_rows returned for its review rows."""
     recoveries, recovery_unreadable = _decode_recoveries(r[17])
     if recovery_unreadable:
         return None
     execute_args, execute_args_unreadable = _decode_execute_args(r[12])
-    candidates, candidates_unreadable = _decode_candidates(r[7], r[5])
+    candidates, candidates_unreadable = _decode_candidates(r[7], r[5], stored)
     single, single_unreadable = _decode_single(r[15])
     quality_shortfall, _ = _decode_object(r[19])
     job = {
@@ -1608,7 +1979,10 @@ def prune_finished(keep: int) -> None:
                 "WHERE NOT EXISTS (SELECT 1 FROM jobs "
                 "WHERE jobs.id=durable_job_completions.job_id)"
             )
+            _delete_rows(conn, (job_id for (job_id,) in removable))
             conn.commit()
+            for (job_id,) in removable:
+                _saved_rows.pop(job_id, None)
         except sqlite3.Error as e:
             _rollback_failed_write(conn)
             _log.debug("prune_finished(%d) failed: %s", keep, e)
@@ -1974,7 +2348,10 @@ def clear_history() -> bool:
                 "WHERE NOT EXISTS (SELECT 1 FROM jobs "
                 "WHERE jobs.id=durable_job_completions.job_id)"
             )
+            _delete_rows(conn, (job_id for (job_id,) in removable))
             conn.commit()
+            for (job_id,) in removable:
+                _saved_rows.pop(job_id, None)
             return True
         except sqlite3.Error as e:
             _rollback_failed_write(conn)
@@ -2001,10 +2378,16 @@ def load_all() -> list[dict]:
             "FROM jobs ORDER BY created_at",
             REVIEW_PICK_KINDS,
         ).fetchall()
+        stored = {}
+        for r in rows:
+            if r[7] == "[]":
+                stored[r[0]], saved = _read_rows(conn, r[0])
+                _remember(r[0], saved)
     out = []
     for r in rows:
         try:
-            job = _decode_row(r, decode_logs=False)
+            job = _decode_row(r, decode_logs=False,
+                              stored=stored.get(r[0], _NO_ROWS))
             if job is None:
                 raise ValueError("recovery payload is invalid")
         except (ValueError, TypeError) as e:
@@ -2029,6 +2412,7 @@ def _reset_for_tests() -> None:
     _admission_ready = False
     _warned_write_failure = False
     _damaged = False
+    _saved_rows.clear()
     p = _path()
     for q in (p, p.with_suffix(".db-wal"), p.with_suffix(".db-shm")):
         try:

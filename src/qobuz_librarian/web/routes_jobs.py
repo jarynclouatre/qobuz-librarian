@@ -963,8 +963,8 @@ async def job_select(request: Request, job_id: str):
             status_code=409,
         )
     if changed:
-        # Coalesced save: the candidate list is multi-MB on a big library, so
-        # the tap must not wait for (or even schedule) a full serialize+write.
+        # Coalesced save: a save encodes the whole review to find what
+        # changed, so the tap must not wait for (or even schedule) one.
         job_mgr.persist_soon(job)
         job.notify_review_changed(_review_origin(request))
     return JSONResponse(payload)
@@ -1909,9 +1909,9 @@ async def job_cancel(
         return RedirectResponse(url="/queue", status_code=303)
     was_review = job.status == job_mgr.JobStatus.AWAITING_REVIEW
     was_pending = job.status == job_mgr.JobStatus.PENDING
-    # Offload: cancelling a parked review runs cancel_review -> persist (a
-    # json.dumps of the full candidate list + SQLite commit), which would block
-    # the event loop and stall every SSE stream for a large review.
+    # Offload: cancelling a parked review runs cancel_review -> persist, which
+    # removes every saved row of the review and would block the event loop
+    # and stall every SSE stream for a large one.
     loop = asyncio.get_running_loop()
     canceled = await loop.run_in_executor(
         None, lambda: job_mgr.request_cancel(job)

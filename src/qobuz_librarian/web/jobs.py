@@ -933,11 +933,10 @@ def work_in_flight() -> bool:
         for job in registry.pending_and_running()
     ) or bool(active_library_operations())
 
-# Review ticks save the whole candidate list, and on a big library that list
-# runs to tens of megabytes. Written per checkbox, each tap waited on a
-# multi-hundred-ms serialize+write. A save that took a while waits this many
-# times as long before the next, so a run of ticks is not answered behind one
-# save after another.
+# A review save encodes every row to find the ones that changed, which on a
+# big library takes a few hundred ms. Run per checkbox, each tap waited on
+# it. A save that took a while waits this many times as long before the
+# next, so a run of ticks is not answered behind one save after another.
 _PERSIST_DELAY = 1.5
 _PERSIST_SPACING = 10
 _persist_timers: dict[str, threading.Timer] = {}
