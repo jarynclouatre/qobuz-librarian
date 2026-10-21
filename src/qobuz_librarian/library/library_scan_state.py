@@ -1,11 +1,15 @@
 """Saved whole-library scan snapshot for cheap post-baseline refreshes."""
 import copy
+import hashlib
 import json
+import re
+import secrets
 import threading
 import time
+from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import state_file
+from qobuz_librarian import safefile, state_file
 from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.ui_cli import logging as cli_logging
 
@@ -89,10 +93,93 @@ def _normalise(data):
     return base
 
 
+# The header of the saved scan, beside it. Loading the whole file once per
+# page costs more than a large library can spare, and a refresh that finds
+# what is already saved changes only this header. The file keeps a full
+# header of its own, so a build that knows nothing of this one still reads
+# it; this one wins only while it names the stamp the file opens with.
+_HEAD_VERSION = 1
+_STAMP = re.compile(rb'\{"stamp": "([0-9a-f]{16})"')
+
+
+def _head_path():
+    path = Path(cfg.LIBRARY_SCAN_STATE_FILE)
+    return path.with_name(path.stem + ".head" + path.suffix)
+
+
+def _file_stamp():
+    try:
+        with open(cfg.LIBRARY_SCAN_STATE_FILE, "rb") as f:
+            match = _STAMP.match(f.read(64))
+    except FileNotFoundError:
+        return None
+    return match.group(1).decode() if match else None
+
+
+def _read_head():
+    """The header file, or None when it does not read as one, and its bytes,
+    None when there is no file. Without it the file is read whole, and its own
+    header may be older than refreshes that changed no rows."""
+    try:
+        raw = _head_path().read_bytes()
+        head = json.loads(raw)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError):
+        return None, b""
+    if (
+        not isinstance(head, dict)
+        or head.get("version") != _HEAD_VERSION
+        or not isinstance(head.get("stamp"), str)
+        or not isinstance(head.get("summary"), dict)
+        or not isinstance(head.get("digests"), dict)
+    ):
+        return None, raw
+    return head, raw
+
+
+def _head_summary(head):
+    return _summarise(_normalise({**head["summary"], "version": STATE_VERSION}))
+
+
+def _current_head():
+    """The header file when it belongs to the saved file now on disk, or
+    None, and the header file's bytes either way."""
+    head, raw = _read_head()
+    if head is not None and head["stamp"] != _file_stamp():
+        head = None
+    return head, raw
+
+
+def _with_head(data, head):
+    summary = head["summary"]
+    headers = summary.get("kinds") if isinstance(summary.get("kinds"), dict) else {}
+    kinds = data.get("kinds") if isinstance(data.get("kinds"), dict) else {}
+    return {
+        **data,
+        **{key: summary.get(key) for key in (
+            "updated_at", "review_retired_at", "review_retired_generation",
+            "review_retired_reason")},
+        "kinds": {
+            name: (
+                {**bucket, **headers[name]}
+                if isinstance(bucket, dict) and isinstance(headers.get(name), dict)
+                else bucket
+            )
+            for name, bucket in kinds.items()
+        },
+    }
+
+
 def load():
-    return _normalise(state_file.load_json_object(
+    # The header first: one written after this file names its stamp.
+    head, _raw = _read_head()
+    data = state_file.load_json_object(
         cfg.LIBRARY_SCAN_STATE_FILE, "the saved library scan",
-        "your parked Library review (it would need a full rescan)"))
+        "your parked Library review (it would need a full rescan)")
+    if data is not None and head is not None and data.get("stamp") == head["stamp"]:
+        data = _with_head(data, head)
+    return _normalise(data)
 
 
 def _kind_from(data, kind, *, keep_artists=True):
@@ -144,7 +231,7 @@ def kind_state(kind: str, data=None):
 
 
 # A page and its poll need only each kind's header, which a large library
-# buries under every saved candidate. The file is parsed once per version.
+# buries under every saved candidate.
 _summary_lock = threading.Lock()
 _summary_read_lock = threading.Lock()
 _summary_cache = None
@@ -163,36 +250,44 @@ def _summarise(data):
     }
 
 
+def _identities():
+    return (state_file.file_identity(cfg.LIBRARY_SCAN_STATE_FILE),
+            state_file.file_identity(_head_path()))
+
+
 def _remember_summary(identity, value):
     global _summary_cache
     with _summary_lock:
-        _summary_cache = (str(cfg.LIBRARY_SCAN_STATE_FILE), identity, value)
+        _summary_cache = (
+            None if value is None
+            else (str(cfg.LIBRARY_SCAN_STATE_FILE), identity, value))
 
 
-def _cached_summary(path, identity):
+def _cached_summary(identity):
     with _summary_lock:
         cached = _summary_cache
-    if cached is not None and cached[:2] == (str(path), identity):
+    if cached is not None and cached[:2] == (
+            str(cfg.LIBRARY_SCAN_STATE_FILE), identity):
         return copy.deepcopy(cached[2])
     return None
 
 
 def summary():
     """load() without the artists of any kind."""
-    path = cfg.LIBRARY_SCAN_STATE_FILE
-    value = _cached_summary(path, state_file.file_identity(path))
+    value = _cached_summary(_identities())
     if value is not None:
         return value
-    # One parse at a time: a page and its poll arriving together would
-    # otherwise each hold a whole copy of the file.
+    # One read at a time: a page and its poll arriving together would
+    # otherwise each hold a whole copy of a file with no header beside it.
     with _summary_read_lock:
-        identity = state_file.file_identity(path)
-        value = _cached_summary(path, identity)
+        identity = _identities()
+        value = _cached_summary(identity)
         if value is not None:
             return value
-        value = _summarise(load())
-        # Only a file that stayed put while it was read can stand for it.
-        if state_file.file_identity(path) == identity:
+        head, _raw = _current_head()
+        value = _head_summary(head) if head is not None else _summarise(load())
+        # Only files that stayed put while they were read can stand for them.
+        if _identities() == identity:
             _remember_summary(identity, value)
     return copy.deepcopy(value)
 
@@ -206,16 +301,80 @@ def kind_summary(kind: str):
     return header
 
 
-def _write_state(data):
+def _encoded(data, stamp, digests):
+    """The saved file's text, opening with ``stamp``, filling ``digests``
+    with each kind's artists as written."""
+    encoder = json.JSONEncoder()
+    top = {"stamp": stamp}
+    top.update((key, value) for key, value in data.items()
+               if key not in ("stamp", "kinds"))
+    yield encoder.encode(top)[:-1] + ', "kinds": {'
+    for index, (kind, bucket) in enumerate(data["kinds"].items()):
+        yield (", " if index else "") + encoder.encode(str(kind)) + ": "
+        if not isinstance(bucket, dict) or "artists" not in bucket:
+            yield encoder.encode(bucket)
+            continue
+        fields = encoder.encode(
+            {key: value for key, value in bucket.items() if key != "artists"})
+        yield fields[:-1] + (', "artists": ' if len(fields) > 2 else '"artists": ')
+        digest = hashlib.sha256()
+        for piece in safefile.json_chunks(encoder, bucket["artists"], depth=1):
+            digest.update(piece.encode())
+            yield piece
+        digests[str(kind)] = digest.hexdigest()
+        yield "}"
+    yield "}}"
+
+
+def _artists_digest(artists):
+    digest = hashlib.sha256()
+    for piece in safefile.json_chunks(json.JSONEncoder(), artists, depth=1):
+        digest.update(piece.encode())
+    return digest.hexdigest()
+
+
+def _write_head(stamp, value, digests):
     try:
-        identity = state_file.write_json(
-            cfg.LIBRARY_SCAN_STATE_FILE, data, indent=None)
+        return state_file.write_json(_head_path(), {
+            "version": _HEAD_VERSION, "stamp": stamp, "digests": digests,
+            "summary": value,
+        }, indent=None)
+    except OSError as e:
+        cli_logging.vlog(f"library scan state header write failed ({e})")
+        return None
+
+
+def _write_state(data):
+    stamp = secrets.token_hex(8)
+    digests = {}
+    try:
+        identity = state_file.write_chunks(
+            cfg.LIBRARY_SCAN_STATE_FILE, _encoded(data, stamp, digests))
     except OSError as e:
         # Losing this file only costs a slower next scan, but say so (verbose)
         # rather than going stale with zero signal on a full/read-only volume.
         cli_logging.vlog(f"library scan state write failed ({e}); next scan re-crawls")
         return False
-    _remember_summary(identity, _summarise(_normalise(data)))
+    value = _summarise(_normalise(data))
+    head_identity = _write_head(stamp, value, digests)
+    # Without its header the file stands alone, which it can.
+    _remember_summary((identity, head_identity),
+                      value if head_identity is not None else None)
+    return True
+
+
+def _write_header(data, head):
+    """Save ``data``, a summary or a whole load(), whose artists are the
+    saved file's own, rewriting only the header when one belongs to it."""
+    if head is None:
+        return _write_state(data)
+    value = _summarise(_normalise({**data, "version": STATE_VERSION}))
+    head_identity = _write_head(head["stamp"], value, head["digests"])
+    if head_identity is None:
+        return False
+    _remember_summary(
+        (state_file.file_identity(cfg.LIBRARY_SCAN_STATE_FILE), head_identity),
+        value)
     return True
 
 
@@ -266,31 +425,71 @@ def save_kind(kind: str, *, artists: dict, complete: bool,
                 previous.close()
 
 
+def _restore(previous, head_raw, *, whole):
+    """Put back the saved file read through ``previous`` and the header
+    file's bytes ``head_raw``."""
+    try:
+        if whole and previous is None:
+            _write_state(_normalise(None))
+            return
+        if whole:
+            previous.seek(0)
+            state_file.write_chunks(
+                cfg.LIBRARY_SCAN_STATE_FILE,
+                iter(lambda: previous.read(1 << 20), b""))
+        if head_raw is None:
+            _head_path().unlink(missing_ok=True)
+        else:
+            state_file.write_chunks(_head_path(), (head_raw,))
+    except OSError as e:
+        cli_logging.vlog(f"library scan state restore failed ({e})")
+    finally:
+        _remember_summary(None, None)
+
+
 def _save_kind_locked(kind, previous, *, artists, complete, quality_sig,
                       generation, revision, limited):
-    header = summary()
-    # Only another kind's saved rows need the whole file read.
-    data = dict(load() if set(header["kinds"]) - {kind} else header)
-    kinds = data["kinds"] = {
-        name: bucket for name, bucket in data["kinds"].items()
-        if name != kind
-    }
+    head, head_raw = _current_head()
+    # Read before the rows below are built, so the two are not held at once.
+    header = _head_summary(head) if head is not None else summary()
     now = time.time()
-    kinds[kind] = {
+    bucket = {
         "updated_at": now,
         "generation": int(generation or 0),
         "revision": int(revision or 0),
         "complete": bool(complete),
         "limited": bool(limited),
         "quality_signature": str(quality_sig or ""),
+        # In name order, so the same rows always read the same.
         "artists": {
             str(name): candidate_premise.compact_artist(_clean_artist_state(entry))
-            for name, entry in (artists or {}).items()
+            for name, entry in sorted(
+                (artists or {}).items(), key=lambda item: str(item[0]))
         },
     }
+    if (
+        head is not None
+        and kind in (head["summary"].get("kinds") or {})
+        and head["digests"].get(kind) == _artists_digest(bucket["artists"])
+    ):
+        # The saved file already holds these rows: only the header moves.
+        data = header
+        data["kinds"][kind] = _kind_from(
+            {"kinds": {kind: bucket}}, kind, keep_artists=False)
+        whole = False
+    else:
+        # Only another kind's saved rows need the whole file read.
+        data = dict(load() if set(header["kinds"]) - {kind} else header)
+        data["kinds"] = {
+            name: value for name, value in data["kinds"].items()
+            if name != kind
+        }
+        data["kinds"][kind] = bucket
+        head = None
+        whole = True
     data["updated_at"] = now
     data["version"] = STATE_VERSION
-    if not _write_state(data):
+    if not _write_header(data, head):
         return None
     if generation and revision:
         from qobuz_librarian.library import generation_state
@@ -306,8 +505,7 @@ def _save_kind_locked(kind, previous, *, artists, complete, quality_sig,
             # The snapshot write landed but its authority record did not.
             # No other snapshot writer can enter until the prior file is
             # restored.
-            _write_state(_normalise(
-                json.load(previous) if previous is not None else None))
+            _restore(previous, head_raw, whole=whole)
             return None
     return int(generation) if generation else now
 
@@ -323,6 +521,7 @@ def mark_review_retired(
     saved-state review reconstruction won't rebuild a review from a snapshot
     whose missing kind was last saved at or before this, so a finished review
     doesn't come back; a fresh missing scan clears the block by construction."""
+    # The whole file, so a build that reads only the file agrees.
     with _lock, state_file.store_lock(cfg.LIBRARY_SCAN_STATE_FILE):
         data = load()
         if generation is not None:

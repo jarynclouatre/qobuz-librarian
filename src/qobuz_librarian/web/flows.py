@@ -1452,7 +1452,10 @@ def _save_scan_seen(mode, fingerprints):
                 "the saved new-since-scan baseline",
                 "your previous scan comparison",
             ) or {}
-            data[mode] = sorted(fingerprints)
+            seen = sorted(fingerprints)
+            if data.get(mode) == seen:
+                return
+            data[mode] = seen
             state_file.write_json(cfg.SCAN_SEEN_FILE, data)
     except OSError:
         pass

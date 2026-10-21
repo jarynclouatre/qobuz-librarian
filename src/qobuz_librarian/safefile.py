@@ -303,12 +303,38 @@ def write_atomic(path, data, *, mode=0o600, prefix=None, strict=False):
     return written
 
 
+def json_chunks(encoder, value, depth=4, level=0):
+    """The text `encoder.iterencode(value)` yields, in larger pieces.
+
+    Objects down to `depth` levels are split by member and everything below
+    goes through the C encoder whole, which iterencode never uses. A large
+    store is then neither encoded in pure Python nor held as one string."""
+    indent = encoder.indent
+    if isinstance(indent, int):
+        indent = " " * indent
+    if (depth <= 0 or not isinstance(value, dict) or not value
+            or not all(isinstance(key, str) for key in value)):
+        text = encoder.encode(value)
+        # Encoded strings carry no raw newline, so every one starts a line.
+        yield (text.replace("\n", "\n" + indent * level)
+               if indent is not None and level else text)
+        return
+    inner = "" if indent is None else "\n" + indent * (level + 1)
+    separator = encoder.item_separator + inner
+    yield "{" + inner
+    for index, (key, item) in enumerate(value.items()):
+        yield ((separator if index else "") + encoder.encode(key)
+               + encoder.key_separator)
+        yield from json_chunks(encoder, item, depth - 1, level + 1)
+    yield ("" if indent is None else "\n" + indent * level) + "}"
+
+
 def write_json(path, data, *, indent=2, ensure_ascii=True, separators=None,
                **options):
     """Replace `path` with `data` as JSON, as write_atomic does."""
-    return write_atomic(path, json.JSONEncoder(
+    return write_atomic(path, json_chunks(json.JSONEncoder(
         ensure_ascii=ensure_ascii, indent=indent,
-        separators=separators).iterencode(data), **options)
+        separators=separators), data), **options)
 
 
 def copy_owner(value, destination_fd) -> None:

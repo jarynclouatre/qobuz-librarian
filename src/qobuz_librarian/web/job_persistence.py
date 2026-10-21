@@ -953,8 +953,12 @@ def _parse_batch(bodies, seen):
     if any(type(body) is not str for body in bodies):
         raise TypeError("a saved row is not text")
     values = json.loads("[" + ",".join(bodies) + "]")
+    # Damaged rows can still join into a list of the right length, so each
+    # must also be one value on its own.
     if len(values) != len(bodies):
         raise ValueError("a saved row is not one value")
+    for body in bodies:
+        json.loads(body)
     for value in values:
         for part in (value, value.get("payload")) if type(value) is dict else ():
             if type(part) is dict:
@@ -995,9 +999,10 @@ def _read_rows(conn, job_id):
                 premises[artist] = value
                 shared[artist] = _digest(body)
         found.sort(key=lambda item: item[0])
-    except (TypeError, ValueError):
+        table = _RowTable(saved)
+    except (TypeError, ValueError, OverflowError):
         return None, None
-    return ([row for _pos, row in found], premises), _SavedRows(_RowTable(saved), shared)
+    return ([row for _pos, row in found], premises), _SavedRows(table, shared)
 
 
 def _encode_snapshot(job, snapshot):
