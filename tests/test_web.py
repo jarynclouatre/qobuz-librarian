@@ -860,9 +860,9 @@ def test_artist_albums_list_by_release_type_oldest_first(
     """An artist's albums came in Qobuz's own order, a box set from 2014
     ahead of the 1969 records. They list under Albums, Live, Compilations,
     EPs & singles and Appears on, each oldest first by the year on the
-    row, a placeholder year last. A release Qobuz files in no list is an
-    album when the artist is its main artist. Without the release lists,
-    one list oldest first."""
+    row, a placeholder year last. A release Qobuz files in no list, or under
+    other or download-only, is an album when the artist is its main artist.
+    Without the release lists, one list oldest first."""
     import re
 
     from qobuz_librarian import config as cfg
@@ -886,7 +886,7 @@ def test_artist_albums_list_by_release_type_oldest_first(
               album("second", "Second", "1970-04-01")]
     types = {"box": "compilation", "remaster": "album", "live": "live",
              "undated": "album", "single": "epSingle", "debut": "album",
-             "second": "album"}
+             "second": "album", "reissue": "other", "cover": "download"}
     monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
     monkeypatch.setattr(qobuz_access, "_get_token", lambda: "tok")
     monkeypatch.setattr(search, "get_artist_albums",

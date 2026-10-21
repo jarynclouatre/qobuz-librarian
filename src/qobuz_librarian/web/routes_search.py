@@ -507,7 +507,7 @@ def _order_artist_albums(artist_id, groups, types):
         if types is not None:
             main = any(str(e["artist_id"]) == str(artist_id) for e in g["editions"])
             g["section"] = next((types[str(e["id"])] for e in g["editions"]
-                                 if str(e["id"]) in types),
+                                 if types.get(str(e["id"])) in _ARTIST_SECTIONS),
                                 "album" if main else "appears")
     groups.sort(key=lambda g: (rank.get(g["section"], 0), g["sort_year"],
                                tags.normalize(g["title"])))

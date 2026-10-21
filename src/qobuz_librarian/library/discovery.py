@@ -29,6 +29,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import state_file
 from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import (
+    EXTRA_RELEASE_LISTS,
     get_album,
     get_artist_albums,
     get_artist_recent_releases,
@@ -830,13 +831,20 @@ def _typed_albums(albums, release_types, artist_name, opts):
     as a compilation (that artist's live releases and singles are left out),
     anything else shorter than MISSING_ALBUMS_MIN_TRACKS as an EP or single,
     and with EXCLUDE_LIVE_ALBUMS an album or compilation titled as a live
-    recording as live."""
+    recording as live. From the other and download-only lists only a full
+    release credited to the artist is offered, as an album or live."""
     by_type = {}
     for album in albums:
         rtype = release_types.get(str(album.get("id")))
         if rtype is None:
             continue
-        if not filter_compilation_albums([(album, 1)], artist_name):
+        if rtype in EXTRA_RELEASE_LISTS:
+            if (_short(album)
+                    or not filter_compilation_albums([(album, 1)], artist_name)):
+                continue
+            rtype = (missing_types.LIVE if _looks_live(album)
+                     else missing_types.ALBUM)
+        elif not filter_compilation_albums([(album, 1)], artist_name):
             if rtype in (missing_types.LIVE, missing_types.EP):
                 continue
             rtype = missing_types.COMPILATION

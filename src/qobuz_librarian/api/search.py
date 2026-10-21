@@ -404,21 +404,25 @@ def _walk_artist_albums(artist_id, token, limit, page_size=None):
 
 
 # The lists artist/getReleasesList files an artist's releases under that
-# missing albums can offer. Other (guest spots, other artists' releases, label
-# reissues) and download-only releases are never offered, so never fetched.
+# missing albums can offer. The other and download-only lists mostly hold
+# guest spots, other artists' releases and label reissues, but Qobuz files
+# some of the artist's own albums there too, so they are read as far as the
+# page limit allows and discovery offers only what is credited to the artist.
 RELEASE_LISTS = ("album", "live", "compilation", "epSingle")
+EXTRA_RELEASE_LISTS = ("other", "download")
 _RELEASE_LIST_PAGES = 6
 
 
 def get_artist_release_types(artist_id, token, album_ids, fresh=False):
-    """{album id: list name} for the artist's releases in RELEASE_LISTS.
+    """{album id: list name} for the artist's releases in RELEASE_LISTS and
+    EXTRA_RELEASE_LISTS.
 
     None when the answer can't cover ``album_ids``: a list runs past the pages
     read, or every list is empty for an artist with albums. Cached with the
     catalogue's TTL, and reused only while every id in ``album_ids`` is one
     the cached answer was fetched for, so a new release fetches it again."""
     album_ids = {str(album_id) for album_id in album_ids}
-    cache_key = f"{artist_id}:release-types"
+    cache_key = f"{artist_id}:release-lists"
     if not fresh:
         cached = album_cache.get_catalog(cache_key, config.ARTIST_CATALOG_CACHE_TTL)
         if cached is not None:
@@ -426,12 +430,13 @@ def get_artist_release_types(artist_id, token, album_ids, fresh=False):
             if (
                 isinstance(types, dict)
                 and isinstance(known, list)
-                and all(name in RELEASE_LISTS for name in types.values())
+                and all(name in RELEASE_LISTS + EXTRA_RELEASE_LISTS
+                        for name in types.values())
                 and album_ids <= set(known) | set(types)
             ):
                 return types
     types = {}
-    for name in RELEASE_LISTS:
+    for name in RELEASE_LISTS + EXTRA_RELEASE_LISTS:
         offset = 0
         for _ in range(_RELEASE_LIST_PAGES):
             data = _expect_dict(qobuz_get("artist/getReleasesList", {
@@ -451,7 +456,8 @@ def get_artist_release_types(artist_id, token, album_ids, fresh=False):
             if not data.get("has_more"):
                 break
         else:
-            return None
+            if name in RELEASE_LISTS:
+                return None
     if album_ids and not types:
         return None
     album_cache.put_catalog(cache_key, {"types": types, "ids": sorted(album_ids)})

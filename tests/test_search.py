@@ -87,7 +87,8 @@ def test_release_types_are_fetched_again_for_an_album_the_cache_never_saw(
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     monkeypatch.setattr(cfg, "ALBUM_CACHE_ENABLED", True)
     album_cache._reset_for_tests()
-    lists = {"album": ["a1"], "live": ["l1"], "compilation": [], "epSingle": []}
+    lists = {"album": ["a1"], "live": ["l1"], "compilation": [], "epSingle": [],
+             "other": [], "download": []}
     served = []
 
     def get(_endpoint, params, _token):
@@ -101,13 +102,13 @@ def test_release_types_are_fetched_again_for_an_album_the_cache_never_saw(
     try:
         assert search.get_artist_release_types("art", "tok", ["a1", "l1", "o1"]) == {
             "a1": "album", "l1": "live"}
-        assert len(served) == 4
+        assert len(served) == 6
         assert search.get_artist_release_types("art", "tok", ["a1", "o1"])
-        assert len(served) == 4
+        assert len(served) == 6
 
         lists["album"].append("a2")
         assert search.get_artist_release_types("art", "tok", ["a1", "a2"])["a2"] == "album"
-        assert len(served) == 8
+        assert len(served) == 12
 
         assert search.get_artist_release_types("huge", "tok", ["x0"]) is None
         lists.update(album=[], live=[])
