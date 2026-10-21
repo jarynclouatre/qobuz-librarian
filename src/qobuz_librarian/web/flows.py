@@ -2169,7 +2169,10 @@ def _scan_library_impl(
         futures = {ex.submit(_scan_library_artist, ad, token, partial_only,
                              hidden): ad
                    for ad in todo}
-        for fut in as_completed(futures):
+        for fut in as_completed(list(futures)):
+            # A finished artist's result, with every album Qobuz sent for it,
+            # is let go once read rather than kept to the end of the scan.
+            ad = futures.pop(fut)
             if job.cancel_requested:
                 for f in futures:
                     f.cancel()
@@ -2188,7 +2191,7 @@ def _scan_library_impl(
                     f.cancel()
                 checkpoint.flush()
                 if isinstance(e, QobuzUnavailable):
-                    name = futures[fut].name
+                    name = ad.name
                     log.info(f"    {name}: {e}")
                     raise QobuzUnavailable(
                         f"Qobuz didn't answer for {name}, so the scan "
@@ -2201,9 +2204,9 @@ def _scan_library_impl(
                 scan_errors += 1
                 if isinstance(e, OSError):
                     read_errors += 1
-                    unreadable_artists.add(futures[fut].name)
-                log.info(f"    skipped {futures[fut].name}: {e}")
-                job.push_progress(_step(_finding), done, n, futures[fut].name,
+                    unreadable_artists.add(ad.name)
+                log.info(f"    skipped {ad.name}: {e}")
+                job.push_progress(_step(_finding), done, n, ad.name,
                                   found=total, unit="artist")
                 continue
             scanned.add(name)
@@ -2684,7 +2687,8 @@ def scan_new_releases(job, token):
                              single_store=single_store, artist_dir=ad,
                              baseline_only=rebaseline): ad
                    for ad in artists}
-        for fut in as_completed(futures):
+        for fut in as_completed(list(futures)):
+            ad = futures.pop(fut)
             if job.cancel_requested:
                 for f in futures:
                     f.cancel()
@@ -2699,14 +2703,14 @@ def scan_new_releases(job, token):
                 raise
             except Exception as e:
                 failed_count += 1
-                log.info(f"    skipped {futures[fut].name}: {e}")
+                log.info(f"    skipped {ad.name}: {e}")
                 job.push_progress("Checking for new releases", done, n,
-                                  futures[fut].name, found=total, unit="artist")
+                                  ad.name, found=total, unit="artist")
                 continue
             if result.artist_id and not getattr(result, "fetch_failed", False):
                 current_seen[result.artist_id] = result.current_ids
             elif getattr(result, "unresolved", False):
-                unresolved_names.append(futures[fut].name)
+                unresolved_names.append(ad.name)
             elif not getattr(result, "by_lead", False):
                 # A short or failed catalogue fetch is unchecked, not a clean
                 # zero-release result.
@@ -2729,14 +2733,14 @@ def scan_new_releases(job, token):
                     result.artist_name,
                     selected=False,
                     is_new=True,
-                    artist_key=futures[fut].name,
+                    artist_key=ad.name,
                     missing_premises=missing_premises,
                 )
                 total += 1
             hit = ({"artist": result.artist_name, "albums": len(new_gaps)}
                    if new_gaps else None)
             job.push_progress("Checking for new releases", done, n,
-                              result.artist_name or futures[fut].name,
+                              result.artist_name or ad.name,
                               found=total, hit=hit, unit="artist")
             if new_gaps:
                 log.info(f"  {result.artist_name} - "
@@ -4500,7 +4504,8 @@ def _scan_repairs_impl(job, token, checkpoint):
                             **job_mgr.pool_initializer_kwargs()) as ex:
         futures = {ex.submit(_scan_repair_artist, ad, token, job, beat): ad
                    for ad in todo}
-        for fut in as_completed(futures):
+        for fut in as_completed(list(futures)):
+            ad = futures.pop(fut)
             if job.cancel_requested:
                 for f in futures:
                     f.cancel()
@@ -4537,7 +4542,7 @@ def _scan_repairs_impl(job, token, checkpoint):
             except Exception as e:
                 # A per-artist failure (not auth/outage) is left unscanned so a
                 # resume retries it rather than baking in a transient miss.
-                log.info(f"    skipped {futures[fut].name}: {e}")
+                log.info(f"    skipped {ad.name}: {e}")
                 n_failed_artists += 1
                 n_linked_artists += isinstance(e, _RepairLink)
                 with beat["lock"]:

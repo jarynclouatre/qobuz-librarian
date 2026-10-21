@@ -316,14 +316,14 @@ def refresh_for_artists(
                                 **(pool_kwargs or {})) as ex:
             futures = {ex.submit(scan_artist, artist_dir): artist_dir
                        for artist_dir in to_scan}
-            for fut in as_completed(futures):
+            for fut in as_completed(list(futures)):
+                artist_dir = futures.pop(fut)
                 if cancel_check is not None and cancel_check():
                     complete = False
                     for f in futures:
                         f.cancel()
                     break
                 done_count += 1
-                artist_dir = futures[fut]
                 try:
                     _handle_result(artist_dir, fut.result(), None, done_count)
                 except Exception as exc:
