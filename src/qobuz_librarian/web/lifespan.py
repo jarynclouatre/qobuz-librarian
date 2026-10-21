@@ -641,10 +641,13 @@ async def _lifespan(_app: FastAPI):
         # tick without a restart.
         ticker = asyncio.create_task(_auto_check_ticker())
         if cfg.NEW_RELEASE_CHECK_INTERVAL > 0:
-            hours = max(1, round(cfg.NEW_RELEASE_CHECK_INTERVAL / 3600))
+            # The ticker wakes every 15 minutes, so no check comes sooner.
+            interval = max(900, cfg.NEW_RELEASE_CHECK_INTERVAL)
+            every = (plural(round(interval / 3600), "hour") if interval >= 5400
+                     else plural(round(interval / 60), "minute"))
             _log.info("New-release checks run in the background every "
-                      "%s; set NEW_RELEASE_CHECK_INTERVAL=0 to turn them off.",
-                      plural(hours, "hour"))
+                      "%s once a Library scan has finished; set "
+                      "NEW_RELEASE_CHECK_INTERVAL=0 to turn them off.", every)
         yield
     finally:
         await _finish_web_lifespan(

@@ -44,6 +44,8 @@ from qobuz_librarian.library.catalog import (
     _paths_equal,
     _pick_best_target_dir_match,
     _primary_artist_of,
+    album_is_upcoming,
+    album_release_ts,
     album_released_within,
     album_year,
     album_year_int,
@@ -552,6 +554,9 @@ class NewReleaseResult:
     # stands in for. It holds a few of that artist's albums, so nothing new
     # is listed for it, and it is neither unchecked nor unknown to Qobuz.
     by_lead: bool = False
+    # True for a catalog past the fetch limit whose newest releases are in
+    # current_ids, so later checks can list what is new from those alone.
+    capped_recent: bool = False
 
 
 def owned_title_key(name):
@@ -1137,44 +1142,102 @@ def gaps_this_folder_offers(gaps, artist_id, artist_dir, token):
     return kept
 
 
-def _nothing_recent_unseen(artist_id, artist_name, token, seen):
-    """True when every lossless release of the artist from the new-release
-    window is one the last check saw, read from their newest releases alone.
-    False sends the check to the whole catalog: something unseen, no window,
-    or a newest-first list that is too long or unreadable."""
+def _recent_unseen(artist_id, artist_name, token, seen):
+    """The artist's lossless releases from the new-release window that the
+    last check did not see, read from their newest releases alone and shaped
+    like that list. None when only the whole catalog can tell: no window, or
+    a newest-first list that is too long or unreadable."""
     max_age_days = cfg.NEW_RELEASE_MAX_AGE_DAYS
     if max_age_days <= 0:
-        return False
+        return None
 
     def field(item, name, key):
         value = item.get(name)
         return value.get(key) if isinstance(value, dict) else None
 
+    def listed(item):
+        return {"release_date_original": field(item, "dates", "original")}
+
     def is_recent(item):
-        return album_released_within(
-            {"release_date_original": field(item, "dates", "original")},
-            max_age_days)
+        return album_released_within(listed(item), max_age_days)
 
     try:
         recent = get_artist_recent_releases(artist_id, token, is_recent)
     except QobuzError as e:
         vlog(f"  {artist_name}: newest releases couldn't be read ({e})")
-        return False
+        return None
     if recent is None:
-        return False
+        return None
     seen = {str(album_id) for album_id in seen}
+    unseen = []
     for item in recent:
         depth = field(item, "audio_info", "maximum_bit_depth")
         if isinstance(depth, (int, float)) and depth < 16:
             continue
+        # A pre-order waits, unrecorded, until it can be downloaded.
+        if album_is_upcoming(listed(item)):
+            continue
         if item.get("id") is not None and str(item["id"]) not in seen:
-            return False
-    return True
+            unseen.append(item)
+    return unseen
+
+
+def _capped_new_releases(artist_id, artist_name, token, unseen, seen, *,
+                         opts, hidden, single_store, album_dirs, since=None,
+                         quiet=False, extra_ids=()):
+    """New releases for an artist whose catalog is past the fetch limit,
+    from the newest-first list: each unseen release is read on its own.
+
+    ``since`` is for an artist whose newest releases are not in the baseline
+    yet, so an unseen one may be old news the catalog slice left out: only
+    those Qobuz dates from then on are listed, the rest only recorded;
+    ``quiet`` lists none. A release that can't be read is left out of the
+    baseline to try again."""
+    def listed_ts(item):
+        dates = item.get("dates")
+        return album_release_ts({"release_date_original": (
+            dates.get("original") if isinstance(dates, dict) else None)})
+
+    wanted = [] if quiet else [
+        item for item in unseen
+        if since is None or (listed_ts(item) or since) >= since]
+    albums = []
+    unread = set()
+    for item in wanted:
+        try:
+            albums.append(get_album(str(item["id"]), token))
+        except (AuthLost, QobuzUnavailable):
+            raise
+        except QobuzError as e:
+            vlog(f"  {artist_name}: new release {item['id']} couldn't be "
+                 f"read ({e})")
+            unread.add(str(item["id"]))
+    current_ids = sorted(({str(a) for a in seen} | set(extra_ids)
+                          | {str(item["id"]) for item in unseen}) - unread)
+    fresh = [a for a in albums if is_lossless_album(a)
+             and album_released_within(a, cfg.NEW_RELEASE_MAX_AGE_DAYS)]
+    if not fresh or not _collecting(
+            single_store, artist_name, album_dirs,
+            _filled_single_dirs(single_store, artist_name, album_dirs, fresh)):
+        return NewReleaseResult(artist_id, artist_name, [], current_ids,
+                                capped_recent=True)
+    new_gaps = discover_fully_missing(
+        artist_name, fresh, opts, hidden=hidden,
+        owned_titles=owned_album_titles(album_dirs), token=token, quick=True,
+        single_store=single_store,
+        release_types=artist_release_types(
+            artist_id, artist_name, token, fresh))
+    included = opts.included_types()
+    new_gaps = [gap for gap in new_gaps
+                if missing_types.shown(gap.release_type, included)]
+    return NewReleaseResult(artist_id, artist_name, new_gaps, current_ids,
+                            capped_recent=True)
 
 
 def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
                                  hidden=None, single_store=None, artist_dir=None,
-                                 baseline_only=False):
+                                 baseline_only=False, capped_ids=(),
+                                 new_since=None):
     """Albums new to this artist's Qobuz catalog since the last check that the
     user doesn't own and hasn't hidden - the cheap "what's new" path.
 
@@ -1184,6 +1247,12 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     releases; only one with a recent release the last check did not see has
     the whole catalog read, plus the release lists. A new release is listed
     only when its type is among opts.included_types(), as in Missing Albums.
+
+    A catalog past the fetch limit can't be diffed whole, so its newest
+    releases are added to the baseline instead; once they are (its id is in
+    ``capped_ids``), what is new is read from that list alone. Until then a
+    release is listed only when Qobuz dates it from ``new_since`` on (the
+    last check, less some slack for releases Qobuz lists late).
 
     seen_by_id maps artist_id → the catalog album ids known at the last check.
     The first time an artist is seen its baseline is recorded and nothing is
@@ -1208,9 +1277,16 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     # snapshot and every run silently re-baselines instead of diffing.
     artist_id = str(artist_id)
     seen = (seen_by_id or {}).get(artist_id)
-    if seen is not None and not baseline_only and _nothing_recent_unseen(
-            artist_id, artist_name, token, seen):
-        return NewReleaseResult(artist_id, artist_name, [], seen)
+    unseen = None
+    if seen is not None and not baseline_only:
+        unseen = _recent_unseen(artist_id, artist_name, token, seen)
+        if unseen == []:
+            return NewReleaseResult(artist_id, artist_name, [], seen)
+        if unseen is not None and artist_id in capped_ids:
+            return _capped_new_releases(
+                artist_id, artist_name, token, unseen, seen, opts=opts,
+                hidden=hidden, single_store=single_store,
+                album_dirs=album_dirs)
 
     # Always fresh: stale catalog data would mean missing the very release this
     # check exists to find. The fetch refreshes the shared cache as a side effect.
@@ -1223,15 +1299,29 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
                                 prev if prev is not None else [],
                                 fetch_failed=True)
     lossless = [a for a in catalog if is_lossless_album(a)]
-    current_ids = [str(a["id"]) for a in lossless if a.get("id") is not None]
+    # A pre-order is left out of the baseline, so it is listed once it can be
+    # downloaded.
+    current_ids = [str(a["id"]) for a in lossless if a.get("id") is not None
+                   and not album_is_upcoming(a)]
 
-    # Two cases where we record the snapshot as baseline but surface NOTHING:
-    # - capped: a catalogue bigger than the fetch cap comes back as a
-    # different unstable slice each run (Qobuz has no stable sort), so the
-    # diff can't be trusted - it would oscillate and dump old albums as "new".
+    # A catalogue bigger than the fetch cap comes back as a different unstable
+    # slice each run (Qobuz has no stable sort), so its diff would dump old
+    # albums as "new": record the slice and the newest releases instead, and
+    # surface nothing until later checks can diff those.
     capped = (len(catalog) >= cfg.ARTIST_CATALOG_LIMIT
               or (_total is not None and _total > cfg.ARTIST_CATALOG_LIMIT))
-    if capped or baseline_only:
+    if capped:
+        if unseen is None:
+            unseen = _recent_unseen(artist_id, artist_name, token, seen or ())
+        if unseen is None:
+            return NewReleaseResult(artist_id, artist_name, [], current_ids)
+        return _capped_new_releases(
+            artist_id, artist_name, token, unseen, seen or (), opts=opts,
+            hidden=hidden, single_store=single_store, album_dirs=album_dirs,
+            since=new_since,
+            quiet=seen is None or baseline_only or new_since is None,
+            extra_ids=current_ids)
+    if baseline_only:
         return NewReleaseResult(artist_id, artist_name, [], current_ids)
 
     # Still record the baseline so a later real album doesn't dump the back
@@ -1252,7 +1342,7 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     # id=None), so skip it here too - str(None) would otherwise miss the set and
     # flag it new on every check.
     fresh = [a for a in lossless if a.get("id") is not None
-             and str(a.get("id")) not in seen_set]
+             and str(a.get("id")) not in seen_set and not album_is_upcoming(a)]
     # A "new release" should be recent.
     fresh = [a for a in fresh
              if album_released_within(a, cfg.NEW_RELEASE_MAX_AGE_DAYS)]

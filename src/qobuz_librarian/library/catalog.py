@@ -1476,6 +1476,13 @@ def album_released_within(album, max_age_days):
     return ts >= cutoff
 
 
+def album_is_upcoming(album):
+    """True for a release Qobuz dates after today: a pre-order, not yet
+    downloadable."""
+    ts = album_release_ts(album)
+    return ts is not None and ts > datetime.now(timezone.utc).timestamp()
+
+
 def is_lossless_album(album):
     return (album.get("maximum_bit_depth") or 0) >= 16
 

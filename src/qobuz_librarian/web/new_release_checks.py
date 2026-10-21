@@ -158,13 +158,13 @@ def _maybe_auto_check_new_releases():
 
     Read-only (it only parks a review list, never downloads), so it's safe to
     fire from a GET. Skipped when the check is off, the token is missing or
-    known-bad, the CLI holds the lock, another job is actively working, or the
-    interval hasn't elapsed. A list already parked for review does NOT stop it:
+    known-bad, the CLI holds the lock, another job is actively working (a
+    held download is not), or the interval hasn't elapsed. A list already parked for review does NOT stop it:
     the run folds its finds into that list, so the timer keeps the review
     current instead of going quiet until the list is cleared.
     """
     global _new_release_submitted_at
-    if not _new_release_check_due():
+    if not _new_release_check_due() or job_mgr.work_in_flight():
         return
     credentials = _auto_start_credentials()
     if credentials is None:
@@ -172,9 +172,7 @@ def _maybe_auto_check_new_releases():
     # Serialise the check-and-submit so two concurrent dashboard loads can't
     # both pass the gate and queue the check twice.
     with runtime._auto_check_lock:
-        active = job_mgr.registry.pending_and_running()
-        working = any(j.status != job_mgr.JobStatus.AWAITING_REVIEW for j in active)
-        if working:
+        if job_mgr.work_in_flight():
             return
         if not _new_release_interval_elapsed():
             return

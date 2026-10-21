@@ -54,11 +54,17 @@ def unresolved_note(names) -> str:
 
 def load() -> dict:
     """Return ``{"last_run": float|None, "seen": {artist_id: [album_id, …]},
-    "baseline_complete": bool, "auto_scan_attempted": bool}``, tolerating a
-    missing or corrupt file with an empty baseline."""
+    "baseline_complete": bool, "auto_scan_attempted": bool,
+    "capped_recent": {artist_id: days}, "checked_at": float|None}``,
+    tolerating a missing or corrupt file with an empty baseline.
+    ``capped_recent`` names the artists past the catalog limit whose releases
+    from the last ``days`` are in ``seen``; ``checked_at`` is when a check or
+    full scan last read the catalogs (``last_run`` also moves when an
+    automatic check only starts)."""
     base = {"last_run": None, "seen": {}, "baseline_complete": False,
             "generation": 0, "revision": 0,
-            "auto_scan_attempted": False, "baseline_limit": None}
+            "auto_scan_attempted": False, "baseline_limit": None,
+            "capped_recent": {}, "checked_at": None}
     data = state_file.load_json_object(
         cfg.NEW_RELEASE_STATE_FILE, "the new-release baseline",
         "the per-artist snapshot of what Qobuz already had (without it every "
@@ -89,6 +95,15 @@ def load() -> dict:
         base["baseline_complete"] = False
         base["generation"] = base["revision"] = 0
     base["auto_scan_attempted"] = bool(data.get("auto_scan_attempted"))
+    capped = data.get("capped_recent")
+    if isinstance(capped, dict):
+        base["capped_recent"] = {
+            str(k): v for k, v in capped.items()
+            if isinstance(v, int) and not isinstance(v, bool)}
+    checked = data.get("checked_at")
+    if (isinstance(checked, (int, float)) and not isinstance(checked, bool)
+            and math.isfinite(checked)):
+        base["checked_at"] = float(checked)
     return base
 
 
@@ -110,11 +125,17 @@ def baseline_limit() -> int | None:
     return load().get("baseline_limit")
 
 
-def mark_run(seen, when=None, complete=False, baseline_limit=None) -> bool:
+def mark_run(seen, when=None, complete=False, baseline_limit=None,
+             capped_recent=None, started_from=None) -> bool:
     """Persist the updated per-artist catalog snapshot and the run time, keeping
     the other fields (load-update-save, not a fresh dict). complete=True also
     marks the baseline ready (a full check crawls every artist, like a library
-    scan); baseline_limit records the catalog cap this snapshot was taken at."""
+    scan); baseline_limit records the catalog cap this snapshot was taken at;
+    capped_recent ({artist_id: days}) updates ``capped_recent``.
+
+    With ``started_from`` (the baseline the check began with), ``seen`` holds
+    only the artists it reached and is added to the baseline as saved now, so
+    an album brought back or downloaded while the check ran stays that way."""
     with _lock, state_file.store_lock(cfg.NEW_RELEASE_STATE_FILE):
         state = load()
         generation = generation_state.current_generation()
@@ -129,8 +150,22 @@ def mark_run(seen, when=None, complete=False, baseline_limit=None) -> bool:
         revision = generation_state.reserve_revision()
         if revision is None:
             return False
+        if started_from is not None:
+            now = state.get("seen") or {}
+            merged = dict(now)
+            for artist_id, ids in seen.items():
+                if artist_id not in now:
+                    merged[artist_id] = sorted(set(ids))
+                    continue
+                kept = set(now[artist_id] or ())
+                forgotten = set(started_from.get(artist_id) or ()) - kept
+                merged[artist_id] = sorted((kept | set(ids)) - forgotten)
+            seen = merged
         state["seen"] = seen
+        state["capped_recent"] = {**state["capped_recent"],
+                                  **(capped_recent or {})}
         state["last_run"] = when if when is not None else time.time()
+        state["checked_at"] = state["last_run"]
         if complete:
             state["baseline_complete"] = True
             state["generation"] = generation
@@ -209,7 +244,7 @@ def seed_baseline(seen, *, generation=None, revision=None,
         # a re-baseline instead of surfacing the newly-visible back-slice as "new".
         state["baseline_limit"] = int(cfg.ARTIST_CATALOG_LIMIT)
         if checked_at is not None:
-            state["last_run"] = float(checked_at)
+            state["last_run"] = state["checked_at"] = float(checked_at)
         if not save(state):
             return False
         return generation_state.mark_output_current(

@@ -194,7 +194,7 @@ def refresh_after_changes(changes, token, args, *, upgrade=True,
                 vlog(f"saved Library update failed: {exc}")
             if not updated and was_current["library"]:
                 stale.add("library")
-            if was_current["new_releases"]:
+            if was_current["new_releases"] and album_id:
                 try:
                     updated = new_releases.note_owned_album(album)
                 except Exception as exc:

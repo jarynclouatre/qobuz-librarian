@@ -48,6 +48,7 @@ from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
 from qobuz_librarian.library.artist_fingerprint import artist_fingerprint
 from qobuz_librarian.library.candidate_premise import CandidateStale
 from qobuz_librarian.library.catalog import (
+    album_is_upcoming,
     album_quality_label,
     album_year,
     find_qobuz_album_for_dir,
@@ -236,6 +237,8 @@ def _album_candidate_spec(
     version = (album.get("version") or "").strip()
     if version:
         payload["version"] = version
+    if album.get("parental_warning"):
+        payload["explicit"] = True
     if partial_n:
         payload["gap_fill"] = partial_n
     if extra_payload:
@@ -1623,7 +1626,8 @@ def _scan_library_artist(artist_dir, token, partial_only, hidden):
     # checked again on the next refresh.
     catalog_ids = None if result.catalog_incomplete else [
         str(a["id"]) for a in result.catalog
-        if is_lossless_album(a) and a.get("id") is not None]
+        if is_lossless_album(a) and a.get("id") is not None
+        and not album_is_upcoming(a)]
     # Folder name to Qobuz id for the albums already on disk. The scan resolves
     # these anyway and then drops them; the collection snapshot keeps them so a
     # restore can ask for the exact album instead of guessing from a search.
@@ -2619,13 +2623,17 @@ def _append_to_parked_new_release_review(job):
         job_persistence.persist_review_mutation(
             parked, lambda: setattr(parked, "summary", restated))
         job.summary += (
-            " Added to the New releases review already waiting, "
+            f" {added:,} added to the New releases review already waiting, "
             f"now {plural(waiting, 'new release')}.")
+        job_mgr._start_post_job_hook_for_job(parked)
     else:
-        job.summary += " They were already in the review."
+        job.summary += " All were already in the New releases review."
     parked.notify_review_changed()
     job.status = job_mgr.JobStatus.DONE
     return True
+
+
+_NEW_RELEASE_LATE_LISTING = 14 * 86400
 
 
 def scan_new_releases(job, token):
@@ -2648,8 +2656,25 @@ def scan_new_releases(job, token):
     if not artists and not unreadable_artists:
         _set_empty_library_summary(job)
         return
+    if not artists:
+        names = sorted(unreadable_artists, key=str.casefold)
+        job.summary = (
+            f"No artist folder could be read ({', '.join(names[:5])}"
+            + (f" (+{len(names) - 5} more)" if len(names) > 5 else "")
+            + "), so nothing was checked.")
+        _mark_job_failed(job)
+        return
     state = new_releases_mod.load()
     seen = state.get("seen") or {}
+    window = int(cfg.NEW_RELEASE_MAX_AGE_DAYS)
+    capped_ids = frozenset(
+        artist_id for artist_id, days in (state.get("capped_recent") or {}).items()
+        if days >= window)
+    # A big artist's unseen release counts as new from the last check on,
+    # with slack for a release Qobuz lists some days after its date.
+    checked_at = state.get("checked_at") or (
+        time.time() - max(0, int(cfg.NEW_RELEASE_CHECK_INTERVAL)))
+    new_since = checked_at - _NEW_RELEASE_LATE_LISTING
     # If the catalog fetch limit has grown since the baseline was captured,
     # the old baseline is missing everything past the previous cap, a plain
     # diff would dump that whole back-slice as "new".
@@ -2669,7 +2694,10 @@ def scan_new_releases(job, token):
     log.info(f"Checking {plural(len(artists), 'artist')} for new releases…")
     total = 0
     done = 0
-    failed_count = len(unreadable_artists)
+    # Unreadable folders are left out, as a Library scan leaves them: checking
+    # again can't read them, so they don't make the check fail.
+    failed_count = 0
+    failed_names = []
     # Folders Qobuz has no artist for at all. Kept apart from failed_count:
     # they are a settled answer, so they must not hold the baseline back or
     # push the user towards a retry that returns the same result.
@@ -2680,6 +2708,7 @@ def scan_new_releases(job, token):
     # run where some/all artists errored can't wipe their baselines and re-surface
     # everything, only artists actually reached get their snapshot refreshed).
     current_seen = {}
+    capped_recent = {}
     missing_premises = {}
     listed_ids = set()
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newrel",
@@ -2687,7 +2716,9 @@ def scan_new_releases(job, token):
         futures = {ex.submit(find_new_releases_for_artist, ad.name, token=token,
                              opts=opts, seen_by_id=seen, hidden=hidden,
                              single_store=single_store, artist_dir=ad,
-                             baseline_only=rebaseline): ad
+                             baseline_only=rebaseline,
+                             capped_ids=capped_ids,
+                             new_since=new_since): ad
                    for ad in artists}
         for fut in as_completed(list(futures)):
             ad = futures.pop(fut)
@@ -2705,18 +2736,22 @@ def scan_new_releases(job, token):
                 raise
             except Exception as e:
                 failed_count += 1
+                failed_names.append(ad.name)
                 log.info(f"    skipped {ad.name}: {e}")
                 job.push_progress("Checking for new releases", done, n,
                                   ad.name, found=total, unit="artist")
                 continue
             if result.artist_id and not getattr(result, "fetch_failed", False):
                 current_seen[result.artist_id] = result.current_ids
+                if getattr(result, "capped_recent", False):
+                    capped_recent[result.artist_id] = window
             elif getattr(result, "unresolved", False):
                 unresolved_names.append(ad.name)
             elif not getattr(result, "by_lead", False):
                 # A short or failed catalogue fetch is unchecked, not a clean
                 # zero-release result.
                 failed_count += 1
+                failed_names.append(ad.name)
             new_gaps = []
             for gap in result.new_gaps:
                 # Two folders of one Qobuz artist both see its new release.
@@ -2752,22 +2787,31 @@ def scan_new_releases(job, token):
     if not job.cancel_requested:
         # UNION each reached artist's snapshot into the prior baseline rather
         # than replacing it.
-        merged = dict(seen)
-        for aid, ids in current_seen.items():
-            merged[aid] = sorted(set(merged.get(aid, [])) | set(ids))
         complete = failed_count == 0 and bool(current_seen)
         saved = new_releases_mod.mark_run(
-            merged,
+            current_seen,
+            started_from=seen,
             complete=complete,
             baseline_limit=cur_limit if complete else None,
+            capped_recent=capped_recent,
         )
     if failed_count:
         _record_unchecked_artists(job, failed_count)
+    shown = ", ".join(sorted(failed_names, key=str.casefold)[:3])
+    if len(failed_names) > 3:
+        shown += f" and {len(failed_names) - 3:,} more"
+    unchecked = plural(failed_count, "artist") + (f" ({shown})" if shown else "")
     # Not logged on its own: every summary below carries it, and the summary
     # is the last line of the log.
     skipped_note = new_releases_mod.unresolved_note(unresolved_names)
     if unreadable_artists:
-        skipped_note += " Unreadable: " + ", ".join(sorted(unreadable_artists)) + "."
+        names = sorted(unreadable_artists, key=str.casefold)
+        shown = ", ".join(names[:5]) + (
+            f" (+{len(names) - 5} more)" if len(names) > 5 else "")
+        skipped_note = " ".join(filter(None, [
+            skipped_note,
+            f"{plural(len(names), 'artist folder')} couldn't be read and "
+            f"{'was' if len(names) == 1 else 'were'} left out: {shown}."]))
     if job.cancel_requested:
         # A cancelled crawl only reached a fraction of the artists, so it can't
         # claim "No new releases" or "First check recorded" definitively.
@@ -2775,7 +2819,7 @@ def scan_new_releases(job, token):
                        f"{plural(total, 'new release')} found so far.")
         if failed_count:
             job.summary += (
-                f" {plural(failed_count, 'artist')} couldn't be checked "
+                f" {unchecked} couldn't be checked "
                 "before the stop."
             )
         if skipped_note:
@@ -2788,10 +2832,10 @@ def scan_new_releases(job, token):
             job.summary = ("What Qobuz has now couldn't be saved. Check "
                            "again to retry it.")
             if failed_count:
-                job.summary += (f" {plural(failed_count, 'artist')} also "
+                job.summary += (f" {unchecked} also "
                                 "couldn't be checked.")
         elif failed_count:
-            job.summary = (f"{plural(failed_count, 'artist')} couldn't be "
+            job.summary = (f"{unchecked} couldn't be "
                            "checked; check again to retry them.")
         else:
             job.summary = ("The catalogue limit changed, so this check "
@@ -2800,14 +2844,14 @@ def scan_new_releases(job, token):
     elif total:
         job.summary = f"{plural(total, 'new release')} found."
         if failed_count:
-            job.summary += (f" {plural(failed_count, 'artist')} couldn't be "
+            job.summary += (f" {unchecked} couldn't be "
                             "checked; check again for a complete result.")
         if saved is False:
             job.summary += (" This check couldn't be saved, so these "
                             "releases may appear again.")
     elif failed_count:
         job.summary = ("No new releases from the artists that could be checked. "
-                       f"{plural(failed_count, 'artist')} couldn't be checked; "
+                       f"{unchecked} couldn't be checked; "
                        "check again for a complete result.")
         if saved is False:
             job.summary += " This check couldn't be saved."

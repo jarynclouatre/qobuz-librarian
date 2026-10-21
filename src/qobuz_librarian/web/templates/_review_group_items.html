@@ -18,7 +18,8 @@
     <span class="ql-review-candidate-heading">
       <span class="ql-review-candidate-title">{{ c.title }}</span>{% if c.payload.is_new %}
       <span class="ql-badge ql-badge-new ql-badge-xs">new</span>{% endif %}{% if c.payload.version %}
-      <span class="ql-sub-version">{{ c.payload.version }}</span>{% endif %}
+      <span class="ql-sub-version">{{ c.payload.version }}</span>{% endif %}{% if c.payload.explicit %}
+      <span class="ql-sub-version">Explicit</span>{% endif %}
     </span>
     {% set _release_label = {'live': 'Live', 'compilation': 'Compilation', 'epSingle': 'EP or single'}.get(c.payload.release_type) if review_tab|default('') == 'missing' %}
     {% if _release_label and (c.payload.version or '') | lower == _release_label | lower %}{% set _release_label = '' %}{% endif %}
