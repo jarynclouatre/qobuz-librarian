@@ -362,6 +362,8 @@ def _get_conn() -> Optional[sqlite3.Connection]:
         _conn = sqlite3.connect(str(_path()), timeout=5.0,
                                 check_same_thread=False)
         _conn.execute("PRAGMA journal_mode=WAL")
+        # A big review's save left a WAL that size on disk for good.
+        _conn.execute("PRAGMA journal_size_limit=4194304")
         return _conn
     except (OSError, sqlite3.Error) as e:
         failed = _conn

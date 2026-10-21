@@ -15,6 +15,8 @@ Two job shapes share one worker and one log-streaming mechanism:
 Progress is captured from the shared ``qobuz_librarian`` logger and streamed
 to connected SSE clients.
 """
+import ctypes
+import gc
 import json
 import logging
 import os
@@ -1490,10 +1492,22 @@ def _worker_loop(work_queue: "queue.Queue"):
             except Exception:
                 log.exception("couldn't finalize crashed job %s", job.id)
         finally:
+            _release_memory()
             try:
                 work_queue.task_done()
             except ValueError:
                 pass
+
+
+def _release_memory():
+    """Hand back what a finished job freed. A library scan's peak otherwise
+    stayed resident: the allocator keeps freed memory for reuse, which on a
+    big library left the container near its memory limit while idle."""
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
 
 
 def start_worker():

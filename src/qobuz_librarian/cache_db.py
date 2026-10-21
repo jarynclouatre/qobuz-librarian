@@ -125,6 +125,7 @@ class CacheDB:
         if held is None:
             conn = sqlite3.connect(str(self._db_path()), timeout=5)
             conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA journal_size_limit=4194304")
             held = self._local.held = _ThreadConnection(conn, self._generation)
         return held.conn
 

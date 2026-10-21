@@ -29,6 +29,12 @@ _db = CacheDB(
         # album track lists they're served with a TTL (see get_catalog).
         "CREATE TABLE IF NOT EXISTS catalogs "
         "(key TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at REAL)",
+        # When a row was last used or confirmed unchanged. Kept apart from
+        # the payloads: SQLite rewrites a whole row to change one column, and
+        # a new-release check confirming 2,000 catalogs rewrote them all.
+        "CREATE TABLE IF NOT EXISTS stamps "
+        "(kind TEXT NOT NULL, key TEXT NOT NULL, at REAL NOT NULL, "
+        "PRIMARY KEY (kind, key)) WITHOUT ROWID",
     ),
     enabled=lambda: cfg.ALBUM_CACHE_ENABLED,
 )
@@ -81,8 +87,9 @@ def _record_use() -> None:
     now = time.time()
     try:
         conn = _db.conn()
-        conn.executemany("UPDATE albums SET fetched_at = ? WHERE id = ?",
-                         [(now, album_id) for album_id in ids])
+        conn.executemany(
+            "INSERT OR REPLACE INTO stamps (kind, key, at) VALUES ('album', ?, ?)",
+            [(album_id, now) for album_id in ids])
         conn.commit()
     except sqlite3.Error as e:
         vlog(f"album cache write failed: {e}")
@@ -93,10 +100,16 @@ def _trim_albums() -> None:
     _record_use()
     try:
         conn = _db.conn()
+        used = ("SELECT a.id, MAX(COALESCE(a.fetched_at, 0), COALESCE(s.at, 0)) "
+                "AS at FROM albums a LEFT JOIN stamps s "
+                "ON s.kind = 'album' AND s.key = a.id")
         conn.execute(
-            "DELETE FROM albums WHERE fetched_at < ? AND id NOT IN "
-            "(SELECT id FROM albums ORDER BY fetched_at DESC LIMIT ?)",
+            f"DELETE FROM albums WHERE id IN (SELECT id FROM ({used}) "
+            "WHERE at < ? AND id NOT IN "
+            f"(SELECT id FROM ({used}) ORDER BY at DESC LIMIT ?))",
             (time.time() - _KEEP_USED_SECONDS, _CACHE_MAX_ALBUMS))
+        conn.execute("DELETE FROM stamps WHERE kind = 'album' AND key NOT IN "
+                     "(SELECT id FROM albums)")
         conn.commit()
     except sqlite3.Error as e:
         vlog(f"album cache trim failed: {e}")
@@ -135,7 +148,9 @@ def get_catalog(key, ttl_seconds) -> dict | None:
         return None
     try:
         row = _db.conn().execute(
-            "SELECT payload, fetched_at FROM catalogs WHERE key = ?",
+            "SELECT c.payload, MAX(COALESCE(c.fetched_at, 0), COALESCE(s.at, 0)) "
+            "FROM catalogs c LEFT JOIN stamps s "
+            "ON s.kind = 'catalog' AND s.key = c.key WHERE c.key = ?",
             (str(key),)).fetchone()
     except sqlite3.Error as e:
         vlog(f"catalog cache read failed: {e}")
@@ -168,9 +183,18 @@ def put_catalog(key, payload) -> None:
         return
     try:
         conn = _db.conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO catalogs (key, payload, fetched_at) "
-            "VALUES (?, ?, ?)", (str(key), data, time.time()))
+        row = conn.execute("SELECT payload FROM catalogs WHERE key = ?",
+                           (str(key),)).fetchone()
+        if row and row[0] == data:
+            conn.execute(
+                "INSERT OR REPLACE INTO stamps (kind, key, at) "
+                "VALUES ('catalog', ?, ?)", (str(key), time.time()))
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO catalogs (key, payload, fetched_at) "
+                "VALUES (?, ?, ?)", (str(key), data, time.time()))
+            conn.execute("DELETE FROM stamps WHERE kind = 'catalog' AND key = ?",
+                         (str(key),))
         conn.commit()
     except sqlite3.Error as e:
         vlog(f"catalog cache write failed: {e}")

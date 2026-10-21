@@ -323,12 +323,26 @@ def _write_snapshot(snapshot, *, force):
             # did lose albums, this is the file the owner confirms against.
             state_file.write_json(suspect_path(), snapshot)
             return False, refusal
+        if previous is not None and _same_collection(snapshot, previous):
+            # Nothing changed: another dated copy would only push an older,
+            # different one out of the few that are kept.
+            suspect_path().unlink(missing_ok=True)
+            return True, None
         state_file.write_json(latest, snapshot)
         state_file.write_json(_dated_path(), snapshot)
         _prune_dated()
         # A confirmed write settles whatever the guard was holding out for.
         suspect_path().unlink(missing_ok=True)
     return True, None
+
+
+_WHEN_FIELDS = ("updated_at", "updated_at_epoch", "source")
+
+
+def _same_collection(snapshot, previous):
+    def what(doc):
+        return {k: v for k, v in doc.items() if k not in _WHEN_FIELDS}
+    return what(snapshot) == what(previous)
 
 
 def _guard_baseline(latest):
