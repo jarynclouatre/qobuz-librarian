@@ -294,7 +294,7 @@ def get_artist_albums(artist_id, token, limit=None, fresh=False):
 
     fresh=True skips the catalog cache read and fetches from Qobuz - the
     new-release check needs current data, and a complete fetch refreshes the
-    cache as a side effect so later gap scans stay fast. A short or partial
+    cache as a side effect. A short or partial
     result (fewer than Qobuz's own total) is used for this run but NOT cached,
     so the next scan re-fetches rather than trust it."""
     limit = limit if limit is not None else config.ARTIST_CATALOG_LIMIT
@@ -456,6 +456,39 @@ def get_artist_release_types(artist_id, token, album_ids, fresh=False):
         return None
     album_cache.put_catalog(cache_key, {"types": types, "ids": sorted(album_ids)})
     return types
+
+
+_RECENT_PAGES = 5
+
+
+def get_artist_recent_releases(artist_id, token, is_recent):
+    """The artist's releases ``is_recent`` accepts, read newest first from
+    every list, a page at a time until a page holds one it turns down.
+
+    The whole page is read, so one release out of date order cannot end the
+    read early. None when they run past _RECENT_PAGES pages. Items are
+    release-list shaped: ``dates`` and ``audio_info`` instead of the catalog's
+    flat fields."""
+    found = []
+    offset = 0
+    for _ in range(_RECENT_PAGES):
+        data = _expect_dict(qobuz_get("artist/getReleasesList", {
+            "artist_id": artist_id,
+            "release_type": "all",
+            "limit": config.ARTIST_CATALOG_PAGE,
+            "offset": offset,
+            "sort": "release_date",
+        }, token), "artist/getReleasesList")
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise QobuzError("artist/getReleasesList returned malformed items")
+        page = [item for item in items if isinstance(item, dict)]
+        recent = [item for item in page if is_recent(item)]
+        found.extend(recent)
+        offset += len(items)
+        if not items or not data.get("has_more") or len(recent) < len(page):
+            return found
+    return None
 
 
 def get_user_favorites(token, limit=None):

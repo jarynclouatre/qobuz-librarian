@@ -67,6 +67,15 @@ class FakeQobuz:
     def get_artist_albums(self, artist_id, token, limit=500, fresh=False):
         return list(self._catalog), self._total
 
+    def get_artist_recent_releases(self, artist_id, token, is_recent):
+        newest = sorted(self._catalog, reverse=True,
+                        key=lambda a: a["release_date_original"])
+        listed = [{"id": a["id"],
+                   "dates": {"original": a["release_date_original"]},
+                   "audio_info": {"maximum_bit_depth": a["maximum_bit_depth"]}}
+                  for a in newest]
+        return [item for item in listed if is_recent(item)]
+
     def get_album(self, album_id, token):
         return self._full[album_id]
 
@@ -83,6 +92,8 @@ class FakeQobuz:
         monkeypatch.setattr(discovery, "get_artist_albums", self.get_artist_albums)
         monkeypatch.setattr(discovery, "get_artist_release_types",
                             self.get_artist_release_types)
+        monkeypatch.setattr(discovery, "get_artist_recent_releases",
+                            self.get_artist_recent_releases)
         monkeypatch.setattr(discovery, "get_album", self.get_album)
         monkeypatch.setattr(cat, "get_album", self.get_album)
         monkeypatch.setattr(cat, "search_albums", self.search_albums)

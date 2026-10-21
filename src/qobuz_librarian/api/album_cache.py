@@ -174,6 +174,36 @@ def get_catalog(key, ttl_seconds) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+# Qobuz hands an artist's catalog back in another order, with other
+# popularity and album counts, from one read to the next. Nothing reads them
+# from the cache, so a catalog that differs only there is unchanged.
+_RESTLESS = frozenset(("popularity", "albums_count"))
+
+
+def _calm(value):
+    if isinstance(value, dict):
+        return {k: _calm(v) for k, v in value.items() if k not in _RESTLESS}
+    if isinstance(value, list):
+        return [_calm(v) for v in value]
+    return value
+
+
+def _settled(payload):
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return payload
+    return {**payload, "items": sorted(
+        json.dumps(_calm(item), sort_keys=True) for item in items)}
+
+
+def _same_catalog(stored, payload) -> bool:
+    try:
+        stored = json.loads(stored)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(stored, dict) and _settled(stored) == _settled(payload)
+
+
 def put_catalog(key, payload) -> None:
     if not key or not isinstance(payload, dict) or not _db.ensure():
         return
@@ -185,7 +215,7 @@ def put_catalog(key, payload) -> None:
         conn = _db.conn()
         row = conn.execute("SELECT payload FROM catalogs WHERE key = ?",
                            (str(key),)).fetchone()
-        if row and row[0] == data:
+        if row and (row[0] == data or _same_catalog(row[0], payload)):
             conn.execute(
                 "INSERT OR REPLACE INTO stamps (kind, key, at) "
                 "VALUES ('catalog', ?, ?)", (str(key), time.time()))

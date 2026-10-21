@@ -2270,7 +2270,6 @@ def _scan_library_impl(
     job.scan_coverage = (frozenset(scanned - set(left_out)), partial_only,
                          frozenset(on_disk_ids))
     job.scan_left_out = dict(left_out)
-    checkpoint.flush()
     flush_resolve_cache()
     baseline_save_failed = False
     scan_state_save_failed = False
@@ -2633,7 +2632,7 @@ def scan_new_releases(job, token):
     """Surface albums that appeared in library artists' Qobuz catalogs since the
     last check and that the user doesn't own or hasn't hidden, flagged as new
     for review, but left un-ticked so one click can't queue the whole list.
-    Cheap (one catalog call per artist, no track fetches), so it's the quick
+    Cheap (about one call per artist, no track fetches), so it's the quick
     "what's new" pass rather than the full gap scan."""
     clear_scan_caches()
     unreadable_artists = {}

@@ -32,10 +32,11 @@ _KINDS = ("missing", "partial")
 # artists still being scanned. Normal exits flush the remaining progress.
 CHECKPOINT_INTERVAL_SECONDS = 5.0
 # A slow write waits this many times its own length before the next, and a
-# large checkpoint a second for every megabyte it holds, so on a large library
-# writing the checkpoint stays a small part of the scan and of the disk's time.
+# large checkpoint ten seconds for every megabyte it holds, so on a large
+# library writing the checkpoint stays a small part of the scan and of the
+# disk's time (1,900 artists: about 13 MB, saved every two minutes or so).
 CHECKPOINT_WRITE_SPACING = 20
-CHECKPOINT_BYTES_PER_SECOND = 1_000_000
+CHECKPOINT_BYTES_PER_SECOND = 100_000
 
 # save/clear are read-modify-write of the shared file; serialise them so two
 # scan kinds progressing in parallel can't clobber each other's entry.
@@ -229,14 +230,15 @@ class Writer(AbstractContextManager):
         self._last_write = None
         self._interval = CHECKPOINT_INTERVAL_SECONDS
 
+    def _due(self):
+        return (self._last_write is None
+                or time.monotonic() - self._last_write >= self._interval)
+
     def save(self, scanned, seen, artists=None, meta=None) -> bool:
         # Keep the single writer's live containers, without copying receipts.
         self._latest = (scanned, seen, artists, meta)
         self._pending = True
-        if (self._last_write is None
-                or time.monotonic() - self._last_write >= self._interval):
-            return self.flush()
-        return True
+        return self.flush() if self._due() else True
 
     def keep_pass(self, name, result) -> bool:
         """Save a finished pass with the progress, for a resume to reuse."""
@@ -244,7 +246,7 @@ class Writer(AbstractContextManager):
         if self._latest is None:
             return True
         self._pending = True
-        return self.flush()
+        return self.flush() if self._due() else True
 
     def flush(self) -> bool:
         if not self._pending:

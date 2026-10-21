@@ -31,6 +31,7 @@ from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import (
     get_album,
     get_artist_albums,
+    get_artist_recent_releases,
     get_artist_release_types,
     search_artists,
 )
@@ -1136,6 +1137,41 @@ def gaps_this_folder_offers(gaps, artist_id, artist_dir, token):
     return kept
 
 
+def _nothing_recent_unseen(artist_id, artist_name, token, seen):
+    """True when every lossless release of the artist from the new-release
+    window is one the last check saw, read from their newest releases alone.
+    False sends the check to the whole catalog: something unseen, no window,
+    or a newest-first list that is too long or unreadable."""
+    max_age_days = cfg.NEW_RELEASE_MAX_AGE_DAYS
+    if max_age_days <= 0:
+        return False
+
+    def field(item, name, key):
+        value = item.get(name)
+        return value.get(key) if isinstance(value, dict) else None
+
+    def is_recent(item):
+        return album_released_within(
+            {"release_date_original": field(item, "dates", "original")},
+            max_age_days)
+
+    try:
+        recent = get_artist_recent_releases(artist_id, token, is_recent)
+    except QobuzError as e:
+        vlog(f"  {artist_name}: newest releases couldn't be read ({e})")
+        return False
+    if recent is None:
+        return False
+    seen = {str(album_id) for album_id in seen}
+    for item in recent:
+        depth = field(item, "audio_info", "maximum_bit_depth")
+        if isinstance(depth, (int, float)) and depth < 16:
+            continue
+        if item.get("id") is not None and str(item["id"]) not in seen:
+            return False
+    return True
+
+
 def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
                                  hidden=None, single_store=None, artist_dir=None,
                                  baseline_only=False):
@@ -1144,8 +1180,9 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
 
     Unlike find_missing_for_artist this skips the owned-folder matching pass and
     never fetches track lists (a fully-missing album is read straight off the
-    catalog list), so the cost is about one Qobuz call per artist, plus the
-    release lists for an artist with something new. A new release is listed
+    catalog list). An artist checked before costs one call for their newest
+    releases; only one with a recent release the last check did not see has
+    the whole catalog read, plus the release lists. A new release is listed
     only when its type is among opts.included_types(), as in Missing Albums.
 
     seen_by_id maps artist_id → the catalog album ids known at the last check.
@@ -1170,6 +1207,10 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     # string id - otherwise an int id from resolve never matches the reloaded
     # snapshot and every run silently re-baselines instead of diffing.
     artist_id = str(artist_id)
+    seen = (seen_by_id or {}).get(artist_id)
+    if seen is not None and not baseline_only and _nothing_recent_unseen(
+            artist_id, artist_name, token, seen):
+        return NewReleaseResult(artist_id, artist_name, [], seen)
 
     # Always fresh: stale catalog data would mean missing the very release this
     # check exists to find. The fetch refreshes the shared cache as a side effect.
@@ -1201,7 +1242,6 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
                                            album_dirs, catalog)):
         return NewReleaseResult(artist_id, artist_name, [], current_ids)
 
-    seen = (seen_by_id or {}).get(artist_id)
     if seen is None:
         return NewReleaseResult(artist_id, artist_name, [], current_ids)
 
