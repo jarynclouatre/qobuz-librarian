@@ -114,7 +114,7 @@ async def api_diagnostics(request: Request):
 async def job_stream(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id)
     if not job:
-        return JSONResponse({"error": "not found"}, status_code=404)
+        raise HTTPException(status_code=404, detail="Job not found")
 
     async def _generator():
         # Reconnect quickly so a backgrounded tab's progress bar catches up to
@@ -332,8 +332,10 @@ async def jobs_list(status: str = "", limit: int = 50):
             raise HTTPException(status_code=400,
                                 detail="Unknown status filter")
     cap = max(1, min(limit, 500))
-    terminal_values = {s.value for s in job_mgr.TERMINAL}
-    want_terminal = wanted in terminal_values if wanted else True
+    # History also keeps parked new-release, restore and migration reviews.
+    from_history = wanted not in {
+        s.value for s in (job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING,
+                          job_mgr.JobStatus.SCANNING)}
 
     matching = []
     seen = set()
@@ -347,7 +349,7 @@ async def jobs_list(status: str = "", limit: int = 50):
 
     # The registry only holds the newest MAX_FINISHED terminal jobs; the
     # archive keeps far more.
-    if want_terminal and len(matching) < cap:
+    if from_history and len(matching) < cap:
         # Filter in SQL: fetching the newest `cap` rows and filtering here
         # would return too few (or none) whenever those rows are mostly other
         # statuses, even though older matching history exists.

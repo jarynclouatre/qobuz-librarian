@@ -502,3 +502,25 @@ def test_album_imported_with_a_track_missing_stays_retryable_once_seen(
     rows = {row["id"]: row for row in job_persistence.history_page(10, 0)}
     assert (rows[job.id]["status"], rows[job.id]["tracks_missing"]) == ("done", 1)
     assert (rows["oes"]["status"], rows["oes"]["tracks_missing"]) == ("failed", 1)
+
+
+def test_download_that_imported_nothing_is_not_shown_as_imported(
+        monkeypatch, tmp_path):
+    # Two tracks of Blue Rev existed only lossy, so nothing was imported, yet
+    # History read the count from the error and showed "Imported, 2 tracks
+    # missing".
+    from qobuz_librarian.web import download_outcomes
+
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+
+    job = Job(title="Blue Rev", album_id="br")
+    download_outcomes._mark_download_attention(job, {
+        "result": "partial", "imported": False, "n_ok": 12, "n_lossy_only": 2,
+    })
+    job.finished_at = 2.0
+    assert _REAL_ADMIT(job) is True
+    [row] = job_persistence.history_page(10, 0)
+    assert (row["status"], row["tracks_missing"]) == ("failed", 0)

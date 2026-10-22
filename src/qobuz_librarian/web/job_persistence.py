@@ -281,9 +281,10 @@ def decode_log_lines(value) -> tuple[list[str], bool]:
 
 
 # A download that imported with tracks missing was saved as failed before
-# tracks_missing was recorded; its message still opens with the count.
-_SAVED_MISSING_RE = re.compile(
-    r"(\d+) tracks? (?:is|are) (?:still missing|only available lossy)")
+# tracks_missing was recorded; its message still opens with the count. A
+# message about lossy-only tracks is left out: a download that imported
+# nothing still opens with that one.
+_SAVED_MISSING_RE = re.compile(r"(\d+) tracks? (?:is|are) still missing")
 
 
 def _tracks_missing(value, status, error) -> int:
