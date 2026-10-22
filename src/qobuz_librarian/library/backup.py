@@ -3822,7 +3822,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
     if on_intent is not None and not callable(on_intent):
         raise ValueError("backup intent checkpoint must be callable")
 
-    what = "" if kind == "repair" else "gap-fill "
+    what = {"repair": "", "consolidate": "consolidation "}.get(kind, "gap-fill ")
     file_paths = list(file_paths)
     if not file_paths:
         return None
@@ -3934,7 +3934,8 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
             f"  ✗  Couldn't set aside the {what}tracks of {public}: "
             f"{exc.strerror or exc}. Every track was left in place."))
         return None
-    bp = backup_root / _backup_dir_name(public, kind=kind)
+    bp = backup_root / _backup_dir_name(
+        public, kind="repair" if kind == "repair" else "gapfill")
     partial = backup_root / (_PARTIAL_COPY_PREFIX + bp.name)
     if os.path.lexists(partial):
         log.info(fmt(C.RED, f"  ✗  {partial} is in the way; leaving every "

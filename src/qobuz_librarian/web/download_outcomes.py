@@ -78,12 +78,28 @@ def _summarize_download_result(r):
     other folder of the album it kept and any track that came at CD
     quality."""
     summary = _download_summary(r)
+    if summary:
+        summary += _consolidation_note(r)
     if summary and (r or {}).get("imported"):
         if r.get("siblings_kept"):
             summary += f" {download_result.siblings_kept_note(r['siblings_kept'])}"
         if r.get("cd_quality_tracks"):
             summary += f" {download_result.cd_quality_note(r['cd_quality_tracks'])}"
     return summary
+
+
+def _consolidation_note(r):
+    moved = r.get("consolidated_tracks_removed") or 0
+    left = r.get("consolidation_failed") or 0
+    parts = []
+    if moved:
+        parts.append(f"{plural(moved, 'duplicate track')} moved to the "
+                     "backup folder")
+    if left:
+        parts.append(f"{plural(left, 'duplicate track')} left in place")
+    if parts and r.get("consolidation_cancelled"):
+        parts.append("then it was stopped")
+    return f" {', '.join(parts)}." if parts else ""
 
 
 def _download_summary(r):
@@ -267,6 +283,11 @@ def download_error(result, *, job_controls=True):
             messages.append("post-download downsampling stopped early")
         if result.get("consolidation_interrupted"):
             messages.append("duplicate cleanup stopped early")
+        if result.get("consolidation_failed"):
+            messages.append(
+                f"{plural(result['consolidation_failed'], 'duplicate track')} "
+                "could not be moved to the backup folder"
+            )
         if result.get("siblings_preserved"):
             messages.append("sibling cleanup needs review")
         detail = "; ".join(messages) or "post-download work did not finish"

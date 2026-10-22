@@ -370,7 +370,7 @@ def print_consolidation_overview(summaries):
     log.info(fmt(C.GRAY,
         f"  Found {plural(len(summaries), 'similar album folder')} for the same artist."))
     log.info(fmt(C.GRAY,
-        "  Tracks that match the primary album can be removed from each sibling."))
+        "  Tracks that match the primary album can move from each sibling to the backup folder."))
     log.info(fmt(C.GRAY,
         "  Bonus tracks (no match) will be left in place."))
 
@@ -401,7 +401,7 @@ def print_consolidation_overview(summaries):
                 f"      ⚠  {plural(qc['unknown'], 'track')} here "
                 f"{'has' if qc['unknown'] == 1 else 'have'} uncertain quality or channel "
                 "layout - can't confirm "
-                f"{'it is' if qc['unknown'] == 1 else 'they are'} safe to delete."))
+                f"{'it is' if qc['unknown'] == 1 else 'they are'} safe to move out."))
 
 
 def print_per_track_consolidation(summary):
@@ -419,13 +419,13 @@ def print_per_track_consolidation(summary):
 
         comparison = quality_decision._track_quality_cmp(st, pt)
         if comparison is None:
-            badge = fmt(C.RED + C.BOLD, "delete (quality uncertain)")
+            badge = fmt(C.RED + C.BOLD, "move out (quality uncertain)")
         elif comparison > 0:
-            badge = fmt(C.RED + C.BOLD, "delete (HIGHER quality)")
+            badge = fmt(C.RED + C.BOLD, "move out (HIGHER quality)")
         elif comparison < 0:
-            badge = fmt(C.GREEN, "delete (lower quality)")
+            badge = fmt(C.GREEN, "move out (lower quality)")
         else:
-            badge = fmt(C.GRAY, "delete (same quality)")
+            badge = fmt(C.GRAY, "move out (same quality)")
 
         log.info(f"  {trk}.  {fmt(C.WHITE, title)}")
         log.info(fmt(C.GRAY,

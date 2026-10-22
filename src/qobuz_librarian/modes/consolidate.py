@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from qobuz_librarian import beets_db, config
+from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import catalog, scanner
 from qobuz_librarian.library.scanner import parse_track_num
@@ -44,6 +45,7 @@ class ConsolidationCancelled(Exception):
 _CHANGED_SINCE_REVIEW = (
     "a track or its library entry changed after the review. Run the "
     "consolidation again to review them as they are now")
+_LEFT_IN_PLACE = "its tracks were left in place"
 _YEAR_RE = re.compile(r"(?<!\d)(19\d\d|20\d\d)(?!\d)")
 
 
@@ -607,7 +609,7 @@ class _BeetsItemSeal:
                 return False, None, _CHANGED_SINCE_REVIEW
             result = mutate()
             if result is None:
-                return False, None, "the protected backup could not be made"
+                return False, None, _LEFT_IN_PLACE
             if not _no_database() or not after_matches():
                 return False, result, "the reviewed filesystem state changed"
             return True, result, None
@@ -622,7 +624,7 @@ class _BeetsItemSeal:
                 result = mutate()
                 if result is None:
                     connection.rollback()
-                    return False, None, "the protected backup could not be made"
+                    return False, None, _LEFT_IN_PLACE
                 if not self._matches(connection, after_matches):
                     raise OSError("the reviewed state changed during backup")
                 self._delete_rows(connection)
@@ -989,6 +991,7 @@ def _carry_left_lyrics(binding):
     without its tracks."""
     from qobuz_librarian.integrations import lyric_fetch
 
+    carried = set()
     for key, standing_in in (binding.kept or {}).items():
         sidecar = (binding.sibling.path / key).with_suffix(".lrc")
         if Path(standing_in).suffix.lower() != ".flac":
@@ -996,6 +999,8 @@ def _carry_left_lyrics(binding):
         try:
             if not stat.S_ISREG(os.lstat(sidecar).st_mode):
                 continue
+            carried.update((
+                standing_in, str(Path(standing_in).with_suffix(".lrc"))))
             lyric_fetch.give_lyrics(
                 binding.primary.path / standing_in, config.MUSIC_ROOT,
                 sidecar.read_text(encoding="utf-8", errors="replace"),
@@ -1009,6 +1014,28 @@ def _carry_left_lyrics(binding):
                 f"kept album ({exc}); the file stays in "
                 f"{binding.sibling.path.name}.",
             ))
+    # The kept album's next sibling is checked against its review, which
+    # these lyrics would otherwise fail.
+    current = snapshot_tree(binding.primary.path) or {}
+    for key in carried:
+        if key in current:
+            binding.primary.snapshot[key] = current[key]
+
+
+def _name_leftovers(album, removed):
+    """Say why a sibling left with no tracks keeps its folder."""
+    if album.track_keys - set(removed):
+        return
+    current = snapshot_tree(album.path)
+    left = sorted(
+        os.path.basename(key) for key, value in (current or {}).items()
+        if not stat.S_ISDIR(value[2]))
+    if left:
+        log.info(fmt(
+            C.GRAY,
+            f"    ⤷  Kept the folder {album.path.name}: it still holds "
+            f"{plural(len(left), 'other file')} ({truncate(', '.join(left), 60)}).",
+        ))
 
 
 def execute_consolidation(summary):
@@ -1039,6 +1066,7 @@ def execute_consolidation(summary):
             paths,
             binding.sibling.path,
             expected_receipts=binding.expected_receipts,
+            kind="consolidate",
         )
 
     success, backup_result, reason = binding.database.run(
@@ -1081,6 +1109,7 @@ def execute_consolidation(summary):
     _carry_left_lyrics(binding)
     scanner.clear_scan_caches()
     _remove_empty_folders(binding.sibling)
+    _name_leftovers(binding.sibling, binding.keys)
     for path in paths:
         vlog(f"consolidation: moved {path} to protected backup")
     return paths, 0
@@ -1096,7 +1125,7 @@ def consolidate_albums(album, args):
     # reaches here before process_album's own dry-run stop.
     if getattr(args, "dry_run", False):
         log.info(fmt(C.GRAY,
-            "  --dry-run: skipping consolidation (it would delete overlapping tracks)."))
+            "  --dry-run: skipping consolidation (it would move overlapping tracks)."))
         return 0, 0
 
     primary_dir = catalog.find_album_dir_filesystem(album)
@@ -1107,7 +1136,25 @@ def consolidate_albums(album, args):
     summaries = []
     n_actioned = 0
     n_failed = 0
-    moving = False
+
+    def move(summary):
+        nonlocal n_actioned, n_failed
+        deleted, failures = execute_consolidation(summary)
+        n_actioned += len(deleted)
+        n_failed += failures
+        if deleted:
+            log.info(fmt(
+                C.GREEN,
+                f"    ✓  Moved {plural(len(deleted), 'track')} "
+                "to the backup folder.",
+            ))
+        if failures:
+            log.info(fmt(
+                C.RED,
+                f"    ✗  {plural(failures, 'track')} not "
+                "consolidated; see above.",
+            ))
+
     try:
         try:
             primary = _review_album(primary_dir)
@@ -1231,11 +1278,11 @@ def consolidate_albums(album, args):
                     if warning:
                         log.info(fmt(
                             C.YELLOW + C.BOLD,
-                            "    Type 'DELETE' to confirm a possible quality "
+                            "    Type 'MOVE' to confirm a possible quality "
                             f"loss on {plural(risky, 'track')}:",
                         ))
                         typed = ask("    > ", lower=False)
-                        if typed != "DELETE":
+                        if typed != "MOVE":
                             log.info(fmt(
                                 C.GRAY, "    Confirmation not given. Skipped."))
                             break
@@ -1247,31 +1294,15 @@ def consolidate_albums(album, args):
                     ):
                         log.info(fmt(C.GRAY, "    Skipped."))
                         break
-                    moving = True
-                    deleted, failures = execute_consolidation(summary)
-                    deleted_count = len(deleted)
-                    n_actioned += deleted_count
-                    n_failed += failures
-                    moving = False
-                    if deleted_count:
-                        log.info(fmt(
-                            C.GREEN,
-                            f"    ✓  Moved {plural(deleted_count, 'track')} "
-                            "to the backup folder.",
-                        ))
-                    if failures:
-                        log.info(fmt(
-                            C.RED,
-                            f"    ✗  {plural(failures, 'track')} not "
-                            "consolidated; see above.",
-                        ))
+                    log.info(fmt(
+                        C.GRAY,
+                        "    Ctrl-C now stops after this folder."))
+                    run_sigint_deferred(lambda: move(summary))
                     break
                 log.info(fmt(C.GRAY, "    Enter d / s / k / q."))
 
         return n_actioned, n_failed
     except KeyboardInterrupt:
-        if moving:
-            raise
         log.info(fmt(C.GRAY, "\n  Consolidation cancelled. " + (
             f"{plural(n_actioned, 'track')} had already moved to the backup "
             "folder." if n_actioned else "Nothing changed.")))

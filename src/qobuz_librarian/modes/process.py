@@ -1361,11 +1361,12 @@ def process_album(album, args, *, allow_force=True, label=None,
         else:
             log.info(fmt(C.GREEN, "\n  ✓  Already complete. Nothing to download.\n"))
         consolidation_interrupted = consolidation_cancelled = False
-        consolidation_failed = 0
+        n_consolidated = consolidation_failed = 0
         if args.consolidate:
             try:
-                _, consolidation_failed = consolidate_albums(album, args)
-            except ConsolidationCancelled:
+                n_consolidated, consolidation_failed = consolidate_albums(album, args)
+            except ConsolidationCancelled as cancel:
+                n_consolidated = cancel.moved
                 consolidation_cancelled = True
             except KeyboardInterrupt:
                 consolidation_interrupted = True
@@ -1376,6 +1377,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             "unavailable_tracks": [track.get("title") or "?" for track in missing],
             "consolidation_interrupted": consolidation_interrupted,
             "consolidation_cancelled": consolidation_cancelled,
+            "consolidated_tracks_removed": n_consolidated,
             "consolidation_failed": consolidation_failed,
         }
 

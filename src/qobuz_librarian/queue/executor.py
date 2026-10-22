@@ -1727,12 +1727,14 @@ def _landed(change):
 
 
 def _record_terminal_results(changes, args):
-    """History rows and POST_JOB_HOOK calls for the albums that landed, failed
-    or were stopped."""
+    """History rows and POST_JOB_HOOK calls for the albums that landed, failed,
+    were stopped or had duplicate folders consolidated."""
     _record_terminal_downloads([
         change for change in changes
         if _landed(change) or change.get("result") == "interrupted"
         or download_job_outcome(change)[0] == "failed"
+        or change.get("consolidated_tracks_removed")
+        or change.get("consolidation_failed")
     ], no_import=getattr(args, "no_import", False))
 
 
