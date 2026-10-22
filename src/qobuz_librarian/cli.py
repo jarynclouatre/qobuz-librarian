@@ -556,10 +556,12 @@ def _help_epilog():
     ))
     lines.extend(("", *textwrap.wrap(
         "Only in the web app: the Library scan and its reviews, New releases "
-        "checks, Discover, dismissing and bringing back albums, restoring, "
-        "removing or deleting kept backups and hi-res originals (Settings > "
-        "Diagnostics), restoring from a collection backup, and "
-        "the Settings fields --settings leaves out.",
+        "checks, Discover, downloading a single track, dismissing and "
+        "bringing back albums, restoring, removing or deleting kept backups "
+        "and hi-res originals (Settings > Diagnostics), restoring from a "
+        "collection backup, the Settings fields --settings leaves out, and "
+        "History entries and POST_JOB_HOOK reports for Lyrics and Library "
+        "migration runs.",
         width=width,
         break_long_words=False,
         break_on_hyphens=False,

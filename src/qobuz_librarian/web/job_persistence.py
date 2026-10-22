@@ -382,11 +382,18 @@ def _get_conn() -> Optional[sqlite3.Connection]:
                 failed.close()
             except sqlite3.Error:
                 pass
+        _schema_ready = False
+        _admission_ready = False
+        # Another program reading a jobs.db that is not in WAL yet blocks the
+        # switch for a moment; the next init() tries again.
+        if getattr(e, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY,
+                                                    sqlite3.SQLITE_LOCKED):
+            _log.warning("jobs.db was busy when it was first opened (%s); "
+                         "trying again later.", e)
+            return None
         _log.info("job persistence disabled (%s); jobs won't survive restart.", e)
         _damaged = _is_damage(e)
         _disabled = True
-        _schema_ready = False
-        _admission_ready = False
         return None
 
 

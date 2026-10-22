@@ -140,12 +140,14 @@ ENV BEETSDIR=/config/beets
 
 # Lets `docker compose ps` and orchestrators detect an unsafe container.
 # Process liveness remains available separately at /healthz.
-# 0.0.0.0 is a bind address, not a destination, so coerce it to 127.0.0.1
-# (uvicorn binds to all interfaces in that case, loopback included). A
-# user who pins WEB_HOST to a specific interface gets that hostname back.
+# 0.0.0.0 and :: are bind addresses, not destinations, so coerce them to
+# loopback (uvicorn binds to all interfaces in that case, loopback included).
+# A user who pins WEB_HOST to a specific interface gets that address back,
+# bracketed when it is IPv6.
 # The check runs as root, so it uses curl rather than the app's Python.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD h="${WEB_HOST:-0.0.0.0}"; [ "$h" != 0.0.0.0 ] || h=127.0.0.1; \
+    CMD h="${WEB_HOST:-0.0.0.0}"; \
+        case "$h" in 0.0.0.0) h=127.0.0.1 ;; ::) h='[::1]' ;; *:*) h="[$h]" ;; esac; \
         curl -q -fsS -o /dev/null --noproxy '*' --max-time 4 \
             "http://$h:${WEB_PORT:-8666}/readyz" || exit 1
 

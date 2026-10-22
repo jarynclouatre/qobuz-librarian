@@ -141,7 +141,7 @@ services:
       WEB_ALLOWED_HOSTS: "${WEB_ALLOWED_HOSTS:-}"
       # Pause downloads and scans while /music or /staging isn't writable by
       # the container user (typical on a NAS with the wrong PUID/PGID).
-      # Set QL_CHECK_VOLUMES=0 in .env for a read-only (:ro) /music share.
+      # A read-only (:ro) /music share is fine: scans run, downloads are off.
       QL_CHECK_VOLUMES: ${QL_CHECK_VOLUMES:-1}
       # Terminal-first mode: set QL_CLI_ONLY=1 in .env to start in terminal
       # mode (web UI serves but its downloads stay paused). Empty = web app.

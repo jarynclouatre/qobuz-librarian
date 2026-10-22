@@ -298,7 +298,7 @@ def _readiness_report() -> tuple[int, dict]:
         degraded.append("terminal_mode")
     if runtime._LOCK_BUSY_PID is not None:
         degraded.append("other_writer")
-    if storage._unwritable_volumes():
+    if storage._unwritable_volumes() or storage.music_mounted_read_only():
         degraded.append("write_volumes")
     if queue_recovery._startup_recovery_status_value() in {
         "attention_required",

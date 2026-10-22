@@ -360,8 +360,7 @@ def _diagnostics():
                            "Check the path in your .env"})
             return
         if (want_writable and label == "Music library"
-                and storage.music_mounted_read_only()
-                and not storage._unwritable_volumes()):
+                and storage.music_mounted_read_only()):
             checks.append({"label": label, "ok": False,
                            "detail": f"{display} is mounted read-only. "
                            "Scans run; downloads are off"})

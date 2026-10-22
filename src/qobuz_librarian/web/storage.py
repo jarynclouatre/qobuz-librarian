@@ -46,11 +46,16 @@ def _unwritable_volumes() -> list[str]:
     if not cfg._env_bool("QL_CHECK_VOLUMES", True):
         return []
     problems = []
+    # A music folder mounted :ro is a choice, not a fault: scans run and
+    # downloads are off, the way the read-only notice says.
+    music_ro = music_mounted_read_only()
     # Named the way the operator would recognise the folder, not the compose
     # env var; the path shown is the host one when the compose file names it,
     # since a container path means nothing on the host that needs fixing.
     for friendly, path in (("Staging area", cfg.STAGING_DIR),
                            ("Music library", cfg.MUSIC_ROOT)):
+        if friendly == "Music library" and music_ro:
+            continue
         p = Path(path)
         unreachable = not p.exists()
         not_a_dir = p.exists() and not p.is_dir()
