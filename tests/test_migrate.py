@@ -40,6 +40,28 @@ def test_normalize_tags_parses_slashed_track_and_disc_and_year():
     assert m.album_components(meta) == ("A", "B")
 
 
+def test_album_folder_keeps_an_edition_bracket_that_holds_a_year(tmp_path):
+    """"Old Record (2011 Remaster)" from 1979 is named like the beets path,
+    not folded into the plain "Old Record (1979)"; only a bracket that is
+    just a year is dropped."""
+    source = tmp_path / "src"
+    source.mkdir()
+    items = []
+    for name, album in (("plain", "Old Record"),
+                        ("remaster", "Old Record (2011 Remaster)")):
+        track = source / f"{name}.flac"
+        track.write_bytes(name.encode())
+        items.append((track, _meta(album=album, year=1979), "tags"))
+    plan = m.build_plan(items, tmp_path / "dest")
+    assert [e.dest_rel.parent for e in plan.placed] == [
+        Path("Artist/Old Record (1979)"),
+        Path("Artist/Old Record (2011 Remaster) (1979)")]
+    assert m.album_components(_meta(album="Old Record [2011]", year=2011)) == (
+        "Artist", "Old Record (2011)")
+    assert m.album_components(_meta(album="[1971] Hunky Dory", year=1971)) == (
+        "Artist", "Hunky Dory (1971)")
+
+
 # ── placement ─────────────────────────────────────────────────────────────────
 
 def test_plan_places_tracks_in_the_beets_layout_and_never_guesses(tmp_path):
@@ -80,6 +102,62 @@ def test_plan_places_tracks_in_the_beets_layout_and_never_guesses(tmp_path):
     ], tmp_path / "dest")
     assert len(plan.unplaceable) == 2
     assert not plan.placed
+
+
+def test_second_copy_of_an_album_in_another_folder_is_not_merged(tmp_path):
+    """A plain rip and a CD1/CD2 rip of the same album stay two albums: the
+    folder that sorts first is placed as a single disc, every track of the
+    other collides and names the folder already placed."""
+    plain = tmp_path / "src" / "Plain"
+    rip = tmp_path / "src" / "Rip"
+    items = []
+    for folder, disc in ((plain, 0), (rip, 1), (rip, 2)):
+        track = folder / (f"CD{disc}" if disc else "") / f"{disc or 1:02d}.flac"
+        track.parent.mkdir(parents=True, exist_ok=True)
+        track.write_bytes(b"audio %d" % disc)
+        items.append((track, _meta(
+            track=disc or 1, title=f"Song {disc or 1}", disc=disc or 1,
+            disctotal=2 if disc else 0), "tags"))
+    plan = m.build_plan(items, tmp_path / "dest")
+    assert [e.dest_rel for e in plan.placed] == [
+        Path("Artist/Album (2017)/01 - Song 1.flac")]
+    assert plan.placed[0].source.parent == plain
+    assert [(e.source.parent.parent, "Plain" in e.reason)
+            for e in plan.collisions] == [(rip, True)] * 2
+
+
+def test_names_differing_only_by_case_or_unicode_form_share_a_folder(tmp_path):
+    """ALVVAYS and Alvvays are one artist folder, spelled as most tracks spell
+    it, and a Björk album tagged in two Unicode forms is one album folder."""
+    source = tmp_path / "src"
+    items = []
+    for folder, artist, number in (("Antisocialites", "ALVVAYS", 1),
+                                   ("Blue Rev", "Alvvays", 1),
+                                   ("Blue Rev", "Alvvays", 2)):
+        track = source / folder / f"{number:02d}.flac"
+        track.parent.mkdir(parents=True, exist_ok=True)
+        track.write_bytes(b"audio")
+        items.append((track, _meta(
+            albumartist=artist, album=folder, track=number), "tags"))
+    plan = m.build_plan(items, tmp_path / "dest")
+    assert {e.dest_rel.parts[0] for e in plan.placed} == {"Alvvays"}
+    assert len(plan.placed) == 3
+
+    composed, decomposed = "Björk", "Björk"
+    assert m.normalize_tags(
+        {"albumartist": [decomposed], "album": ["Debut"]}, "01", ".flac"
+    )["albumartist"] == composed
+    items = []
+    for number, artist in enumerate((composed, decomposed), 1):
+        track = source / "Debut" / f"{number:02d}.flac"
+        track.parent.mkdir(parents=True, exist_ok=True)
+        track.write_bytes(b"audio")
+        items.append((track, _meta(
+            albumartist=artist, album="Debut", track=number), "tags"))
+    plan = m.build_plan(items, tmp_path / "dest")
+    assert {e.dest_rel.parent for e in plan.placed} == {
+        Path(composed) / "Debut (2017)"}
+    assert len(plan.placed) == 2
 
 
 # ── AcoustID match selection ──────────────────────────────────────────────────
@@ -211,18 +289,20 @@ def test_copy_keeps_originals_and_in_place_moves_only_after_a_verified_copy(tmp_
     (album / "Scans" / "back.jpg").write_bytes(b"scan")
     (album / "readme.txt").write_text("notes")
     items = []
-    for entry, folder in zip(plan.placed, (album, root / "src" / "Disc")):
+    for entry, folder, title in zip(
+            plan.placed, (album, root / "src" / "Disc"), ("Album", "Other")):
         folder.mkdir(exist_ok=True)
         source = entry.source.rename(folder / entry.source.name)
         source.with_suffix(".lrc").write_text(source.name)
-        items.append((source, entry.meta, entry.source_of_truth))
+        items.append(
+            (source, {**entry.meta, "album": title}, entry.source_of_truth))
     plan = m.build_plan(items, plan.dest_root)
     res = m.execute_plan(plan, in_place=True)
     assert res.copied == 2 and res.companions == 2
     # The copied lyrics stay in both, but only these never reached the new
     # library.
     assert res.left_in_source == [
-        ("Album", ["Scans/", "readme.txt"]), ("Disc", [])]
+        ("Album", ["Scans/", "readme.txt"], 1), ("Disc", [], 1)]
     for entry in plan.placed:
         assert not entry.source.exists()
         destination = plan.dest_root / entry.dest_rel

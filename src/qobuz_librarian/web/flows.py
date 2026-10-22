@@ -5520,16 +5520,10 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
             group = groups.setdefault(
                 key, {"entries": [], "resume_entries": []})
             group[kind].append(entry)
+    owners = engine._companion_owners(plan.placed + resume_entries)
     for (artist, album), group in sorted(groups.items()):
         entries = group["entries"]
         resumes = group["resume_entries"]
-        source_folders = {
-            folder
-            for entry in entries + resumes
-            if entry.source_receipt is not None
-            for folder in engine.companion_folders(
-                entry.source_receipt.get("relative", ())[:-1])
-        }
         resumed = (f"{plural(len(resumes), 'track')} already copied, "
                    f"{'original' if len(resumes) == 1 else 'originals'} to "
                    "delete" if in_place else
@@ -5558,10 +5552,8 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
             "source_root_receipt": plan.source_root_receipt,
             "dest_root_receipt": plan.dest_root_receipt,
             "destination_name_semantics": plan.destination_name_semantics,
-            "companion_receipts": [
-                receipt for receipt in plan.companion_receipts
-                if tuple(receipt.get("relative", ())[:-1]) in source_folders
-            ],
+            "companion_receipts": engine.album_companion_receipts(
+                plan, entries + resumes, owners),
         }
         job.add_candidate(
             kind="migrate",
@@ -5778,6 +5770,20 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
                     reason=reason)
                 for status, sot, source, destination, reason
                 in (job.execute_args or {}).get("left_behind", [])]
+            chosen_ids = {c.get("cid") for c in chosen}
+            for candidate in job.candidates:
+                if candidate.get("cid") in chosen_ids:
+                    continue
+                payload = candidate.get("payload") or {}
+                for raw in [*payload.get("entries", []),
+                            *payload.get("resume_entries", [])]:
+                    if isinstance(raw, (list, tuple)) and len(raw) == 4:
+                        left_behind.append(migrate_engine.PlanEntry(
+                            source=Path(raw[0]), status=migrate_engine.SKIPPED,
+                            source_of_truth=("acoustid" if raw[0] in fingerprinted
+                                             else "tags"),
+                            dest_rel=Path(raw[1]),
+                            reason="not selected in the review"))
             try:
                 manifest = migrate_engine.write_manifest(
                     plan, left_behind=left_behind)
@@ -5793,6 +5799,11 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
                 return
             manifest_display, _ = storage._resolve_host_path(str(manifest))
             job.push_line(f"Full plan written to {manifest_display}")
+            if isinstance(job.execute_args, dict):
+                # Saved now so a restart part way through can still name
+                # the plan.
+                job.execute_args["manifest"] = manifest_display
+                job_persistence.persist(job)
             result = migrate_engine.execute_plan(
                 plan, in_place=in_place,
                 cancel_check=lambda: job.cancel_requested,
@@ -5801,7 +5812,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
             pruned = getattr(result, "pruned", 0)
             try:
                 results_manifest = migrate_engine.write_results_manifest(
-                    result, plan=plan)
+                    result, plan=plan, left_behind=left_behind)
             except BaseException as exc:
                 results_error = exc
                 if not isinstance(exc, Exception):
@@ -5835,16 +5846,31 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
     for source, _destination, status, reason in companion_outcomes:
         if status in {migrate_engine.FAILED, migrate_engine.INTERRUPTED}:
             job.push_line(f"sidecar failed: {source} - {reason}")
+    left_behind_rows = (job.execute_args or {}).get("left_behind", [])
     unreadable = sum(
         status == migrate_engine.UNPLACEABLE
         and reason.startswith(migrate_engine.UNREADABLE)
-        for status, _sot, _source, _destination, reason
-        in (job.execute_args or {}).get("left_behind", []))
+        for status, _sot, _source, _destination, reason in left_behind_rows)
+    not_carried = migrate_engine.not_carried_line(
+        sum(status == migrate_engine.COLLISION
+            for status, _sot, _source, _destination, _reason
+            in left_behind_rows),
+        sum(status == migrate_engine.UNPLACEABLE
+            and not reason.startswith(migrate_engine.UNREADABLE)
+            for status, _sot, _source, _destination, reason
+            in left_behind_rows))
     verb = "moved" if in_place else "copied"
     has_problem = bool(
         failed or companion_failed or results_error or result.lingered
         or unreadable)
-    if has_problem:
+    unreadable_only = bool(unreadable) and not (
+        failed or companion_failed or results_error or result.lingered
+        or result.cancelled)
+    if unreadable_only:
+        lead = ("Finished, but "
+                f"{plural(unreadable, 'file or folder', 'files or folders')} "
+                "could not be read")
+    elif has_problem:
         lead = (
             "Migration stopped with problems"
             if result.cancelled else "Migration needs attention"
@@ -5877,7 +5903,9 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         parts.append(
             f"{plural(result.lingered, 'original')} still at the source; "
             "the report says why")
-    if unreadable:
+    if unreadable_only:
+        parts.append("what could not be read stayed at the source")
+    elif unreadable:
         parts.append(_unreadable_left(unreadable))
     if failed:
         parts.append(f"{failed} failed; see the log")
@@ -5887,23 +5915,15 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         job.error = f"{plural(failed, 'file')} couldn't be migrated; see the log."
     if pruned:
         parts.append(f"cleared {plural(pruned, 'empty source folder')}")
-    left = getattr(result, "left_in_source", ())
-    left_out = [(folder, names) for folder, names in left if names]
-    copies_only = len(left) - len(left_out)
-    if left_out:
-        parts.append(
-            f"{plural(len(left_out), 'source folder')} still "
-            f"{'holds' if len(left_out) == 1 else 'hold'} files that were "
-            "not moved, listed in the activity log")
-        for folder, names in left_out[:50]:
-            shown = ", ".join(names[:20]) + (
-                f" and {len(names) - 20} more" if len(names) > 20 else "")
-            job.push_line(f"not carried, still in {folder}: {shown}")
-    if copies_only:
-        parts.append(
-            f"{plural(copies_only, 'source folder')} still "
-            f"{'holds' if copies_only == 1 else 'hold'} only cover art and "
-            "sidecars, which were copied")
+    left_lines = migrate_engine.left_in_source_lines(
+        getattr(result, "left_in_source", ()))
+    if left_lines:
+        parts.append(left_lines[0].rstrip(":") + ", listed in the activity log")
+        for line in left_lines:
+            job.push_line(line)
+    if not_carried:
+        parts.append(not_carried)
+        job.push_line(not_carried)
     if result.cancelled:
         parts.append("the destination may contain a partial migration")
     if results_error is not None:
@@ -5922,8 +5942,10 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
             "See the saved report.")
     if unreadable and not job.error:
         job.error = (
+            f"{lead}; what could not be read stayed at the source. "
+            if unreadable_only else
             f"Migration needs attention: {_unreadable_left(unreadable)}. "
-            "See the activity log.")
+        ) + "See the activity log."
     if companion_failed:
         attention = plural(companion_failed, "sidecar failure")
         if job.error:
@@ -5937,6 +5959,10 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         _mark_job_failed(job)
     elif result.cancelled:
         job.status = job_mgr.JobStatus.CANCELED
+    if has_problem or result.cancelled:
+        # Finished with a problem or part way, this run belongs in the
+        # unresolved History until someone has looked.
+        job.attention = job.attention or "failed"
     job.summary = "; ".join(parts) + "."
     log.info(job.summary)
     if not has_problem and not result.cancelled:

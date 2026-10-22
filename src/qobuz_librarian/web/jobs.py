@@ -2557,7 +2557,20 @@ def restore_jobs(
             elif job.execute_kind == "lyrics":
                 job.error = restart + "Start it again from the Lyrics page."
             elif job.execute_kind == "migration":
-                job.error = restart + "Start it again from the Library migration page."
+                # The review's summary still described the plan; this run
+                # stopped part way, and what it had done stays done.
+                args = job.execute_args or {}
+                verb = "moved" if args.get("in_place") else "copied"
+                job.summary = (
+                    "Stopped by a restart part way through. Files it had "
+                    f"already {verb} are in the destination and verified; "
+                    "the rest are still in the source. Start it again from "
+                    "the Library migration page: it skips what is already "
+                    "there."
+                    + (f" The plan is saved at {args['manifest']}."
+                       if args.get("manifest") else ""))
+                job.error = restart.rstrip()
+                job.attention = "failed"
             elif job.execute_kind == "library":
                 job.error = restart + "Start the scan again from the Library page."
             elif job.execute_kind == "downsample":

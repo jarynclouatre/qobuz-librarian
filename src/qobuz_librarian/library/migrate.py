@@ -58,6 +58,7 @@ from qobuz_librarian.safefile import fsync_dirs, stat_identity
 from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
 from qobuz_librarian.safefile import named_entry_missing as _named_entry_missing
 from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace_at
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import vlog
 
 log = logging.getLogger("qobuz_librarian")
@@ -166,10 +167,9 @@ class ExecResult:
     # Empty source directories removed through their preview-sealed identities
     # once every track of their source folder has left.
     pruned: int = 0
-    # In-place runs: source folders every track left that still hold files,
-    # as (relative path, names of what did not reach the destination). Cover
-    # art and sidecars are copied, not moved, so a folder holding only those
-    # names nothing.
+    # In-place runs: every source folder that still holds anything, as
+    # (relative path, names of what did not reach the destination, count of
+    # the cover art and sidecars that did; those are copied, not moved).
     left_in_source: list = field(default_factory=list)
     cancelled: bool = False
     interrupted: bool = False
@@ -235,15 +235,27 @@ def _folder_disc(name: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _nfc(value: str) -> str:
+    return unicodedata.normalize("NFC", value)
+
+
+def _fold_name(name: str) -> str:
+    """One key for the spellings of a name that differ only by case or
+    Unicode form."""
+    return _nfc(name).casefold()
+
+
 def normalize_tags(tags: Mapping, stem: str, ext: str, folder: str = "") -> dict:
     """Map a raw tag mapping to the fields placement needs.
 
     Pure: takes an already-read mapping (so it's testable without a real audio
     file). ``stem`` is the source filename minus extension, used as the title
     fallback when no title tag is present; ``folder`` is the name of the folder
-    holding the file, which gives the disc number when no tag does.
+    holding the file, which gives the disc number when no tag does. Names are
+    composed (NFC), so a tag written on a Mac and one written on Linux read
+    the same.
     """
-    albumartist = _first(tags, "albumartist", "album artist", "artist")
+    albumartist = _nfc(_first(tags, "albumartist", "album artist", "artist"))
     track, _ = _num_and_total(_first(tags, "tracknumber", "track"))
     disc, disc_total_inline = _num_and_total(_first(tags, "discnumber", "disc"))
     if not disc:
@@ -251,8 +263,8 @@ def normalize_tags(tags: Mapping, stem: str, ext: str, folder: str = "") -> dict
     disc_total, _ = _num_and_total(_first(tags, "disctotal", "totaldiscs"))
     return {
         "albumartist": albumartist,
-        "album": _first(tags, "album"),
-        "title": _first(tags, "title") or stem,
+        "album": _nfc(_first(tags, "album")),
+        "title": _nfc(_first(tags, "title") or stem),
         "track": track,
         "disc": disc or 1,
         "disctotal": disc_total or disc_total_inline or 0,
@@ -316,6 +328,17 @@ def _truncate_component(name: str, *, ext: str = "", limit: int = _NAME_MAX) -> 
     return beets_sanitize(b[:budget].decode("utf-8", "ignore")) + ext
 
 
+_YEAR_BRACKET_RE = re.compile(
+    r"^\s*[(\[]\s*\d{4}\s*[)\]]\s*|\s*[(\[]\s*\d{4}\s*[)\]]\s*$")
+
+
+def _without_year_bracket(album: str) -> str:
+    """The album name minus a leading or trailing bracket holding only a
+    year, "(2010)" or "[2010]". An edition such as "(2011 Remaster)" stays,
+    as it does in the beets path."""
+    return _YEAR_BRACKET_RE.sub("", album).strip() or album
+
+
 def album_components(meta: dict) -> tuple:
     """(artist_folder, album_folder) for an album, sanitized to match beets.
 
@@ -328,9 +351,9 @@ def album_components(meta: dict) -> tuple:
     year = meta.get("year") or 0
     album = meta["album"]
     if year:
-        # Strip any year the album tag already carries so we don't end up with
+        # Strip a year the album tag already carries so we don't end up with
         # "Album (2010) (2010)".
-        album_folder = f"{strip_year_decoration(album)} ({year})"
+        album_folder = f"{_without_year_bracket(album)} ({year})"
     else:
         album_folder = album
     return (_truncate_component(beets_sanitize(artist)),
@@ -352,6 +375,40 @@ def _album_source_dir(source) -> Path:
     """The folder an album came from, above any "Disc N" folder of its own."""
     parent = Path(source).parent
     return parent.parent if _folder_disc(parent.name) else parent
+
+
+def _source_folder_label(folder: Path, source_root) -> str:
+    """A source folder as the summary names it: relative to the source root
+    when it is under it."""
+    if source_root is not None:
+        try:
+            relative = _lexical_absolute(folder).relative_to(
+                _lexical_absolute(source_root))
+        except ValueError:
+            pass
+        else:
+            return str(relative) if relative.parts else "the source folder itself"
+    return str(folder)
+
+
+def _track_slot(meta: dict) -> tuple:
+    """What tells one track of an album from another: its disc and track
+    number, or its title when it has no number."""
+    return (meta.get("disc") or 1, meta.get("track") or meta.get("title"))
+
+
+def _existing_spellings(folder) -> dict:
+    """The folders already under ``folder``, by folded name."""
+    try:
+        with os.scandir(folder) as listing:
+            names = sorted(entry.name for entry in listing
+                           if entry.is_dir(follow_symlinks=False))
+    except OSError:
+        return {}
+    spellings: dict = {}
+    for name in names:
+        spellings.setdefault(_fold_name(name), name)
+    return spellings
 
 
 def companion_folders(folder) -> tuple:
@@ -1576,39 +1633,100 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
                   reason=f"{UNREADABLE}: {reason}")
         for source, reason in getattr(items, "unreadable", ()))
 
-    # The year is decided once per album, so tracks tagged with different
-    # years (a compilation's own, or one original date) share one folder. An
-    # album is its tags plus the folder it came from, which keeps two
-    # same-titled albums in separate folders apart.
+    # An album is its tags plus the folder it came from (a "Disc N" folder
+    # counts as its parent), so a second copy of an album in another folder
+    # is kept apart from the first. The year is decided once per album, so
+    # tracks tagged with different years (a compilation's own, or one
+    # original date) share one folder.
     albums: dict = {}
     for row in placeable:
         source, meta = row[0], row[1]
+        artist_folder, album_folder = _album_key({**meta, "year": 0})
         albums.setdefault(
-            (_album_key({**meta, "year": 0}), _album_source_dir(source)), []
+            (_fold_name(artist_folder),
+             _fold_name(_without_year_bracket(album_folder)),
+             _album_source_dir(source)), []
         ).append(row)
 
-    # Group by album so multi-disc can be decided from the whole album, not one
-    # track: a disc tag of 2 only means "Disc 2/" if the album really spans
-    # discs (disctotal > 1, or some track carries a higher disc number).
-    groups: dict = {}
-    for members in albums.values():
+    # Names that differ only by case or Unicode form are one name: every
+    # album of an artist takes the spelling most of the tracks carry (ties go
+    # to the first in source order), and so does an album folder under one
+    # artist.
+    artist_spellings: dict = {}
+    album_spellings: dict = {}
+    keyed = []
+    for identity, members in albums.items():
         year = _album_year(meta for _, meta, _, _ in members)
-        for row in members:
-            groups.setdefault(
-                _album_key({**row[1], "year": year}), []).append(row)
+        folders = [_album_key({**meta, "year": year})
+                   for _, meta, _, _ in members]
+        for artist_folder, album_folder in folders:
+            artist_key = _fold_name(artist_folder)
+            artist_spellings.setdefault(
+                artist_key, Counter())[artist_folder] += 1
+            album_spellings.setdefault(
+                (artist_key, _fold_name(album_folder)), Counter()
+            )[album_folder] += 1
+        keyed.append((identity, members, folders[0]))
 
+    # A folder already at the destination keeps its spelling, so a move
+    # started again after a stop lands the rest of an album where its first
+    # tracks went.
+    existing_artists = _existing_spellings(dest_root)
+    existing_albums: dict = {}
+
+    def album_dir(artist_folder, album_folder):
+        artist_key = _fold_name(artist_folder)
+        artist = existing_artists.get(artist_key) or (
+            artist_spellings[artist_key].most_common(1)[0][0])
+        if artist not in existing_albums:
+            existing_albums[artist] = _existing_spellings(dest_root / artist)
+        album_key = _fold_name(album_folder)
+        album = existing_albums[artist].get(album_key) or (
+            album_spellings[(artist_key, album_key)].most_common(1)[0][0])
+        return Path(artist, album)
+
+    # Two source albums that map to one destination folder are one album
+    # when their tracks do not overlap (discs ripped to sibling folders, a
+    # bonus disc in a subfolder); otherwise the folder that sorts first is
+    # placed and the other is reported against it.
+    placed: dict = {}
+    laid_out = []
+    for identity, members, folders in sorted(
+            keyed, key=lambda item: str(item[0][2])):
+        folder = album_dir(*folders)
+        slots = {_track_slot(meta) for _, meta, _, _ in members}
+        if folder not in placed:
+            album = list(members)
+            placed[folder] = (identity[2], slots, album)
+            laid_out.append((folder, album, ""))
+        elif placed[folder][1].isdisjoint(slots):
+            placed[folder][1].update(slots)
+            placed[folder][2].extend(members)
+        else:
+            laid_out.append((folder, members, _source_folder_label(
+                placed[folder][0], source_root)))
+
+    # Multi-disc is decided from the whole album, not one track: a disc tag
+    # of 2 only means "Disc 2/" if the album really spans discs (disctotal >
+    # 1, or some track carries a higher disc number).
     seen_dest: dict = {}
     built = []
-    for key, members in groups.items():
-        artist_folder, album_folder = key
+    for folder, members, duplicate_of in laid_out:
         multidisc = any(
             (m.get("disctotal") or 0) > 1 or (m.get("disc") or 1) > 1
             for _, m, _, _ in members)
         for source, meta, sot, source_receipt in members:
-            rel = Path(artist_folder) / album_folder
+            rel = folder
             if multidisc:
                 rel = rel / f"Disc {meta.get('disc') or 1}"
             rel = rel / track_filename(meta)
+            if duplicate_of:
+                entries.append(PlanEntry(
+                    source=source, status=COLLISION, dest_rel=rel,
+                    source_of_truth=sot,
+                    reason=f"same album already placed from {duplicate_of}",
+                    meta=meta, source_receipt=source_receipt))
+                continue
             built.append((source, sot, meta, rel, source_receipt))
             collision_key = _destination_collision_key(
                 rel, destination_name_semantics)
@@ -2311,6 +2429,39 @@ def _companion_belongs(receipt, folder, owners) -> bool:
     )
 
 
+def album_companion_receipts(plan, entries, owners) -> list:
+    """The cover art and sidecars of ``plan`` that go with one album's
+    ``entries`` when a review splits the plan by album: a lyrics file named
+    after one of its tracks (or after no track in the plan, which an earlier
+    run may have moved), and the rest as ``_companion_belongs`` judges them
+    for the album's destination folders against the ``owners`` of the whole
+    plan, so what a reviewer ticks never changes where a cover goes."""
+    folders, destinations, tracks = set(), set(), set()
+    for entry in entries:
+        if entry.source_receipt is None or entry.dest_rel is None:
+            continue
+        relative = entry.source_receipt["relative"]
+        folders.update(companion_folders(relative[:-1]))
+        destinations.update(_companion_destinations(entry.dest_rel))
+        tracks.add(Path(*relative).with_suffix(""))
+    planned = {
+        Path(*entry.source_receipt["relative"]).with_suffix("")
+        for entry in plan.entries if entry.source_receipt is not None}
+    kept = []
+    for receipt in plan.companion_receipts:
+        relative = Path(*receipt["relative"])
+        if tuple(receipt["relative"][:-1]) not in folders:
+            continue
+        if relative.suffix.lower() == ".lrc":
+            stem = relative.with_suffix("")
+            if stem in tracks or stem not in planned:
+                kept.append(receipt)
+        elif any(_companion_belongs(receipt, folder, owners)
+                 for folder in destinations):
+            kept.append(receipt)
+    return kept
+
+
 def _companion_targets(companions, folder, lyric_destinations, owners):
     for receipt in companions:
         relative = Path(*receipt["relative"])
@@ -2670,6 +2821,53 @@ def skipped_folders_note(items) -> str:
     if count == 1:
         return f"Skipped 1 hidden or system folder: {shown}."
     return f"Skipped {count} hidden or system folders, such as {shown}."
+
+
+def _items(names) -> str:
+    folders = sum(name.endswith("/") for name in names)
+    files = len(names) - folders
+    return " and ".join(
+        plural(count, word)
+        for count, word in ((files, "file"), (folders, "folder")) if count)
+
+
+def left_in_source_lines(left, limit: int = 20) -> list:
+    """What a move left in the source: a heading, one line per folder with
+    the folders holding files that did not reach the new library first, and
+    the folders past ``limit`` as one count. The terminal and the web page
+    print the same lines."""
+    if not left:
+        return []
+    ordered = sorted(left, key=lambda item: not item[1])
+    lines = [f"{plural(len(left), 'source folder')} still "
+             f"{'holds' if len(left) == 1 else 'hold'} files:"]
+    for folder, names, carried in ordered[:limit]:
+        carried_text = plural(carried, "carried cover/sidecar file")
+        if names and carried:
+            what = f"{_items(names)} not moved, {carried_text}"
+        elif names:
+            what = f"{_items(names)} not moved"
+        else:
+            what = f"only {carried_text}"
+        lines.append(f"{folder or 'the source folder itself'}: {what}")
+    if len(ordered) > limit:
+        lines.append(f"and {plural(len(ordered) - limit, 'more folder')} "
+                     "(see the results CSV)")
+    return lines
+
+
+def not_carried_line(collided: int, unidentified: int) -> str:
+    """One line for the files the plan left where they were, or ""."""
+    parts = []
+    if collided:
+        parts.append(f"{plural(collided, 'file')} skipped to avoid name collisions")
+    if unidentified:
+        parts.append(f"{plural(unidentified, 'file')} could not be identified")
+    if not parts:
+        return ""
+    return " and ".join(parts) + (
+        ", all listed in the manifest CSV" if collided + unidentified > 1
+        else ", listed in the manifest CSV")
 
 
 def collect_items(source_root: Path, *, use_acoustid: bool = False,
@@ -3294,42 +3492,64 @@ def _prune_retired_source_parents(binding, receipts, *, result=None,
     return removed
 
 
-def _source_folders_left(binding, chains, carried) -> list:
-    """The finished source folders, of ``{folder: sealed parent chain}``, that
-    still hold anything, as (relative path, names left out) pairs.
+def _source_folders_left(binding, planned, carried) -> list:
+    """Every source folder a move left something in, as (relative path,
+    names not in the new library, count of carried names) triples.
 
-    ``carried`` holds the source paths of the cover art and sidecars that
-    reached the destination; every other name is left out, with a slash
-    after a folder's, except a finished folder, which is reported itself."""
-    left = []
-    for folder, chain in sorted(chains.items()):
-        if not chain:
-            continue
-        try:
-            descriptors = _open_sealed_directory_chain(binding, list(chain))
-        except OSError:
-            continue
-        try:
-            names = sorted(os.listdir(descriptors[-1]))
-            if names:
-                left_out = []
-                for name in names:
-                    if (
-                        binding.path.joinpath(*folder, name) in carried
-                        or (*folder, name) in chains
-                    ):
-                        continue
-                    value = os.stat(
-                        name, dir_fd=descriptors[-1], follow_symlinks=False)
-                    left_out.append(
-                        name + "/" if stat.S_ISDIR(value.st_mode) else name)
-                left.append((os.path.join(*folder), left_out))
-        except OSError:
-            continue
-        finally:
-            for descriptor in reversed(descriptors):
-                os.close(descriptor)
-    return left
+    ``planned`` holds the relative folders the plan's audio came from, with
+    their ancestors, and ``carried`` the source paths of the cover art and
+    sidecars that reached the destination. A folder that holds audio, is
+    planned, or has a reported folder beneath it is reported itself; any
+    other folder is a name of its parent, with a slash after it. Hidden and
+    system folders are not read, as in the scan."""
+    audio_exts = set(config.AUDIO_EXTS)
+
+    def walk(fd, folder):
+        names, carried_here, has_audio, children = [], 0, False, []
+        for name in sorted(os.listdir(fd)):
+            try:
+                value = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except OSError:
+                names.append(name)
+                continue
+            if stat.S_ISDIR(value.st_mode):
+                if is_library_system_folder(name):
+                    names.append(name + "/")
+                else:
+                    children.append(name)
+            elif binding.path.joinpath(*folder, name) in carried:
+                carried_here += 1
+            else:
+                names.append(name)
+                has_audio = has_audio or Path(name).suffix.lower() in audio_exts
+        lines = []
+        for name in children:
+            try:
+                child_fd = _open_directory(name, dir_fd=fd)
+            except OSError:
+                names.append(name + "/")
+                continue
+            try:
+                child_lines, child_own = walk(child_fd, folder + (name,))
+            except OSError:
+                child_lines, child_own = [], False
+            finally:
+                os.close(child_fd)
+            if child_own:
+                lines.extend(child_lines)
+            else:
+                names.append(name + "/")
+        own = has_audio or folder in planned or not folder or bool(lines)
+        if own and (names or carried_here):
+            lines.insert(0, (
+                os.path.join(*folder) if folder else "",
+                sorted(names), carried_here))
+        return lines, own
+
+    try:
+        return walk(binding.root_fd, ())[0]
+    except OSError:
+        return []
 
 
 def _close_published_file(published) -> None:
@@ -3696,11 +3916,17 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
     waiting = Counter()
     folder_chains: dict = {}
 
-    def finished_folders_left():
+    def source_folders_left():
+        root = _lexical_absolute(Path(plan.source_root))
+        planned = set()
+        for entry in [*plan.entries, *resume_entries]:
+            try:
+                parts = _lexical_absolute(entry.source).relative_to(root).parts
+            except ValueError:
+                continue
+            planned.update(parts[:depth] for depth in range(len(parts)))
         return _source_folders_left(
-            source_root,
-            {folder: chain for folder, chain in folder_chains.items()
-             if not waiting[folder]},
+            source_root, planned,
             {source for source, _destination, status, reason
              in result.companion_outcomes
              if status == COPIED or reason == SAME_COMPANION})
@@ -3923,7 +4149,7 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                 cancel_check=cancel_check,
             )
         if in_place:
-            result.left_in_source = finished_folders_left()
+            result.left_in_source = source_folders_left()
         return result
     except (KeyboardInterrupt, Exception) as exc:
         # The run stops here, but returns its result so the report is
@@ -3933,9 +4159,9 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
         else:
             log.exception("Migration stopped by an unexpected error")
         result.cancelled = True
-        if in_place and folder_chains:
+        if in_place and source_root is not None:
             try:
-                result.left_in_source = finished_folders_left()
+                result.left_in_source = source_folders_left()
             except BaseException:
                 pass
         return result
@@ -4050,7 +4276,42 @@ def write_manifest(plan: MigrationPlan, *, left_behind=()) -> Path:
     )
 
 
-def _results_rows(result) -> list:
+def _not_carried_rows(result, plan, left_behind) -> list:
+    """One skipped row per plan entry the run never attempted, and one row
+    per name a move left in the source that no other row names."""
+    if plan is None:
+        return []
+    done = {os.fspath(source) for source, _destination, _status, _reason
+            in result.outcomes}
+    rows, known = [], set()
+    for entry in [*plan.entries, *left_behind]:
+        source = os.fspath(entry.source)
+        known.add(source)
+        if source in done:
+            continue
+        rows.append([
+            "track",
+            SKIPPED,
+            _csv_safe_cell(entry.source, path=True),
+            _csv_safe_cell(entry.dest_rel, path=True)
+            if entry.dest_rel is not None else "",
+            entry.reason or "the run stopped before it was reached",
+            "",
+            "",
+        ])
+    root = os.fspath(plan.source_root) if plan.source_root is not None else ""
+    for folder, names, _carried in result.left_in_source:
+        for name in names:
+            path = os.path.join(root, folder, name)
+            if path.rstrip("/") in known:
+                continue
+            rows.append([
+                "left", "not moved", _csv_safe_cell(path, path=True),
+                "", "", "", ""])
+    return rows
+
+
+def _results_rows(result, *, plan=None, left_behind=()) -> list:
     companion_failures = sum(
         status == FAILED
         for _source, _destination, status, _reason
@@ -4061,6 +4322,7 @@ def _results_rows(result) -> list:
         else "failed" if result.failed or companion_failures
         else "completed"
     )
+    not_carried = _not_carried_rows(result, plan, left_behind)
     summary = {
         "state": state,
         "cancelled": bool(result.cancelled),
@@ -4073,6 +4335,8 @@ def _results_rows(result) -> list:
         "companion_failures": int(companion_failures),
         "pruned": int(result.pruned),
         "track_attempts": len(result.outcomes),
+        "not_carried": sum(row[0] == "track" for row in not_carried),
+        "left_in_source": sum(row[0] == "left" for row in not_carried),
     }
     rows = [[
         "summary",
@@ -4103,11 +4367,15 @@ def _results_rows(result) -> list:
                 "",
                 "",
             ])
+    rows.extend(not_carried)
     return rows
 
 
-def write_results_manifest(result: ExecResult, *, plan: MigrationPlan) -> Path:
-    """Write every track and companion outcome beside the destination."""
+def write_results_manifest(result: ExecResult, *, plan: MigrationPlan,
+                           left_behind=()) -> Path:
+    """Write every track and companion outcome beside the destination, with
+    the plan entries the run never attempted and what a move left in the
+    source. ``left_behind`` adds entries that are not part of ``plan``."""
     return _write_csv_for_plan(
         plan,
         "migration-results",
@@ -4115,5 +4383,5 @@ def write_results_manifest(result: ExecResult, *, plan: MigrationPlan) -> Path:
             "record", "status", "source", "destination", "reason",
             "state", "restart",
         ],
-        _results_rows(result),
+        _results_rows(result, plan=plan, left_behind=left_behind),
     )

@@ -339,25 +339,18 @@ def run_migrate_mode(args):
     if pruned:
         log.info(fmt(C.GRAY,
             f"  Cleared {plural(pruned, 'now-empty folder')} from the source."))
-    left = getattr(result, "left_in_source", ())
-    left_out = [(folder, names) for folder, names in left if names]
-    copies_only = len(left) - len(left_out)
-    if left_out:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  {plural(len(left_out), 'source folder')} still "
-            f"{'holds' if len(left_out) == 1 else 'hold'} files that were "
-            "not moved:"))
-        for folder, names in left_out[:20]:
-            shown = ", ".join(names[:8]) + (
-                f" and {len(names) - 8} more" if len(names) > 8 else "")
-            log.info(fmt(C.YELLOW, f"       {truncate(folder, 50)}: {shown}"))
-        if len(left_out) > 20:
-            log.info(fmt(C.YELLOW, f"       … and {len(left_out) - 20} more"))
-    if copies_only:
-        log.info(fmt(C.GRAY,
-            f"  {plural(copies_only, 'source folder')} still "
-            f"{'holds' if copies_only == 1 else 'hold'} only cover art and "
-            "sidecars, which were copied."))
+    left_lines = engine.left_in_source_lines(
+        getattr(result, "left_in_source", ()))
+    if left_lines:
+        log.info(fmt(C.YELLOW, f"  ⚠  {left_lines[0]}"))
+        for line in left_lines[1:]:
+            log.info(fmt(C.YELLOW, f"       {line}"))
+    resumed = {id(entry) for entry in resume_entries}
+    not_carried = engine.not_carried_line(
+        sum(id(entry) not in resumed for entry in plan.collisions),
+        plan.summary()["unplaceable"])
+    if not_carried:
+        log.info(fmt(C.YELLOW, f"  ⚠  {not_carried}."))
     if result.failed:
         log.info(fmt(C.RED, f"  ✗  {result.failed} failed:"))
         for src, reason in result.failures[:50]:
@@ -385,7 +378,9 @@ def run_migrate_mode(args):
             "  ⚠  Finished, but some originals are still at the source."))
     elif unreadable:
         log.warning(fmt(C.YELLOW,
-            "  ⚠  Finished, but some files could not be read."))
+            "  ⚠  Finished, but "
+            f"{plural(len(unreadable), 'file or folder', 'files or folders')} "
+            "could not be read."))
     else:
         log.info(fmt(C.GREEN, "  ✓  Done."))
     # A run with failures or one that stopped early is not a success, however
