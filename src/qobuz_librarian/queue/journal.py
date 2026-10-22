@@ -10,7 +10,6 @@ import re
 import secrets
 import stat
 import threading
-import time
 from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
@@ -32,6 +31,7 @@ from qobuz_librarian.completion import (
     parse_completion_input_record,
     parse_completion_record,
 )
+from qobuz_librarian.integrations.beets import is_system_file
 from qobuz_librarian.integrations.staging import (
     _staging_group_reference_parameters,
     staging_run_from_record,
@@ -1783,7 +1783,8 @@ _JOURNAL_TEMPORARY = re.compile(r"\.([0-9a-f]{64})\.[A-Za-z0-9_]+\.tmp")
 
 
 def _abandoned_journal_temporary(path: Path) -> bool:
-    """A save's temporary copy left behind by a kill, not one being written."""
+    """A save's temporary copy left behind by a kill. Saves hold the
+    namespace lock, as does every caller here, so none is being written."""
     match = _JOURNAL_TEMPORARY.fullmatch(path.name)
     if match is None:
         return False
@@ -1791,7 +1792,7 @@ def _abandoned_journal_temporary(path: Path) -> bool:
         info = path.lstat()
     except OSError:
         return False
-    return stat.S_ISREG(info.st_mode) and time.time() - info.st_mtime > 60
+    return stat.S_ISREG(info.st_mode)
 
 
 def _discover_journal_paths() -> tuple[Path, ...]:
@@ -1820,6 +1821,8 @@ def _discover_journal_paths() -> tuple[Path, ...]:
                 pass
             except OSError:
                 ambiguous_paths.append(path)
+        elif is_system_file(path.name):
+            continue
         else:
             ambiguous_paths.append(path)
     if ambiguous_paths:

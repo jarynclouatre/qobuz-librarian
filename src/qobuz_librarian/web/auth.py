@@ -409,12 +409,17 @@ def _env_password() -> str:
     if not path:
         return ""
     try:
-        with open(path, encoding="utf-8") as f:
-            # Strip only the trailing newline a file editor adds.
-            password = f.read().rstrip("\n")
+        with open(path, encoding="utf-8-sig") as f:
+            # Strip only what a file editor adds: a byte-order mark and the
+            # trailing line ending.
+            password = f.read().rstrip("\r\n")
     except OSError as exc:
         raise CredentialSeedError(
             "WEB_AUTH_PASSWORD_FILE could not be read"
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise CredentialSeedError(
+            "WEB_AUTH_PASSWORD_FILE is not UTF-8 text"
         ) from exc
     if not password:
         raise CredentialSeedError("WEB_AUTH_PASSWORD_FILE is empty")
@@ -714,10 +719,17 @@ def _note_untrusted_forwarder(peer: str, client: str) -> None:
 
 def via_trusted_proxy(request) -> bool:
     """Whether uvicorn took the client from X-Forwarded-For, as it does only
-    for a FORWARDED_ALLOW_IPS peer: a forwarded address carries no port."""
+    for a FORWARDED_ALLOW_IPS peer: a forwarded address carries no port, or
+    the exact address and port the proxy wrote."""
     client = request.scope.get("client")
-    return bool(client and client[1] == 0
-                and request.headers.get("x-forwarded-for"))
+    forwarded = request.headers.get("x-forwarded-for")
+    if not (client and forwarded):
+        return False
+    host, port = client[0], client[1]
+    if port == 0:
+        return True
+    entries = {entry.strip() for entry in forwarded.split(",")}
+    return bool(entries & {f"{host}:{port}", f"[{host}]:{port}"})
 
 
 _LOCAL_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal",

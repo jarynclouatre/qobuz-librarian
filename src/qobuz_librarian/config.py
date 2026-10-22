@@ -149,7 +149,7 @@ def _resolve_secret(key: str) -> str:
     if not path:
         return ""
     try:
-        val = Path(path).read_text(encoding="utf-8").strip()
+        val = Path(path).read_text(encoding="utf-8-sig").strip()
     except (OSError, UnicodeDecodeError) as e:
         _warn(f"{key}_FILE={path!r} couldn't be read ({e}); ignoring it.")
         reason = (e.strerror or e) if isinstance(e, OSError) else "it is not text"

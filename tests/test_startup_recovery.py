@@ -819,7 +819,7 @@ def test_startup_recovery_is_fail_closed_and_settles_exact_work(
     assert authority is not None
     try:
         journal_path = journals_dir / f"{saved.operation_id}.json"
-        residue = journals_dir / f".{saved.operation_id}.interrupted.tmp"
+        residue = journals_dir / f".{saved.operation_id}.json.swp"
         residue.write_bytes(journal_path.read_bytes())
         before = journal_path.read_bytes(), residue.read_bytes()
 

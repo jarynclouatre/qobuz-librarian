@@ -3180,6 +3180,14 @@ def test_saved_login_survives_restarts_and_a_new_password_retires_old_sessions(
     assert web_auth.verify_login("admin", "distant meadow signal")
     assert (tmp_path / "auth.json.corrupt").read_text(encoding="utf-8") == "{"
 
+    # A password file saved by Windows Notepad.
+    secret = tmp_path / "password.txt"
+    secret.write_bytes(b"\xef\xbb\xbfnorthern copper bell\r\n")
+    monkeypatch.delenv("WEB_AUTH_PASSWORD")
+    monkeypatch.setenv("WEB_AUTH_PASSWORD_FILE", str(secret))
+    assert web_auth.apply_env_credentials() == "applied"
+    assert web_auth.verify_login("admin", "northern copper bell")
+
 
 def test_restore_and_startup_put_backups_home_but_never_by_a_path(
         client, tmp_path, monkeypatch):

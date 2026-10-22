@@ -255,6 +255,24 @@ def test_malformed_v2_blocks_replay_and_requires_explicit_discard(queue_paths):
     assert path.read_bytes() == raw
 
 
+def test_a_kill_mid_save_and_desktop_files_do_not_block_the_queue(queue_paths):
+    saved = save_queue_journal(create_queue_journal([_queue_item()], mode="cli"))
+    journals = queue_paths
+    leftover = journals / f".{saved.operation_id}.k3Xq9z.tmp"
+    leftover.write_bytes(b"{")
+    for name in (".DS_Store", "Thumbs.db", f"._{saved.operation_id}.json"):
+        (journals / name).write_bytes(b"")
+    (journals / "@eaDir").mkdir()
+
+    loaded = load_queue_journal(saved.operation_id)
+
+    assert loaded.status is QueueLoadStatus.READY
+    assert not leftover.exists()
+
+    (journals / "notes.txt").write_text("mine", encoding="utf-8")
+    assert load_queue_journal(saved.operation_id).status is QueueLoadStatus.BLOCKED
+
+
 def test_completed_removal_commits_first(queue_paths, monkeypatch):
     monkeypatch.setattr(cfg, "MUSIC_ROOT", Path("/music"))
     save_queue_journal(create_queue_journal([_queue_item("Saved")], mode="walk_queue"))
