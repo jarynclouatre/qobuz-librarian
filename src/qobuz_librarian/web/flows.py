@@ -1654,7 +1654,7 @@ def _scan_library_artist(artist_dir, token, partial_only, hidden):
 # Seconds between live-status refreshes during the whole-library repair sweep
 # (see scan_repairs).
 _REPAIR_HEARTBEAT_SECS = 2
-_REPAIR_CHECKPOINT_VERSION = 2
+_REPAIR_CHECKPOINT_VERSION = 3
 _REPAIR_RESULT_VERSION = 1
 
 
@@ -1684,6 +1684,7 @@ def _repair_checkpoint_bundle(name, agg, proof):
         "counts": {
             "verified_ok": int(agg.get("verified_ok") or 0),
             "unverified": int(agg.get("unverified") or 0),
+            "unmatched": int(agg.get("unmatched") or 0),
             "failed_albums": int(agg.get("failed") or 0),
         },
         "artist": name,
@@ -1705,12 +1706,13 @@ def _validated_repair_checkpoint_bundle(artist_dir, value):
         or type(value.get("candidates")) is not list
         or type(value.get("counts")) is not dict
         or set(value["counts"]) != {
-            "verified_ok", "unverified", "failed_albums",
+            "verified_ok", "unverified", "unmatched", "failed_albums",
         }
         or any(
             type(value["counts"].get(key)) is not int
             or value["counts"][key] < 0
-            for key in ("verified_ok", "unverified", "failed_albums")
+            for key in ("verified_ok", "unverified", "unmatched",
+                        "failed_albums")
         )
         # Failed albums were not fully checked. Retry their artist instead of
         # reusing an incomplete result in a later clean scan.
@@ -4230,8 +4232,8 @@ def _repair_album_outcome(album_dir, name, token):
     """Scan one album into an outcome dict: counts, review-candidate specs, and
     any log lines to emit. AuthLost / QobuzUnavailable propagate (they stop the
     sweep); any other scan error is recorded as a failed album."""
-    out = {"verified_ok": 0, "unverified": 0, "failed": 0, "specs": [],
-           "warns": []}
+    out = {"verified_ok": 0, "unverified": 0, "unmatched": 0, "failed": 0,
+           "specs": [], "warns": []}
     try:
         scan = repair_log.scan_dir_for_isrc_repairs(album_dir, token, deep=True)
     except (AuthLost, QobuzUnavailable):
@@ -4242,6 +4244,10 @@ def _repair_album_outcome(album_dir, name, token):
         return out
     out["verified_ok"] = scan["verified_ok"]
     out["unverified"] = scan.get("unverified", 0)
+    out["unmatched"] = sum(
+        not entry.get("diagnostic")
+        for bucket in ("isrc_no_match", "no_isrc_tag", "isrc_mismatch")
+        for entry in scan.get(bucket, []))
     truncated = scan["verified_truncated"]
     suspicious = [
         entry
@@ -4349,14 +4355,15 @@ def _scan_repair_artist(artist_dir, token, job, beat=None):
                 f"{link} is a symbolic link, which Repair can't check or back "
                 "up safely; replace it with a copy of its file")
         raise OSError("artist files could not be recorded before Repair checked them")
-    agg = {"verified_ok": 0, "unverified": 0, "failed": 0, "checked": 0,
-           "specs": []}
+    agg = {"verified_ok": 0, "unverified": 0, "unmatched": 0, "failed": 0,
+           "checked": 0, "specs": []}
     for album_dir in list_artist_album_dirs(artist_dir):
         if job.cancel_requested:
             break
         outcome = _repair_album_outcome(album_dir, name, token)
         agg["verified_ok"] += outcome.get("verified_ok", 0)
         agg["unverified"] += outcome.get("unverified", 0)
+        agg["unmatched"] += outcome.get("unmatched", 0)
         agg["failed"] += outcome.get("failed", 0)
         agg["checked"] += 1
         agg["specs"].extend(outcome.get("specs", []))
@@ -4472,6 +4479,7 @@ def _scan_repairs_impl(job, token, checkpoint):
     total = 0
     n_verified = 0
     n_unverified = 0
+    n_unmatched = 0
     n_failed_albums = 0
     n_failed_artists = len(unreadable_artists)
     n_linked_artists = 0
@@ -4488,6 +4496,7 @@ def _scan_repairs_impl(job, token, checkpoint):
             counts = bundle["counts"]
             n_verified += counts["verified_ok"]
             n_unverified += counts["unverified"]
+            n_unmatched += counts["unmatched"]
             n_failed_albums += counts["failed_albums"]
             for spec in bundle["candidates"]:
                 _readd_candidate(job, spec)
@@ -4601,6 +4610,7 @@ def _scan_repairs_impl(job, token, checkpoint):
                 continue
             n_verified += agg["verified_ok"]
             n_unverified += agg["unverified"]
+            n_unmatched += agg.get("unmatched", 0)
             n_failed_albums += agg["failed"]
             for spec in agg["specs"]:
                 # Unticked by default, like Upgrade and Downsample: Repair
@@ -4637,14 +4647,18 @@ def _scan_repairs_impl(job, token, checkpoint):
         n_unverified, n_failed_albums,
         n_failed_artists - len(unreadable_artists) - n_linked_artists,
         n_linked_artists)
+    unmatched = (
+        f" {plural(n_unmatched, 'track')} couldn't be matched to a Qobuz "
+        "recording, so their length wasn't checked."
+        if n_unmatched else "")
     if total:
         job.summary = (f"{plural(total, 'album')} flagged with damaged files. "
                        f"{plural(n_verified, 'track')} decode-verified clean."
-                       + caveats)
+                       + unmatched + caveats)
     else:
         job.summary = (f"No damaged files found. "
                        f"{plural(n_verified, 'track')} decode-verified intact."
-                       + caveats)
+                       + unmatched + caveats)
     if clear_failed:
         job.summary += (
             " Old resume data could not be cleared. Check the data folder "
@@ -5093,6 +5107,11 @@ def execute_repairs(job, chosen, token):
             interrupted += 1
             stopped_early = True
             unfinished_start = processed - 1
+            try:
+                candidate_premise.validate(cand)
+            except CandidateStale:
+                changed += 1
+                unfinished_start = processed
         elif (result and result.get("n_ok", 0) > 0 and result.get("imported")
                 and result.get("n_fail", 0) == 0
                 and result.get("repair_unverified")):

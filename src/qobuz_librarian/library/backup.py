@@ -4330,6 +4330,7 @@ def stash_downsample_originals(files, album_dir):
 def restore_gap_fill_backup(backup, album_dir: Path,
                             *, keep_larger_dst: bool = True,
                             replace_dst: bool = True,
+                            keep=frozenset(),
                             expected_owner=None) -> int:
     """Put every file of a gap-fill, repair or downsample backup back under
     album_dir at its own relative path, and return how many are there.
@@ -4341,6 +4342,8 @@ def restore_gap_fill_backup(backup, album_dir: Path,
     pass False: there the backup is the good original, so a larger but
     corrupt re-rip must not win. replace_dst=False never replaces a file
     already at the destination: any other file there fails that track.
+    Files named in ``keep`` are left as the album holds them and the backup
+    keeps its copy of them.
 
     Each file is copied under a temporary name beside its destination and
     checked against the receipt's sha256, then renamed to its name, over
@@ -4372,6 +4375,8 @@ def restore_gap_fill_backup(backup, album_dir: Path,
     payload = backup_payload(backup.receipt)
     found = {}
     for relative, (size, digest) in sorted(payload.items()):
+        if relative in keep:
+            continue
         target = album / relative
         try:
             if _library_path(target, create_parents=True) is None:
@@ -4394,7 +4399,7 @@ def restore_gap_fill_backup(backup, album_dir: Path,
                      for relative, identity in found.items())
     except OSError:
         intact = False
-    if len(found) != len(payload) or not intact:
+    if len(found) + len(keep & payload.keys()) != len(payload) or not intact:
         _write_receipt_marker(
             backup,
             _PARTIAL_RESTORE_SENTINEL,
@@ -4403,6 +4408,8 @@ def restore_gap_fill_backup(backup, album_dir: Path,
         log.info(fmt(C.RED + C.BOLD,
             f"  ✗  Some tracks could NOT be restored. Originals are "
             f"PRESERVED at:\n     {source}"))
+        return len(found)
+    if keep & payload.keys():
         return len(found)
     if not _delete_backup_folder(
             source, backup_snapshot, _hidden_name(source.name)):
@@ -5968,6 +5975,15 @@ def _classify_backup_contents(
                 if budget is not None and not budget.reserve(destination.stat().st_size):
                     skipped = True
                     continue
+                same_size = destination.stat().st_size == source.stat().st_size
+                if same_size and budget is not None and not budget.reserve(
+                        source.stat().st_size):
+                    skipped = True
+                    continue
+                if same_size and _file_digest(source) == _file_digest(destination):
+                    # The album holds this very file, damaged or not, so the
+                    # backup's copy adds nothing.
+                    continue
                 source_duration = _audio_duration_seconds(source)
                 destination_duration = _audio_duration_seconds(destination)
                 if source_duration is None or destination_duration is None:
@@ -6311,7 +6327,7 @@ def _replacement_proof(candidate):
         return origin, {"match_recordings": True}
     if kind != "gap-fill":
         return None
-    if re.match(r"^\d{8}_\d{6}_\d{6}_repair_", backup_name(candidate.path)):
+    if is_repair_backup(candidate.path):
         return origin, {"match_recordings": True, "allow_smaller_audio": True}
     return origin, {"match_recordings": True, "allow_smaller_audio": True,
                     "same_audio": True}
@@ -6635,6 +6651,12 @@ def _leftover_origin(top):
     if origin is None and (receipt := _leftover_receipt(top)) is not None:
         origin = Path(receipt["origin"])
     return origin
+
+
+def is_repair_backup(path) -> bool:
+    """Whether the backup at ``path`` holds the damaged tracks a Repair
+    replaced."""
+    return bool(re.match(r"^\d{8}_\d{6}_\d{6}_repair_", backup_name(path)))
 
 
 def backup_name(path) -> str:

@@ -28,6 +28,7 @@ from qobuz_librarian.library.backup import (
     BackupResult,
     _normalise_gap_fill_expected_receipts,
     backup_gap_fill_files,
+    backup_payload,
     files_replaced_in_album,
     first_symlink,
     pin_unverified_upgrade_backup,
@@ -314,6 +315,18 @@ def _repair_receipt_parts(value):
     ):
         raise OSError("repair import receipt has an invalid path")
     return tuple(relative.parts)
+
+
+def _audio_files(album_dir):
+    """The album's audio files by path relative to it, or None if it can't
+    be read."""
+    try:
+        return {
+            path.relative_to(album_dir).as_posix()
+            for path in Path(album_dir).rglob("*")
+            if path.suffix.lower() in cfg.AUDIO_EXTS and path.is_file()}
+    except OSError:
+        return None
 
 
 def _album_identity(album_dir):
@@ -736,6 +749,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         # originals are in the backup. The presence/intact gates below compare
         # against baseline + wanted, so a healthy PRE-EXISTING file sharing a
         # refill's ISRC can't vouch for a refill that never came back.
+        held_tracks = _audio_files(album_dir)
         _bl_errs = []
         baseline_counts = Counter(
             _norm_isrc(et.get("isrc"))
@@ -782,23 +796,49 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "downloaded.",
             )
         except BaseException as exc:
-            # Interrupted or an unexpected failure mid-refill. Don't auto-
-            # restore: a partly-succeeded refill may already have written good
-            # replacements, and moving the truncated originals back would
-            # clobber them.
-            if backup_path and backup_path.exists():
-                pin_repair_recovery(
-                    "repair backup kept, refill was interrupted")
+            # Interrupted or an unexpected failure mid-refill. The originals
+            # go back only where nothing landed: a refill that did may be
+            # good, so it stays and the backup keeps the original it replaced.
+            # A refill filed under another name would sit beside its original,
+            # so nothing goes back once a new track is in the album.
+            now_held = _audio_files(album_dir)
+            if (backup_path.exists()
+                    and _album_identity(album_dir) == album_identity
+                    and held_tracks is not None and now_held is not None
+                    and now_held - held_tracks
+                    <= set(backup_payload(backup_path.receipt))):
+                try:
+                    restore_gap_fill_backup(
+                        backup_path, album_dir, replace_dst=False,
+                        keep=files_replaced_in_album(backup_path))
+                except BaseException as restore_exc:
+                    log.info(fmt(C.RED,
+                        "  ✗  Putting the originals back stopped "
+                        f"({restore_exc!r})."))
+            if not backup_path.exists():
+                resolve_recovery(
+                    backup_path,
+                    "Repair stopped before a replacement landed, so every "
+                    "original was put back.",
+                )
                 log.info(fmt(C.YELLOW,
-                    f"  ⚠  Repair interrupted, damaged originals preserved at:\n"
-                    f"     {backup_path}\n"
-                    f"     Re-run Repair to retry, or restore them by hand."))
-            interrupt_with_recovery(
-                exc,
-                "refill",
+                    "  ⚠  Repair stopped; the damaged originals are back in "
+                    "the album. Re-run Repair to retry."))
+                raise
+            pin_repair_recovery("repair backup kept, refill was interrupted")
+            landed = len(files_replaced_in_album(backup_path))
+            stopped = (
+                f"Repair stopped after {plural(landed, 'replacement track')} "
+                "reached the album, before they were checked."
+                if landed else
                 "Repair stopped while replacement tracks were being "
-                "downloaded.",
-            )
+                "downloaded.")
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  {stopped} Damaged originals are kept at:\n"
+                f"     {backup_path}\n"
+                f"     Settings, Diagnostics lists them and can put them "
+                f"back."))
+            interrupt_with_recovery(exc, "refill", stopped)
 
         if _album_identity(album_dir) != album_identity:
             pin_repair_recovery(
@@ -971,7 +1011,9 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                         "short."))
                 try:
                     n_restored = restore_gap_fill_backup(
-                        backup_path, album_dir, replace_dst=not n_fail_final)
+                        backup_path, album_dir, replace_dst=not n_fail_final,
+                        keep=(files_replaced_in_album(backup_path)
+                              if n_fail_final else frozenset()))
                 except BaseException as exc:
                     pin_repair_recovery(
                         "repair backup kept, automatic restore was "
@@ -1062,6 +1104,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             "n_fail": (n_fail_final if repaired or partial
                        else max(n_fail_final, len(verified_truncated))),
             "imported": repaired or bool(partial),
+            "cancelled": qi.get("result") == "cancelled",
             "backup": recovery_result(),
             "cd_quality_tracks": (qi.get("cd_quality_tracks", [])
                                   if repaired or partial else []),
@@ -1241,7 +1284,8 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             + fmt(C.GRAY,
                 f"   {_format_mmss(b['file_length']):>5}"
                 f" / {_format_mmss(b['qobuz_duration']):>5}"
-                f"  {b['isrc']}"))
+                f"  {b['isrc']}"
+                + ("  won't decode" if b.get("reason") else "")))
 
     # Repair moves the truncated originals aside before re-ripping, so it has to
     # stop here under --dry-run, reaching repair_album_dir would mutate the

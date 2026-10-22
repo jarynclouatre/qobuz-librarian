@@ -2375,8 +2375,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         nonlocal interrupted, io_error, auth_lost_exc
         if isinstance(exc, KeyboardInterrupt):
             log.info(fmt(C.YELLOW,
-                "\n    Interrupted. Stopping further downloads and "
-                "restoring any upgrade backups."))
+                "\n    Interrupted. Stopping further downloads."))
             item["result"] = "interrupted"
             interrupted = True
         elif isinstance(exc, AuthLost):

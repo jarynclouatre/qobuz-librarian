@@ -749,6 +749,8 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         )
     orphans = report["orphans"]
     tok = html.escape(request.state.csrf_token)
+    shared = Counter(
+        (origin, backup_mod.is_repair_backup(path)) for path, origin, _ in orphans)
     for path, origin, classification in orphans:
         name = html.escape(path.name)
         if origin:
@@ -840,7 +842,22 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         where = dest if origin else "the album folder it came from"
         by_file = re.match(
             r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_", path.name)
-        if by_file:
+        repaired = backup_mod.is_repair_backup(path)
+        kept = ""
+        if shared[origin, repaired] > 1:
+            stamp = re.match(r"(\d{8}_\d{6})_", path.name)
+            try:
+                when = datetime.strptime(stamp.group(1), "%Y%m%d_%H%M%S")
+            except (AttributeError, ValueError):
+                pass
+            else:
+                kept = f", kept {when:%b} {when.day}, {when:%H:%M:%S}"
+        if repaired:
+            restore_confirm = (
+                f"Put these damaged tracks back in {where}? They replace "
+                "any file of the same name there, including a replacement "
+                "Repair downloaded, and that file cannot be brought back.")
+        elif by_file:
             # These restore file by file and the backup wins each swap.
             restore_confirm = (
                 f"Put these files back in {where}? Any file of the same name "
@@ -895,7 +912,8 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'<div class="ql-diagnostic-row" data-backup-status="{classification.status}">'
             f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'
             f'<div class="min-w-0"><div class="ql-diagnostic-label">'
-            f'Backup{f": {album}" if album else ""}</div>'
+            f'{"Damaged tracks Repair replaced" if repaired else "Backup"}'
+            f'{f": {album}" if album else ""}{kept}</div>'
             f'<div class="ql-diagnostic-detail">{reason}</div>'
             f'<div class="mt-2 flex gap-2">'
             f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
