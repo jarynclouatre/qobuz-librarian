@@ -634,6 +634,17 @@ def _is_damage(exc) -> bool:
         sqlite3.SQLITE_NOTADB, sqlite3.SQLITE_CORRUPT)
 
 
+def _note_damage(exc) -> None:
+    """Hold back new work when a read finds the file itself damaged.
+
+    init() touches only the jobs table, so a bad page among the review rows
+    first shows up here. Callers hold ``_lock``."""
+    global _damaged, _admission_ready
+    if _is_damage(exc):
+        _damaged = True
+        _admission_ready = False
+
+
 def database_damaged() -> bool:
     """Whether jobs.db failed to open because the file itself is damaged."""
     return _damaged
@@ -646,7 +657,8 @@ def database_path():
 def ready_for_admission() -> bool:
     """Whether the schema opened successfully and durable jobs can be saved."""
     with _lock:
-        return _schema_ready and _admission_ready and not _disabled
+        return (_schema_ready and _admission_ready and not _disabled
+                and not _damaged)
 
 
 _PERSIST_SQL = (
@@ -691,14 +703,16 @@ def _job_snapshot(job, *, single=_CURRENT_JOB_SINGLE):
             separators=(",", ":"),
             allow_nan=False,
         )
-        # Only a finished job's log is stored: a running one is on screen live,
-        # and re-serialising a growing blob on every snapshot is waste.
+        # Only a finished or parked job's log is stored: a running one is on
+        # screen live, and re-serialising a growing blob on every snapshot is
+        # waste.
         status_value = (
             job.status.value if hasattr(job.status, "value") else str(job.status)
         )
         log_json = json.dumps(
             job.persisted_log_lines_locked()
-            if status_value in _TERMINAL_STATUSES else [],
+            if status_value in _TERMINAL_STATUSES
+            or status_value == "awaiting_review" else [],
             default=str,
         )
         quality_shortfall_json = json.dumps(
@@ -1061,14 +1075,21 @@ _TERMINAL_RECORD_SQL = (
 )
 
 
+# A terminal run that just finished can wait out the web app's long writes,
+# which the five-second connection timeout cannot.
+_TERMINAL_RECORD_WAIT = 30.0
+
+
 def _insert_terminal_record(values, what):
     """Insert one row for finished terminal work and return its id."""
     init()
+    deadline = time.monotonic() + _TERMINAL_RECORD_WAIT
     with _lock:
         conn = _get_conn()
         if conn is None:
             return None
-        for _ in range(3):
+        draws = 0
+        while draws < 3:
             job_id = uuid.uuid4().hex[:8]
             try:
                 conn.execute(_TERMINAL_RECORD_SQL, (job_id, *values))
@@ -1078,9 +1099,23 @@ def _insert_terminal_record(values, what):
                 # Same eight-character id space the web uses; a collision is
                 # rare enough to just draw again.
                 _rollback_failed_write(conn)
+                draws += 1
             except sqlite3.Error as e:
                 _rollback_failed_write(conn)
-                _note_write_failure(f"record terminal {what}", e)
+                busy = ((getattr(e, "sqlite_errorcode", None) or 0) & 0xFF
+                        == sqlite3.SQLITE_BUSY)
+                if busy and time.monotonic() < deadline:
+                    time.sleep(0.5)
+                    conn = _get_conn()
+                    if conn is None:
+                        return None
+                    continue
+                if busy:
+                    _log.info("History entry for %s not saved: the web app "
+                              "kept %s busy for %d seconds", what, _path(),
+                              _TERMINAL_RECORD_WAIT)
+                else:
+                    _note_write_failure(f"record terminal {what}", e)
                 return None
     return None
 
@@ -1903,6 +1938,7 @@ def load_one(job_id: str) -> Optional[dict]:
                       if row is not None and row[5] in _ROW_STATUSES
                       and row[7] == "[]" else _NO_ROWS)
         except sqlite3.Error as e:
+            _note_damage(e)
             _log.debug("load_one failed for %s: %s", job_id, e)
             return None
     if row is None:
@@ -2130,6 +2166,7 @@ def history_page(limit: int, offset: int,
                 (*params, limit, offset),
             ).fetchall()
         except sqlite3.Error as e:
+            _note_damage(e)
             _log.debug("history_page failed: %s", e)
             return []
     result = []
@@ -2365,30 +2402,39 @@ def clear_history() -> bool:
             return False
 
 
+def _load_all_rows(conn):
+    rows = conn.execute(
+        "SELECT id, title, artist, album_id, kind, status, phase, "
+        # A finished job never reopens its rows, so its text is not read
+        # back. A run cut short returns its picks to the review.
+        "CASE WHEN status='awaiting_review' OR (status IN "
+        f"('pending', 'running') AND execute_kind IN ({_REVIEW_PICK_MARKS})) "
+        "THEN candidates END, "
+        "error, summary, review_verb, execute_kind, "
+        "execute_args, created_at, finished_at, single, attention, "
+        "recoveries, log_lines, quality_shortfall, edition, tracks_missing "
+        "FROM jobs ORDER BY created_at",
+        REVIEW_PICK_KINDS,
+    ).fetchall()
+    stored = {}
+    for r in rows:
+        if r[7] == "[]":
+            stored[r[0]], saved = _read_rows(conn, r[0])
+            _remember(r[0], saved)
+    return rows, stored
+
+
 def load_all() -> list[dict]:
     """Read saved jobs, leaving logs encoded until needed. Raise on failure."""
     with _lock:
         conn = _get_conn()
         if conn is None:
             raise RuntimeError("saved jobs are unavailable")
-        rows = conn.execute(
-            "SELECT id, title, artist, album_id, kind, status, phase, "
-            # A finished job never reopens its rows, so its text is not read
-            # back. A run cut short returns its picks to the review.
-            "CASE WHEN status='awaiting_review' OR (status IN "
-            f"('pending', 'running') AND execute_kind IN ({_REVIEW_PICK_MARKS})) "
-            "THEN candidates END, "
-            "error, summary, review_verb, execute_kind, "
-            "execute_args, created_at, finished_at, single, attention, "
-            "recoveries, log_lines, quality_shortfall, edition, tracks_missing "
-            "FROM jobs ORDER BY created_at",
-            REVIEW_PICK_KINDS,
-        ).fetchall()
-        stored = {}
-        for r in rows:
-            if r[7] == "[]":
-                stored[r[0]], saved = _read_rows(conn, r[0])
-                _remember(r[0], saved)
+        try:
+            rows, stored = _load_all_rows(conn)
+        except sqlite3.Error as e:
+            _note_damage(e)
+            raise
     out = []
     for r in rows:
         try:

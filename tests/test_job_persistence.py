@@ -160,6 +160,27 @@ def test_a_library_download_stopped_by_a_restart_returns_as_interrupted(
     assert restored.finished_at is not None
 
 
+def test_a_parked_review_keeps_its_log_across_a_restart(monkeypatch, tmp_path):
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    job_persistence._reset_for_tests()
+    monkeypatch.setattr(job_persistence, "_disabled", False)
+    job_persistence.init()
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+
+    job = Job(title="New releases", kind="scan", execute_kind="new_releases",
+              status=JobStatus.AWAITING_REVIEW)
+    job.add_candidate("album", "Album", "Artist", payload={"id": 1})
+    job.log_lines = ["Checked 40 artists.", "1 new release found."]
+    jm.registry.add(job)
+    assert job_persistence.persist(job) is True
+
+    monkeypatch.setattr(jm, "registry", jm.JobRegistry())
+    jm.restore_jobs({"new_releases": lambda job, args: (lambda j, chosen: None)})
+    restored = jm.registry.get(job.id)
+    assert restored.status is JobStatus.AWAITING_REVIEW
+    assert restored.log_lines == job.log_lines
+
+
 def test_an_upgrade_cut_short_by_a_restart_returns_only_unchanged_picks(
         monkeypatch, tmp_path):
     """An album upgraded just before the app was killed came back to the

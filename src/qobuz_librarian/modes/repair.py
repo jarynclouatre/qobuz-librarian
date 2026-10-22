@@ -1143,11 +1143,12 @@ def _report_repair_recovery(backup, *, reason=""):
 
 
 def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
-                        quiet=False, cd_quality=None):
+                        quiet=False, cd_quality=None, tally=None):
     """Scan one album dir by ISRC, report, confirm, and repair. Returns
     "repaired" | "would_repair" | "clean" | "attention" | "skipped" | "failed" |
-    "recovery", and adds a repaired album's tracks that came at CD quality to
-    ``cd_quality``.
+    "recovery", adds a repaired album's tracks that came at CD quality to
+    ``cd_quality``, and counts the tracks it could not check in
+    ``tally["unmatched"]``.
     """
     if not quiet:
         section(f"Repair scan, {truncate(album_dir.name, 60)}")
@@ -1162,6 +1163,10 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     no_isrc_tag        = scan["no_isrc_tag"]
     isrc_mismatch      = scan.get("isrc_mismatch") or []
     unverified         = scan.get("unverified", 0)
+    if tally is not None:
+        tally["unmatched"] += sum(
+            not entry.get("diagnostic")
+            for entry in (*isrc_no_match, *no_isrc_tag, *isrc_mismatch))
 
     if (quiet and not unverified and not verified_truncated and not isrc_mismatch and not any(
             x.get("diagnostic") for x in (*isrc_no_match, *no_isrc_tag))):
@@ -1308,6 +1313,16 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             f"{plural(len(verified_truncated), 'track')}. Nothing changed."))
         return "attention" if unverified else "would_repair"
 
+    read_only = next((
+        folder for folder in sorted({
+            Path(b["path"]).parent for b in verified_truncated})
+        if not os.access(folder, os.W_OK | os.X_OK)), None)
+    if read_only is not None:
+        log.info(fmt(C.RED,
+            f"\n  ✗  Can't repair this album: the app can't write to "
+            f"{read_only}. Every track was left in place."))
+        return "failed"
+
     if not args.yes:
         r = ask(f"\n  Re-download {plural(len(verified_truncated), 'track')}? "
                 "[y/N]: ")
@@ -1366,7 +1381,7 @@ def _all_library_album_dirs(*, on_artist_error=None):
 
 def _report_repair_run(tally, started, *, interrupted=False, clause=None):
     """Give a finished terminal Repair its History card and hook report."""
-    parts = [f"{count} {what}" for count, what in (
+    parts = [f"{plural(count, 'album')} {what}" for count, what in (
         (tally.get("repaired", 0), "repaired"),
         (tally.get("attention", 0), "did not finish cleanly"),
         (tally.get("failed", 0), "failed"),
@@ -1374,6 +1389,10 @@ def _report_repair_run(tally, started, *, interrupted=False, clause=None):
     ) if count]
     summary = ("Stopped early. " if interrupted else "") + (
         f"{', '.join(parts)}." if parts else "No damaged tracks found.")
+    if tally.get("unmatched"):
+        summary += (f" {plural(tally['unmatched'], 'track')} couldn't be "
+                    "matched to a Qobuz recording, so their length wasn't "
+                    "checked.")
     if tally.get("cd_quality"):
         summary += f" {cd_quality_note(tally['cd_quality'])}"
     failed = tally.get("failed", 0)
@@ -1440,6 +1459,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                     "skipped": 0,
                     "failed": 0,
                     "recovery": 0,
+                    "unmatched": 0,
                     "cd_quality": [],
                 }
                 interrupted = False
@@ -1456,7 +1476,7 @@ def run_album_repair_mode(args, token, *, loop=False):
                             status = _scan_report_repair(
                                 aldir, adir.name, args, token,
                                 deep=True, quiet=True,
-                                cd_quality=tally["cd_quality"])
+                                cd_quality=tally["cd_quality"], tally=tally)
                         except AuthLost as exc:
                             print()
                             die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
@@ -1486,6 +1506,9 @@ def run_album_repair_mode(args, token, *, loop=False):
                     _summary += f"  ·  failed: {tally['failed']}"
                 if tally["recovery"]:
                     _summary += f"  ·  recovery needed: {tally['recovery']}"
+                if tally["unmatched"]:
+                    _summary += ("  ·  not checked: "
+                                 f"{plural(tally['unmatched'], 'track')}")
                 needs_attention = (
                     interrupted
                     or bool(unreadable)
@@ -1525,16 +1548,16 @@ def run_album_repair_mode(args, token, *, loop=False):
             if album_dir is None:
                 return 0
 
-            cd_quality = []
+            single = {"unmatched": 0, "cd_quality": []}
             try:
                 status = _scan_report_repair(
                     album_dir, artist_dir.name, args, token,
-                    cd_quality=cd_quality,
+                    cd_quality=single["cd_quality"], tally=single,
                 )
             except AuthLost as exc:
                 die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
             if status in {"repaired", "attention", "failed", "recovery"}:
-                _report_repair_run({status: 1, "cd_quality": cd_quality}, started, clause={
+                _report_repair_run({status: 1, **single}, started, clause={
                     "attention": "the album did not finish cleanly",
                     "recovery": "the album kept a recovery backup",
                 }.get(status))

@@ -67,6 +67,7 @@ from qobuz_librarian.safefile import (
     named_entry_matches,
     named_entry_missing,
     rename_noreplace,
+    write_json,
 )
 from qobuz_librarian.safefile import identity_record as _ownership_identity
 from qobuz_librarian.safefile import stat_identity as _staged_identity
@@ -3975,12 +3976,26 @@ def _isrc_query(isrc):
     return "isrc::(?i)^" + "-?".join(isrc) + "$"
 
 
+def _migration_copy_record():
+    return cfg.DATA_DIR / ".beets_migration_copy.json"
+
+
+def _migration_copy_rounds():
+    """Which Beets migrations each kept copy was made before, by copy path."""
+    try:
+        rounds = json.loads(_migration_copy_record().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return rounds if isinstance(rounds, dict) else {}
+
+
 def _back_up_before_migrations(plugin_config, database_path):
     """Keep one copy of a database Beets is about to migrate.
 
     Beets copies the whole database before each migration it runs, so an older
     library would gain one copy per migration. Returns True when this copy
-    stands in for them.
+    stands in for them. A copy made for an earlier Beets update is replaced:
+    the database has changed since.
     """
     expected = {
         tuple(pair) for pair in (plugin_config or {}).get("migrations") or ()
@@ -3988,6 +4003,8 @@ def _back_up_before_migrations(plugin_config, database_path):
     if not expected:
         return False
     backup = Path(f"{database_path}-before-migrations.bak")
+    this_round = sorted(list(pair) for pair in expected)
+    rounds = _migration_copy_rounds()
     database = beets_db.path()
     if database is None or not database.is_file():
         return False
@@ -4006,7 +4023,14 @@ def _back_up_before_migrations(plugin_config, database_path):
         if expected <= done:
             return False
         if backup.exists():
-            return True
+            made_for = rounds.get(str(backup))
+            if made_for is None:
+                # Kept before this was recorded, by the only Beets that made it.
+                made_for = this_round
+                rounds[str(backup)] = made_for
+                write_json(_migration_copy_record(), rounds)
+            if made_for == this_round:
+                return True
         # SQLite's own copy is whole whatever the journal mode.
         descriptor, temporary = tempfile.mkstemp(
             dir=backup.parent, prefix=f".{backup.name}.", suffix=".tmp")
@@ -4030,6 +4054,8 @@ def _back_up_before_migrations(plugin_config, database_path):
                 pass
             raise
         fsync_dir(backup.parent)
+        rounds[str(backup)] = this_round
+        write_json(_migration_copy_record(), rounds)
         log.info(fmt(C.GRAY, f"  Saved a copy of the beets database at {backup} "
                              "before Beets updates it."))
         return True

@@ -58,6 +58,7 @@ fi
 # This runs as root, so Python starts isolated and without site-packages:
 # nothing the app user can write is imported.
 reconcile_streamrip() {
+    [ -f "$STREAMRIP_DIR/config.toml" ] || return 0
     python3 -I -S - "$STREAMRIP_DIR/config.toml" <<'PY'
 import os
 import re
@@ -73,7 +74,14 @@ managed = {
     "qobuz": ("download_booklets", "false"),
     "misc": ("check_for_updates", "false"),
 }
-lines = path.read_text().splitlines(keepends=True)
+try:
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+except UnicodeDecodeError:
+    print(f"[warn] {path} is not UTF-8 text; save it as UTF-8.", file=sys.stderr)
+    raise SystemExit(2)
+except OSError as e:
+    print(f"[warn] couldn't read {path}: {e.strerror}.", file=sys.stderr)
+    raise SystemExit(2)
 found_sections = set()
 found_keys = set()
 result = []
@@ -129,7 +137,8 @@ mode = stat.S_IMODE(path.stat().st_mode)
 tmp_name = None
 try:
     with tempfile.NamedTemporaryFile(
-        mode="w", dir=path.parent, prefix=f".{path.name}.", delete=False
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+        delete=False,
     ) as tmp:
         tmp_name = tmp.name
         tmp.write(rewritten)
@@ -147,7 +156,9 @@ finally:
 print("[init] Reconciled managed streamrip settings.")
 PY
 }
-if ! reconcile_streamrip; then
+reconcile_rc=0
+reconcile_streamrip || reconcile_rc=$?
+if [ "$reconcile_rc" -ne 0 ] && [ "$reconcile_rc" -ne 2 ]; then
     echo "[warn] couldn't reconcile managed streamrip settings. Mount /config read-write." >&2
 fi
 

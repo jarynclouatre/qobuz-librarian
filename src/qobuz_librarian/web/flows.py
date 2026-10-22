@@ -5194,7 +5194,7 @@ def execute_repairs(job, chosen, token):
             "repair",
             execute_args=getattr(job, "execute_args", None),
         )
-        parts = [f"{fixed} repaired"]
+        parts = [f"{plural(fixed, 'album')} repaired"]
         if unverified:
             parts.append(f"{unverified} replaced but unproven")
         if failed:
