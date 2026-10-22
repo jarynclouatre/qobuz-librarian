@@ -552,13 +552,26 @@ def _holds_file(kept, newer):
         return False
 
 
+def _holds_nothing(tree, relative):
+    """A file a stopped rip had only just created, or the cover streamrip
+    fetches into __artwork under a new random name each time."""
+    if "__artwork" in Path(relative).parts:
+        return True
+    try:
+        return os.stat(tree.path / relative, follow_symlinks=False).st_size == 0
+    except OSError:
+        return False
+
+
 def _attempt_covered(tree, later):
     """Whether a kept attempt holds nothing the later copy ``later`` (path
     inside the run -> file) lacks."""
-    if not tree.files or any(relative not in later for relative, _ in tree.files):
+    files = [relative for relative, _identity in tree.files
+             if not _holds_nothing(tree, relative)]
+    if not files or any(relative not in later for relative in files):
         return False
     return all(_holds_file(tree.path / relative, later[relative])
-               for relative, _identity in tree.files)
+               for relative in files)
 
 
 def _superseded_attempts(later, *, keep=None):
