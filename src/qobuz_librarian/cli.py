@@ -1171,6 +1171,12 @@ def main():
                 log.info(fmt(C.YELLOW,
                     f"  ⟲  Put back {origin}, which an interrupted "
                     "upgrade or repair had moved aside."))
+            for backup, origin in backup_mod.repair_backups_to_fill_in():
+                count = backup_mod.fill_in_from_repair_backup(backup, origin)
+                if count:
+                    log.info(fmt(C.YELLOW,
+                        f"  ⟲  Put back {plural(count, 'track')} of {origin}, "
+                        "which an interrupted repair had moved aside."))
             left = backup_mod.albums_left_in_backups()
             if left:
                 log.info(fmt(C.YELLOW, wrap(

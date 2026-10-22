@@ -1,4 +1,5 @@
 """Album repair mode: ISRC-anchored refill of truncated FLACs."""
+import contextlib
 import json
 import os
 import stat
@@ -20,8 +21,10 @@ from qobuz_librarian.api.auth import (
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.download_result import cd_quality_note
 from qobuz_librarian.integrations.beets import (
+    _highest_album_id,
     beets_entry_ids,
     forget_replaced_beets_entries,
+    settle_tracks_added_to_album,
 )
 from qobuz_librarian.library import candidate_premise
 from qobuz_librarian.library.backup import (
@@ -695,6 +698,12 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     and not pin_unverified_upgrade_backup(backup_path, note)):
                 warn_pin_failed(backup_path)
 
+        def settle_beets_after_stop():
+            # The import step settles beets right after the refills land; a
+            # stop there would leave each refilled track listed twice.
+            with contextlib.suppress(KeyboardInterrupt):
+                settle_tracks_added_to_album(album_dir, last_old_id)
+
         if _album_identity(album_dir) != album_identity:
             pin_repair_recovery(
                 "repair backup kept, the selected album changed after backup")
@@ -770,6 +779,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             qi["pre_import_retag"] = _make_retag_callback(
                 retag_sources, retag_failed)
 
+        last_old_id = _highest_album_id()
         try:
             _execute_download_queue([qi], args, token)
         except AuthLost as exc:
@@ -784,6 +794,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             if backup_path and backup_path.exists():
                 pin_repair_recovery(
                     "repair backup kept, authentication was lost mid-refill")
+                settle_beets_after_stop()
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Qobuz {lost} mid-refill; damaged originals preserved at:\n"
                     f"     {backup_path}\n"
@@ -826,6 +837,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     "the album. Re-run Repair to retry."))
                 raise
             pin_repair_recovery("repair backup kept, refill was interrupted")
+            settle_beets_after_stop()
             landed = len(files_replaced_in_album(backup_path))
             stopped = (
                 f"Repair stopped after {plural(landed, 'replacement track')} "

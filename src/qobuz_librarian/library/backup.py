@@ -5291,6 +5291,43 @@ def albums_left_in_backups():
     return found
 
 
+def repair_backups_to_fill_in():
+    """(backup, album folder) for each Repair backup whose album a hard stop
+    left without some of its tracks, oldest first.
+
+    Repair moves the damaged tracks here before their replacements download,
+    so a stop it could not handle leaves their places empty. Only a whole,
+    unpinned backup whose album folder is still in the library counts.
+    """
+    found = []
+    try:
+        entries = sorted(cfg.UPGRADE_BACKUP_DIR.iterdir())
+    except FileNotFoundError:
+        return found
+    for entry in entries:
+        if (not re.match(r"^\d{8}_\d{6}(?:_\d{6})?_repair_", entry.name)
+                or not entry.is_dir() or backup_keep_markers_present(entry)):
+            continue
+        candidate = load_backup_result(entry)
+        if (candidate is None or not candidate.complete
+                or candidate.receipt["kind"] != "gap-fill"
+                or not _backup_owner_authorized(candidate, None)):
+            continue
+        origin = Path(candidate.receipt["origin"])
+        if (origin.is_dir() and _library_path(origin) is not None
+                and (files_not_back_in_album(entry) or (0,))[0]):
+            found.append((candidate, origin))
+    return found
+
+
+def fill_in_from_repair_backup(backup, origin) -> int:
+    """Put a Repair backup's tracks back into the places in ``origin`` that
+    are empty, keeping any replacement that reached the album, and return
+    how many are back."""
+    return restore_gap_fill_backup(backup, origin, replace_dst=False,
+                                   keep=files_replaced_in_album(backup))
+
+
 def _intended_origin(path):
     try:
         root_fd = _open_backup_directory(path.parent)

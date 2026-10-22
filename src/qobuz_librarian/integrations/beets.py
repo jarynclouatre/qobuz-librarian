@@ -4928,13 +4928,19 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
         _forget_failed_import_rows(album_dirs)
     if ok and album_dir is not None:
         try:
-            forget_replaced_beets_entries(folder=album_dir)
-            # Beets files tracks added to an album as an album of their own.
-            _consolidate_duplicate_albums(
-                folders=[album_dir], last_old_id=last_old_id)
+            settle_tracks_added_to_album(album_dir, last_old_id)
         except KeyboardInterrupt:
             raise ImportedThenInterrupted from None
     return "ok" if ok else kind
+
+
+def settle_tracks_added_to_album(album_dir, last_old_id):
+    """Drop the beets entries of tracks an import into ``album_dir`` replaced
+    and join the album entry it made to the folder's own. ``last_old_id`` is
+    the newest album id before that import."""
+    forget_replaced_beets_entries(folder=album_dir)
+    # Beets files tracks added to an album as an album of their own.
+    _consolidate_duplicate_albums(folders=[album_dir], last_old_id=last_old_id)
 
 
 def beets_import_managed(

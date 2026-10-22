@@ -707,6 +707,23 @@ def _put_back_albums() -> None:
             _log.warning(
                 "Put back %s, which a hard stop had left part way into its "
                 "backup.", origin)
+        for backup, origin in backup_mod.repair_backups_to_fill_in():
+            plan = job_mgr.prepare_recovery_resolution(
+                str(backup.path), backup.receipt)
+            if plan is None:
+                continue
+            count = backup_mod.fill_in_from_repair_backup(backup, origin)
+            if not count:
+                continue
+            runtime.note_restored_albums([origin])
+            _log.warning(
+                "Put back %s of %s, which an interrupted repair had moved "
+                "to %s.", plural(count, "track"), origin, backup.path)
+            if (not backup.path.exists()
+                    and not job_mgr.resolve_recovery_resolution(plan)):
+                _log.warning(
+                    "The saved recovery status of %s could not be "
+                    "updated.", origin)
     except Exception:
         _log.exception("couldn't put back albums left in their backups")
 

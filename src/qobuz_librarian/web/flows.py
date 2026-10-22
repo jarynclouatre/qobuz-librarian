@@ -5,6 +5,7 @@ process_album) but without any terminal prompts, a scan attaches review
 candidates to the job, and execution runs over the candidates the user kept.
 """
 import argparse
+import contextlib
 import dataclasses
 import os
 import shutil
@@ -4756,6 +4757,22 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
                      "because its recovery record could not be saved.")
         return recovery, persisted
 
+    def stopped_after_landing(exc):
+        # A stop once the replacement reached the library: the original
+        # stays in its backup until the new album is checked, and Beets
+        # drops the entries the new files replaced at their paths.
+        if backup is None or not backup.exists() or not album_dir.exists():
+            return
+        pin_repair_recovery("repair backup kept, re-download was interrupted")
+        with contextlib.suppress(KeyboardInterrupt):
+            beets_mod.forget_replaced_beets_entries(folder=album_dir)
+        recovery, _ = checkpoint_recovery(
+            "refill",
+            "Repair stopped after the replacement reached the library, "
+            "before it was checked.",
+        )
+        raise RepairRecoveryRequired(recovery, exc) from exc
+
     if backup is not None:
         _recovery, recovery_saved = checkpoint_recovery(
             "backup",
@@ -4811,113 +4828,123 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
                 )
                 raise RepairRecoveryRequired(recovery, exc) from exc
         raise
+    except BaseException as exc:
+        stopped_after_landing(exc)
+        raise
     imported_ok = bool(result.get("imported")) and result.get("n_ok", 0) > 0
     if backup:
-        if imported_ok and process_mode._upgrade_replacement_verified(full, album_dir, backup):
-            # Carry useful companions, then retire the original's backup when
-            # every file it holds is verifiably superseded in the new album.
-            carried = process_mode._carry_non_audio_from_backup(
-                full, album_dir, backup, replacement_dir=album_dir)
-            if carried is not None:
-                replacement_path, replacement_receipt, left = carried
-                if not beets_mod.retire_replaced_beets_entries(
-                    catalogue_snapshot,
-                    replacement_path,
-                    process_mode._replacement_audio_paths(
+        try:
+            if imported_ok and process_mode._upgrade_replacement_verified(full, album_dir, backup):
+                # Carry useful companions, then retire the original's backup when
+                # every file it holds is verifiably superseded in the new album.
+                carried = process_mode._carry_non_audio_from_backup(
+                    full, album_dir, backup, replacement_dir=album_dir)
+                if carried is not None:
+                    replacement_path, replacement_receipt, left = carried
+                    if not beets_mod.retire_replaced_beets_entries(
+                        catalogue_snapshot,
                         replacement_path,
-                        replacement_receipt,
-                    ),
-                ):
+                        process_mode._replacement_audio_paths(
+                            replacement_path,
+                            replacement_receipt,
+                        ),
+                    ):
+                        result["repair_unverified"] = True
+                        pin_repair_recovery(
+                            "repair backup kept; the replaced Beets entries "
+                            "could not be retired safely")
+                        log.info("  Re-download verified, but its replaced "
+                                 "Beets entries couldn't be reconciled safely; "
+                                 f"keeping the backup at {backup}.")
+                        checkpoint_recovery(
+                            "verification",
+                            "The re-download verified, but the replaced Beets "
+                            "entries could not be reconciled safely.",
+                        )
+                    elif left:
+                        result["companions_kept"] = left
+                        log.info(process_mode._keep_backup_for_companions(
+                            backup, left))
+                        one = len(left) == 1
+                        checkpoint_recovery(
+                            "verification",
+                            "The re-download verified. The original album's "
+                            f"{', '.join(left)} {'differs' if one else 'differ'} "
+                            "from the new album's and "
+                            f"{'is' if one else 'are'} kept here.",
+                        )
+                    elif backup_mod.retire_verified_repair_backup(backup):
+                        checkpoint_recovery(
+                            "resolved",
+                            "The re-download verified, so the original album's "
+                            "backup was removed.",
+                            retained=False,
+                        )
+                        log.info("  Re-download verified; removed the original "
+                                 "album's backup.")
+                    else:
+                        pin_repair_recovery(
+                            "repair backup kept, could not be proven redundant "
+                            "after a verified re-download")
+                        log.info("  Re-download verified, but the original "
+                                 "album's backup couldn't be proven redundant; "
+                                 f"keeping it at {backup}.")
+                        checkpoint_recovery(
+                            "verification",
+                            "The re-download verified, but the original album's "
+                            "backup could not be proven redundant.",
+                        )
+                else:
                     result["repair_unverified"] = True
                     pin_repair_recovery(
-                        "repair backup kept; the replaced Beets entries "
-                        "could not be retired safely")
-                    log.info("  Re-download verified, but its replaced "
-                             "Beets entries couldn't be reconciled safely; "
-                             f"keeping the backup at {backup}.")
+                        "repair backup kept, replacement not durable")
+                    log.info("  Re-download landed, but the rebuilt album or its "
+                             "companions couldn't be flushed safely; keeping your "
+                             f"backup at {backup}.")
                     checkpoint_recovery(
                         "verification",
-                        "The re-download verified, but the replaced Beets "
-                        "entries could not be reconciled safely.",
+                        "The replacement landed, but its album or companion files "
+                        "could not be flushed safely.",
                     )
-                elif left:
-                    result["companions_kept"] = left
-                    log.info(process_mode._keep_backup_for_companions(
-                        backup, left))
-                    one = len(left) == 1
-                    checkpoint_recovery(
-                        "verification",
-                        "The re-download verified. The original album's "
-                        f"{', '.join(left)} {'differs' if one else 'differ'} "
-                        "from the new album's and "
-                        f"{'is' if one else 'are'} kept here.",
-                    )
-                elif backup_mod.retire_verified_repair_backup(backup):
-                    checkpoint_recovery(
-                        "resolved",
-                        "The re-download verified, so the original album's "
-                        "backup was removed.",
-                        retained=False,
-                    )
-                    log.info("  Re-download verified; removed the original "
-                             "album's backup.")
-                else:
-                    pin_repair_recovery(
-                        "repair backup kept, could not be proven redundant "
-                        "after a verified re-download")
-                    log.info("  Re-download verified, but the original "
-                             "album's backup couldn't be proven redundant; "
-                             f"keeping it at {backup}.")
-                    checkpoint_recovery(
-                        "verification",
-                        "The re-download verified, but the original album's "
-                        "backup could not be proven redundant.",
-                    )
-            else:
+            elif imported_ok:
+                # Imported, but a decode pass alone doesn't prove the re-rip kept
+                # every track, a truncated or short result could be WORSE than
+                # the damaged original it replaced.
                 result["repair_unverified"] = True
                 pin_repair_recovery(
-                    "repair backup kept, replacement not durable")
-                log.info("  Re-download landed, but the rebuilt album or its "
-                         "companions couldn't be flushed safely; keeping your "
-                         f"backup at {backup}.")
+                    "repair backup kept, replacement could not be verified "
+                    "complete")
+                # A track the replacement lacks keeps its entry, and Restore
+                # needs it.
+                beets_mod.forget_replaced_beets_entries(folder=album_dir)
+                log.info("  Re-download landed but couldn't be verified as complete "
+                         f"as the original; keeping your backup at {backup}.")
                 checkpoint_recovery(
                     "verification",
-                    "The replacement landed, but its album or companion files "
-                    "could not be flushed safely.",
-                )
-        elif imported_ok:
-            # Imported, but a decode pass alone doesn't prove the re-rip kept
-            # every track, a truncated or short result could be WORSE than
-            # the damaged original it replaced.
-            result["repair_unverified"] = True
-            pin_repair_recovery(
-                "repair backup kept, replacement could not be verified "
-                "complete")
-            log.info("  Re-download landed but couldn't be verified as complete "
-                     f"as the original; keeping your backup at {backup}.")
-            checkpoint_recovery(
-                "verification",
-                "The replacement landed but could not be verified as complete "
-                "as the original album.",
-            )
-        else:
-            log.info("  Re-download didn't complete. Restoring the original "
-                     "album folder.")
-            if backup_mod.restore_upgrade_backup(backup, album_dir):
-                checkpoint_recovery(
-                    "resolved",
-                    "The replacement did not complete, so the original album "
-                    "was restored.",
-                    retained=False,
+                    "The replacement landed but could not be verified as complete "
+                    "as the original album.",
                 )
             else:
-                pin_repair_recovery(
-                    "repair backup kept, automatic restore did not complete")
-                checkpoint_recovery(
-                    "restore",
-                    "The replacement did not complete and automatic "
-                    "restoration was incomplete.",
-                )
+                log.info("  Re-download didn't complete. Restoring the original "
+                         "album folder.")
+                if backup_mod.restore_upgrade_backup(backup, album_dir):
+                    checkpoint_recovery(
+                        "resolved",
+                        "The replacement did not complete, so the original album "
+                        "was restored.",
+                        retained=False,
+                    )
+                else:
+                    pin_repair_recovery(
+                        "repair backup kept, automatic restore did not complete")
+                    checkpoint_recovery(
+                        "restore",
+                        "The replacement did not complete and automatic "
+                        "restoration was incomplete.",
+                    )
+        except BaseException as exc:
+            stopped_after_landing(exc)
+            raise
     return result
 
 
