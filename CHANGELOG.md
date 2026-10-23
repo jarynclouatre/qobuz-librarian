@@ -2,18 +2,20 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
-## [1.4.1] - 2026-10-19
+## [1.5.0] - 2026-10-22
 
-Lyrics runs suited to a whole library, steadier Discover, and cleaner recovery after hard stops.
+Fuller search results, lighter scans of big libraries, New releases for every artist, lyrics suited to a whole library, and Repair, Migrate and restarts that finish cleanly.
 
-- Every lyrics provider's match must fit the track's title, artist and length, and synced lyrics from a recording of another length must end with the track. Credits headings are left out. A track whose artist is tagged in another script is also looked up on LRCLIB by its exact title, album and length.
-- The default lyrics providers are Lrclib and Musixmatch. NetEase is available through `LYRICS_PROVIDERS` or Settings; when listed, it is asked only about the tracks the providers before it could not settle, at 15 lookups a minute.
-- Long Lyrics runs show progress, time left and any wait on NetEase. A run that leaves a few tracks unchecked finishes and tries them next time, a stopped run says what it wrote, and a plain `.lrc` beside synced tag lyrics gets the synced lyrics.
-- Discover keeps its last list on screen while it rebuilds, leaves the searched artist out of similar-artist results and shows Last.fm's spelling of the name, and hides Not interested artists in Genres too. A Last.fm key that Last.fm rejects is not saved, and genre and decade chips have full tap height on phones.
-- Search downloads and track grabs queued before a run stopped on a full disk are not started; they say the disk filled up and can be retried once space is freed. A filed download that blocks again on resume is settled in one go.
-- After a hard stop, Downsample's Restore works and its temporary files are cleared, an Upgrade cut off while filing retires the old album's beets entries where they can be told apart, and the hidden folder a grab can leave on an rclone mount is removed.
-- In a terminal queue, an Upgrade that keeps the old album's own files in a backup lets the other albums carry on. An Upgrade put back because its new copy could not be verified returns to the Upgrade list unticked.
-- Job and terminal messages say what happened, and multi-disc albums show the cover from their first disc folder.
+- Search lists Qobuz's top 100 matches 25 at a time with **Show more**, puts every album you own on the first page, and marks explicit releases. A Qobuz link pasted without `https://` opens its album. Search in the terminal has the same order, marks and paging.
+- Library scans finish on very large libraries and use far less memory and disk, and a tick, **Select all** or **Dismiss** in a review of tens of thousands of albums saves only the rows it changes. A near artist name is matched only when its catalogue holds one of the folder's albums, folders such as `.38 Special` are found, and the summary names folders Qobuz has no artist for.
+- New releases checks read each artist's newest releases first and the whole catalogue only when something new appears. Artists with more than 1,000 albums are covered, and a pre-order is listed once its release date has passed. Missing Albums and New releases also offer an artist's own releases that Qobuz files under other or download-only.
+- Every lyrics provider's match must fit the track's title, artist and length, and synced lyrics from a recording of another length must end with the track. The default providers are Lrclib and Musixmatch; NetEase, when listed in `LYRICS_PROVIDERS` or Settings, is asked only about the tracks the others could not settle. Long runs show progress and time left, and a run that leaves a few tracks unchecked tries them next time.
+- Discover keeps its last list on screen while it rebuilds, leaves the searched artist out of similar-artist results, and hides Not interested artists in Genres too. A Last.fm key that Last.fm rejects is not saved.
+- Repair restores only the tracks whose replacement did not arrive, keeps beets to one entry per track after a stop, and after a hard stop puts originals back wherever nothing landed. After a hard stop, Downsample's Restore works and an Upgrade cut off while filing retires the old album's beets entries.
+- Migrate keeps edition brackets such as `(2011 Remaster)` in folder names, keeps a second copy of an album apart and an album's disc folders together, carries each cover to its own album, and lists what a move left in each source folder. A migration cut short by a restart says what was done and how to continue. Consolidation merges every duplicate folder of an album and says what it moved and left.
+- A music folder mounted read-only (`:ro`) scans with downloads off. On a disk that cannot run Upgrade, Lyrics or Downsample, such as an SMB share, their pages say so before you pick anything. A download cut short by a restart is cleared from staging once its retry imports the album, and downloads queued before a disk filled up wait to be retried once space is freed.
+- Password and secret files saved with a byte-order mark or Windows line endings work, `.DS_Store`, `Thumbs.db` and `@eaDir` files beside the saved download queue are ignored, a trusted proxy is recognised when it forwards client ports, and the container health check works with `WEB_HOST=::`.
+- History and the jobs API say when a download imported nothing, a parked review keeps its log across restarts, Diagnostics names a damaged Queue/History database, and multi-disc albums show the cover from their first disc folder.
 
 ## [1.4.0] - 2026-10-18
 
