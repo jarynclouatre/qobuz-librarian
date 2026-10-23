@@ -474,7 +474,7 @@ async def _release_types(artist_id, raw, token):
     try:
         return await qobuz_access._qobuz_call(
             qobuz_search.get_artist_release_types, artist_id, token,
-            [a["id"] for a in raw if a.get("id") is not None])
+            [a["id"] for a in raw if a.get("id") is not None], for_page=True)
     except (asyncio.TimeoutError, AuthLost, QobuzError, QobuzUnavailable) as exc:
         _log.info("release lists for artist %s couldn't be read: %s",
                   artist_id, exc)

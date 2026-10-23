@@ -9,10 +9,12 @@ STRICT - text-search hits, substrings, and prefixes do NOT satisfy it.
 This strictness is load-bearing: a loose match would silently replace
 a user's file with the wrong recording.
 """
+from concurrent.futures import ThreadPoolExecutor
+
 from qobuz_librarian import config
 from qobuz_librarian.api import album_cache
 from qobuz_librarian.api.auth import QobuzError
-from qobuz_librarian.api.client import qobuz_get
+from qobuz_librarian.api.client import carry_deadline, qobuz_get
 from qobuz_librarian.library.tags import clean_qobuz_string
 
 
@@ -413,17 +415,25 @@ EXTRA_RELEASE_LISTS = ("other", "download")
 _RELEASE_LIST_PAGES = 6
 
 
-def get_artist_release_types(artist_id, token, album_ids, fresh=False):
+def get_artist_release_types(artist_id, token, album_ids, fresh=False,
+                             for_page=False):
     """{album id: list name} for the artist's releases in RELEASE_LISTS and
-    EXTRA_RELEASE_LISTS.
+    EXTRA_RELEASE_LISTS, or, ``for_page``, in RELEASE_LISTS alone.
 
     None when the answer can't cover ``album_ids``: a list runs past the pages
     read, or every list is empty for an artist with albums. Cached with the
     catalogue's TTL, and reused only while every id in ``album_ids`` is one
-    the cached answer was fetched for, so a new release fetches it again."""
+    the cached answer was fetched for, so a new release fetches it again.
+
+    The artist page reads ``for_page``: its sections come from those lists,
+    and Qobuz can take seconds a page to answer for an artist it was not
+    asked about lately, so it reads them side by side. The answer with every
+    list serves it too."""
     album_ids = {str(album_id) for album_id in album_ids}
-    cache_key = f"{artist_id}:release-lists"
-    if not fresh:
+    cache_keys = [f"{artist_id}:release-lists"]
+    if for_page:
+        cache_keys.append(f"{artist_id}:release-types")
+    for cache_key in [] if fresh else cache_keys:
         cached = album_cache.get_catalog(cache_key, config.ARTIST_CATALOG_CACHE_TTL)
         if cached is not None:
             types, known = cached.get("types"), cached.get("ids")
@@ -435,33 +445,48 @@ def get_artist_release_types(artist_id, token, album_ids, fresh=False):
                 and album_ids <= set(known) | set(types)
             ):
                 return types
+    names = RELEASE_LISTS if for_page else RELEASE_LISTS + EXTRA_RELEASE_LISTS
+    read = carry_deadline(lambda name: _release_list_ids(artist_id, token, name))
+    if for_page:
+        with ThreadPoolExecutor(max_workers=len(names)) as pool:
+            lists = list(pool.map(read, names))
+    else:
+        lists = map(read, names)
     types = {}
-    for name in RELEASE_LISTS + EXTRA_RELEASE_LISTS:
-        offset = 0
-        for _ in range(_RELEASE_LIST_PAGES):
-            data = _expect_dict(qobuz_get("artist/getReleasesList", {
-                "artist_id": artist_id,
-                "release_type": name,
-                "limit": config.ARTIST_CATALOG_PAGE,
-                "offset": offset,
-                "sort": "release_date",
-            }, token), "artist/getReleasesList")
-            items = data.get("items")
-            if not isinstance(items, list):
-                raise QobuzError("artist/getReleasesList returned malformed items")
-            for item in items:
-                if isinstance(item, dict) and item.get("id") is not None:
-                    types.setdefault(str(item["id"]), name)
-            offset += len(items)
-            if not data.get("has_more"):
-                break
-        else:
-            if name in RELEASE_LISTS:
-                return None
+    for name, (ids, whole) in zip(names, lists):
+        if not whole and name in RELEASE_LISTS:
+            return None
+        for album_id in ids:
+            types.setdefault(album_id, name)
     if album_ids and not types:
         return None
-    album_cache.put_catalog(cache_key, {"types": types, "ids": sorted(album_ids)})
+    album_cache.put_catalog(cache_keys[-1], {"types": types, "ids": sorted(album_ids)})
     return types
+
+
+def _release_list_ids(artist_id, token, name):
+    """The ids of the releases Qobuz files in list ``name`` for the artist,
+    and whether that is the whole list rather than _RELEASE_LIST_PAGES pages
+    of a longer one."""
+    ids = []
+    offset = 0
+    for _ in range(_RELEASE_LIST_PAGES):
+        data = _expect_dict(qobuz_get("artist/getReleasesList", {
+            "artist_id": artist_id,
+            "release_type": name,
+            "limit": config.ARTIST_CATALOG_PAGE,
+            "offset": offset,
+            "sort": "release_date",
+        }, token), "artist/getReleasesList")
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise QobuzError("artist/getReleasesList returned malformed items")
+        ids.extend(str(item["id"]) for item in items
+                   if isinstance(item, dict) and item.get("id") is not None)
+        offset += len(items)
+        if not data.get("has_more"):
+            return ids, True
+    return ids, False
 
 
 _RECENT_PAGES = 5

@@ -84,6 +84,20 @@ def call_within(seconds: float, fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
+def carry_deadline(fn):
+    """Wrap ``fn`` so it runs under this thread's qobuz_get deadline on
+    whichever thread calls it."""
+    deadline = getattr(_thread_local, "deadline", None)
+
+    def wrapped(*args, **kwargs):
+        if deadline is None:
+            return fn(*args, **kwargs)
+        with request_deadline(deadline - time.monotonic()):
+            return fn(*args, **kwargs)
+
+    return wrapped
+
+
 def _remaining_budget() -> float | None:
     deadline = getattr(_thread_local, "deadline", None)
     return None if deadline is None else deadline - time.monotonic()
