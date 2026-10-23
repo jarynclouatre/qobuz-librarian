@@ -768,11 +768,31 @@ def host_allowed(request) -> bool:
     return name.endswith(_LOCAL_SUFFIXES) or name in cfg.WEB_ALLOWED_HOSTS
 
 
+# Proxies already named by the refusal below, bounded like the peers above.
+_refused_proxy_peers: dict[str, None] = {}
+
+
 def host_refusal(request) -> Response:
-    return Response(
-        f"{request_host_name(request)} is not an address Qobuz Librarian "
-        "answers to. To use it, add it to WEB_ALLOWED_HOSTS and restart.\n",
-        status_code=400, media_type="text/plain")
+    name = request_host_name(request)
+    message = (f"{name} is not an address Qobuz Librarian answers to. To use "
+               "it, add it to WEB_ALLOWED_HOSTS and restart.\n")
+    if (request.headers.get("x-forwarded-for")
+            or request.headers.get("forwarded")):
+        # A new install behind a proxy lands here first. The proxy's address
+        # goes to the log, not to whoever is looking at this page.
+        message += ("This request came through a proxy. If it is your reverse "
+                    "proxy, set FORWARDED_ALLOW_IPS to its address instead and "
+                    "restart; the log names that address.\n")
+        peer = request.client.host if request.client else ""
+        if peer and peer not in _refused_proxy_peers:
+            _refused_proxy_peers[peer] = None
+            if len(_refused_proxy_peers) > _MAX_WARNED_PROXY_PEERS:
+                del _refused_proxy_peers[next(iter(_refused_proxy_peers))]
+            log.warning(
+                "Refused a request for %s passed on by %s, which is not in "
+                "FORWARDED_ALLOW_IPS. If it is your reverse proxy, add %s to "
+                "FORWARDED_ALLOW_IPS and restart.", name, peer, peer)
+    return Response(message, status_code=400, media_type="text/plain")
 
 
 def _locked(times: list[float], limit: int, now: float) -> bool:
