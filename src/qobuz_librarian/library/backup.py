@@ -3605,10 +3605,14 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 "in place."))
             return None
         moved = False
-        if (
-            _same_filesystem(public, bp.parent)
-            and not _tree_has_multiply_linked_file(source_receipt["fidelity"])
-        ):
+        if _tree_has_multiply_linked_file(source_receipt["fidelity"]):
+            why = "its files have other hard links"
+        elif not _same_filesystem(public, bp.parent):
+            why = "the backup folder is on another filesystem"
+        else:
+            # Docker mounts the library and the backup folder separately,
+            # and a move between two mounts fails even on one disk.
+            why = "the backup folder is mounted separately from the library"
             try:
                 _rename_noreplace_at(AT_FDCWD, public, AT_FDCWD, bp)
                 moved = True
@@ -3626,7 +3630,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
                 public, bp, source_receipt, owner=owner, set_aside=set_aside)
         else:
             result = _copy_album_to_backup(
-                public, bp, snapshot, source_receipt, owner=owner,
+                public, bp, snapshot, source_receipt, why, owner=owner,
                 set_aside=set_aside)
         # Left behind, the intent puts the album back at the next start.
         if intent is not None and (result is None or result.receipt):
@@ -3699,15 +3703,13 @@ def _seal_moved_album(public, bp, source_receipt, *, owner, set_aside):
             backed_up=files)
 
 
-def _copy_album_to_backup(public, bp, snapshot, source_receipt, *, owner,
-                          set_aside):
+def _copy_album_to_backup(public, bp, snapshot, source_receipt, why, *,
+                          owner, set_aside):
     """Copy the album at ``public`` to the backup ``bp`` and delete it from
-    the library while it is the album ``snapshot`` and the receipt hold."""
+    the library while it is the album ``snapshot`` and the receipt hold.
+    ``why`` says in the log why it is not a move."""
     payload = backup_payload(source_receipt)
     partial = bp.parent / (_PARTIAL_COPY_PREFIX + bp.name)
-    why = ("its files have other hard links"
-           if _tree_has_multiply_linked_file(source_receipt["fidelity"])
-           else "the backup folder is on another filesystem")
     log.info(fmt(
         C.GRAY,
         f"  ⤷  Copying {errors_mod.plural(len(payload), 'file')} / "

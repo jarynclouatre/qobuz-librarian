@@ -9,7 +9,7 @@
          data-group-total="{{ items | length }}" data-group-selected="{{ group_selected }}"
          data-cids="{{ items | map(attribute='cid') | join(',') }}"{% if open %} open{% endif %}>
   <summary class="ql-review-summary">
-    <span class="ql-review-chevron" aria-hidden="true"></span>
+    <span class="ql-review-chevron-hit" aria-hidden="true"><span class="ql-review-chevron"></span></span>
     {% if triage or job.execute_kind == 'repair' %}
     <label class="ql-review-artist-hit">
       <input type="checkbox" class="ql-checkbox ql-review-artist-check" data-artist-select value="{{ artist }}"

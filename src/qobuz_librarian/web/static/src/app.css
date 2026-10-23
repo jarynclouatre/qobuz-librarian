@@ -5081,9 +5081,25 @@ details[open] > .ql-disclosure-summary::after {
   display: inline-flex;
   flex: none;
   align-items: center;
-  padding: 0.85rem;
-  margin: -0.85rem;
+  padding: 0.85rem 0.625rem 0.85rem 0.375rem;
+  margin: -0.85rem -0.625rem -0.85rem -0.375rem;
   cursor: pointer;
+}
+/* The arrow is the part people tap to open a group. On its own it was an 8px
+   mark inside the checkbox's target, so a tap on it ticked the artist. This
+   gives it a full-height target of its own beside the checkbox's. */
+.ql-review-chevron-hit {
+  display: inline-flex;
+  flex: none;
+  align-self: stretch;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  margin: -0.75rem 0 -0.75rem -0.25rem;
+  cursor: pointer;
+}
+.ql-review-chevron-hit:active {
+  background-color: color-mix(in oklab, var(--ql-text) 6%, transparent);
 }
 /* The disclosure row's own focus ring. Without it this fell through to
    Chromium's, which resolves to a near-black outline on the night page. */
@@ -5131,10 +5147,17 @@ details[open] > .ql-disclosure-summary::after {
 .ql-review-title {
   display: flex;
   min-width: 0;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.375rem 0.625rem;
   overflow: visible;
+}
+/* Chrome on Android moves a tap to the nearest element that reacts to a
+   press, and the name did not, so a tap on its first letters ticked the
+   checkbox beside it. */
+.ql-review-title:active {
+  opacity: 0.8;
 }
 .ql-review-title-main {
   min-width: 0;
