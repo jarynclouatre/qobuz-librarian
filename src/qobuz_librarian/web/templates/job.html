@@ -25,6 +25,12 @@
 </div>
 {% endif %}
 
+{% if disk_notice and not error and job.status.value == 'awaiting_review' %}
+<div class="ql-notice ql-notice-warning ql-job-banner">
+  <span>{{ disk_notice }}</span>
+</div>
+{% endif %}
+
 {% if noselection and job.status.value == 'awaiting_review' %}
 <div class="ql-notice ql-notice-warning ql-job-banner" data-flash>
   {% set _review_thing = labels.discard_review_label(job) %}

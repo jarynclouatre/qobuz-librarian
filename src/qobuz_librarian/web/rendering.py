@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
 
-from qobuz_librarian import __version__
+from qobuz_librarian import __version__, disk_support
 from qobuz_librarian import config as cfg
 from qobuz_librarian import download as download_mod
 from qobuz_librarian.library import generation_state
@@ -29,6 +29,8 @@ from qobuz_librarian.web import (
     write_gate,
 )
 from qobuz_librarian.web import jobs as job_mgr
+
+_DISK_TOOLS = ("upgrade", "downsample", "lyrics", "repair")
 
 
 def _ql_notice_html(kind: str, body: str) -> str:
@@ -302,6 +304,14 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
                 context.get("page") not in {"lyrics", "downsample", "upgrade"}
                 or storage.music_mounted_read_only()):
             context.setdefault("writes_paused_notice", held)
+    # A tool the music disk cannot run says so before anything is picked,
+    # not only once a start or an approval is refused.
+    if (not context.get("writes_paused_notice")
+            and context.get("page") in _DISK_TOOLS
+            and (why := disk_support.refusal(context["page"]))):
+        context["disk_notice"] = why
+        context["writes_paused_notice"] = {
+            "reason": why, "msg": why, "action": None}
     context.setdefault("downloads_paused",
                        context["writes_paused"] or held is not None)
     context.setdefault(
