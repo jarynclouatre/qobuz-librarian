@@ -3,6 +3,7 @@ their nav dots in step with album changes from the terminal or the web app."""
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import state_file
 from qobuz_librarian.library import (
     candidate_premise,
     catalog,
@@ -105,8 +106,73 @@ def reseal_saved_reviews(fresh_seal):
 
 def reseal_put_back_album(backup_receipt):
     """Seal again the saved rows over an album a put-back restored byte for
-    byte, so the new inodes of a copy don't make the next run refuse it."""
+    byte, so the new inodes of a copy don't make the next run refuse it, and
+    note it for the web app's own reviews."""
     reseal_saved_reviews(candidate_premise.sealer_after_put_back(backup_receipt))
+    note_put_back(backup_receipt)
+
+
+_PUT_BACK_LIMIT = 50
+
+
+def _put_backs_file():
+    return cfg.DATA_DIR / ".qobuz_put_backs.json"
+
+
+def note_put_back(backup_receipt):
+    """Keep the receipt of an album the terminal put back, with its files as
+    they came back.
+
+    A terminal run cannot reach the reviews the web app keeps, such as the
+    picks of a web run a hard stop cut short, which still hold the seal from
+    before. The web seals them again from these the next time it takes the
+    library, and forgets them.
+    """
+    origin = backup_receipt.get("origin")
+    after = candidate_premise.capture("upgrade", origin) if origin else None
+    if after is None:
+        return
+    path = _put_backs_file()
+    try:
+        with state_file.store_lock(path):
+            data = state_file.load_json_object(
+                path, "the albums put back from the terminal",
+                "which albums the web reviews should seal again") or {}
+            notes = [note for note in data.get("put_backs") or ()
+                     if type(note) is dict and note.get("origin") != origin]
+            notes.append({"origin": origin, "receipt": backup_receipt,
+                          "after": after["receipt"]})
+            state_file.write_json(
+                path, {"put_backs": notes[-_PUT_BACK_LIMIT:]}, indent=None)
+    except (OSError, TypeError, ValueError) as exc:
+        vlog(f"put-back note for the web app not saved: {exc}")
+
+
+def take_put_backs():
+    """The receipts ``note_put_back`` kept for albums whose files are still
+    as they came back, forgetting every note."""
+    path = _put_backs_file()
+    if not path.exists():
+        return []
+    try:
+        with state_file.store_lock(path):
+            data = state_file.load_json_object(
+                path, "the albums put back from the terminal",
+                "which albums the web reviews should seal again") or {}
+            path.unlink(missing_ok=True)
+    except (OSError, ValueError) as exc:
+        vlog(f"put-back notes from the terminal not read: {exc}")
+        return []
+    receipts = []
+    for note in data.get("put_backs") or ():
+        if type(note) is not dict or type(note.get("receipt")) is not dict:
+            continue
+        current = candidate_premise.capture("upgrade", note.get("origin"))
+        if (current is not None and type(note.get("after")) is dict
+                and candidate_premise.durable_receipts_match(
+                    note["after"], current["receipt"])):
+            receipts.append(note["receipt"])
+    return receipts
 
 
 def _artist_dir(change):

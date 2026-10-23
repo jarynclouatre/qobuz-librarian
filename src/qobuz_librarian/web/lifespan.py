@@ -6,11 +6,17 @@ import shutil
 import signal
 import sys
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from fastapi import FastAPI
 
-from qobuz_librarian import beets_db, disk_support, raise_open_file_limit, run_lock
+from qobuz_librarian import (
+    beets_db,
+    disk_support,
+    raise_open_file_limit,
+    run_lock,
+    saved_views,
+)
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api import auth as api_auth
 from qobuz_librarian.integrations import beets as beets_mod
@@ -220,6 +226,7 @@ def _recover_under_web_run_lock(lease, *, restore_jobs: bool = True):
         if restore_jobs and runtime._JOBS_RESTORED:
             _settle_interrupted_upgrades()
             _settle_restarted_web_jobs()
+            _reseal_put_back(saved_views.take_put_backs())
         elif restore_jobs:
             _restore_jobs_once()
         return result
@@ -351,7 +358,8 @@ def _restore_jobs_once() -> bool:
                 return False
             rendering._retire_gone_recoveries(
                 job_persistence.recovery_history(strict=True))
-            finished, put_back = _settle_interrupted_upgrades()
+            with _put_backs_noted() as receipts:
+                finished, put_back = _settle_interrupted_upgrades()
             job_mgr.restore_jobs(
                 job_runs._RESUME_EXECUTE,
                 unsettled=queue_recovery._unsettled_web_job_ids(),
@@ -368,9 +376,40 @@ def _restore_jobs_once() -> bool:
             )
             return False
         queue_recovery.take_settled_downloads()
+        # The picks a run cut short returned still hold the seal from before
+        # their album was put back, here or from the terminal, and a copy
+        # back gives it new inodes.
+        _reseal_put_back([*saved_views.take_put_backs(), *receipts])
         flows.note_upgrades_put_back(put_back)
         runtime._JOBS_RESTORED = True
         return True
+
+
+def _reseal_put_back(receipts) -> None:
+    for receipt in receipts:
+        try:
+            flows.reseal_put_back_album(receipt)
+        except Exception as exc:
+            _log.warning("couldn't update the reviews of %s after it was "
+                         "put back: %s", receipt.get("origin"), exc)
+
+
+@contextmanager
+def _put_backs_noted():
+    """The receipt of each album put back meanwhile, passed on as usual."""
+    receipts = []
+    hook = backup_mod.on_restored
+
+    def note(receipt):
+        receipts.append(receipt)
+        if hook is not None:
+            hook(receipt)
+
+    backup_mod.on_restored = note
+    try:
+        yield receipts
+    finally:
+        backup_mod.on_restored = hook
 
 
 def _settle_interrupted_upgrades() -> tuple[list, list]:
