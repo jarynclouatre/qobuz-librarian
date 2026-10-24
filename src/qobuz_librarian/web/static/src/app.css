@@ -995,9 +995,10 @@ details.ql-mobile-drawer[open]::before {
   margin: 0;
   transform: translateY(-50%);
 }
+/* Safari keeps drawing its own clear glyph beside ours unless it is gone
+   from the layout, not just unstyled. */
 .ql-clear-field > input::-webkit-search-cancel-button {
-  -webkit-appearance: none;
-  appearance: none;
+  display: none;
 }
 /* On a phone the keyboard's own Search key submits, so the button folds into
    the end of the field as an icon instead of a second full-width bar. */
@@ -3344,6 +3345,12 @@ details.ql-mobile-drawer[open]::before {
   min-height: 2.75rem;
   padding: 0.5rem 0.7rem;
   font-size: 0.875rem;
+}
+/* Safari on a phone zooms the page into any field set below 16px. */
+@media (pointer: coarse) {
+  .ql-review-filter-input {
+    font-size: 1rem;
+  }
 }
 .ql-review-warning {
   margin-bottom: var(--ql-space-3);

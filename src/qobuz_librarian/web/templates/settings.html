@@ -337,6 +337,7 @@
         <label class="ql-field-label" for="user_id">Email or user ID</label>
         <input type="text" name="user_id" id="user_id" value="{{ user_id or '' }}"
                placeholder="name@example.com or numeric ID"
+               autocapitalize="none" autocorrect="off" spellcheck="false"
                {% if env_user_id_set %}disabled aria-disabled="true"{% endif %}
                class="ql-input max-w-lg">
         <p class="ql-field-help">
