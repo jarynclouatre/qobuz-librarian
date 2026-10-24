@@ -812,14 +812,14 @@ class JobRegistry:
             excess -= 1
 
     def clear_finished(self):
-        """Drop ordinary terminal jobs from memory after durable clearing."""
+        """Drop the terminal jobs durable clearing removed from memory too."""
         with self._lock:
             keep = [jid for jid in self._order
                     if (self._jobs.get(jid)
                         and (self._jobs[jid].status not in TERMINAL
                              or self._jobs[jid].finished_at is None
                              or self._jobs[jid].recoveries
-                             or job_persistence.has_active_single_undo(
+                             or job_persistence.single_cleanup_pending(
                                  self._jobs[jid].single)))]
             dropped = [jid for jid in self._jobs.keys() if jid not in keep]
             for jid in dropped:

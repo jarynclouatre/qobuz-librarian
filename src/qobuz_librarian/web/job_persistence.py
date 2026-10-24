@@ -2319,20 +2319,25 @@ def attention_count() -> int:
             return 0
 
 
-def has_active_single_undo(single) -> bool:
-    """Whether a saved single-track result still has an action to finish."""
+def single_cleanup_pending(single) -> bool:
+    """Whether a track grab's Undo removed the track but not yet its folder."""
     cleanup = single.get("catalog_cleanup") if type(single) is dict else None
-    cleanup_pending = (
+    return (
         type(cleanup) is dict
         and cleanup.get("pending") is True
         and isinstance(cleanup.get("path"), str)
         and bool(cleanup["path"])
     )
+
+
+def has_active_single_undo(single) -> bool:
+    """Whether a saved single-track result still has an action to finish."""
     return (
         type(single) is dict
         and type(single.get("owned_path")) is dict
         and bool(single["owned_path"])
-        and (single.get("removed") is not True or cleanup_pending)
+        and (single.get("removed") is not True
+             or single_cleanup_pending(single))
     )
 
 
@@ -2372,7 +2377,8 @@ def single_mark_still_used(album_id, job_id) -> bool:
 
 
 def clear_history() -> bool:
-    """Delete ordinary finished jobs; retain recovery and Undo state."""
+    """Delete finished jobs, track grabs and their Undo included; retain
+    recovery state and an Undo that is still cleaning up."""
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -2389,7 +2395,7 @@ def clear_history() -> bool:
                     single = json.loads(raw_single or "{}")
                 except (TypeError, ValueError):
                     continue
-                if type(single) is not dict or has_active_single_undo(single):
+                if type(single) is not dict or single_cleanup_pending(single):
                     continue
                 removable.append((job_id,))
             conn.executemany("DELETE FROM jobs WHERE id=?", removable)

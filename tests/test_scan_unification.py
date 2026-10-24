@@ -548,6 +548,8 @@ def test_new_release_check_completes_past_a_folder_qobuz_has_no_artist_for(
         "mark_run",
         lambda _seen, **kwargs: marked.update(kwargs) or True,
     )
+    logged = []
+    monkeypatch.setattr(flows.log, "info", logged.append)
     job = jm.Job(title="new releases")
 
     flows.scan_new_releases(job, "tok")
@@ -555,9 +557,10 @@ def test_new_release_check_completes_past_a_folder_qobuz_has_no_artist_for(
     assert job.status is not jm.JobStatus.FAILED
     assert job.error is None
     assert marked["complete"] is True
-    # Naming the folder is the only way the user learns why that artist never
-    # surfaces, so a silent skip would be its own fault.
-    assert "Bonobo, Joy Crookes" in job.summary
+    # The log names the folder; the summary stays clear of it, as it would
+    # otherwise repeat after every check with nothing to act on.
+    assert any("Bonobo, Joy Crookes" in line for line in logged)
+    assert "Bonobo, Joy Crookes" not in job.summary
     assert job.unchecked_artists == 0
 
 

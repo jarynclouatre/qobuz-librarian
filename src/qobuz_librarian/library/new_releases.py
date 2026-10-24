@@ -26,12 +26,10 @@ _NAMED_UNRESOLVED = 3
 
 
 def unresolved_note(names) -> str:
-    """One sentence for library folders Qobuz has no artist for, or "" if none.
+    """One log line for library folders Qobuz has no artist for, or "".
 
-    These are permanent, not a hiccup: a collaboration folder Beets filed under
-    a joined artist string, a compilation, an artist Qobuz doesn't carry. Since
-    running the check again cannot change the answer, name the folders and the
-    one thing that would, rather than asking for a retry.
+    Usually an artist Qobuz doesn't carry, so the line only names them: it is
+    kept out of the summary, where it would come back after every scan.
     """
     names = sorted({str(n) for n in (names or []) if n})
     if not names:
@@ -40,12 +38,7 @@ def unresolved_note(names) -> str:
     extra = len(names) - _NAMED_UNRESOLVED
     if extra > 0:
         shown += f" and {extra:,} more"
-    if len(names) == 1:
-        note = (f"Qobuz has no artist for {shown}, so it was skipped. "
-                "Rename the folder to the artist's name to include it.")
-    else:
-        note = (f"Qobuz has no artist for {shown}, so they were skipped. "
-                "Rename each folder to the artist's name to include them.")
+    note = f"Not on Qobuz, so not checked: {shown}."
     if not cfg.MIGRATE_MULTI_ARTIST and any(", " in n for n in names):
         note += (" Turn on Migrate multi-artist folders in Settings to file "
                  "new downloads under the album's main artist.")

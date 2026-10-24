@@ -150,10 +150,21 @@ def _review_log_lines(job):
     return kept
 
 
+# Reviews saved by 1.5.0 and earlier carry this in their summary; it now goes
+# to the log only.
+_NO_ARTIST_NOTE = re.compile(
+    r"\s*Qobuz has no artist for .*?, so (?:it was|they were) skipped\. "
+    r"Rename (?:the|each) folder to the artist's name to include (?:it|them)\."
+    r"(?: Turn on Migrate multi-artist folders in Settings to file new "
+    r"downloads under the album's main artist\.)?"
+)
+
+
 def review_summary_without_count(execute_kind, summary) -> str:
     summary = str(summary or "").strip()
     if execute_kind not in _TRIAGE_KINDS or not summary:
         return summary
+    summary = _NO_ARTIST_NOTE.sub("", summary).strip()
     count = _COUNT_ONLY_SUMMARY.match(summary)
     return summary[count.end():].strip() if count else summary
 

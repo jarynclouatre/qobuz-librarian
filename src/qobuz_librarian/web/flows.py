@@ -2529,7 +2529,7 @@ def _scan_library_impl(
             no_artist := new_releases_mod.unresolved_note(
                 [name for name, entry in state_artists.items()
                  if not entry.get("artist_id")])):
-        caveats.append(no_artist)
+        log.info(no_artist)
     if baseline_save_failed:
         caveats.append("New releases could not be updated; the next "
                        "complete scan tries again.")
@@ -2804,17 +2804,16 @@ def scan_new_releases(job, token):
     if len(failed_names) > 3:
         shown += f" and {len(failed_names) - 3:,} more"
     unchecked = plural(failed_count, "artist") + (f" ({shown})" if shown else "")
-    # Not logged on its own: every summary below carries it, and the summary
-    # is the last line of the log.
-    skipped_note = new_releases_mod.unresolved_note(unresolved_names)
+    if no_artist := new_releases_mod.unresolved_note(unresolved_names):
+        log.info(no_artist)
+    skipped_note = ""
     if unreadable_artists:
         names = sorted(unreadable_artists, key=str.casefold)
         shown = ", ".join(names[:5]) + (
             f" (+{len(names) - 5} more)" if len(names) > 5 else "")
-        skipped_note = " ".join(filter(None, [
-            skipped_note,
+        skipped_note = (
             f"{plural(len(names), 'artist folder')} couldn't be read and "
-            f"{'was' if len(names) == 1 else 'were'} left out: {shown}."]))
+            f"{'was' if len(names) == 1 else 'were'} left out: {shown}.")
     if job.cancel_requested:
         # A cancelled crawl only reached a fraction of the artists, so it can't
         # claim "No new releases" or "First check recorded" definitively.

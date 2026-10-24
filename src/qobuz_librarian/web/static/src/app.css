@@ -3218,10 +3218,11 @@ details.ql-mobile-drawer[open]::before {
 .ql-review-footer-secondary.hidden {
   display: none !important;
 }
-/* Two sets of tools: the selection tools, then the Dismissed link and
-   Discard, which act on the review rather than its rows. Each set keeps
-   together; where the row cannot hold both, the second moves under the
-   first, and on a phone it always does. */
+/* Two sets of tools: the selection tools, then Dismiss unselected, the
+   Dismissed link and Discard, which act on the review rather than its rows.
+   Each set keeps together; where the row cannot hold both, the second moves
+   under the first. On a phone the second folds into a menu at the end of
+   the first's row. */
 .ql-review-summary-actions {
   display: flex;
   min-width: 0;
@@ -3238,11 +3239,22 @@ details.ql-mobile-drawer[open]::before {
   align-items: center;
   gap: 0 var(--ql-space-3);
 }
-.ql-review-tool-group > * {
+.ql-review-tool-group > *,
+.ql-review-more-menu > * {
   flex: none;
   white-space: nowrap;
 }
-.ql-review-tool-group > .ql-review-discard {
+.ql-review-tool.ql-review-more-toggle {
+  display: none;
+}
+.ql-review-more-toggle svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+.ql-review-more-menu {
+  display: contents;
+}
+.ql-review-more-menu > .ql-review-discard {
   position: relative;
   margin-left: var(--ql-space-2);
   padding-left: calc(var(--ql-space-3) + 1px);
@@ -3257,17 +3269,56 @@ details.ql-mobile-drawer[open]::before {
   transform: translateY(-50%);
   background-color: var(--ql-line);
 }
-/* On a phone a review without a Dismissed link leaves Discard alone on its
-   row, already apart, so it drops the rule there. */
 @media (max-width: 639.98px) {
+  .ql-review-summary-actions {
+    flex-wrap: nowrap;
+  }
   .ql-review-tool-group {
-    flex-basis: 100%;
+    flex: 0 1 auto;
+    min-width: 0;
   }
-  .ql-review-tool-group > .ql-review-discard:first-child {
+  .ql-review-more {
+    position: relative;
+    margin-left: auto;
+    flex: none;
+  }
+  .ql-review-tool.ql-review-more-toggle {
+    display: inline-flex;
+    min-width: 2.75rem;
+    justify-content: center;
+  }
+  .ql-review-more-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 30;
+    display: none;
+    min-width: 14rem;
+    flex-direction: column;
+    align-items: stretch;
+    border: 1px solid var(--ql-line);
+    border-radius: var(--ql-radius-xl);
+    background-color: var(--ql-surface);
+    box-shadow: var(--ql-shadow);
+    padding: var(--ql-space-1) 0;
+  }
+  .ql-review-more[data-open] .ql-review-more-menu {
+    display: flex;
+  }
+  .ql-review-more .ql-review-more-menu > :not(.hidden) {
+    display: flex;
+    min-height: 2.75rem;
+    align-items: center;
+    padding: 0 var(--ql-space-4);
+    font-size: 0.875rem;
+    text-align: left;
+  }
+  .ql-review-more .ql-review-more-menu > .ql-review-discard {
     margin-left: 0;
-    padding-left: var(--ql-space-1);
+    padding-left: var(--ql-space-4);
+    border-top: 1px solid var(--ql-line-soft);
   }
-  .ql-review-discard:first-child::before {
+  .ql-review-more-menu > .ql-review-discard::before {
     content: none;
   }
 }

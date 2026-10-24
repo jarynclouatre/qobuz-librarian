@@ -1299,6 +1299,31 @@
     panel.classList.toggle("hidden", !nextOpen);
   });
 
+  // The phone menu of review actions. Any press outside the toggle closes
+  // it, a press on one of its actions included.
+  function setReviewMore(menu, open) {
+    var toggle = menu.querySelector(".ql-review-more-toggle");
+    menu.toggleAttribute("data-open", open);
+    if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  document.addEventListener("click", function (evt) {
+    var toggle = evt.target.closest && evt.target.closest(".ql-review-more-toggle");
+    document.querySelectorAll("[data-review-more][data-open]").forEach(function (menu) {
+      if (!toggle || !menu.contains(toggle)) setReviewMore(menu, false);
+    });
+    if (!toggle) return;
+    var menu = toggle.closest("[data-review-more]");
+    if (menu) setReviewMore(menu, !menu.hasAttribute("data-open"));
+  });
+  document.addEventListener("keydown", function (evt) {
+    if (evt.key !== "Escape") return;
+    document.querySelectorAll("[data-review-more][data-open]").forEach(function (menu) {
+      setReviewMore(menu, false);
+      var toggle = menu.querySelector(".ql-review-more-toggle");
+      if (toggle && menu.contains(document.activeElement)) toggle.focus();
+    });
+  });
+
   // Discover artist rows open their albums under the row. Once the list is
   // there the request above is dropped and the button is a plain show/hide.
   document.addEventListener("click", function (evt) {
@@ -3258,21 +3283,19 @@
           "&tab=" + encodeURIComponent(curTab())
         : "";
       var det = cb.closest("details[data-artist]");
-      // Keep keyboard focus on the checkbox while its save is pending.
-      if (cb.dataset.saving === "1") {
-        cb.checked = previous;
-        return;
-      }
-      cb.dataset.saving = "1";
+      // A second tap while the first is saving queues behind it; only the
+      // newest one sets the box when its answer comes back.
+      var seq = (cb._tickSeq || 0) + 1;
+      cb._tickSeq = seq;
       pendingChoices.set(cb.value, on);
       cb.setAttribute("aria-busy", "true");
       function done() {
-        delete cb.dataset.saving;
-        cb.removeAttribute("aria-busy");
+        if (cb._tickSeq === seq) cb.removeAttribute("aria-busy");
       }
       var body = "cid=" + encodeURIComponent(cb.value) + "&checked=" + (cb.checked ? "1" : "0") + scopeQ;
       queueChoice("/jobs/" + id + "/select", body, function (c) {
           done();
+          if (cb._tickSeq !== seq) return;
           pendingChoices.delete(cb.value);
           cb.checked = on;
           if (det) delete det.dataset.selectionOverride;
@@ -3287,8 +3310,6 @@
         });
     }
 
-    // Guard against overlapping whole-set writes.
-    var bulkBusy = false;
     function applyGroupChoice(det, on, commit) {
       det.querySelectorAll(".cb").forEach(function (cb) { cb.checked = on; });
       var header = det.querySelector("[data-artist-select]");
@@ -3316,12 +3337,11 @@
     }
 
     function bulkSelect(on, scope, artist) {
-      if (bulkBusy || actionsBlocked()) {
-        showToast("Another selection is still saving. Try again in a moment.", "error");
+      // Earlier choices still saving go first: queueChoice sends in order.
+      if (choicesUnknown || dismissPending || pageLoading) {
         applyCounts(lastCounts);
         return Promise.resolve({ ok: false, busy: true });
       }
-      bulkBusy = true;
       var requestTab = curTab();
       var requestQuery = curQuery();
       var requestGeneration = loadGen;
@@ -3337,7 +3357,6 @@
         });
       }
       return queueChoice("/jobs/" + id + "/select-all", body, function (c) {
-          bulkBusy = false;
           var current = requestTab === curTab() &&
                         requestQuery === curQuery() &&
                         requestGeneration === loadGen;
@@ -3348,7 +3367,7 @@
           if (current && (scope === "all" || scope === "page")) {
             pageBox() && pageBox().querySelectorAll("details[data-artist]").forEach(function (det) {
               var ids = groupCandidateIds(det);
-              if (!ids.length || !ids.every(function (cid) { return accepted.has(cid); })) return;
+              if (det._selecting || !ids.length || !ids.every(function (cid) { return accepted.has(cid); })) return;
               det.dataset.selectionOverride = on ? "1" : "0";
               applyGroupChoice(det, on, true);
             });
@@ -3360,7 +3379,6 @@
           return { ok: true, counts: c, current: current, accepted: accepted };
         })
         .catch(function (why) {
-          bulkBusy = false;
           if (why === "navigation") {
             return { ok: false, busy: false, navigating: true };
           }
@@ -3385,17 +3403,19 @@
     }
 
     function groupSelect(det, on) {
-      if (det._selecting) return;
       var previousRows = Array.prototype.map.call(
         det.querySelectorAll(".cb"), function (cb) { return cb.checked; });
-      det._selecting = true;
-      // Same reason as saveTick: this box is usually the one with focus.
+      // As in saveTick, a newer tap on the same artist decides its boxes.
+      det._selecting = (det._selecting || 0) + 1;
+      var seq = (det._selectSeq || 0) + 1;
+      det._selectSeq = seq;
       var header = det.querySelector("[data-artist-select]");
       if (header) header.setAttribute("aria-busy", "true");
       det.dataset.selectionOverride = on ? "1" : "0";
       applyGroupChoice(det, on, false);
       bulkSelect(on, "artist", det.dataset.artist || "").then(function (result) {
-        det._selecting = false;
+        det._selecting -= 1;
+        if (det._selectSeq !== seq) return;
         if (header) header.removeAttribute("aria-busy");
         if (result.navigating) return;
         if (result.ok && result.current && groupCandidateIds(det).every(function (cid) {
