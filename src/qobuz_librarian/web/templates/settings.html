@@ -684,7 +684,7 @@
   </div>
 </details>
 
-<details class="ql-settings-section">
+<details class="ql-settings-section"{% if open_restore %} open{% endif %}>
   <summary class="ql-settings-summary">
     <h2 id="collection-restore" tabindex="-1" class="ql-anchor-target">Restore from a backup</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>
@@ -696,6 +696,12 @@
           Reads a backup file and opens a review of every album in it that is
           not in your library.
         </p>
+        {% if open_restore %}
+        <p>
+          A restore is open.
+          <a href="/jobs/{{ open_restore.id }}" class="ql-inline-link">Open the restore review</a>.
+        </p>
+        {% endif %}
       </div>
     </div>
 

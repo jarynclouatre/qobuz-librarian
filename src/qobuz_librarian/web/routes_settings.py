@@ -24,6 +24,7 @@ from qobuz_librarian.web import (
     qobuz_access,
     rendering,
     runtime,
+    scans,
     settings_store,
     storage,
     write_gate,
@@ -87,9 +88,12 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         pass
     census = storage._census_view()
     library_size = census.get("total") if census else ""
+    open_restore = scans._active_scan("collection_restore",
+                                      statuses=job_mgr.ACTIVE)
     return rendering._tr(request, "settings.html", {
         "music_storage": music_storage,
         "library_size": library_size,
+        "open_restore": open_restore,
         "library_baseline_exists": generation_state.library_snapshot_available(
             generation_state.load()),
         # True once Qobuz has accepted the saved token, False once it has
