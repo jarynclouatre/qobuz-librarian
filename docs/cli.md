@@ -51,7 +51,7 @@ docker compose run --rm -it qobuz-librarian cli --settings
 
 ## Direct downloads
 
-Both ask before anything downloads, so keep `-it`. Search results come 25 at a time, with `m` for more and every album you already own listed from the start, and carry the web app's marks (**In library**, how many tracks of a part-owned album you have, **Other version in library**, **Explicit**). An album URL, or a search whose result you pick by number, shows what is missing and asks `Proceed with downloading N tracks? [y/N]`. `--artist` asks about each incomplete album you own in turn (`y`, `N`, `a` for yes to the rest, `s` to stop) and keeps the albums you approve in the saved queue, so a Ctrl-C leaves them to resume on the next run; it then lists the albums you don't have and asks for the numbers to download. Search in the menu also offers to queue an album; the queue downloads when you leave Search with `q`, and a Ctrl-C drops what is still queued. With no terminal attached, an album download stops at its question without downloading anything, and the run exits with status 1.
+Both ask before anything downloads, so keep `-it`. Search results come 25 at a time, with `m` for more and every album you already own listed from the start, and carry the web app's marks (**In library**, how many tracks of a part-owned album you have, **Other version in library**, **Explicit**). An album URL, or a search whose result you pick by number, shows what is missing and asks `Proceed with downloading N tracks? [y/N]`. `--artist` asks about each incomplete album you own in turn (`y`, `N`, `a` for yes to the rest, `s` to stop) and keeps the albums you approve in the saved queue, so a Ctrl-C leaves them to resume on the next run; it then lists the albums you don't have and asks for the numbers to download. Search in the menu also offers to queue an album; the queue downloads when you leave Search with `q`. A Ctrl-C before then drops the queue, and one during its downloads keeps the rest for the next run. With no terminal attached, an album download stops at its question without downloading anything, and the run exits with status 1.
 
 ```bash
 # Download a specific album (URL or "Artist Album" string)
@@ -77,8 +77,9 @@ docker compose run --rm qobuz-librarian cli --upgrade-walk --dry-run
 # Preview which hi-res library files would downsample to 44.1/48 kHz
 docker compose run --rm qobuz-librarian cli --downsample-walk --dry-run
 
-# Fetch lyrics for tracks missing them (--lyrics-synced-only for timed
-# lyrics only; --lyrics-rescan to look up tracks checked recently too)
+# Fetch missing lyrics, and synced ones for tracks with plain lyrics
+# (--lyrics-synced-only for timed lyrics only; --lyrics-rescan to look up
+# tracks checked recently too)
 docker compose run --rm qobuz-librarian cli --lyrics-walk
 
 # Start the next walk fresh, revisiting artists already reviewed
@@ -94,8 +95,8 @@ docker compose run --rm qobuz-librarian cli --help
 |---|---|
 | The Library walk and Gap Fill walk, which ask as they go | The Library scan and the reviews it builds |
 | Downloading without importing (`--no-import`) | New releases checks and Discover |
-| | Downloading a single track (Search's Track tab) |
-| | Dismissing and bringing back albums |
+| Merging sibling album folders (`--consolidate`) | Downloading a single track (Search's Track tab) |
+| Upgrading an album during an ordinary download (`AUTO_UPGRADE_ENABLED`) | Dismissing and bringing back albums |
 | | Restoring, removing or deleting kept backups and hi-res originals (Settings > Diagnostics), and restoring from a collection backup |
 | | The Settings fields `--settings` leaves out |
 | | History entries and `POST_JOB_HOOK` reports for Lyrics and Library migration runs |
@@ -113,7 +114,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--repair` | Re-download damaged (truncated or corrupt) tracks you own |
 | `--upgrade-walk` | Review quality upgrades, artist by artist |
 | `--downsample-walk` | Bring files above 48 kHz down to 44.1 / 48 kHz in place |
-| `--lyrics-walk` | Fetch lyrics for tracks that are missing them |
+| `--lyrics-walk` | Fetch missing lyrics, and synced lyrics for tracks with plain ones |
 | `--migrate` | Reorganise an existing library into the Artist/Album layout (menu: Library migration) |
 | `--settings` | Set download quality, whether downsampling keeps the originals, and the behaviour toggles |
 | `--reset-walk-seen` | Forget which artists and albums the walks have answered, and exit |

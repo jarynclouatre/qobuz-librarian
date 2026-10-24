@@ -263,7 +263,7 @@ services:
       - qobuz-librarian-config:/config
       # App data: job history, queue persistence, repair log
       - qobuz-librarian-data:/data
-      # Upgrade backups
+      # Backups of files Upgrade, Repair and the other tools replace
       - ${QL_UPGRADE_BACKUPS:-./upgrade_backups}:/upgrade_backups
       - ${QL_COLLECTION_BACKUPS:-./collection_backups}:/collection_backups
 

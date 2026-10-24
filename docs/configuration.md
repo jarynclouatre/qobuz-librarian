@@ -21,7 +21,7 @@ These settings apply to new jobs. A field you change on the Settings page keeps 
 |---|---|---|
 | `QL_MUSIC_DIR` | `./music` | Music library; beets imports into this |
 | `QL_STAGING_DIR` | `./staging` | Scratch space for in-progress downloads |
-| `QL_UPGRADE_BACKUPS` | `./upgrade_backups` | Backups taken before a quality upgrade |
+| `QL_UPGRADE_BACKUPS` | `./upgrade_backups` | Backups of files Upgrade, Repair and the other tools replace |
 | `QL_COLLECTION_BACKUPS` | `./collection_backups` | Collection snapshots used by Backup & Restore |
 | `WEB_PORT` | `8666` | Host port for the web UI |
 

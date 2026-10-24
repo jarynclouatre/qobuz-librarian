@@ -641,7 +641,8 @@ def parse_args():
                         "--dry-run lists only). Local; no Qobuz login needed.")
     modes.add_argument("--lyrics-walk", action="store_true",
                    help="fetch lyrics for tracks already in the library that "
-                        "are missing them (LYRICS_FORMAT / LYRICS_PROVIDERS "
+                        "are missing them, and synced lyrics for tracks with "
+                        "plain ones (LYRICS_FORMAT / LYRICS_PROVIDERS "
                         "settings apply). Local; no Qobuz login needed.")
     modes.add_argument("--migrate", action="store_true",
                    help="one-time setup: reorganise an existing library into the "

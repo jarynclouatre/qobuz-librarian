@@ -33,7 +33,7 @@ It has a web UI and a CLI.
 - **New releases.** Checks regularly for new albums by artists in your library.
 - **Discover.** With a free Last.fm API key, suggests artists like yours, browses your library by genre and lists albums you saved on Qobuz that aren't on disk yet.
 - **Lyrics.** Fetched on import, with a Lyrics page to fill in the rest of your library.
-- **Repair.** Finds truncated or corrupt FLACs and replaces just those tracks when Qobuz has the same recording.
+- **Repair.** Finds truncated or corrupt FLACs and replaces just those tracks when Qobuz has the same recording, or offers the whole album again when it can't tell.
 - **Migration.** Reorganises an existing library into `Artist/Album (Year)` folders, copying by default.
 - **Collection backup.** After each full scan it saves a list of everything you own. Upload one later and it offers to download what's missing.
 - **Survives restarts.** Queues and reviews come back after a restart, and a download cut off part way picks up the tracks it was missing.
