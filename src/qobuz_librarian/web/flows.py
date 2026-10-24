@@ -4299,7 +4299,11 @@ def _repair_album_outcome(album_dir, name, token):
                       f"as “{m_title}” ({m_year})")
             payload = {"album_dir": str(album_dir), "artist_name": name,
                        "album_id": matched.get("id"),
-                       "matched_title": m_title}
+                       "matched_title": m_title,
+                       "damaged": [
+                           {"file": Path(e["path"]).relative_to(album_dir).as_posix(),
+                            "title": e.get("local_title") or e.get("title")}
+                           for e in (*truncated, *suspicious)]}
             if premise is not None:
                 payload["_premise"] = {
                     **premise,
@@ -4834,11 +4838,15 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
     imported_ok = bool(result.get("imported")) and result.get("n_ok", 0) > 0
     if backup:
         try:
-            if imported_ok and process_mode._upgrade_replacement_verified(full, album_dir, backup):
+            damaged = payload.get("damaged") or []
+            damaged_files = [d["file"] for d in damaged]
+            if imported_ok and process_mode._upgrade_replacement_verified(
+                    full, album_dir, backup, damaged_files):
                 # Carry useful companions, then retire the original's backup when
                 # every file it holds is verifiably superseded in the new album.
                 carried = process_mode._carry_non_audio_from_backup(
-                    full, album_dir, backup, replacement_dir=album_dir)
+                    full, album_dir, backup, replacement_dir=album_dir,
+                    damaged=damaged_files)
                 if carried is not None:
                     replacement_path, replacement_receipt, left = carried
                     if not beets_mod.retire_replaced_beets_entries(
@@ -4894,6 +4902,11 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
                             "The re-download verified, but the original album's "
                             "backup could not be proven redundant.",
                         )
+                    if not result.get("repair_unverified"):
+                        repair_log.append_repair_log([
+                            {"artist": payload["artist_name"],
+                             "album": album_dir.name, "title": d["title"]}
+                            for d in damaged])
                 else:
                     result["repair_unverified"] = True
                     pin_repair_recovery(
@@ -5128,6 +5141,20 @@ def execute_repairs(job, chosen, token):
         )
         if local_files_changed:
             job._imported_any = True
+        if result and result.get("put_back") and "_premise" in p:
+            # Every original went back as a copy of itself, which the pick's
+            # seals would refuse as changed files.
+            resealed = candidate_premise.resealed_after_tracks_put_back(
+                p["_premise"], result["put_back"])
+            receipts = [
+                repair_log.resealed_source_receipt(
+                    p["album_dir"], b["source_receipt"])
+                for b in p["verified_truncated"]
+            ] if resealed is not None else []
+            if resealed is not None and all(receipts):
+                p["_premise"] = resealed
+                for b, receipt in zip(p["verified_truncated"], receipts):
+                    b["source_receipt"] = receipt
         if result and (
             result.get("result") == "cancelled" or result.get("cancelled")
         ):
@@ -5164,8 +5191,8 @@ def execute_repairs(job, chosen, token):
             cd_quality_tracks.extend(result.get("cd_quality_tracks") or [])
         else:
             failed += 1
-            # Start refuses a pick whose album this run changed, even when it
-            # only put the originals back, so only a fresh scan can offer it.
+            # Start refuses a pick whose album this run changed, so unless
+            # the put-back resealed it above, only a fresh scan can offer it.
             try:
                 candidate_premise.validate(cand)
             except CandidateStale:

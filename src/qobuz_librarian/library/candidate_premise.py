@@ -561,8 +561,8 @@ def resealed_after_put_back(value, backup_receipt, captures):
 
 
 def resealed_after_tracks_put_back(value, backup_receipt):
-    """A fresh seal for a gap-fill row whose tracks a backup set aside and a
-    put-back proved against it byte for byte, or None.
+    """A fresh seal for a gap-fill or Repair row whose tracks a backup set
+    aside and a put-back proved against it byte for byte, or None.
 
     The tracks come back as copies with new inodes. Each must keep the size
     and mtime it was sealed with, and nothing else in the folder may differ
@@ -571,9 +571,10 @@ def resealed_after_tracks_put_back(value, backup_receipt):
     origin = backup_receipt.get("origin")
     premise = canonical_premise(value)
     if (premise is None or premise["version"] != PREMISE_VERSION
-            or premise["kind"] != "gap-fill" or premise["path"] != origin):
+            or premise["kind"] not in ("gap-fill", "repair")
+            or premise["path"] != origin):
         return None
-    fresh = capture("gap-fill", origin)
+    fresh = capture(premise["kind"], origin)
     if fresh is None or _durable_premises_match(premise, fresh):
         return None
     sealed = premise["receipt"]

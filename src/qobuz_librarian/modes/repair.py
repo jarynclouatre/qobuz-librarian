@@ -931,6 +931,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             repaired = False
 
         partial = []
+        put_back = None
         if backup_path and backup_path.exists():
             if repaired and retag_failed:
                 # The audio is verifiably fixed, but the originals' tags/art
@@ -1071,6 +1072,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                         "verified; the originals of the tracks that failed "
                         "are back in the album."))
                 elif n_restored and not backup_path.exists():
+                    put_back = backup_path.receipt
                     resolve_recovery(
                         backup_path,
                         "The refill did not complete, so every original was "
@@ -1118,6 +1120,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             "imported": repaired or bool(partial),
             "cancelled": qi.get("result") == "cancelled",
             "backup": recovery_result(),
+            "put_back": put_back,
             "cd_quality_tracks": (qi.get("cd_quality_tracks", [])
                                   if repaired or partial else []),
         }

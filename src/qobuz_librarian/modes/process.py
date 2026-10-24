@@ -339,13 +339,30 @@ def _upgrade_track_identity_matches(original, replacement):
     return _unidentified_track_match(original, replacement)
 
 
-def _pair_upgrade_tracks_for_disposal(originals, replacements):
+def _damaged_track_match(original, replacement):
+    old_slot = _known_track_slot(original)
+    old_title = canonical_track_title(original.get("title"))
+    return bool(
+        old_title
+        and old_title == canonical_track_title(replacement.get("title"))
+        and old_slot is not None
+        and old_slot == _known_track_slot(replacement)
+    )
+
+
+def _held_paths(backup_path, names):
+    return {os.fspath(Path(backup_path) / name) for name in names}
+
+
+def _pair_upgrade_tracks_for_disposal(originals, replacements, damaged=()):
     """Return unique, destruction-safe original/replacement pairs.
 
     The normal library matcher deliberately tolerates missing identifiers and
     fuzzy edition titles so scans can find music. Deleting the upgrade backup
     needs stronger evidence: one-sided recording IDs cannot fall back to a
     title, and unidentified tracks must agree on slot, title, and duration.
+    A file Repair found damaged pairs on slot and title alone: its recording
+    ID is why it was re-downloaded, and the damage can throw its length.
     """
     replacement_slots = [
         slot for track in replacements
@@ -357,9 +374,11 @@ def _pair_upgrade_tracks_for_disposal(originals, replacements):
     pairs = []
     claimed = set()
     for original in originals:
+        matches = (_damaged_track_match if original.get("path") in damaged
+                   else _upgrade_track_identity_matches)
         candidates = [
             index for index, replacement in enumerate(replacements)
-            if _upgrade_track_identity_matches(original, replacement)
+            if matches(original, replacement)
         ]
         if len(candidates) != 1 or candidates[0] in claimed:
             return None
@@ -380,7 +399,7 @@ def _track_identity_conflicts(original, replacement):
     return False
 
 
-def _upgrade_replacement_verified(album, album_dir, backup_path):
+def _upgrade_replacement_verified(album, album_dir, backup_path, damaged=()):
     """True only when the freshly imported album is at least as complete as the
     backed-up original: same-or-more tracks AND same-or-more playtime. The
     success gate clears `flac -t` per file, which proves each file decodes but
@@ -393,11 +412,14 @@ def _upgrade_replacement_verified(album, album_dir, backup_path):
     post_dir = album_dir if album_dir.is_dir() else find_album_dir_filesystem(album)
     if not post_dir or not post_dir.exists():
         return False
-    return _upgrade_trees_verified(post_dir, backup_path)
+    return _upgrade_trees_verified(post_dir, backup_path, damaged)
 
 
-def _upgrade_trees_verified(post_dir, backup_path):
-    """Compare exact replacement/original tree views at the disposal gate."""
+def _upgrade_trees_verified(post_dir, backup_path, damaged=()):
+    """Compare exact replacement/original tree views at the disposal gate.
+    ``damaged`` names files, relative to the album, that Repair found
+    damaged."""
+    damaged = _held_paths(backup_path, damaged)
     new_tracks, new_degraded = _folder_tracks_checked(post_dir)
     old_tracks, old_degraded = _folder_tracks_checked(backup_path)
     # A degraded walk returns only the READABLE tracks: a transient error on
@@ -429,7 +451,7 @@ def _upgrade_trees_verified(post_dir, backup_path):
             f"original {int(old_secs)}s (a track may be truncated)."))
         return False
     # Every original must have one identity-paired replacement.
-    pairs = _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks)
+    pairs = _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks, damaged)
     if pairs is None:
         log.info(fmt(C.YELLOW,
             "  ⚠  Couldn't prove one unique replacement for every original "
@@ -438,7 +460,7 @@ def _upgrade_trees_verified(post_dir, backup_path):
     for ot, nt in pairs:
         oq, nq = _track_quality(ot), _track_quality(nt)
         title = truncate(str(ot.get("title") or ""), 40)
-        if _track_identity_conflicts(ot, nt):
+        if ot.get("path") not in damaged and _track_identity_conflicts(ot, nt):
             log.info(fmt(C.YELLOW,
                 f"  ⚠  Upgrade matched {title} to a different recording "
                 "identity."))
@@ -579,7 +601,8 @@ def _tags_present(tags, target):
         for key, values in original.items())
 
 
-def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
+def _carry_track_annotations(backup_path, replacement_path, *, edition=None,
+                             damaged=()):
     """Give each replacement track the user's own tags and pictures.
 
     Original tags take precedence unless the new download owns that kind
@@ -593,7 +616,8 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
     if edition is not None:
         new_tracks = catalog.edition_files(edition, new_tracks, replacement_path)
     pairs = (None if new_degraded or old_degraded
-             else _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks))
+             else _pair_upgrade_tracks_for_disposal(
+                 old_tracks, new_tracks, _held_paths(backup_path, damaged)))
     if pairs is None:
         return False
     carried_to = 0
@@ -638,7 +662,7 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None):
 
 
 def _carry_non_audio_from_backup(album, album_dir, backup_path,
-                                 replacement_dir=None):
+                                 replacement_dir=None, damaged=()):
     """Carry companions and the user's own track tags between exact trees.
 
     Returns the exact replacement path, its updated receipt, and the
@@ -655,12 +679,12 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
             dest = album_dir
     if not dest or not dest.exists():
         return None
-    if not _carry_track_annotations(backup_path, dest):
+    if not _carry_track_annotations(backup_path, dest, damaged=damaged):
         return None
     receipt = capture_album_source_receipt(dest)
     if receipt is None:
         return None
-    renamed = _lyrics_follow_tracks(backup_path, dest)
+    renamed = _lyrics_follow_tracks(backup_path, dest, damaged)
     updated = carry_backup_companions(
         backup_path,
         dest,
@@ -676,7 +700,7 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
     return dest, updated, left
 
 
-def _lyrics_follow_tracks(backup_path, replacement_path):
+def _lyrics_follow_tracks(backup_path, replacement_path, damaged=()):
     """The name each of the backup's .lrc files takes in the replacement:
     that of the track its own track became, where that has another name.
     None are renamed when the tracks can't be paired, or when two would end
@@ -686,7 +710,8 @@ def _lyrics_follow_tracks(backup_path, replacement_path):
     new_tracks, new_degraded = _folder_tracks_checked(replacement_path)
     old_tracks, old_degraded = _folder_tracks_checked(backup_path)
     pairs = (None if new_degraded or old_degraded
-             else _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks))
+             else _pair_upgrade_tracks_for_disposal(
+                 old_tracks, new_tracks, _held_paths(backup_path, damaged)))
     renamed = {}
     for old, new in pairs or ():
         source = Path(old["path"]).with_suffix(".lrc")

@@ -42,6 +42,28 @@ def test_no_isrc_redownload_failure_restores_original_folder(tmp_path, monkeypat
     assert restored == {"bp": backup, "dir": album_dir}
 
 
+def test_a_redownload_for_a_track_without_a_recording_id_can_verify(
+        tmp_path, monkeypatch):
+    from qobuz_librarian.modes import process
+
+    def track(folder, n, isrc):
+        return {"path": str(folder / f"0{n} - T{n}.flac"), "title": f"T{n}",
+                "tracknumber": n, "discnumber": 1, "isrc": isrc,
+                "mb_trackid": "", "length": 200.0, "bits": 16,
+                "sample_rate": 44100, "channels": 2}
+
+    album, backup = tmp_path / "album", tmp_path / "backup"
+    album.mkdir()
+    trees = {
+        album: [track(album, 1, "USAAA0000001"), track(album, 2, "USAAA0000002")],
+        backup: [track(backup, 1, ""), track(backup, 2, "USAAA0000002")],
+    }
+    monkeypatch.setattr(process, "_folder_tracks_checked",
+                        lambda folder: (trees[folder], False))
+    assert not process._upgrade_trees_verified(album, backup)
+    assert process._upgrade_trees_verified(album, backup, ["01 - T1.flac"])
+
+
 # ── Repair: backup resolution branches (the core data-safety machinery) ─
 
 def _call_repair_album_dir(tmp_path, monkeypatch, *, n_ok, n_fail, imported,

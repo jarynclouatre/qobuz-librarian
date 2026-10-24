@@ -429,6 +429,23 @@ def _repair_flac_paths(album_dir):
     return sorted(paths)
 
 
+def resealed_source_receipt(album_dir, receipt):
+    """A fresh receipt for a file put back with the bytes, size and mtime
+    ``receipt`` sealed, or None."""
+    try:
+        with _HeldRepairSource(
+                album_dir, Path(album_dir) / receipt["relative"]) as source:
+            fresh = source.source_receipt
+    except OSError:
+        return None
+    if fresh is None or fresh["relative"] != receipt["relative"]:
+        return None
+    old, new = receipt["file"], fresh["file"]
+    if any(old[key] != new[key] for key in ("type", "size", "mtime_ns", "sha256")):
+        return None
+    return fresh
+
+
 def _append_verified_truncated(report, source, entry):
     """Attach the receipt only while the source is still the file every check
     read."""

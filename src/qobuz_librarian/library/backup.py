@@ -3703,6 +3703,14 @@ def _seal_moved_album(public, bp, source_receipt, *, owner, set_aside):
             backed_up=files)
 
 
+def _copy_failure(exc):
+    """Why a copy into the backup folder failed. Only the copy writes, so a
+    full disk is the backup folder's."""
+    if exc.errno == errno.ENOSPC:
+        return f"the backup folder {cfg.UPGRADE_BACKUP_DIR} is full"
+    return exc.strerror or exc
+
+
 def _copy_album_to_backup(public, bp, snapshot, source_receipt, why, *,
                           owner, set_aside):
     """Copy the album at ``public`` to the backup ``bp`` and delete it from
@@ -3756,7 +3764,7 @@ def _copy_album_to_backup(public, bp, snapshot, source_receipt, why, *,
             raise
         log.info(fmt(
             C.RED,
-            f"  ✗  Could not back up {public}: {exc.strerror or exc}. It "
+            f"  ✗  Could not back up {public}: {_copy_failure(exc)}. It "
             "was left in place"
             + (f"; what is left of its copy is at {partial}." if left else
                "." if not published else
@@ -4005,7 +4013,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
         log.info(fmt(
             C.RED,
             f"  ✗  Couldn't back up the {what}tracks of {public}: "
-            f"{exc.strerror or exc}. Every track was left in place{where}."))
+            f"{_copy_failure(exc)}. Every track was left in place{where}."))
         return None
 
     try:

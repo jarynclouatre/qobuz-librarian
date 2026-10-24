@@ -463,7 +463,7 @@ def test_executor_upgrade_carries_non_audio_companions_from_backup(
     monkeypatch.setattr(proc, "find_album_dir_filesystem", lambda _a: album_dir)
     monkeypatch.setattr(proc, "_upgrade_replacement_verified", lambda *a: True)
     monkeypatch.setattr(proc, "_upgrade_trees_verified", lambda *_a: True)
-    monkeypatch.setattr(proc, "_carry_track_annotations", lambda *_a: True)
+    monkeypatch.setattr(proc, "_carry_track_annotations", lambda *_a, **_k: True)
     monkeypatch.setattr(executor, "retire_backup_beets_entries",
                         lambda *_a, **_k: True)
 
