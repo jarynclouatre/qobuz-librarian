@@ -126,6 +126,29 @@ def test_second_copy_of_an_album_in_another_folder_is_not_merged(tmp_path):
             for e in plan.collisions] == [(rip, True)] * 2
 
 
+def test_a_move_run_again_still_holds_back_the_second_copy(tmp_path, tagged_flac):
+    """Once the first copy has moved, the second is alone in the source; it
+    still meets the first at the destination and stays where it is."""
+    src, dest = tmp_path / "src", tmp_path / "dest"
+    items = []
+    for folder, disc in (("Rip", 1), ("Rip", 2), ("Single", 0)):
+        track = tagged_flac(
+            src / folder / (f"CD{disc}" if disc else "") / "01.flac",
+            artist="Artist", album="Album", title=f"Song {disc}",
+            tracknumber=1, discnumber=disc or 1, date=2017)
+        items.append((track, _meta(
+            title=f"Song {disc}", disc=disc or 1, disctotal=2 if disc else 0),
+            "tags"))
+    assert m.execute_plan(m.build_plan(items, dest), in_place=True).copied == 2
+    plan = m.build_plan([row for row in items if row[0].exists()], dest)
+    assert not plan.placed and len(plan.collisions) == 1
+    m.execute_plan(plan, in_place=True)
+    assert (src / "Single" / "01.flac").exists()
+    assert sorted(str(p.relative_to(dest)) for p in dest.rglob("*.flac")) == [
+        "Artist/Album (2017)/Disc 1/01 - Song 1.flac",
+        "Artist/Album (2017)/Disc 2/01 - Song 2.flac"]
+
+
 def test_names_differing_only_by_case_or_unicode_form_share_a_folder(tmp_path):
     """ALVVAYS and Alvvays are one artist folder, spelled as most tracks spell
     it, and a Björk album tagged in two Unicode forms is one album folder."""

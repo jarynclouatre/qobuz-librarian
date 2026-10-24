@@ -287,6 +287,10 @@ def run_migrate_mode(args):
         status == engine.SKIPPED
         and not reason.startswith(engine.VERIFIED_COPY)
         for _source, _destination, status, reason in result.outcomes)
+    verified = sum(
+        status == engine.SKIPPED
+        and reason.startswith(engine.VERIFIED_COPY)
+        for _source, _destination, status, reason in result.outcomes)
     companion_failed = sum(
         status == engine.FAILED
         for _source, _destination, status, _reason in companion_outcomes)
@@ -298,14 +302,14 @@ def run_migrate_mode(args):
             f"     {plural(result.copied, 'file')} "
             f"{'moved' if in_place else 'copied'} before the run ended."))
     else:
-        if result.copied or not resume_entries:
+        if result.copied or not verified:
             log.info(fmt(C.GRAY,
                 f"     {plural(result.copied, 'file')} "
                 f"{'moved' if in_place else 'copied'}."))
-        if resume_entries:
+        if verified:
             log.info(fmt(C.GRAY,
-                f"     {plural(len(resume_entries), 'file')} already in place "
-                f"{'was' if len(resume_entries) == 1 else 'were'} verified."))
+                f"     {plural(verified, 'file')} already in place "
+                f"{'was' if verified == 1 else 'were'} verified."))
     if result.interrupted:
         log.info(fmt(C.YELLOW,
             f"     ⚠  Stopped early; the library is partly moved into {dest}."

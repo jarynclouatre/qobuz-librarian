@@ -427,6 +427,24 @@ def _companion_destinations(dest_rel) -> tuple:
     return dest_rel.parent, Path(*dest_rel.parts[:2])
 
 
+def _audio_already_in(dest_root, folder, semantics, own) -> tuple:
+    """The audio files already under ``folder`` at the destination, by
+    collision key, and the track slots of those not at a name in ``own``."""
+    found, slots = set(), set()
+    for parent, folders, files in os.walk(Path(dest_root) / folder):
+        folders[:] = [name for name in folders if not name.startswith(".")]
+        for name in files:
+            path = Path(parent, name)
+            if name.startswith(".") or path.suffix.lower() not in config.AUDIO_EXTS:
+                continue
+            key = _destination_collision_key(
+                path.relative_to(dest_root), semantics)
+            found.add(key)
+            if key not in own and (meta := extract_metadata(path)):
+                slots.add(_track_slot(meta))
+    return found, slots
+
+
 def _album_year(metas) -> int:
     """The one year an album's folder is named with: the year most of its
     tracks carry, the later one on a tie."""
@@ -1715,16 +1733,32 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
         multidisc = any(
             (m.get("disctotal") or 0) > 1 or (m.get("disc") or 1) > 1
             for _, m, _, _ in members)
-        for source, meta, sot, source_receipt in members:
+        rels = []
+        for _, meta, _, _ in members:
             rel = folder
             if multidisc:
                 rel = rel / f"Disc {meta.get('disc') or 1}"
-            rel = rel / track_filename(meta)
-            if duplicate_of:
+            rels.append(rel / track_filename(meta))
+        # A copy of this album that an earlier run placed under other names
+        # (another folder's rip, other titles) is the same album again, as
+        # within one run; the names it shares go through the checks below.
+        held_back = duplicate_of and f"same album already placed from {duplicate_of}"
+        existing = set()
+        if not held_back:
+            own = {_destination_collision_key(rel, destination_name_semantics)
+                   for rel in rels}
+            existing, taken = _audio_already_in(
+                dest_root, folder, destination_name_semantics, own)
+            if not taken.isdisjoint(
+                    _track_slot(meta) for _, meta, _, _ in members):
+                held_back = f"same album already in {folder} at the destination"
+        for (source, meta, sot, source_receipt), rel in zip(members, rels):
+            if held_back and _destination_collision_key(
+                    rel, destination_name_semantics) not in existing:
                 entries.append(PlanEntry(
                     source=source, status=COLLISION, dest_rel=rel,
                     source_of_truth=sot,
-                    reason=f"same album already placed from {duplicate_of}",
+                    reason=held_back,
                     meta=meta, source_receipt=source_receipt))
                 continue
             built.append((source, sot, meta, rel, source_receipt))
