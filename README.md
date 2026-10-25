@@ -35,8 +35,8 @@ It has a web UI and a CLI.
 - **Lyrics.** Fetched on import, with a Lyrics page to fill in the rest of your library.
 - **Repair.** Finds truncated or corrupt FLACs and replaces just those tracks when Qobuz has the same recording, or offers the whole album again when it can't tell.
 - **Migration.** Reorganises an existing library into `Artist/Album (Year)` folders, copying by default.
-- **Collection backup.** After each full scan it saves a list of everything you own. Upload one later and it offers to download what's missing.
-- **Survives restarts.** Queues and reviews come back after a restart, and a download cut off part way picks up the tracks it was missing.
+- **Collection backup.** After each Library scan it saves a list of everything you own. Upload one later and it offers to download what's missing.
+- **Survives restarts.** Queues and reviews come back after a restart. A Search download cut off part way picks up the tracks it was missing, and a Library or Upgrade run puts the albums it had not finished back in its review, ticked.
 
 Scans give you a list to tick through before anything is downloaded or changed. Search and Lyrics act right away.
 

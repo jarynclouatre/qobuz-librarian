@@ -1525,9 +1525,9 @@ async def job_retry(request: Request, job_id: str):
 
 def _undone_summary(single, outcome):
     if outcome.get("single_kept"):
-        return (f"Removed “{single.get('title')}”. Another track you took "
-                "from this album keeps it a single.")
-    return f"Removed “{single.get('title')}” and undid the single."
+        return (f"Removed “{single.get('title')}”. Other tracks you took "
+                "from this album stay.")
+    return f"Removed “{single.get('title')}”."
 
 
 def _undo_root(single):

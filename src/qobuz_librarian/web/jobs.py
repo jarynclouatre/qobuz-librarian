@@ -1778,7 +1778,7 @@ def submit_scan(job: Job, scan_fn, execute_fn):
             j.status = JobStatus.AWAITING_REVIEW
             review_badges.mark_ready(j.execute_kind)
         else:
-            j.push_line("Nothing to do. No candidates found.")
+            j.push_line("Nothing to review.")
             j.status = JobStatus.DONE
 
     _scan_queue.put((job, _scan))
@@ -1902,7 +1902,7 @@ def _restore_untouched_review(j: Job, *, status=JobStatus.RUNNING) -> bool:
             if j.status != status or j.cancel_requested:
                 return False
             previous = (j.status, j.finished_at, j.error, j.candidates, j._cand_seq,
-                        j.title)
+                        j.title, j.log_lines)
             should_merge = bool(
                 parked is not None
                 and parked.status == JobStatus.AWAITING_REVIEW
@@ -1928,6 +1928,8 @@ def _restore_untouched_review(j: Job, *, status=JobStatus.RUNNING) -> bool:
                 ))
                 j.candidates = candidates
                 j.sync_cand_seq()
+                j.log_lines = parked.log_lines + j.log_lines
+                j._trim_log_lines_locked()
             j.status = JobStatus.AWAITING_REVIEW
             j.finished_at = None
             j.error = None
@@ -1942,7 +1944,7 @@ def _restore_untouched_review(j: Job, *, status=JobStatus.RUNNING) -> bool:
             )
             if not saved:
                 (j.status, j.finished_at, j.error,
-                 j.candidates, j._cand_seq, j.title) = previous
+                 j.candidates, j._cand_seq, j.title, j.log_lines) = previous
                 return False
             if should_merge:
                 parked._retired = True
@@ -2004,6 +2006,7 @@ def approve(
             "started_at": job.started_at,
             "title": job.title,
             "execute_args": job.execute_args,
+            "log_lines": job.log_lines,
         }
         previous_candidates = job.candidates
         previous_selected = [
@@ -2031,6 +2034,11 @@ def approve(
             job.execute_args = {**(job.execute_args or {}),
                                 "_review_title": job.title}
             job.title = run_title
+            # The run's log starts empty; the scan's lines move with the
+            # unticked picks to the review they stay in.
+            if parked is not None:
+                parked.log_lines = job.log_lines
+            job.log_lines = []
         # Restart the elapsed clock at approve so the execute phase (downloading /
         # repairing) times itself; otherwise it keeps counting from the scan
         # start and folds in however long the results sat awaiting review, making

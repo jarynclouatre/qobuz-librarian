@@ -2117,9 +2117,13 @@ def _queue_done_line(results, n_items, *, stopped=False):
     clear = (n_total_missing == 0 and n_unfinished == 0 and n_cancelled == 0
              and n_left == 0 and n_own_left == 0)
     text = (f"  {'✓' if clear else '⚠'} Queue {'stopped' if stopped else 'done'}: "
-            f"{n_success}/{n_items} albums OK · "
-            f"{n_total_ok} track{'s' if n_total_ok != 1 else ''} downloaded · "
-            f"{n_total_missing} track{'s' if n_total_missing != 1 else ''} unresolved")
+            f"{n_success}/{n_items} album{'s' if n_items != 1 else ''} OK")
+    # A stop tallies finished albums only, so its zeros say nothing about
+    # the album it cut short.
+    if n_total_ok or not stopped:
+        text += f" · {plural(n_total_ok, 'track')} downloaded"
+    if n_total_missing or not stopped:
+        text += f" · {plural(n_total_missing, 'track')} unresolved"
     if n_cancelled:
         text += (f" · {n_cancelled} album"
                  f"{'s' if n_cancelled != 1 else ''} cancelled")

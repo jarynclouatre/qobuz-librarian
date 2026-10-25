@@ -10,7 +10,9 @@ from qobuz_librarian import run_lock, safefile
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.download import (
     clear_attempts_after_import,
+    discard_download_staging,
     discard_retry_staging,
+    download_holds_audio,
     keep_unimported_download,
     note_superseded_attempts,
     retain_download_staging,
@@ -1564,6 +1566,7 @@ def process_album(album, args, *, allow_force=True, label=None,
     _gap_fill_not_located = False  # gap-fill succeeded on paper but album not found on disk
     recovery_unverified = False
     early_result = None
+    cancelled = None
     post_dir = None
 
     def _imported_dir():
@@ -1600,19 +1603,26 @@ def process_album(album, args, *, allow_force=True, label=None,
         elapsed = download_result["elapsed"]
 
         # Cancelled mid-rip: the user hit stop, so the partial set must not be
-        # imported.
+        # imported. It is kept for the next try only when it holds audio.
         def cancelled_result():
+            nonlocal cancelled
+            if download_holds_audio(download_result):
+                kept = retain_download_staging(download_result)
+            else:
+                kept = False
+                discard_download_staging(download_result)
             log.info(fmt(C.YELLOW,
-                "\n  Cancelled; retaining the partial download for review. "
-                "nothing imported."))
-            retain_download_staging(download_result)
-            return {
+                "\n  Stopped; nothing was imported."
+                + (" The part already downloaded is kept in staging."
+                   if kept else "")))
+            cancelled = {
                 "result": "cancelled",
                 "imported": False,
                 "n_ok": n_ok,
                 "n_lossy": n_lossy,
                 "n_fail": n_fail,
             }
+            return cancelled
 
         if is_cancel_requested():
             return cancelled_result()
@@ -2206,6 +2216,9 @@ def process_album(album, args, *, allow_force=True, label=None,
                 catalogue_unverified=catalogue_unverified,
                 recovery_unverified=recovery_unverified,
             )
+        # A cancelled Upgrade says it put the album back only once it has.
+        if cancelled is not None and upgrade_unverified:
+            cancelled["upgrade_unverified"] = True
 
     if disk_full is not None:
         raise disk_full

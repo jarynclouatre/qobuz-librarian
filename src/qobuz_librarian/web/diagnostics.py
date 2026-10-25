@@ -1082,7 +1082,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 f'<input type="hidden" name="_csrf_token" value="{tok}">'
                 f'<input type="hidden" name="group" value="{name}">'
                 f'<button type="submit" class="ql-btn ql-btn-sm" '
-                f'data-confirm="Delete these files? They are not in your '
+                f'data-confirm="Remove these files? They are not in your '
                 f'library and this cannot be undone." '
                 f'data-confirm-action="Remove" data-irreversible>Remove</button>'
                 f'</form>'

@@ -393,6 +393,21 @@ def retain_download_staging(result, *, label="interrupted", recovery_checkpoint=
     return True
 
 
+def download_holds_audio(result):
+    """Whether a stopped download's run holds a track with anything in it.
+
+    A run whose tracks are all empty files, or that holds only cover art, has
+    nothing a later try could use.
+    """
+    run = staging_run_from_record(result.get("_staging_run"))
+    if run is None:
+        return False
+    current = capture_staging_run(run)
+    return current is None or any(
+        identity[3] and Path(relative).suffix.lower() in cfg.AUDIO_EXTS
+        for relative, identity in current.files)
+
+
 def keep_unimported_download(result):
     """Leave a complete --no-import download where the manual import finds
     it, out of reach of the next run's clean-up of abandoned downloads."""
@@ -1211,12 +1226,12 @@ def run_album_download(
     rate_limited = False
 
     if download_full_album:
-        log.info(
-            fmt(C.GRAY, f"  Whole album ({len(missing)} of {n_tracks_total} tracks missing)")
-        )
+        whole = (plural(n_tracks_total, "track") if len(missing) == n_tracks_total
+                 else f"{len(missing)} of {n_tracks_total} tracks missing")
+        log.info(fmt(C.GRAY, f"  Whole album ({whole})"))
     else:
         why = (
-            "repair"
+            plural(len(missing), "track")
             if force_track_by_track
             else f"{len(missing)} of {n_tracks_total} tracks missing"
         )

@@ -428,7 +428,7 @@ def _make_single_track_run(album, track, token):
                 hidden_mod.mark_single(artist, title, catalog.album_year(album),
                                        album.get("id"))
                 upgrade = (
-                    "Upgrade treats the album as a single."
+                    "Upgrade leaves this track alone."
                     if not cfg.SUPPRESS_SINGLE_TRACK_GAPS
                     and not cfg.UPGRADE_SINGLES_ENABLED else "")
                 rest_note = _rest_of_album_note(landed_dir, active_token)

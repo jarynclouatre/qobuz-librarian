@@ -320,8 +320,6 @@
 {% endfor -%}
       </div>
     </details>
-    {% else %}
-    <p class="ql-job-muted">No log output was retained for this job.</p>
     {% endif %}
     <div class="ql-job-actions">
       {% if (s in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and job.attention != 'recovery' %}
@@ -345,7 +343,7 @@
             hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm" data-irreversible
-                data-confirm="{% if single_kept_by_other %}Remove the downloaded track? Another track you took from this album keeps it a single.{% else %}Remove the downloaded track and undo the single?{% endif %}"
+                data-confirm="{% if single_kept_by_other %}Remove the downloaded track? Other tracks you took from this album stay.{% else %}Remove the downloaded track?{% endif %}"
                 data-confirm-action="Remove track"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Undo (removes track)</button>
         {% include "_writes_paused_reason.html" %}
       </form>

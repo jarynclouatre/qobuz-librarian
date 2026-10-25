@@ -609,7 +609,8 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
     the rows the review lists that changed or left; ``held_back`` maps the
     switches (switch_holding) to the added rows they keep out of the list;
     ``left_out`` maps artist folders to the listed rows the review had
-    no room for; ``notes`` are the lines the fold added to the review's log."""
+    no room for; ``notes`` are the lines the fold added to the review's log
+    besides the counts, which the refresh's own summary gives."""
     _key = fold_key
     def _fold():
         if parked.status != job_mgr.JobStatus.AWAITING_REVIEW:
@@ -774,13 +775,14 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                 "_library_review_generation": int(review_generation),
             }
         held = sum(held_back.values())
+        counted = []
         notes = []
         changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
             ("added", added - held), ("updated", updated), ("removed", removed))
             if n]
         if coverage is not None and (changes or held):
             # Say what the refresh changed in the list the review shows.
-            line = "A later refresh "
+            line = "A refresh "
             if changes:
                 line += (", ".join(changes[:-1])
                          + (" and " if len(changes) > 1 else "")
@@ -791,7 +793,7 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
             else:
                 line += (f"added {plural(held, 'album')} under "
                          f"{missing_types.named(held_back)}.")
-            notes.append(line)
+            counted.append(line)
         if in_library:
             n = len(in_library)
             notes.append(
@@ -811,7 +813,7 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                 f"now under {missing_types.named(moved)} and "
                 f"{'stays' if n == 1 else 'stay'} listed while ticked.")
         # Saved with this change; the review's lock is already held.
-        parked.log_lines.extend(notes)
+        parked.log_lines.extend(counted + notes)
         parked._trim_log_lines_locked()
         return added, updated, removed, held_back, left_out, notes
 
@@ -3080,6 +3082,10 @@ def execute_albums(job, chosen, token):
     fetch_failed = 0
     skipped = 0
     processed = 0
+    # The summary names the albums, not just how many.
+    downloaded = []
+    partial_cands = []
+    skipped_cands = []
     # Picks that didn't land (never fetched, errored, or came back empty).
     failed_cands = []
     failure_causes = []
@@ -3301,6 +3307,7 @@ def execute_albums(job, chosen, token):
             elif retryable or unretryable:
                 _, _, lossy_only, unavailable = track_shortfall(result)
                 partial += 1
+                partial_cands.append(cand)
                 retryable_tracks += retryable
                 lossy_only_tracks += lossy_only
                 unavailable_tracks += unavailable
@@ -3317,9 +3324,11 @@ def execute_albums(job, chosen, token):
                     )
             else:
                 ok += 1
+                downloaded.append(cand)
         elif result and result.get("result") in _benign:
             if result.get("result") != "cancelled":
                 skipped += 1
+                skipped_cands.append(cand)
         else:
             failed += 1
             failed_cands.append(cand)
@@ -3341,35 +3350,32 @@ def execute_albums(job, chosen, token):
         if leftovers and review_kind:
             _remember_review_save(
                 _return_picks(leftovers, review_kind, review_args))
-        interrupted = 1 if cancelled_cand is not None else 0
-        not_started = len(chosen) - processed
-        parts = [f"{plural(ok, 'album')} downloaded"]
+        parts = []
+        if downloaded:
+            parts.append(f"{named_albums(downloaded)} downloaded")
         if partial:
-            parts.append(f"{plural(partial, 'album')} partly downloaded")
+            parts.append(f"{named_albums(partial_cands)} partly downloaded")
         attention_total = sum(attention_counts.values())
         if attention_total:
-            parts.append(f"{plural(attention_total, 'album')} needs attention")
+            parts.append(f"{plural(attention_total, 'album')} "
+                         f"{'needs' if attention_total == 1 else 'need'} attention")
         if failed:
             parts.append(f"{plural(failed, 'album')} failed")
-        if interrupted:
-            parts.append(f"{plural(interrupted, 'album')} interrupted")
         if skipped:
-            parts.append(f"{plural(skipped, 'album')} skipped")
-        parts.append(f"{plural(not_started, 'album')} not started")
-        job.summary = "Stopped early. " + ", ".join(parts) + "."
-        retry_count = failed + interrupted + not_started
+            parts.append(f"{named_albums(skipped_cands)} skipped")
+        job.summary = "Stopped early." + (
+            " " + ", ".join(parts) + "." if parts else "")
         destination = ("Library" if is_library_run else
                        "New releases" if is_nr_run else "Restore review")
-        if retry_count and (is_library_run or is_nr_run or is_restore_run):
+        if leftovers and review_kind:
+            names = named_albums(leftovers)
             if retry_save_failed:
-                job.summary += (
-                    f" {plural(retry_count, 'retry choice')} could not be "
-                    f"saved back to {destination}."
-                )
+                job.summary += (f" {names} could not be saved back to "
+                                f"{destination}.")
             else:
                 job.summary += (
-                    f" {plural(retry_count, 'retry choice')} returned to "
-                    f"{destination}, selected for retry."
+                    f" {names} {'is' if len(leftovers) == 1 else 'are'} back "
+                    f"in {destination}, ticked, to download again."
                 )
         if retry_save_failed:
             job.error = (
@@ -3381,7 +3387,7 @@ def execute_albums(job, chosen, token):
         log.info(job.summary)
         return
     if ok:
-        parts = [f"{ok}/{plural(len(chosen), 'album')} downloaded and imported"]
+        parts = [f"{named_albums(downloaded)} downloaded and imported"]
     elif partial:
         parts = []
     elif sum(attention_counts.values()):
@@ -3390,9 +3396,11 @@ def execute_albums(job, chosen, token):
         parts = ["No albums downloaded or imported"]
     if partial:
         parts.append(
-            f"{plural(partial, 'album')} only partly downloaded "
+            f"{named_albums(partial_cands)} only partly downloaded "
             "(some tracks are missing)"
         )
+    if skipped and (ok or partial):
+        parts.append(f"{named_albums(skipped_cands)} skipped")
     if attention_counts["backup"]:
         parts.append(
             f"{plural(attention_counts['backup'], 'album')} retained "
@@ -3483,7 +3491,7 @@ def execute_albums(job, chosen, token):
             reason = ""
         causes = "; ".join(dict.fromkeys(cause for cause in failure_causes if cause))
         failure_message = (
-            f"{failed} of {plural(len(chosen), 'album')} didn't finish"
+            f"{named_albums(failed_cands)} didn't finish"
             f"{': ' + causes if causes else ''}.{reason} {outcome}"
         )
         job.error = " ".join(part for part in (job.error, failure_message) if part)
@@ -3533,6 +3541,7 @@ def execute_upgrades(job, chosen, token):
     # safely take) an upgrade.
     _skip = BENIGN_UPGRADE_RESULTS
     ok = 0
+    upgraded = []
     kept = 0
     companion_notes = []
     cd_quality_tracks = []
@@ -3547,6 +3556,7 @@ def execute_upgrades(job, chosen, token):
     refused_cands = []
     processed = 0
     current_interrupted = False
+    put_back = None
 
     def return_unfinished(current_index):
         if not job._imported_any:
@@ -3616,6 +3626,8 @@ def execute_upgrades(job, chosen, token):
             _res == "cancelled" or result.get("cancelled")
         ):
             current_interrupted = True
+            if _res == "cancelled" and not result.get("upgrade_unverified"):
+                put_back = cand
         elif result and result.get("catalogue_unverified"):
             catalogue_failed += 1
             job._imported_any = True
@@ -3629,6 +3641,7 @@ def execute_upgrades(job, chosen, token):
         elif result and result.get("imported") and _res not in (
                 _skip | {"upgrade_aborted_backup_failed"}):
             ok += 1
+            upgraded.append(cand)
             job._imported_any = True
             _note_album_done(job)
             cd_quality_tracks.extend(result.get("cd_quality_tracks") or [])
@@ -3687,25 +3700,31 @@ def execute_upgrades(job, chosen, token):
         leftovers = failed_cands + chosen[first_unfinished:]
         retry_saved = _return_upgrade_picks(
             leftovers, refused_cands, job.execute_args)
-        parts = [f"{ok} upgraded"]
+        parts = []
+        if upgraded:
+            parts.append(f"{named_albums(upgraded)} upgraded")
         if failed:
-            parts.append(f"{failed} failed")
+            parts.append(f"{plural(failed, 'album')} failed")
         if changed:
-            parts.append(f"{changed} changed since the review")
-        if current_interrupted:
-            parts.append("1 interrupted")
-        parts.append(f"{len(chosen) - processed} not started")
-        job.summary = "Stopped early. " + ", ".join(parts) + "."
+            parts.append(f"{plural(changed, 'album')} changed since the review")
+        job.summary = "Stopped early." + (
+            " " + ", ".join(parts) + "." if parts else "")
+        if put_back:
+            job.summary += f" {named_albums([put_back])} was put back as it was"
+            job.summary += ("; it is ticked in Upgrade to try again."
+                            if retry_saved is not False and leftovers == [put_back]
+                            else ".")
         if retry_saved is False:
             unsaved = len(leftovers) + len(refused_cands)
             job.summary += (
                 f" {plural(unsaved, 'album')} could not be saved back to "
                 "Upgrade."
             )
-        elif leftovers:
+        elif leftovers and leftovers != [put_back]:
             job.summary += (
-                f" {plural(len(leftovers), 'retry choice')} returned to "
-                "Upgrade, selected for retry."
+                f" {named_albums(leftovers)} "
+                f"{'is' if len(leftovers) == 1 else 'are'} ticked in Upgrade "
+                "to try again."
             )
         if cd_quality_tracks:
             job.summary += f" {cd_quality_note(cd_quality_tracks)}"
@@ -3756,7 +3775,8 @@ def execute_upgrades(job, chosen, token):
             _mark_job_failed(job)
         log.info(job.summary)
         return
-    msg = f"Upgraded {ok}/{plural(len(chosen), 'album')}."
+    msg = (f"Upgraded {named_albums(upgraded)}." if upgraded
+           else "No albums were upgraded.")
     if not any((failed, kept, catalogue_failed, quality_attention,
                 processing_attention, changed)):
         msg = "Finished. " + msg
@@ -5120,7 +5140,6 @@ def execute_repairs(job, chosen, token):
     partly = []
     cd_quality_tracks = []
     failed_cands = []
-    interrupted = 0
     processed = 0
     stopped_early = False
     unfinished_start = None
@@ -5240,7 +5259,6 @@ def execute_repairs(job, chosen, token):
         if result and (
             result.get("result") == "cancelled" or result.get("cancelled")
         ):
-            interrupted += 1
             stopped_early = True
             unfinished_start = processed - 1
             try:
@@ -5303,34 +5321,33 @@ def execute_repairs(job, chosen, token):
             "repair",
             execute_args=getattr(job, "execute_args", None),
         )
-        parts = [f"{plural(fixed, 'album')} repaired"]
+        parts = []
+        if fixed:
+            parts.append(f"{plural(fixed, 'album')} repaired")
         if unverified:
             parts.append(f"{unverified} replaced but unproven")
         if failed:
             parts.append(f"{failed} failed")
-        if interrupted:
-            parts.append(f"{interrupted} interrupted")
         if partly:
             parts.append(f"{len(partly)} partly repaired")
         if changed:
             parts.append(f"{changed} to check again with a new Repair scan")
         if recovery_count:
             parts.append(f"{recovery_count} kept for recovery")
-        parts.append(f"{len(chosen) - processed} not started")
-        job.summary = "Stopped early. " + ", ".join(parts) + "."
+        job.summary = "Stopped early." + (
+            " " + ", ".join(parts) + "." if parts else "")
         if retry_saved is False:
-            job.summary += (
-                f" {plural(len(leftovers), 'retry choice')} could not be "
-                "saved back to Repair."
-            )
+            job.summary += (f" {named_albums(leftovers)} could not be saved "
+                            "back to Repair.")
             job.error = (
                 "Retry choices could not be saved. Check the data folder, "
                 "then run a fresh Repair scan."
             )
         elif leftovers:
             job.summary += (
-                f" {plural(len(leftovers), 'retry choice')} returned to "
-                "Repair, selected for retry."
+                f" {named_albums(leftovers)} "
+                f"{'is' if len(leftovers) == 1 else 'are'} back in Repair, "
+                "ticked, to repair again."
             )
         if failed and not job.error:
             job.error = (

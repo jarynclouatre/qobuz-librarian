@@ -140,8 +140,8 @@ def test_a_library_download_stopped_by_a_restart_returns_as_interrupted(
     job = Job(title=jm.RUN_TITLES["library"], kind="scan",
               execute_kind="library", status=JobStatus.RUNNING)
     assert _REAL_ADMIT(job) is True
-    job.push_line("Stopped early. 0 albums downloaded, 2 albums not started. "
-                  "2 retry choices returned to Library, selected for retry.")
+    job.push_line("Stopped early. Artist · One and Artist · Two are back in "
+                  "Library, ticked, to download again.")
     job.stopping_for_restart = True
     job.cancel_requested = True
     job.status = JobStatus.CANCELED
