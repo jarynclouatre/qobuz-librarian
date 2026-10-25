@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import dataclasses
 import os
+import re
 import shutil
 import threading
 import time
@@ -1133,6 +1134,42 @@ def note_upgrades_put_back(origins):
                        else "were put back as they were."))
             job.summary = f"{job.summary} {note}" if job.summary else note
         job_persistence.persist(job)
+
+
+_KEPT_ORIGINALS = re.compile(
+    r" Your hi-res originals are kept for [^.]*\. Until then you can put "
+    r"them back from Settings[^.]*\.")
+
+
+def note_downsample_put_back(origin):
+    """Say on the page of the last Downsample run that rewrote ``origin``
+    that its originals were put back, and drop the offer to put them back
+    once none of that run's albums has originals left."""
+    folder = os.fspath(origin)
+    runs = [job for job in job_mgr.registry.all()
+            if job.execute_kind == "downsample" and job.phase == "execute"
+            and job.status in job_mgr.TERMINAL
+            and any(c.get("selected")
+                    and (c.get("payload") or {}).get("album_dir") == folder
+                    for c in job.candidates)]
+    if not runs:
+        return
+    job = max(runs, key=lambda j: j.finished_at or j.created_at or 0)
+    kept = {os.fspath(other) for _path, other, _ok
+            in backup_mod.list_undo_copies() if other}
+    with job._lock:
+        picked = [c for c in job.candidates if c.get("selected")]
+        albums = [c for c in picked
+                  if (c.get("payload") or {}).get("album_dir") == folder]
+        note = f"{named_albums(albums)} was put back as it was."
+        summary = job.summary or ""
+        if note in summary:
+            return
+        if not any((c.get("payload") or {}).get("album_dir") in kept
+                   for c in picked):
+            summary = _KEPT_ORIGINALS.sub("", summary)
+        job.summary = f"{summary} {note}" if summary else note
+    job_persistence.persist(job)
 
 
 def reseal_put_back_album(backup_receipt):
@@ -4232,7 +4269,7 @@ def _kept_originals_note(resampled_files, keep_originals):
     days = cfg.UPGRADE_BACKUP_RETENTION_DAYS
     return (f" Your hi-res originals are kept for {plural(days, 'day')}, so "
             "nothing is freed until they expire. Until then you can put them "
-            "back from Settings.")
+            "back from Settings → Diagnostics.")
 
 
 def _repair_damage_detail(truncated):

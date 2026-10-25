@@ -103,7 +103,8 @@ def run_downsample_walk_mode(args):
             "  ⚠  This rewrites hi-res files in place to 44.1/48kHz. A "
             "restorable copy of each original is kept for "
             f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}; a rewrite "
-            "can be undone from the Settings page until then.")))
+            "can be undone from Settings → Diagnostics in the web app until "
+            "then.")))
     elif cfg.DOWNSAMPLE_KEEP_ORIGINALS == "delete":
         log.info(block(fmt(C.YELLOW,
             "  ⚠  This rewrites hi-res files in place to 44.1/48kHz. The "
@@ -313,7 +314,7 @@ def run_downsample_walk_mode(args):
                 "     The hi-res originals are kept for "
                 f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}, so "
                 "nothing is freed until they expire. Until then they can be "
-                "put back from Settings.")))
+                "put back from Settings → Diagnostics in the web app.")))
     if total_read_only:
         log.info(fmt(C.GRAY, f"     {read_only_note(total_read_only)}."))
     if total_errors:

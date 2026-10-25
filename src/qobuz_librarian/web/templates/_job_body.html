@@ -148,7 +148,7 @@
             data-review-verb="{{ job.review_verb }}"
             data-empty-label="{{ labels.review_empty_label(job) }}"
             {% if not _bar_selected or _review_paused or _review_qobuz_blocked %} disabled{% endif %}{% if _review_paused %} title="{{ _review_paused_reason }}" aria-disabled="true"{% elif _review_qobuz_blocked %} title="Connect Qobuz before continuing." aria-disabled="true"{% endif %}
-            {%- if job.execute_kind == 'downsample' %}{% if downsample_originals_choice in ('keep', 'delete') %} data-confirm="{% if downsample_originals_choice == 'keep' %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"{% endif %}
+            {%- if job.execute_kind == 'downsample' %}{% if downsample_originals_choice in ('keep', 'delete') %} data-confirm="{% if downsample_originals_choice == 'keep' %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings → Diagnostics.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected folders ({count})? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Damaged files are set aside while their replacements download, and an album too damaged to patch is downloaded again in full. Your originals are removed once the replacement is proven good, so a repair cannot be undone. If a replacement cannot be verified, it stays in the album and your originals are kept, restorable from Settings."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
@@ -251,7 +251,8 @@
        what went wrong. Showing only the error threw away the outcome. #}
     {% set _summary = without_old_advice(job.execute_kind, job.summary) %}
     {% if _summary and job.summary != job.error %}
-    <div class="ql-job-summary ql-job-summary--terminal"><span>{{ _summary }}</span></div>
+    {% set _put_back = _summary.split('Settings → Diagnostics', 1) if job.execute_kind == 'downsample' else [_summary] %}
+    <div class="ql-job-summary ql-job-summary--terminal"><span>{{ _put_back[0] }}{% if _put_back | length > 1 %}<a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>{{ _put_back[1] }}{% endif %}</span></div>
     {% endif %}
     {% if _attention == 'cancel_late' %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
