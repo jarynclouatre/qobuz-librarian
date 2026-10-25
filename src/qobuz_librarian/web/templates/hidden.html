@@ -6,11 +6,11 @@
 {# One vocabulary: the thing is an album, the action pair is Dismiss / Bring
    back. Downsample keeps its own words ("kept hi-res") because that action
    really is different. #}
-{% set heading = 'Kept hi-res' if is_downsample else 'Dismissed' %}
 {% set kept_label = 'albums kept hi-res' if is_downsample else 'dismissed albums' %}
 {% set restore_all_label = 'album kept hi-res' if is_downsample else 'album' %}
 {% set restore_all_label_plural = 'albums kept hi-res' if is_downsample else 'albums' %}
 {% set back_label = 'Upgrade' if is_upgrade else ('Downsample' if is_downsample else 'Library') %}
+{% set heading = 'Kept hi-res' if is_downsample else 'Dismissed from ' ~ back_label %}
 {% block title %}{{ heading }} - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-4xl{% endblock %}
 {% block content %}

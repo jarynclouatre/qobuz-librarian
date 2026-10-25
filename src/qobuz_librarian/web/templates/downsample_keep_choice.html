@@ -24,7 +24,7 @@
     <p>The hi-res originals are removed as each file is downsampled. This can't be undone.</p>
   </div>
 
-  <div class="ql-work-card-actions gap-3 mt-4">
+  <div class="ql-work-card-actions mt-4">
     <form action="/jobs/{{ job.id }}/approve" method="post" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">

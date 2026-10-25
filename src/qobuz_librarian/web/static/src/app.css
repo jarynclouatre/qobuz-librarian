@@ -4169,7 +4169,9 @@ details.ql-mobile-drawer[open]::before {
   display: flex;
   width: 100%;
   flex: none;
+  flex-wrap: wrap;
   align-items: stretch;
+  gap: var(--ql-space-3);
 }
 .ql-work-card-actions form,
 .ql-work-card-actions .ql-btn {

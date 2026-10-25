@@ -428,7 +428,7 @@
             {# Search's albums_count takes in every album the artist appears
                on, compilations included, while the album page lists the
                artist's own releases (2,800 against 614 for one artist). #}
-            <p class="ql-result-meta">Artist{% if a.albums_count %} · appears on about {{ "{:,}".format(a.albums_count) }} album{{ 's' if a.albums_count != 1 else '' }}<span class="ql-result-meta-source"> on Qobuz</span>{% endif %}</p>
+            <p class="ql-result-meta">Artist{% if a.albums_count %} · appears on {% if a.albums_count >= 10 %}about {% endif %}{{ "{:,}".format(a.albums_count) }} album{{ 's' if a.albums_count != 1 else '' }}<span class="ql-result-meta-source"> on Qobuz</span>{% endif %}</p>
           </div>
         </div>
         <form method="post" action="/search"
