@@ -1583,8 +1583,26 @@ def is_derivative_release(album):
     return bool(items) and all(_DERIVATIVE_RE.search(_release_title(t)) for t in items)
 
 
+_OTHER_PERFORMANCE_RE = re.compile(r"live|acoustic|unplugged|demo")
+
+
+def _other_performance(album):
+    """Whether Qobuz's version field or an edition label in the title names
+    a live, acoustic or demo recording rather than the album's own."""
+    _title, labels = _edition_title_parts(album.get("title"), album.get("version") or "")
+    return any(_OTHER_PERFORMANCE_RE.search(label) for label in labels)
+
+
 def _artist_key(album):
     return normalize((album.get("artist") or {}).get("name") or "")
+
+
+def _without(group, set_aside):
+    """``group`` less the editions ``set_aside`` picks out, for each artist
+    that also has an edition it doesn't."""
+    marked = {id(a): set_aside(a) for a in group}
+    kept = {_artist_key(a) for a in group if not marked[id(a)]}
+    return [a for a in group if not marked[id(a)] or _artist_key(a) not in kept]
 
 
 def _derivative_of(album):
@@ -1638,17 +1656,15 @@ def _best_edition(group, prefer_hires):
     """Representative edition for a group of same-album editions.
 
     An instrumental, karaoke or other derivative release never stands for
-    the album when the same artist's original is in the group. Both modes
-    target the standard track count so a padded deluxe/anniversary edition
-    never wins on track count alone. prefer_hires then takes the best
-    resolution at that count; otherwise it takes the original (untagged)
-    edition without chasing a remaster's higher resolution.
+    the album when the same artist's original is in the group, nor does a
+    live, acoustic or demo version when the album's own recording is. Both
+    modes target the standard track count so a padded deluxe/anniversary
+    edition never wins on track count alone. prefer_hires then takes the
+    best resolution at that count; otherwise it takes the original
+    (untagged) edition without chasing a remaster's higher resolution.
     """
     if len(group) > 1:
-        derivative = {id(a): is_derivative_release(a) for a in group}
-        with_original = {_artist_key(a) for a in group if not derivative[id(a)]}
-        group = [a for a in group
-                 if not derivative[id(a)] or _artist_key(a) not in with_original]
+        group = _without(_without(group, is_derivative_release), _other_performance)
     standard = _standard_track_count(group)
 
     def off_standard(a):
@@ -1793,8 +1809,10 @@ def dedup_album_versions(albums, prefer_hires=False):
     real edition's, so a padded deluxe/anniversary release never wins on
     track count alone and a smaller companion never stands in for the album.
     An instrumental or karaoke release (is_derivative_release) is not picked
-    over the same artist's original, and one named after an album by its
-    title joins that album's group whatever its year (_fold_derivatives).
+    over the same artist's original, nor a live, acoustic or demo version
+    over the album's own recording, and an instrumental named after an
+    album by its title joins that album's group whatever its year
+    (_fold_derivatives).
 
     Returns list of (canonical_album, n_versions_in_group) tuples, sorted by
     canonical's release year ascending.

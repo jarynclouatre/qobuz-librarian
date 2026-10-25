@@ -130,10 +130,10 @@ def test_track_matching_by_disc_edition_title_and_isrc():
 
 def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
     """Editions of one album collapse to one, preferring hi-res but never a
-    smaller "Bonus Content" companion or an instrumental, while distinct years and non-Latin
-    titles stay apart. Owning an album hides its editions and reissues, but
-    not a sequel whose title contains its name, and owning a live album does
-    not hide the studio one."""
+    smaller "Bonus Content" companion, an instrumental or a live version,
+    while distinct years and non-Latin titles stay apart. Owning an album
+    hides its editions and reissues, but not a sequel whose title contains
+    its name, and owning a live album does not hide the studio one."""
     pairs = [_qalbum("Abbey Road", 1969), _qalbum("Abbey Road (Remaster)", 1969)]
     assert len(dedup_album_versions(pairs)) == 1
     pairs = [_qalbum("Grateful Dead", 1967), _qalbum("The Grateful Dead", 1967)]
@@ -156,6 +156,10 @@ def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
     bonus = {**_qalbum("The Reminder", 2007, bd=24, sr=96, tc=9), "version": "Bonus Content"}
     [(picked, _)] = dedup_album_versions([bonus, album], prefer_hires=True)
     assert picked is album
+    studio = _qalbum("War All The Time", 2003, tc=11)
+    live = {**_qalbum("War All the Time", 2003, bd=24, sr=48, tc=11), "version": "Live"}
+    [(picked, _)] = dedup_album_versions([live, studio], prefer_hires=True)
+    assert picked is studio
     # An instrumental release never stands for the album, even when only its
     # tracks say so.
     deluxe = _qalbum("Criminal Minded (Deluxe)", 1987, tc=26)
