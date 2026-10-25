@@ -16,7 +16,7 @@
   {% endif %}
   <span class="ql-review-candidate-body">
     <span class="ql-review-candidate-heading">
-      <span class="ql-review-candidate-title">{{ c.title }}</span>{% if c.payload.is_new %}
+      <span class="ql-review-candidate-title">{{ c.payload.album if job.execute_kind == 'downsample' and c.payload.album else c.title }}</span>{% if c.payload.is_new %}
       <span class="ql-badge ql-badge-new ql-badge-xs">new</span>{% endif %}{% if c.payload.version %}
       <span class="ql-sub-version">{{ c.payload.version }}</span>{% endif %}{% if c.payload.explicit %}
       <span class="ql-sub-version">Explicit</span>{% endif %}
@@ -26,7 +26,7 @@
     {% set _detail = (c.detail | replace('gap-fill: ', '')) if review_tab|default('') == 'gaps' else c.detail %}
     {# Each "·" part stays on one line, so "24-bit/96kHz" or "9 missing of
        10" never breaks inside on a phone. #}
-    <span class="ql-review-candidate-detail">{% if _release_label %}{{ _release_label }} · {% endif %}{% if job.execute_kind == 'upgrade' and c.payload.year | known_year %}{{ c.payload.year | known_year }} · {% endif %}{% if job.execute_kind == 'repair' %}{{ _detail }}{% else %}{% for _part in (_detail or '').split(' · ') %}{% if not loop.first %} · {% endif %}{% if loop.first and _part | length == 4 and _part.isdigit() and not _part | known_year %}{% set _part = '?' %}{% endif %}{% for _step in _part.split(' → ') %}{% if not loop.first %} {% endif %}<span class="whitespace-nowrap">{% if not loop.first %}→ {% endif %}{{ _step }}</span>{% endfor %}{% endfor %}{% endif %}</span>
+    <span class="ql-review-candidate-detail">{% if _release_label %}{{ _release_label }} · {% endif %}{% if job.execute_kind in ('upgrade', 'downsample') and c.payload.year | known_year %}{{ c.payload.year | known_year }} · {% endif %}{% if job.execute_kind == 'repair' %}{{ _detail }}{% else %}{% for _part in (_detail or '').split(' · ') %}{% if not loop.first %} · {% endif %}{% if loop.first and _part | length == 4 and _part.isdigit() and not _part | known_year %}{% set _part = '?' %}{% endif %}{% for _step in _part.split(' → ') %}{% if not loop.first %} {% endif %}<span class="whitespace-nowrap">{% if not loop.first %}→ {% endif %}{{ _step }}</span>{% endfor %}{% endfor %}{% endif %}</span>
     {% if c.payload.verified_truncated %}
     <span class="ql-review-truncated">
       {% for t in c.payload.verified_truncated[:12] %}

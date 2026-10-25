@@ -3890,6 +3890,10 @@ def scan_downsamples(job):
                 "album_dir": str(c.album_dir),
                 "est_saving": c.est_saving,
             }
+            if c.album:
+                payload["album"] = c.album
+            if c.year:
+                payload["year"] = c.year
             if premise is not None:
                 payload["_premise"] = premise
             job.add_candidate(

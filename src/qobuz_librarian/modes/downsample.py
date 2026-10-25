@@ -225,7 +225,7 @@ def run_downsample_walk_mode(args):
                 f"~{format_size(est_total)} reclaimable:"))
             log.info("")
             for c in candidates:
-                log.info(f"    • {fmt(C.WHITE, truncate(c.title, 48))}   "
+                log.info(f"    • {fmt(C.WHITE, truncate(c.label, 48))}   "
                          f"{fmt(C.GRAY, c.detail)}")
             log.info("")
 
@@ -251,7 +251,7 @@ def run_downsample_walk_mode(args):
             for j, c in enumerate(candidates, 1):
                 log.info("")
                 log.info(fmt(C.BOLD + C.WHITE,
-                    f"  [{j}/{n_albums}] {truncate(c.title, 55)}"))
+                    f"  [{j}/{n_albums}] {truncate(c.label, 55)}"))
                 artist_attempted = True
                 if mark_local_album_capped(c.album_dir) is not True:
                     total_errors += 1

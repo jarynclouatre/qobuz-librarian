@@ -38,6 +38,10 @@ def _candidate_to_dict(c: DownsampleCandidate):
         "est_saving": c.est_saving,
         "detail": c.detail,
     }
+    if c.album:
+        value["album"] = c.album
+    if c.year:
+        value["year"] = c.year
     premise = candidate_premise.capture("downsample", c.album_dir)
     if premise is not None:
         value["_premise"] = premise
@@ -54,6 +58,8 @@ def _candidate_from_dict(data):
         source_rates=list(data.get("source_rates") or []),
         target_rates=list(data.get("target_rates") or []),
         est_saving=int(data.get("est_saving") or 0),
+        album=data.get("album") or "",
+        year=data.get("year") or "",
     )
 
 

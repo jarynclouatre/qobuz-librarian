@@ -151,6 +151,9 @@ def _saved_review_row(surface, spec):
             "album_dir": spec.get("album_dir") or payload.get("album_dir") or "",
             "est_saving": spec.get("est_saving") or payload.get("est_saving") or 0,
         }
+        for key in ("album", "year"):
+            if spec.get(key) or payload.get(key):
+                row_payload[key] = spec.get(key) or payload.get(key)
         premise = spec.get("_premise") or payload.get("_premise")
         if premise is not None:
             row_payload["_premise"] = premise
@@ -226,6 +229,9 @@ def _saved_review_specs_from_job(surface, job):
                 "album_dir": payload.get("album_dir") or "",
                 "est_saving": payload.get("est_saving") or 0,
             }
+            for key in ("album", "year"):
+                if payload.get(key):
+                    spec[key] = payload[key]
             if payload.get("_premise") is not None:
                 spec["_premise"] = payload["_premise"]
             specs.append(spec)
@@ -553,12 +559,7 @@ def _review_job_from_downsample_state(state):
         job._saved_review_signature = signature
         job._execute_fn = job_runs._resume_downsample(job, job.execute_args)
         for spec in state.get("candidates") or []:
-            payload = {
-                "album_dir": spec.get("album_dir") or "",
-                "est_saving": spec.get("est_saving") or 0,
-            }
-            if spec.get("_premise") is not None:
-                payload["_premise"] = spec["_premise"]
+            payload = _saved_review_row("downsample", spec)["payload"]
             job.add_candidate(
                 kind="downsample",
                 title=spec.get("title") or "?",

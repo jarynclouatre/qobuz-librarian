@@ -5,6 +5,7 @@ the high-rate files into per-album candidates the downsample mode offers for
 review. No Qobuz lookup - unlike the upgrade scan the answer comes entirely off
 disk, so it runs without credentials.
 """
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from qobuz_librarian.integrations.downsample_engine import (
     HAVE_DOWNSAMPLE,
     scan_dir_for_hires,
 )
-from qobuz_librarian.library.scanner import list_artist_album_dirs
+from qobuz_librarian.library.scanner import list_artist_album_dirs, read_audio_meta
 from qobuz_librarian.ui_cli.colors import format_size
 
 
@@ -30,6 +31,16 @@ class DownsampleCandidate:
     source_rates: list    # sorted unique source sample rates (Hz)
     target_rates: list    # sorted unique target sample rates (Hz)
     est_saving: int       # estimated bytes reclaimable (audio scaled by the rate cut)
+    album: str = ""       # the album tag, for display; title stays the folder name
+    year: str = ""
+
+    @property
+    def label(self):
+        """The album as a person reads it: its tag title and year, or the
+        folder name when the tag can't be read."""
+        if not self.album:
+            return self.title
+        return f"{self.album} ({self.year})" if self.year else self.album
 
     @property
     def rate_label(self):
@@ -41,6 +52,21 @@ class DownsampleCandidate:
     def detail(self):
         part = "" if self.n_hires == self.n_flac else f" · {self.n_hires} of {self.n_flac} tracks"
         return f"{self.rate_label}{part} · ~{format_size(self.est_saving)} reclaimable"
+
+
+_FOLDER_YEAR = re.compile(r"\((\d{4})\)\s*$")
+
+
+def _album_tag(hires):
+    """The album tag of the first high-rate file, or "" when it can't be read."""
+    for h in hires:
+        try:
+            meta = read_audio_meta(Path(h["path"]))
+        except OSError:
+            continue
+        if meta and meta.get("album"):
+            return meta["album"]
+    return ""
 
 
 def scan_artist_for_downsample(artist_dir: Path):
@@ -62,6 +88,7 @@ def scan_artist_for_downsample(artist_dir: Path):
         # Scale each file's audio portion by its rate cut (96→48 ≈ half the
         # samples, so ≈ half the audio bytes).
         est = sum(int(h["audio_size"] * (1 - h["target"] / h["sr"])) for h in hires)
+        year = _FOLDER_YEAR.search(album_dir.name)
         out.append(DownsampleCandidate(
             album_dir=album_dir,
             artist=artist,
@@ -71,5 +98,7 @@ def scan_artist_for_downsample(artist_dir: Path):
             source_rates=sorted({h["sr"] for h in hires}),
             target_rates=sorted({h["target"] for h in hires}),
             est_saving=est,
+            album=_album_tag(hires),
+            year=year.group(1) if year else "",
         ))
     return out

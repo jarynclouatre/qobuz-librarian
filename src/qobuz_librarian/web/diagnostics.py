@@ -161,6 +161,22 @@ def _album_name_from_path(path):
     return parts[-1] if parts else ""
 
 
+def _album_name(path):
+    """An album folder as a name, with the album title its tracks carry,
+    since a folder name has "_" where the title has ":" or quotes."""
+    folder = Path(str(path))
+    try:
+        first = min((f for f in folder.rglob("*")
+                     if f.suffix.lower() in cfg.AUDIO_EXTS and f.is_file()),
+                    default=None)
+        meta = scanner.read_audio_meta(first) if first is not None else None
+    except OSError:
+        meta = None
+    if not meta or not meta.get("album") or not folder.parent.name:
+        return _album_name_from_path(path)
+    return f"{folder.parent.name} · {meta['album']}"
+
+
 def _staging_display_name(path):
     """A staging path as something worth reading: artist, album and file, with
     the app's own private run folders left out of it."""
@@ -308,33 +324,39 @@ def _staging_leftovers():
     return leftovers
 
 
+def _tree_size(path, skip_names=()) -> int:
+    """Best-effort total bytes of regular files under a directory tree.
+
+    Skips whatever it can't stat rather than giving up on the whole
+    total: this feeds a rough disk-usage line, not a byte-exact figure.
+    """
+    total = 0
+    try:
+        for parent, dirs, names in os.walk(path):
+            if parent == os.fspath(path):
+                dirs[:] = [name for name in dirs if name not in skip_names]
+                names = [name for name in names if name not in skip_names]
+            for name in names:
+                try:
+                    value = os.stat(os.path.join(parent, name),
+                                    follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISREG(value.st_mode):
+                    total += int(value.st_size)
+    except OSError:
+        pass
+    return total
+
+
+def _size_note(path) -> str:
+    size = _tree_size(path)
+    return f" · {format_size(size)}" if size else ""
+
+
 def _diagnostics():
     """Read-only health checks surfaced on the Settings page."""
     checks = []
-
-    def _tree_size(path, skip_names=()) -> int:
-        """Best-effort total bytes of regular files under a directory tree.
-
-        Skips whatever it can't stat rather than giving up on the whole
-        total: this feeds a rough disk-usage line, not a byte-exact figure.
-        """
-        total = 0
-        try:
-            for parent, dirs, names in os.walk(path):
-                if parent == os.fspath(path):
-                    dirs[:] = [name for name in dirs if name not in skip_names]
-                    names = [name for name in names if name not in skip_names]
-                for name in names:
-                    try:
-                        value = os.stat(os.path.join(parent, name),
-                                        follow_symlinks=False)
-                    except OSError:
-                        continue
-                    if stat.S_ISREG(value.st_mode):
-                        total += int(value.st_size)
-        except OSError:
-            pass
-        return total
 
     def _dir_check(label, path, *, want_writable, skip_names=(),
                    unit=("entry", "entries"), show_size=False,
@@ -732,6 +754,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         report = diagnostics
     checks = report["checks"]
     rows = []
+    originals_at = None
     for d in checks:
         icon = "OK" if d["ok"] else "!"
         cls = "ql-diagnostic-status-ok" if d["ok"] else "ql-diagnostic-status-error"
@@ -746,6 +769,8 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'<div class="min-w-0"><div class="ql-diagnostic-label">{html.escape(d["label"])}</div>{detail}</div>'
             f'</div>'
         )
+        if d["label"] == "Hi-res originals kept" and d["ok"]:
+            originals_at = len(rows)
     orphans = report["orphans"]
     tok = html.escape(request.state.csrf_token)
     shared = Counter(
@@ -755,7 +780,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         if origin:
             dest_display, _is_host = storage._resolve_host_path(str(origin))
             dest = html.escape(dest_display)
-            album = html.escape(_album_name_from_path(origin))
+            album = html.escape(_album_name(origin))
         else:
             dest = "its album folder"
             album = ""
@@ -813,24 +838,39 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 and origin and Path(origin).is_dir()):
             # Restore would put this download over the album's original. One
             # whose folder is gone is listed as a backup, which Restore can
-            # put back.
+            # put back. A later upgrade that landed the same files leaves
+            # nothing here the album lacks.
+            same = classification.reason == "identical"
+            if same:
+                chip = ('<span class="ql-diagnostic-status '
+                        'ql-diagnostic-status-ok" aria-label="OK">OK</span>')
+                detail = (f"{dest} now holds the same files as this "
+                          "download, so it is safe to delete.")
+                confirm = "Delete this download? The album holds the same files."
+                irreversible = ""
+            else:
+                chip = ('<span class="ql-diagnostic-status '
+                        'ql-diagnostic-status-error" '
+                        'aria-label="Needs attention">!</span>')
+                detail = ("An upgrade couldn't verify this download, so the "
+                          f"original album was put back in {dest}.")
+                confirm = ("Delete this download? The album keeps the files "
+                           "it has now.")
+                irreversible = " data-irreversible"
             rows.append(
                 f'<div class="ql-diagnostic-row" data-backup-status="set-aside">'
-                f'<span class="ql-diagnostic-status ql-diagnostic-status-error" '
-                f'aria-label="Needs attention">!</span>'
+                f'{chip}'
                 f'<div class="min-w-0"><div class="ql-diagnostic-label">'
-                f'Download set aside{f": {album}" if album else ""}</div>'
-                f'<div class="ql-diagnostic-detail">An upgrade couldn\'t '
-                f'verify this download, so the original album was put back in '
-                f'{dest}.</div>'
+                f'Download set aside{f": {album}" if album else ""}'
+                f'{_size_note(path)}</div>'
+                f'<div class="ql-diagnostic-detail">{detail}</div>'
                 f'<form hx-post="/backups/discard-unchecked" '
                 f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
                 f'<input type="hidden" name="_csrf_token" value="{tok}">'
                 f'<input type="hidden" name="backup" value="{name}">'
                 f'<button type="submit" class="ql-btn ql-btn-sm" '
-                f'data-confirm="Delete this download? The album keeps its '
-                f'original files." data-confirm-action="Delete" '
-                f'data-irreversible>Delete</button>'
+                f'data-confirm="{confirm}" data-confirm-action="Delete"'
+                f'{irreversible}>Delete</button>'
                 f'</form></div></div>'
             )
             continue
@@ -912,7 +952,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'
             f'<div class="min-w-0"><div class="ql-diagnostic-label">'
             f'{"Damaged tracks Repair replaced" if repaired else "Backup"}'
-            f'{f": {album}" if album else ""}{kept}</div>'
+            f'{f": {album}" if album else ""}{kept}{_size_note(path)}</div>'
             f'<div class="ql-diagnostic-detail">{reason}</div>'
             f'<div class="mt-2 flex gap-2">'
             f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
@@ -926,12 +966,13 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'</div></div></div>'
         )
     undo = report["undo"]
+    undo_rows = []
     for path, origin, restorable in undo:
         name = html.escape(path.name)
         if origin:
             dest_display, _is_host = storage._resolve_host_path(str(origin))
             dest = html.escape(dest_display)
-            album = html.escape(_album_name_from_path(origin))
+            album = html.escape(_album_name(origin))
         else:
             dest = "its album folder"
             album = ""
@@ -1012,17 +1053,22 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
                 f'data-confirm-action="Delete originals" data-irreversible>'
                 f'Delete originals</button>'
                 f'</form>')
-        rows.append(
+        undo_rows.append(
             f'<div class="ql-diagnostic-row">'
-            f'<span class="ql-diagnostic-status ql-diagnostic-status-ok" aria-label="OK">OK</span>'
+            f'<span class="ql-diagnostic-status" aria-hidden="true"></span>'
             f'<div class="min-w-0"><div class="ql-diagnostic-label">'
-            f'Hi-res originals kept{f": {album}" if album else ""}</div>'
+            f'Hi-res originals kept{f": {album}" if album else ""}'
+            f'{_size_note(path)}</div>'
             f'<div class="ql-diagnostic-detail">{detail}</div>'
             f'<div class="mt-2 flex gap-2">'
             f'{restore_form}'
             f'{delete_form}'
             f'</div></div></div>'
         )
+    if originals_at is None:
+        rows.extend(undo_rows)
+    else:
+        rows[originals_at:originals_at] = undo_rows
     leftovers = report["leftovers"]
     for leftover in leftovers:
         detail = html.escape(leftover["reason"])

@@ -235,6 +235,7 @@ def test_walk_binds_first_keep_choice_and_stops_if_it_cannot_be_saved(
         album_dir=album_dir,
         artist="Artist",
         title="Album",
+        label="Album",
         detail="96 kHz to 48 kHz",
         est_saving=100,
     )
