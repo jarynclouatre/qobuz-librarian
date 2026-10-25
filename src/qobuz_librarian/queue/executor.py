@@ -86,6 +86,7 @@ from qobuz_librarian.library.backup import (
     pin_unverified_upgrade_backup,
     restore_gap_fill_backup,
     restore_upgrade_backup,
+    unwritable_folder,
     warn_pin_failed,
 )
 from qobuz_librarian.library.candidate_premise import (
@@ -1598,7 +1599,7 @@ def _resolve_queue_item(
     if _stop in (
             "cancelled", "incomplete", "interrupted", "disk_full", "io_error",
             "auth_lost", "import_failed", "upgrade_aborted_backup_failed",
-            "stale_candidate", "disk_refused"):
+            "stale_candidate", "disk_refused", "folder_read_only"):
         status = _stop
     elif n_ok and (n_retryable or n_unretryable or outcome_attention):
         status = "partial"
@@ -1630,6 +1631,7 @@ def _resolve_queue_item(
         "catalogue_unverified": bool(item.get("catalogue_unverified", False)),
         "recovery_unverified": bool(item.get("recovery_unverified", False)),
         "import_denied": item.get("import_denied"),
+        "folder_denied": item.get("folder_denied"),
         "quality_verdict": item.get("quality_verdict"),
         "siblings_preserved": item.get("_siblings_preserved", []),
         "siblings_kept": item.get("_siblings_kept", []),
@@ -2671,6 +2673,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         # now-successful re-download isn't read as still-stopped by
         # _queue_item_needs_retry and left in the queue forever.
         item["result"] = None
+        item["folder_denied"] = None
         item["quality_verdict"] = None
         item["upgrade_unverified"] = False
         item["catalogue_unverified"] = False
@@ -2705,6 +2708,18 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
             log.info(fmt(C.YELLOW, f"    ⚠  {refusal} Nothing was downloaded."))
             item["result"] = "disk_refused"
             _drop(item)
+            results.append(_resolve_queue_item(
+                item, args, False, authority=authority))
+            continue
+
+        if resume_owner is None and album_dir and album_dir.is_dir() and (
+                folder := unwritable_folder(
+                    album_dir, parent=bool(item["auto_upgrade"]))):
+            log.info(fmt(C.RED,
+                f"    ✗  The app can't write to {folder}, so this album was "
+                "left as it is. Nothing was downloaded."))
+            item["result"] = "folder_read_only"
+            item["folder_denied"] = str(folder)
             results.append(_resolve_queue_item(
                 item, args, False, authority=authority))
             continue

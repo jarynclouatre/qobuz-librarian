@@ -16,6 +16,7 @@ from qobuz_librarian.integrations.downsample_engine import (
     HAVE_DOWNSAMPLE,
     DownsampleInterrupted,
     downsample_dir,
+    read_only_note,
 )
 from qobuz_librarian.library import downsample_state, generation_state
 from qobuz_librarian.library import hidden as hidden_mod
@@ -199,6 +200,7 @@ def run_downsample_walk_mode(args):
     total_errors = 0
     total_damaged = 0
     total_flush_warns = 0
+    total_read_only = 0
     state_refresh_warnings = 0
     interrupted = False
     no_answer = False
@@ -278,6 +280,7 @@ def run_downsample_walk_mode(args):
                     1 for entry in res.get("failed_files") or []
                     if entry.get("damaged"))
                 total_flush_warns += res.get("flush_warnings", 0)
+                total_read_only += res.get("read_only", 0)
                 if stopped:
                     interrupted = True
                     break
@@ -311,6 +314,8 @@ def run_downsample_walk_mode(args):
                 f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}, so "
                 "nothing is freed until they expire. Until then they can be "
                 "put back from Settings.")))
+    if total_read_only:
+        log.info(fmt(C.GRAY, f"     {read_only_note(total_read_only)}."))
     if total_errors:
         log.info(fmt(C.YELLOW,
             f"     {plural(total_errors, 'file')} could not be downsampled "
@@ -350,6 +355,8 @@ def run_downsample_walk_mode(args):
                  f"{format_size(total_saved)} smaller"]
         if total_errors:
             parts.append(f"{plural(total_errors, 'file')} left unchanged")
+        if total_read_only:
+            parts.append(read_only_note(total_read_only))
         if total_flush_warns:
             parts.append(f"{plural(total_flush_warns, 'file')} not flushed "
                          "to disk")

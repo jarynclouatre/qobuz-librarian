@@ -2496,7 +2496,12 @@ def _process_bound_file(
 
     def read_only(kind):
         # Not recorded, so the track is tried again once it can be written.
-        return "embed" in fill(kind) and is_read_only(binding.track_fd)
+        # Every write, tag or .lrc, goes through a new file in its folder.
+        places = fill(kind)
+        return bool(places) and (
+            not os.access(f"/proc/self/fd/{binding.parent_fd}",
+                          os.W_OK | os.X_OK)
+            or ("embed" in places and is_read_only(binding.track_fd)))
 
     keeps_lrc = (kinds["sidecar"] == "plain" and "sidecar" in required
                  and run is not None and not run.replaces_lrc)

@@ -737,6 +737,25 @@ class DownsampleInterrupted(KeyboardInterrupt):
         self.result = result
 
 
+def _read_only_track(path: Path) -> bool:
+    """Whether the app may not rewrite ``path``: no write permission on it,
+    none the app holds, or a folder it can't write in."""
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return False
+    return (not mode & 0o222 or not os.access(path, os.W_OK)
+            or not os.access(path.parent, os.W_OK | os.X_OK))
+
+
+def read_only_note(count):
+    """The summary clause for ``count`` read-only tracks left alone."""
+    one = count == 1
+    return (f"{plural(count, 'track')} {'is' if one else 'are'} read-only, "
+            f"so {'it was' if one else 'they were'} left as "
+            f"{'it is' if one else 'they are'}")
+
+
 def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                    keep_originals=False, cancel_check=None):
     """Resample any high-sample-rate FLACs inside `directory` (recursive). Probes
@@ -802,6 +821,18 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     if not candidates:
         return {"resampled": 0, "errors": 0, "saved_bytes": 0}
 
+    # Read-only tracks are the owner's to keep as they are, as Lyrics leaves
+    # them; they stay listed so a later run picks them up once writable.
+    n_read_only = 0
+    writable = [c for c in candidates if not _read_only_track(_bd / c[0])]
+    if len(writable) < len(candidates):
+        n_read_only = len(candidates) - len(writable)
+        candidates = writable
+        log(f"  · downsample: {read_only_note(n_read_only)}.")
+    if not candidates:
+        return {"resampled": 0, "errors": 0, "saved_bytes": 0,
+                "read_only": n_read_only}
+
     if verbose:
         log(f"  ⇳ downsample: {plural(len(candidates), 'file')} in {directory.name}")
 
@@ -811,7 +842,7 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     # has been touched yet. Report a clean cancel before even stashing.
     if cancel_check is not None and cancel_check():
         return {"resampled": 0, "errors": 0, "saved_bytes": 0,
-                "cancelled": True}
+                "read_only": n_read_only, "cancelled": True}
 
     n_uncopied = 0
     uncopied_files = []
@@ -854,6 +885,7 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                 "errors": n_uncopied,
                 "saved_bytes": 0,
                 "failed_files": uncopied_files,
+                "read_only": n_read_only,
                 "cancelled": True,
             }
         if not candidates:
@@ -862,7 +894,8 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             # "undo" for a run that changed nothing.
             _discard_unused_stash(kept_dir, log)
             return {"resampled": 0, "errors": n_uncopied, "saved_bytes": 0,
-                    "failed_files": uncopied_files}
+                    "failed_files": uncopied_files,
+                    "read_only": n_read_only}
         backup_mod.note_downsample_running(kept_dir)
 
     saved_total = 0
@@ -1002,6 +1035,7 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
               "flush_warnings": flush_warnings,
               "failed_files": uncopied_files + failed_files,
               "flushed_files": flushed_files,
+              "read_only": n_read_only,
               "cancelled": cancelled}
     if interrupted is not None:
         raise DownsampleInterrupted(result) from interrupted

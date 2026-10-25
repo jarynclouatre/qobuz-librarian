@@ -60,6 +60,7 @@ from qobuz_librarian.library.backup import (
     restore_gap_fill_backup,
     restore_incomplete_upgrade_backup,
     restore_upgrade_backup,
+    unwritable_folder,
     upgrade_backup_restorable,
     warn_pin_failed,
 )
@@ -1405,6 +1406,17 @@ def process_album(album, args, *, allow_force=True, label=None,
             "consolidated_tracks_removed": n_consolidated,
             "consolidation_failed": consolidation_failed,
         }
+
+    # Tracks for an album already on disk land in its folder, and an upgrade
+    # or --force moves that folder aside first, so a folder the app can't
+    # write to is refused here, before anything is downloaded or asked.
+    if album_dir is not None and album_dir.is_dir() and (
+            folder := unwritable_folder(
+                album_dir, parent=auto_upgrade_active or use_force)):
+        log.info(fmt(C.RED,
+            f"  ✗  The app can't write to {folder}, so this album was left "
+            "as it is. Nothing was downloaded."))
+        return {"result": "folder_read_only", "folder_denied": str(folder)}
 
     # A dry run has already printed the plan above; stop before the download
     # confirm so we don't ask "proceed with downloading?" for a run that never

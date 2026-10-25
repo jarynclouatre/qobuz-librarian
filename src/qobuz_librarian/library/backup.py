@@ -3478,10 +3478,11 @@ def _finish_put_back(note_name) -> None:
         _drop_put_back_note(note_name)
 
 
-def _unwritable_folder(album: Path):
+def unwritable_folder(album: Path, *, parent: bool = True):
     """The first folder that removing ``album`` needs to change and the app
-    may not write to: its parent, itself or a folder in it."""
-    folders = [album.parent, album]
+    may not write to: its parent, itself or a folder in it. Without
+    ``parent``, only the folders adding tracks to it writes in."""
+    folders = [album.parent, album] if parent else [album]
     folders += sorted(path for path in iter_tree_no_symlinks(album, errors=[])
                       if path.is_dir() and not path.is_symlink())
     for folder in folders:
@@ -3569,7 +3570,7 @@ def backup_album_dir(album_dir: Path, *, expected_receipt=None, owner=None,
         log.info(fmt(C.RED, f"  ✗  Couldn't prepare backup path: {exc}."))
         return None
     try:
-        folder = _unwritable_folder(public)
+        folder = unwritable_folder(public)
         if folder is None and not os.access(bp.parent, os.W_OK | os.X_OK):
             folder = bp.parent
         if folder is not None:
@@ -3777,7 +3778,7 @@ def _copy_album_to_backup(public, bp, snapshot, source_receipt, why, *,
             f"  ✗  {public} changed while it was copied to its backup at "
             f"{bp}; nothing was removed from it."))
         return result
-    folder = _unwritable_folder(public)
+    folder = unwritable_folder(public)
     if folder is not None:
         log.info(fmt(
             C.RED,

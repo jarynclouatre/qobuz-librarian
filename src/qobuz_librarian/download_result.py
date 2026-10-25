@@ -107,6 +107,8 @@ def failure_cause(result):
     """Why a download that added nothing failed, as a short clause."""
     if result.get("rate_limited"):
         return "Qobuz rate-limited the download"
+    if result.get("folder_denied"):
+        return "the app can't write to the album's folder"
     if result.get("result") in ("incomplete", "partial"):
         return "Qobuz couldn't deliver every track"
     if result.get("n_ok"):

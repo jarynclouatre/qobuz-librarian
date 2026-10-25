@@ -3482,6 +3482,7 @@ def execute_upgrades(job, chosen, token):
     quality_attention = 0
     processing_attention = 0
     failed = 0
+    denied = 0
     changed = 0
     failed_cands = []
     refused_cands = []
@@ -3607,6 +3608,8 @@ def execute_upgrades(job, chosen, token):
                 None, cand["payload"].get("album_dir"))
         elif _res not in _skip:
             failed += 1
+            if result and result.get("folder_denied"):
+                denied += 1
             if result and result.get("upgrade_refused"):
                 refused_cands.append(cand)
             else:
@@ -3681,7 +3684,8 @@ def execute_upgrades(job, chosen, token):
             job.attention = "processing"
             job.error = "Post-download work needs attention; see the job log."
         elif failed:
-            job.error = f"{plural(failed, 'album')} couldn't be upgraded."
+            job.error = (f"{plural(failed, 'album')} couldn't be upgraded"
+                         f"{_folders_denied_note(failed, denied)}.")
         elif changed:
             job.error = _changed_since_review(changed) + "."
         if retry_saved is False:
@@ -3739,6 +3743,7 @@ def execute_upgrades(job, chosen, token):
         if failed:
             problems.append(
                 f"{plural(failed, 'album')} couldn't be upgraded"
+                f"{_folders_denied_note(failed, denied)}"
             )
         if changed:
             problems.append(_changed_since_review(changed))
@@ -3922,6 +3927,7 @@ def execute_downsamples(
     interrupted = 0
     processed = 0
     resampled_files = 0
+    read_only_tracks = 0
     failed_files = []
     flushed_files = []
     stopped_early = False
@@ -3948,6 +3954,8 @@ def execute_downsamples(
                 f"{plural(skipped_changed, 'album')} skipped "
                 "(the files no longer match the review; refresh it)"
             )
+        if read_only_tracks:
+            parts.append(downsample_engine.read_only_note(read_only_tracks))
         return parts
 
     for i, cand in enumerate(chosen, 1):
@@ -4019,8 +4027,9 @@ def execute_downsamples(
             _note_album_done(job)
         elif res.get("errors"):
             failed_albums += 1
-        else:
+        elif not res.get("read_only"):
             skipped_unchanged += 1
+        read_only_tracks += res.get("read_only", 0)
         saved_views.refresh_downsample_artist(album_dir.parent)
         total_errors += res.get("errors", 0)
         total_flush_warns += res.get("flush_warnings", 0)
@@ -4124,6 +4133,17 @@ def execute_downsamples(
         _mark_job_failed(job)
     else:
         _close_completed_job(job)
+
+
+def _folders_denied_note(failed, denied):
+    """Why ``denied`` of ``failed`` albums couldn't be upgraded, the app may
+    not write to their folders, as a tail for the count, or ""."""
+    if not denied:
+        return ""
+    folders = "its folder" if denied == 1 else "their folders"
+    if denied == failed:
+        return f": the app can't write to {folders}"
+    return f", {denied} because the app can't write to {folders}"
 
 
 def _kept_companions_note(notes):

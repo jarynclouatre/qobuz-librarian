@@ -56,6 +56,10 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "cancelled": "Cancelled. Nothing was imported.",
     "incomplete": "Qobuz couldn't deliver the whole album. Nothing was imported.",
     "upgrade_aborted_backup_failed": "Upgrade aborted: couldn't back up the original.",
+    "folder_read_only": (
+        "Left as it is: the app can't write to the album's folder. Nothing "
+        "was downloaded."
+    ),
     "stale_candidate": (
         "Left as it is: the album's files changed after it was queued, or "
         "could not be read. A run that stopped part way may already have "
@@ -345,6 +349,11 @@ def download_error(result, *, job_controls=True):
         if n_failed:
             return (f"{plural(n_failed, 'track')} failed."
                     + hint("See job log.") + other)
+        if result.get("folder_denied"):
+            folder, _is_host = storage._resolve_host_path(
+                result["folder_denied"])
+            return (f"Nothing was downloaded: the app can't write to "
+                    f"{folder}. Check that folder's permissions, then retry.")
         if result.get("import_denied"):
             return import_denied_text(result["import_denied"])
         if result.get("n_ok"):
