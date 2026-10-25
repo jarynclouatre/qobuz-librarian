@@ -540,6 +540,14 @@ def _catalogue_feed_signature(owned: Library, prefer_hires: bool) -> str:
     return f"{owned.signature}|prefer_hires:{int(prefer_hires)}"
 
 
+def _artist_feed_signature(owned: Library, prefer_hires: bool) -> str:
+    """Identity of an artist feed. Dismissed artists are left out as it is
+    built, so bringing one back asks for a new one."""
+    signature = _catalogue_feed_signature(owned, prefer_hires)
+    brought_back = discover_hidden.current().brought_back_at
+    return f"{signature}|back:{brought_back}" if brought_back else signature
+
+
 def _publish(kind: str, **fields) -> None:
     with _builds_lock:
         build = _builds.get(kind)
@@ -719,7 +727,7 @@ def ensure_similar_feed(token) -> dict:
     to show yet."""
     owned = library()
     prefer_hires = bool(cfg.PREFER_HIRES)
-    signature = _catalogue_feed_signature(owned, prefer_hires)
+    signature = _artist_feed_signature(owned, prefer_hires)
     view = _without_owned_artists(feed_view(SIMILAR, signature), owned)
     if view["phase"] in ("building", "ready"):
         return view
@@ -1043,7 +1051,7 @@ def ensure_search_feed(token, query: str) -> dict:
                 "items": [], "built_at": 0.0, "stale": False}
     owned = library()
     prefer_hires = bool(cfg.PREFER_HIRES)
-    signature = _catalogue_feed_signature(owned, prefer_hires)
+    signature = _artist_feed_signature(owned, prefer_hires)
     kind = search_feed_kind(text)
     view = _without_owned_artists(feed_view(kind, signature), owned)
     if view["phase"] in ("building", "ready"):

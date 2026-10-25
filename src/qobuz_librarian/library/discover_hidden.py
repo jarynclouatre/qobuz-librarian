@@ -14,12 +14,15 @@ from qobuz_librarian.library.tags import normalize
 _LOCK = threading.RLock()
 
 
-def load() -> list[dict]:
-    """The hidden artists, most recently hidden first."""
-    data = state_file.load_json_object(
+def _read() -> dict:
+    return state_file.load_json_object(
         cfg.DISCOVER_HIDDEN_FILE, "the artists hidden from Discover",
-        "your list of artists hidden from Discover")
-    rows = (data or {}).get("artists")
+        "your list of artists hidden from Discover") or {}
+
+
+def load(data: dict | None = None) -> list[dict]:
+    """The hidden artists, most recently hidden first."""
+    rows = (_read() if data is None else data).get("artists")
     if not isinstance(rows, list):
         return []
     out = []
@@ -37,17 +40,27 @@ def load() -> list[dict]:
     return sorted(out, key=lambda row: -row["ts"])
 
 
+def _brought_back_at(data: dict) -> float:
+    try:
+        return float(data.get("brought_back_at") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _name_key(name) -> str:
     return normalize(name) or str(name or "").strip().casefold()
 
 
 class Hidden:
-    """One read of the list, asked about many names during a build."""
+    """One read of the list, asked about many names during a build.
+    `brought_back_at` is when an artist was last taken off it; a list built
+    before then may have left that artist out."""
 
-    def __init__(self, rows):
+    def __init__(self, rows, brought_back_at=0.0):
         self.ids = {row["id"] for row in rows if row["id"]}
         self.names = {_name_key(row["name"]) for row in rows if row["name"]}
         self.names.discard("")
+        self.brought_back_at = brought_back_at
 
     def covers_name(self, name) -> bool:
         return _name_key(name) in self.names
@@ -59,15 +72,17 @@ class Hidden:
 
 def current() -> Hidden:
     try:
-        return Hidden(load())
+        data = _read()
     except OSError:
         return Hidden([])
+    return Hidden(load(data), _brought_back_at(data))
 
 
-def _save(rows) -> None:
+def _save(rows, brought_back_at) -> None:
     state_file.write_json(cfg.DISCOVER_HIDDEN_FILE, {
         "artists": [{"id": r["id"], "name": r["name"], "ts": r["ts"]}
-                    for r in rows]}, ensure_ascii=False)
+                    for r in rows],
+        "brought_back_at": brought_back_at}, ensure_ascii=False)
 
 
 def _matches(row, artist_id, name) -> bool:
@@ -80,9 +95,10 @@ def hide(artist_id, name) -> None:
     artist_id = str(artist_id or "").strip()
     name = str(name or "").strip()
     with _LOCK, state_file.store_lock(cfg.DISCOVER_HIDDEN_FILE):
-        rows = [row for row in load() if not _matches(row, artist_id, name)]
+        data = _read()
+        rows = [row for row in load(data) if not _matches(row, artist_id, name)]
         rows.insert(0, {"id": artist_id, "name": name, "ts": time.time()})
-        _save(rows)
+        _save(rows, _brought_back_at(data))
 
 
 def unhide(artist_id, name) -> bool:
@@ -94,5 +110,5 @@ def unhide(artist_id, name) -> bool:
         kept = [row for row in rows if not _matches(row, artist_id, name)]
         if len(kept) == len(rows):
             return False
-        _save(kept)
+        _save(kept, time.time())
         return True
