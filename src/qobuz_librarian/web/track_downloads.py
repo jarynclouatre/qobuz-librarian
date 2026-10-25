@@ -270,6 +270,9 @@ def _folder_label(landed_dir):
     return " / ".join(relative.parts) or None
 
 
+_SCANS_OFFER_REST = "Future scans can still offer the rest of the album."
+
+
 def _rest_of_album_note(landed_dir, token):
     """What Library scans make of the rest of an album a track download
     left part-owned, or "" when that can't be told."""
@@ -294,7 +297,7 @@ def _rest_of_album_note(landed_dir, token):
     if not artist_id:
         return (f"Qobuz has no artist for “{folder.name}”, so scans skip "
                 "that folder.")
-    return "Future scans can still offer the rest of the album."
+    return _SCANS_OFFER_REST
 
 
 _SINGLE_TRACK_FAILURES = {
@@ -419,6 +422,7 @@ def _make_single_track_run(album, track, token):
                 and not catalog.unstreamable(t)]
         marked = len(rest) > len(
             catalog.bonus_versions(rest, [*present, track]))
+        rest_note = ""
         if marked:
             try:
                 hidden_mod.mark_single(artist, title, catalog.album_year(album),
@@ -427,9 +431,8 @@ def _make_single_track_run(album, track, token):
                     "Upgrade treats the album as a single."
                     if not cfg.SUPPRESS_SINGLE_TRACK_GAPS
                     and not cfg.UPGRADE_SINGLES_ENABLED else "")
-                j.summary = " ".join(filter(None, (
-                    got, upgrade,
-                    _rest_of_album_note(landed_dir, active_token))))
+                rest_note = _rest_of_album_note(landed_dir, active_token)
+                j.summary = " ".join(filter(None, (got, upgrade, rest_note)))
             except OSError as e:
                 # The track landed fine, so don't fail the job, but don't claim
                 # the exclusion stuck either.
@@ -472,5 +475,14 @@ def _make_single_track_run(album, track, token):
             token=active_token,
             args=args,
         )
+        if rest_note == _SCANS_OFFER_REST:
+            # The refresh takes the album off the review; a scan would list
+            # the rest of it under Gap Fill, so the review does now.
+            flows._fold_partial_gap_fill(
+                album, artist, len(rest), album_dir=landed_dir)
+            if flows._library_review_lists(str(album.get("id") or "")):
+                j.summary = j.summary.replace(
+                    _SCANS_OFFER_REST,
+                    "The rest of the album is in Library Gap Fill.")
         flows._close_completed_job(j)
     return run

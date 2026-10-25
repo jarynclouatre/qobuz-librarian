@@ -1666,6 +1666,8 @@ async def job_undo(request: Request, job_id: str):
         except Exception as exc:
             _log.info(
                 "quality state refresh after undo skipped: %s", exc)
+        # A Gap Fill row the grab left no longer matches its folder.
+        flows.prune_library_review_candidates({"id": info.get("album_id")})
 
     undo_outcome = {}
 

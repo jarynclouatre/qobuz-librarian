@@ -1252,9 +1252,16 @@ def _fold_partial_gap_fill(full_album, artist_name, n_missing, *,
     folded = refold_into_living_review([spec], ticked=False)
     if folded is False:
         return False
+    if folded is None and not park_when_absent:
+        return True
+    # Fold before taking the album's other rows off, so that can't empty and
+    # close the review, and settle the record the download left for the next
+    # page load, which would take this row off too.
+    key = fold_key(spec)
+    prune_library_review_candidates(
+        full_album, keep=lambda c: is_gap_candidate(c) and fold_key(c) == key)
+    generation_state.clear_review_removals([full_album.get("id")])
     if folded is None:
-        if not park_when_absent:
-            return True
         return _park_library_failures(
             [spec], ticked=False,
             summary="1 album downloaded only partly: the missing tracks "
@@ -1262,12 +1269,13 @@ def _fold_partial_gap_fill(full_album, artist_name, n_missing, *,
     return True
 
 
-def prune_library_review_candidates(album):
+def prune_library_review_candidates(album, keep=None):
     """A full album just landed on disk (Search download, batch download,
     upgrade replace): drop its candidates from every parked or still-scanning
     Qobuz album review, so a stale review can't offer to download an album the
     user already has. The executing job itself is RUNNING and untouched.
-    Matched by Qobuz album id. Returns the number of candidates dropped."""
+    Matched by Qobuz album id; a row ``keep`` accepts stays. Returns the
+    number of candidates dropped."""
     album_id = str((album or {}).get("id") or "")
     if not album_id:
         return 0
@@ -1282,13 +1290,13 @@ def prune_library_review_candidates(album):
             def _drop():
                 if job.status not in states:
                     return 0
-                keep = [c for c in job.candidates
+                kept = [c for c in job.candidates
                         if str((c.get("payload") or {}).get("album_id") or "")
-                        != album_id]
-                n = len(job.candidates) - len(keep)
+                        != album_id or (keep is not None and keep(c))]
+                n = len(job.candidates) - len(kept)
                 if not n:
                     return 0
-                job.candidates = keep
+                job.candidates = kept
                 return n
 
             saved, n = job_persistence.persist_review_mutation(job, _drop)
