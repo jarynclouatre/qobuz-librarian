@@ -123,7 +123,9 @@ _COUNT_ONLY_SUMMARY = re.compile(
     r"|[0-9][0-9,]* albums? can be upgraded"
     r"|[0-9][0-9,]* albums? can be downsampled"
     r"|[0-9][0-9,]* albums? stored above (?:CD rate|48 kHz)"
-    r"|[0-9][0-9,]* new releases? found across the library)\."
+    r"|[0-9][0-9,]* new releases? found(?: across the library)?"
+    r"|[0-9][0-9,]* new releases? waiting to review, [0-9,]+ of them from the"
+    r" latest check)\."
 )
 
 
@@ -150,21 +152,39 @@ def _review_log_lines(job):
     return kept
 
 
-# Reviews saved by 1.5.0 and earlier carry this in their summary; it now goes
-# to the log only.
+# Summaries saved by 1.5.0 and earlier carry this; it now goes to the log
+# only.
 _NO_ARTIST_NOTE = re.compile(
     r"\s*Qobuz has no artist for .*?, so (?:it was|they were) skipped\. "
     r"Rename (?:the|each) folder to the artist's name to include (?:it|them)\."
     r"(?: Turn on Migrate multi-artist folders in Settings to file new "
     r"downloads under the album's main artist\.)?"
 )
+_OLD_CHECK_AGAIN = "Run the scan again to retry."
+
+
+# The Library review shows the count Upgrade has when the page renders, so
+# the ones its scans wrote into the summary are dropped.
+_UPGRADE_NOTE = re.compile(r"\s*[0-9][0-9,]* (?:new )?albums? can be upgraded\.")
+
+
+def summary_without_old_advice(execute_kind, summary) -> str:
+    """A saved summary without the advice earlier versions wrote into it."""
+    summary = str(summary or "").strip()
+    if execute_kind in ("library", "new_releases"):
+        summary = _NO_ARTIST_NOTE.sub("", summary).strip()
+    if execute_kind == "new_releases" and summary.endswith(_OLD_CHECK_AGAIN):
+        summary = (summary[:-len(_OLD_CHECK_AGAIN)]
+                   + "Check again from the Library page.")
+    return summary
 
 
 def review_summary_without_count(execute_kind, summary) -> str:
-    summary = str(summary or "").strip()
+    summary = summary_without_old_advice(execute_kind, summary)
     if execute_kind not in _TRIAGE_KINDS or not summary:
         return summary
-    summary = _NO_ARTIST_NOTE.sub("", summary).strip()
+    if execute_kind == "library":
+        summary = _UPGRADE_NOTE.sub("", summary).strip()
     count = _COUNT_ONLY_SUMMARY.match(summary)
     return summary[count.end():].strip() if count else summary
 

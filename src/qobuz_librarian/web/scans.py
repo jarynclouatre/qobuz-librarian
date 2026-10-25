@@ -1,6 +1,5 @@
 """Finding, starting and deduplicating scan jobs."""
 import asyncio
-import re
 import time
 from pathlib import Path
 
@@ -282,21 +281,14 @@ def _start_library_scan(credentials, partial_only=False, force_full=False):
         )
 
 
-_UPGRADE_NOTE = re.compile(r"[0-9][0-9,]* (?:new )?albums? can be upgraded\.")
-
-
-def _restate_parked_status(parked, unchecked, upgrades, status):
+def _restate_parked_status(parked, unchecked, status):
     """Library shows the open review's summary, so it says what the newest
     scan left unchecked or unsaved, not what an earlier one did."""
     summary = str(parked.summary or "")
     count = review_pages._COUNT_ONLY_SUMMARY.match(summary)
     if count is None:
         return
-    head = [summary[:count.end()].rstrip(".") + "."]
-    head += _UPGRADE_NOTE.findall(summary[count.end():])
-    if upgrades:
-        head.append(flows.upgrade_finds_note(upgrades))
-    restated = " ".join(head + status)
+    restated = " ".join([summary[:count.end()].rstrip(".") + "."] + status)
     if restated == summary and parked.unchecked_artists == unchecked:
         return
 
@@ -410,7 +402,7 @@ def _fold_into_parked_library_review(job):
         status.append(flows.left_out_note(no_room, parked.CANDIDATE_CAP))
     status.extend(caveats)
     bits.extend(status)
-    _restate_parked_status(parked, unchecked, upgrades, status)
+    _restate_parked_status(parked, unchecked, status)
     job.summary = " ".join(bits)
     job.push_line(job.summary)
     job.status = job_mgr.JobStatus.DONE

@@ -23,7 +23,9 @@ from qobuz_librarian.web import (
     new_release_checks,
     qobuz_access,
     review_badges,
+    review_pages,
     runtime,
+    saved_reviews,
     settings_store,
     storage,
     write_gate,
@@ -111,6 +113,19 @@ def _recovery_missing(recovery) -> bool:
 
 templates.env.globals["recovery_on_disk"] = _recovery_on_disk
 templates.env.globals["downloads_albums"] = write_gate._review_downloads
+
+
+def _library_upgrade_count() -> int:
+    """How many albums Upgrade lists right now, for the Library review's
+    pointer to it."""
+    if not runtime._upgrade_available():
+        return 0
+    state = saved_reviews._upgrade_state_summary()
+    return 0 if state["stale"] else state["count"]
+
+
+templates.env.globals["library_upgrade_count"] = _library_upgrade_count
+templates.env.globals["without_old_advice"] = review_pages.summary_without_old_advice
 
 
 def _retire_gone_recoveries(rows: list[dict]) -> list[dict]:

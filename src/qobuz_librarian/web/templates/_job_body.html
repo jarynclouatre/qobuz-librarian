@@ -108,8 +108,9 @@
     {% else %}
     {% set _job_summary = job.summary %}
     {% endif %}
-    {% if _job_summary %}
-    <div class="ql-job-summary ql-job-summary--review"><span>{{ _job_summary }}{% if job.execute_kind == 'library' and 'can be upgraded' in _job_summary %} <a href="/upgrade" class="ql-inline-link">Open Upgrade</a>{% endif %}</span></div>
+    {% set _upgrades = library_upgrade_count() if job.execute_kind == 'library' else 0 %}
+    {% if _job_summary or _upgrades %}
+    <div class="ql-job-summary ql-job-summary--review"><span>{{ _job_summary }}{% if _upgrades %}{{ ' ' if _job_summary }}{{ _upgrades }} album{{ 's' if _upgrades != 1 }} can be upgraded. <a href="/upgrade" class="ql-inline-link">Open Upgrade</a>{% endif %}</span></div>
     {% endif %}
 
     {# Tab scoping: on a library review the bulk bar acts on the ACTIVE tab
@@ -223,7 +224,7 @@
         <div class="ql-progress-panel-head">
           <span id="prog-count" class="ql-progress-count readout">{% if _pt %}{{ _pc }} / {{ _pt }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if _pt != 1 }}{% endif %}{% endif %}</span>
         </div>
-        <progress id="prog-bar" class="ql-progress-bar" aria-label="Progress"{% if _pt %} max="100" value="{{ (_pc * 100 // _pt) }}"{% endif %}></progress>
+        <progress id="prog-bar" class="ql-progress-bar" aria-label="Progress"{% if job.progress_fraction is not none %} max="100" value="{{ (job.progress_fraction * 100) | int }}"{% elif _pt %} max="100" value="{{ (_pc * 100 // _pt) }}"{% endif %}></progress>
         <p id="prog-item" class="ql-progress-item">{{ job.progress_item }}</p>
       </div>
     </div>
@@ -248,8 +249,9 @@
     {% endif %}
     {# A partial run sets both: the summary is what it managed, the error is
        what went wrong. Showing only the error threw away the outcome. #}
-    {% if job.summary and job.summary != job.error %}
-    <div class="ql-job-summary ql-job-summary--terminal"><span>{{ job.summary }}</span></div>
+    {% set _summary = without_old_advice(job.execute_kind, job.summary) %}
+    {% if _summary and job.summary != job.error %}
+    <div class="ql-job-summary ql-job-summary--terminal"><span>{{ _summary }}</span></div>
     {% endif %}
     {% if _attention == 'cancel_late' %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">

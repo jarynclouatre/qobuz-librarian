@@ -30,7 +30,7 @@
     {% if job.status.value == 'scanning' %}
     <p id="card-prog-{{ job.id }}" class="ql-row-meta">
       {%- if job.progress_total > 0 -%}
-      Scanning {{ job.progress_current }} / {{ job.progress_total }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if job.progress_total != 1 }}{% endif %}{% if job.progress_item %} · {{ job.progress_item }}{% endif %}
+      {{ labels.job_activity(job) }} {{ job.progress_current }} / {{ job.progress_total }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if job.progress_total != 1 }}{% endif %}{% if job.progress_item %} · {{ job.progress_item }}{% endif %}
       {%- elif job.progress_phase -%}
       {{ job.progress_phase }}
       {%- else -%}
@@ -64,7 +64,7 @@
     {% endif %}
     {% if job.status.value in ('running', 'scanning') %}
     <div class="ql-progress" id="card-bar-{{ job.id }}">
-      <i style="width: {% if job.progress_total > 0 %}{{ ((job.progress_current / job.progress_total) * 100) | round(1) }}{% else %}0{% endif %}%"></i>
+      <i style="width: {% if job.progress_fraction is not none %}{{ (job.progress_fraction * 100) | round(1) }}{% elif job.progress_total > 0 %}{{ ((job.progress_current / job.progress_total) * 100) | round(1) }}{% else %}0{% endif %}%"></i>
     </div>
     {% endif %}
   </div>

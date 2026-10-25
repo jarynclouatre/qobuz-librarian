@@ -88,6 +88,9 @@ async def queue_history(
                 # page has the live one.
                 r["summary"] = review_pages.review_summary_without_count(
                     r.get("execute_kind"), r.get("summary"))
+            else:
+                r["summary"] = review_pages.summary_without_old_advice(
+                    r.get("execute_kind"), r.get("summary"))
         return rows
 
     def _load_page(page, bulk_page):

@@ -297,6 +297,9 @@ class Job:
     # What current/total are counting, so the UI can label a bare "12 / 350"
     # ("artist", "album", "track").
     progress_unit: str    = ""
+    # How full the bar is, when it moves ahead of the counts: a run on its
+    # first album is still at "0 / 1 album" while that album's tracks arrive.
+    progress_fraction: Optional[float] = None
     log_lines: list   = field(default_factory=list)
     # Review candidates: each is a dict
     #   {cid, kind, title, artist, detail, payload, selected}
@@ -375,8 +378,11 @@ class Job:
     # When set to (current, total, unit), push_progress reports THESE counts
     # in place of the caller's, so a multi-item execute (repairing 16 albums)
     # keeps the progress card on "3 / 16 albums" even while each album's inner
-    # phases (download, import, downsample) report their own 1 / 1.
+    # phases (download, import, downsample) report their own 1 / 1. A fourth
+    # item names the album, which then stays on the card through those phases.
     _progress_scope: Optional[tuple] = field(default=None, repr=False)
+    # The share of the scoped album's tracks downloaded so far.
+    _album_share: float = field(default=0.0, repr=False)
 
     def __post_init__(self):
         self.sync_cand_seq()
@@ -498,24 +504,39 @@ class Job:
         It is deliberately left out of the stored snapshot so a reconnect
         replay doesn't duplicate a preview row. ``unit`` names what current/total
         count ("artist"/"album"/"track") so the UI can label the bare numbers."""
-        # An execute loop can pin the counts to an overall scope (e.g. 3 of 16
-        # albums finished) so inner per-album phases don't reset the card to
-        # 1/1. The count is work completed, never work begun: counting the
-        # album being written left the card reading "2 / 2" for the whole of
-        # the second album.
-        scope = self._progress_scope
-        if scope is not None:
-            current, total, unit = scope
         # Write the snapshot fields under the lock so a reconnecting subscriber
         # reading them via _progress_snapshot() (also under the lock) can't catch
         # a torn mix, e.g. the new phase label with the previous phase's counts.
         with self._lock:
+            # An execute loop can pin the counts to an overall scope (e.g. 3 of
+            # 16 albums finished) so inner per-album phases don't reset the
+            # card to 1/1. The count is work completed, never work begun:
+            # counting the album being written left the card reading "2 / 2"
+            # for the whole of the second album.
+            fraction = None
+            scope = self._progress_scope
+            if scope is not None:
+                done, scope_total, scope_unit, *album = scope
+                if album and not unit:
+                    # The album's own phases report without a unit. Its track
+                    # downloads move the bar, and no track title, file or
+                    # folder takes the album's place on the card.
+                    if phase == "Downloading" and total:
+                        self._album_share = (current - 1) / total
+                        item = f"{album[0]} · track {current} of {total}"
+                    else:
+                        item = album[0]
+                    fraction = (done + self._album_share) / scope_total
+                elif album:
+                    self._album_share = 0.0
+                current, total, unit = done, scope_total, scope_unit
             self.progress_phase = phase
             self.progress_current = current
             self.progress_total = total
             self.progress_item = item
             self.progress_found = found
             self.progress_unit = unit
+            self.progress_fraction = fraction
             if hit and hit.get("albums"):
                 self.progress_found_artists += 1
             found_artists = self.progress_found_artists
@@ -528,6 +549,8 @@ class Job:
         # common case stays lean and existing consumers see no new field.
         if unit:
             payload["unit"] = unit
+        if fraction is not None:
+            payload["fraction"] = fraction
         if hit:
             payload["hit"] = hit
         if found_artists:
@@ -564,6 +587,8 @@ class Job:
             "found": self.progress_found}
         if self.progress_unit:
             snap["unit"] = self.progress_unit
+        if self.progress_fraction is not None:
+            snap["fraction"] = self.progress_fraction
         if self.progress_found_artists:
             snap["found_artists"] = self.progress_found_artists
         if self.importing:
@@ -2021,6 +2046,7 @@ def approve(
         job.progress_item = ""
         job.progress_found = 0
         job.progress_unit = ""
+        job.progress_fraction = None
         job.progress_found_artists = 0
         related = (parked,) if parked is not None else ()
         if not job_persistence.admit_review_transition(job, related):
@@ -2723,6 +2749,8 @@ def _interrupted_scan_summary(job: Job) -> str:
                 "from where it left off.")
     if job.execute_kind == "downsample":
         return restart + "Start it again from Downsample."
+    if job.execute_kind == "new_releases":
+        return restart + "Check again from the Library page."
     return restart + "Run the scan again to retry."
 
 

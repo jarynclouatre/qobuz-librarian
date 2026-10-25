@@ -186,8 +186,8 @@
 {% macro status_chip_label(job) -%}
   {%- if job.interrupted_by_restart -%}Interrupted
   {%- elif job.tracks_missing -%}Imported, {{ job.tracks_missing }} track{{ 's' if job.tracks_missing != 1 }} missing
-  {%- elif job.status.value == 'running' -%}{{ job_activity(job) }}
-  {%- else -%}{{ {'done': 'Done', 'failed': 'Failed', 'canceled': 'Cancelled', 'awaiting_review': 'Needs review', 'scanning': 'Scanning', 'pending': 'Queued'}.get(job.status.value, job.status.value.replace('_', ' ')) }}{%- endif -%}
+  {%- elif job.status.value in ('running', 'scanning') -%}{{ job_activity(job) }}
+  {%- else -%}{{ {'done': 'Done', 'failed': 'Failed', 'canceled': 'Cancelled', 'awaiting_review': 'Needs review', 'pending': 'Queued'}.get(job.status.value, job.status.value.replace('_', ' ')) }}{%- endif -%}
 {%- endmacro %}
 
 {# A pushed phase only earns a line where the chip beside it has not already

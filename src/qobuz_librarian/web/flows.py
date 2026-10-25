@@ -3144,9 +3144,10 @@ def execute_albums(job, chosen, token):
         album_id = cand["payload"].get("album_id")
         label = f"[{i}/{len(chosen)}] {cand.get('artist','')} - {cand['title']}"
         log.info(label)
-        job._progress_scope = (i - 1, len(chosen), "album")
-        job.push_progress("Downloading albums", i - 1, len(chosen),
-                          f"{cand.get('artist','')} - {cand['title']}", unit="album")
+        album = " · ".join(filter(None, (cand.get("artist"), cand["title"])))
+        job._progress_scope = (i - 1, len(chosen), "album", album)
+        job.push_progress("Downloading albums", i - 1, len(chosen), album,
+                          unit="album")
         try:
             full = get_album(album_id, token)
         except (AuthLost, QobuzUnavailable):

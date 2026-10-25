@@ -2453,7 +2453,7 @@
   }
 
   function jobActivityFallback(kind, status) {
-    if (status === "scanning") return "Scanning";
+    if (status === "scanning") return kind === "new_releases" ? "Checking" : "Scanning";
     if (kind === "upgrade") return "Upgrading";
     if (kind === "downsample") return "Downsampling";
     if (kind === "repair") return "Repairing";
@@ -2570,13 +2570,14 @@
       }
       var el = document.getElementById(progId);
       if (!el) return;
-      var verb = status === "scanning" ? "Scanning" : (p.phase || runFallback);
+      var verb = status === "scanning" ? runFallback : (p.phase || runFallback);
       var txt = fmtProgress(p, verb);
       if (txt) el.textContent = txt;
       var bar = document.getElementById("card-bar-" + id);
       if (bar && p.total > 0) {
         var fill = bar.querySelector("i");
-        if (fill) fill.style.width = Math.min(100, (p.current / p.total) * 100) + "%";
+        var share = typeof p.fraction === "number" ? p.fraction : p.current / p.total;
+        if (fill) fill.style.width = Math.min(100, share * 100) + "%";
       }
     }
     function onDone(e) {
@@ -2790,7 +2791,8 @@
         if (card) card.classList.remove("hidden");
         var ct = p.total > 0 ? p.current + " / " + p.total + unitSuffix(p) : (p.current ? String(p.current) : "");
         if (count) count.textContent = ct;
-        if (bar) { if (p.total > 0) { bar.max = 100; bar.value = Math.round(p.current / p.total * 100); } else { bar.removeAttribute("value"); } }
+        var share = typeof p.fraction === "number" ? p.fraction : p.current / p.total;
+        if (bar) { if (p.total > 0) { bar.max = 100; bar.value = Math.round(share * 100); } else { bar.removeAttribute("value"); } }
         if (item) item.textContent = p.item || "";
         if (typeof p.found === "number" && p.found > foundAlbums) foundAlbums = p.found;
         // Both tallies come cumulative from the server (found_artists rides the
