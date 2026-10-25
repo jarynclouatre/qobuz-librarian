@@ -223,6 +223,8 @@
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v13"/><path d="M6 12l6 6 6-6"/></svg>
   {% elif job.execute_kind == 'migration' %}
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h11M4 12h11M4 17h11"/><path d="M18 9l3 3-3 3"/></svg>
+  {% elif job.execute_kind in ('collection_snapshot', 'collection_restore') %}
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 5h17v4h-17z"/><path d="M5 9v10h14V9"/><path d="M10 13h4"/></svg>
   {% else %}
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
   {% endif %}

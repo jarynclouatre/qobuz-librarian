@@ -358,6 +358,22 @@ def _backup_dir_problem(value):
     return f"\u201c{label}\u201d has to be outside {_ROOT_NAMES[conflict]}."
 
 
+def _backup_dir_unwritable(value):
+    """Why the app can't make or write the Backup folder ``value``, or "".
+
+    Asked only when the folder is saved: a drive that is unmounted when
+    settings load must not clear the folder the user chose."""
+    folder = Path(os.path.abspath(value))
+    while not os.path.exists(folder) and folder != folder.parent:
+        folder = folder.parent
+    label = _FIELD_LABELS["COLLECTION_BACKUP_DIR"]
+    if not os.path.isdir(folder):
+        return f"\u201c{label}\u201d can't be used: {folder} is a file, not a folder."
+    if not os.access(folder, os.W_OK | os.X_OK):
+        return f"\u201c{label}\u201d can't be used: the app can't write to {folder}."
+    return ""
+
+
 # The saved Backup folder the last load cleared, and why, for Settings to say.
 _cleared_backup_dir = ""
 
@@ -762,6 +778,9 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
             problem = (_backup_dir_problem(value)
                        if key == "COLLECTION_BACKUP_DIR"
                        else _path_template_problem(key, value))
+            if (not problem and key == "COLLECTION_BACKUP_DIR" and value
+                    and value != str(baseline.get(key) or "").strip()):
+                problem = _backup_dir_unwritable(value)
             if problem:
                 # Same rule as the enum branch: reject the whole submission
                 # rather than apply the siblings and leave a path that would

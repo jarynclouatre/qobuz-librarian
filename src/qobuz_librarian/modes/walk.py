@@ -223,7 +223,8 @@ def _write_collection_snapshot():
     except OSError as exc:
         log.warning(fmt(
             C.YELLOW,
-            f"  ⚠  The collection backup could not be written: {exc}",
+            "  ⚠  The collection backup could not be written: "
+            f"{collection_snapshot.write_error(exc)}.",
         ))
         return
     if not written:

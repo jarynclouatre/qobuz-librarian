@@ -293,6 +293,15 @@ def last_failure():
     return _last_failure
 
 
+def write_error(exc) -> str:
+    """Why a backup couldn't be written, in plain words for a page."""
+    folder = snapshot_dir()
+    if isinstance(exc, PermissionError):
+        return f"the app can't write to {folder}"
+    reason = exc.strerror or str(exc)
+    return f"{reason[:1].lower()}{reason[1:]} in {folder}"
+
+
 def write_snapshot(snapshot, *, force=False):
     """Write the snapshot, honouring the shrink guard. Returns (ok, reason).
 
@@ -304,7 +313,7 @@ def write_snapshot(snapshot, *, force=False):
     try:
         written, refusal = _write_snapshot(snapshot, force=force)
     except OSError as e:
-        _last_failure = (time.time(), str(e))
+        _last_failure = (time.time(), write_error(e))
         raise
     if written:
         _last_failure = None
@@ -323,7 +332,7 @@ def _write_snapshot(snapshot, *, force):
             # did lose albums, this is the file the owner confirms against.
             state_file.write_json(suspect_path(), snapshot)
             return False, refusal
-        if previous is not None and _same_collection(snapshot, previous):
+        if previous is not None and same_collection(snapshot, previous):
             # Nothing changed: another dated copy would only push an older,
             # different one out of the few that are kept.
             suspect_path().unlink(missing_ok=True)
@@ -339,7 +348,8 @@ def _write_snapshot(snapshot, *, force):
 _WHEN_FIELDS = ("updated_at", "updated_at_epoch", "source")
 
 
-def _same_collection(snapshot, previous):
+def same_collection(snapshot, previous):
+    """Whether two snapshots record the same library, whenever taken."""
     def what(doc):
         return {k: v for k, v in doc.items() if k not in _WHEN_FIELDS}
     return what(snapshot) == what(previous)
@@ -414,11 +424,11 @@ def validate_upload(data, *, allow_empty=False):
     the stricter default.
     """
     if not isinstance(data, dict):
-        return False, "That file isn't a collection snapshot from this app."
+        return False, "That file isn't a collection backup from this app."
     if data.get("format") != FORMAT:
-        return False, "That file isn't a collection snapshot from this app."
+        return False, "That file isn't a collection backup from this app."
     if data.get("version") != VERSION:
-        return False, (f"That snapshot was written by a different version of "
+        return False, (f"That backup was written by a different version of "
                        f"the app (version {data.get('version')!r}, this one "
                        f"reads {VERSION}).")
     updated_at_epoch = data.get("updated_at_epoch")
@@ -427,7 +437,7 @@ def validate_upload(data, *, allow_empty=False):
         or not math.isfinite(updated_at_epoch)
         or updated_at_epoch < 0
     ):
-        return False, "That snapshot has an invalid backup timestamp."
+        return False, "That backup has an invalid timestamp."
     counts = data.get("counts")
     if (
         not isinstance(counts, dict)
@@ -436,11 +446,11 @@ def validate_upload(data, *, allow_empty=False):
             for name in ("artists", "albums", "tracks")
         )
     ):
-        return False, "That snapshot has invalid collection totals."
+        return False, "That backup has invalid collection totals."
     artists = data.get("artists")
     if (not isinstance(artists, list)
             or (not artists and not allow_empty)):
-        return False, "That snapshot doesn't list any artists."
+        return False, "That backup doesn't list any artists."
     album_count = 0
     track_count = 0
     for artist in artists:
@@ -448,7 +458,7 @@ def validate_upload(data, *, allow_empty=False):
                 or not isinstance(artist.get("name"), str)
                 or not artist["name"].strip()
                 or not isinstance(artist.get("albums"), list)):
-            return False, "That snapshot has an invalid artist entry."
+            return False, "That backup has an invalid artist entry."
         for album in artist["albums"]:
             if (not isinstance(album, dict)
                     or not isinstance(album.get("name"), str)
@@ -458,7 +468,7 @@ def validate_upload(data, *, allow_empty=False):
                     or not isinstance(album.get("tracks"), list)
                     or not all(isinstance(track, dict)
                                for track in album["tracks"])):
-                return False, "That snapshot has an invalid album entry."
+                return False, "That backup has an invalid album entry."
             album_count += 1
             track_count += len(album["tracks"])
     listed = {"artists": len(artists), "albums": album_count,

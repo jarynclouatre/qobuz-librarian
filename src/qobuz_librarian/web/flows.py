@@ -83,6 +83,7 @@ from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.web import (
     download_outcomes,
+    job_labels,
     job_persistence,
     review_badges,
     settings_store,
@@ -1465,7 +1466,8 @@ def _write_collection_snapshot(job, owned_qobuz, artist_ids, source="scan"):
             previous=previous, source=source)
         written, refusal = collection_snapshot.write_snapshot(document)
     except OSError as e:
-        failure = f"The collection backup couldn't be written: {e}"
+        failure = ("The collection backup couldn't be written: "
+                   f"{collection_snapshot.write_error(e)}.")
         job.push_line(failure)
         return failure
     if not written:
@@ -5396,7 +5398,9 @@ def run_collection_snapshot(job, *, force=False):
         written, refusal = collection_snapshot.write_snapshot(
             document, force=force)
     except OSError as e:
-        job.summary = f"The snapshot couldn't be written: {e}"
+        job.summary = (f"The backup couldn't be written: "
+                       f"{collection_snapshot.write_error(e)}. Check the "
+                       "Backup folder in Settings.")
         job.error = job.summary
         _mark_job_failed(job)
         log.info(job.summary)
@@ -5407,6 +5411,15 @@ def run_collection_snapshot(job, *, force=False):
         job.error = refusal
         _mark_job_failed(job)
         log.info(job.summary)
+        return
+    if (not force and previous is not None
+            and collection_snapshot.same_collection(document, previous)):
+        age = job_labels._format_age(previous.get("updated_at_epoch"))
+        job.summary = (f"Nothing changed since the last backup"
+                       f"{f' ({age})' if age else ''}, so it was kept as it "
+                       "is.")
+        log.info(job.summary)
+        _close_completed_job(job)
         return
     job.summary = (
         f"Backed up {plural(counts['albums'], 'album')} by "

@@ -79,7 +79,7 @@ async def collection_snapshot_download(request: Request):
     if state != "ready" or not path.is_file():
         return RedirectResponse(
             url="/settings?error=" + rendering._notice_key(
-                "There is no snapshot yet. Run a library scan, or use Back up "
+                "There is no backup yet. Run a library scan, or use Back up "
                 "now, and it will be here."),
             status_code=303)
     return FileResponse(path, media_type="application/json",
