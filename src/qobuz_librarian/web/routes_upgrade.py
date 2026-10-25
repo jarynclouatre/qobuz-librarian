@@ -14,7 +14,9 @@ from qobuz_librarian.web import (
     review_badges,
     runtime,
     saved_reviews,
+    scans,
 )
+from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
 
@@ -25,9 +27,19 @@ async def upgrade_page(request: Request):
         return saved_reviews._upgrade_unavailable_response()
     badge_generation = review_badges.ready_generation("upgrade")
     state = saved_reviews._upgrade_state_summary()
+    latest = scans._last_finished("upgrade")
+    stopped = (latest if latest and latest.phase == "execute" and (
+        latest.interrupted_by_restart
+        or latest.status == job_mgr.JobStatus.CANCELED) else None)
+    if stopped and (
+            (state.get("updated_at") or 0) > (stopped.finished_at or stopped.created_at)
+            or scans._active_scan("upgrade", statuses=(
+                job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING))):
+        stopped = None
     return rendering._tr(request, "upgrade.html", {
         "creds_ok": qobuz_access._creds_ok(), "qobuz_ready": qobuz_access._qobuz_ready(), "page": "upgrade",
         "upgrade_state": state,
+        "upgrade_stopped": stopped,
         "last_run": job_labels._tool_last_run_age("library"),
         "hidden_count": hidden_mod.count(hidden_mod.SCOPE_UPGRADE)},
         review_badge_ack=("upgrade", badge_generation))

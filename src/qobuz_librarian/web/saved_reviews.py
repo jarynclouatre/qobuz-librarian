@@ -77,6 +77,7 @@ def _upgrade_state_summary():
         # Results are listed only once complete, and only then given an age.
         "updated": (job_labels._format_age(updated_at)
                     if complete and updated_at else None),
+        "updated_at": updated_at,
     }
 
 

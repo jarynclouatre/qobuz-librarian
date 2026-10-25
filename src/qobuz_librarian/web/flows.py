@@ -1569,6 +1569,14 @@ def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
     artists = set(artists)
     in_tab = review_tab_filter(tab)
     live = (job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.SCANNING)
+    upgrade = scope == hidden_mod.SCOPE_UPGRADE
+
+    def dismissed_as(c):
+        if not upgrade:
+            return c.get("title")
+        return hidden_mod.versioned_title(
+            c.get("title"), (c.get("payload") or {}).get("version"))
+
     # Snapshot + mutate under the lock in one go: a live scan appends candidates
     # from the worker thread, so reading job.candidates and replacing it in
     # separate steps could drop a concurrently-added album.
@@ -1584,7 +1592,7 @@ def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
         # a key that cannot tell them apart, so nothing the user kept disappears
         # and the count that leaves matches the count recorded.
         mine = [c for c in job.candidates if c.get("artist") in artists]
-        kept = {hidden_mod.album_fingerprint(c.get("artist"), c.get("title"))
+        kept = {hidden_mod.album_fingerprint(c.get("artist"), dismissed_as(c))
                 for c in mine if c.get("selected")}
         kept.discard(None)
         to_hide = [c for c in mine
@@ -1592,11 +1600,13 @@ def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
                    and in_tab(c)
                    and (not query or candidate_matches_query(c, query))
                    and hidden_mod.album_fingerprint(
-                       c.get("artist"), c.get("title")) not in kept]
+                       c.get("artist"), dismissed_as(c)) not in kept]
         if not to_hide:
             return 0
-        specs = [(c.get("artist"), c.get("title"),
+        specs = [(c.get("artist"), dismissed_as(c),
                   (c.get("payload") or {}).get("year")) for c in to_hide]
+        versions = ([(c.get("payload") or {}).get("version") or ""
+                     for c in to_hide] if upgrade else None)
         gap_flags = [is_gap_candidate(c) for c in to_hide]
         album_ids = ([(c.get("payload") or {}).get("album_id") for c in to_hide]
                      if job.execute_kind == "new_releases" else None)
@@ -1607,7 +1617,8 @@ def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
         spec for spec in specs
         if not hidden_mod.is_hidden_row(scope, *spec, hidden_before)
     ]
-    hidden_mod.hide(scope, specs, gap_fill=gap_flags, album_ids=album_ids)
+    hidden_mod.hide(scope, specs, gap_fill=gap_flags, album_ids=album_ids,
+                    versions=versions)
     drop = {c["cid"] for c in to_hide}
 
     def _drop():
@@ -1638,10 +1649,10 @@ def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
             for artist_name, title, year in new_specs
         }
         raced_specs = [
-            (c.get("artist"), c.get("title"),
+            (c.get("artist"), dismissed_as(c),
              (c.get("payload") or {}).get("year"))
             for c in ticked_meanwhile
-            if (c.get("artist") or "", c.get("title") or "",
+            if (c.get("artist") or "", dismissed_as(c) or "",
                 str((c.get("payload") or {}).get("year") or "")) in new_keys
         ]
         hidden_mod.restore_rows(scope, raced_specs)

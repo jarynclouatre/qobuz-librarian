@@ -43,6 +43,11 @@ async def lyrics_page(request: Request):
             "lyrics", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING)),
         "lyrics_failed": lyrics_failed,
         "lyrics_stopped": lyrics_stopped,
+        "lyrics_summary": (
+            latest_lyrics.summary
+            if latest_lyrics is not None
+            and latest_lyrics.status == job_mgr.JobStatus.DONE
+            else ""),
         "lyrics_format": lyrics_format_label,
         "providers": providers,
     })

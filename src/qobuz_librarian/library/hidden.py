@@ -110,6 +110,15 @@ def album_fingerprint(artist, title):
     return f"{a}|{t}"
 
 
+def versioned_title(title, version):
+    """The title an Upgrade dismissal is kept under: "Good Luck · Acoustic"
+    beside a plain "Good Luck", so the two are dismissed apart and the
+    Dismissed page says which one it is."""
+    title = _stored_text(title)
+    version = _stored_text(version).strip()
+    return f"{title} · {version}" if version else title
+
+
 def _entry_rows(entry):
     """The review rows recorded under one fingerprint.
 
@@ -233,9 +242,13 @@ def _undecorated_self_titled(artist, title):
     )
 
 
-def is_hidden(scope, artist, title, store, *, year=None):
+def is_hidden(scope, artist, title, store, *, year=None, version=""):
     """True when (artist, title) is dismissed in this scope. `store` is a
     preloaded dict from load() so a scan doesn't re-read the file per album.
+
+    A ``version`` is part of what was dismissed (see versioned_title). A
+    dismissal saved under the bare title before versions were kept still
+    covers it; one saved since, which records its version, does not.
 
     Edition decorations stay folded together regardless of year. The narrow
     exception is an undecorated self-titled release whose known year is more
@@ -244,6 +257,13 @@ def is_hidden(scope, artist, title, store, *, year=None):
     ownership logic deliberately keeps them separate too. Missing years and
     old stores remain conservative and keep the fingerprint hidden.
     """
+    if version:
+        if is_hidden(scope, artist, versioned_title(title, version), store,
+                     year=year):
+            return True
+        entry = (store.get(scope) or {}).get(album_fingerprint(artist, title))
+        if entry is None or all("version" in row for row in _entry_rows(entry)):
+            return False
     fp = album_fingerprint(artist, title)
     if fp is None:
         return False
@@ -264,7 +284,7 @@ def is_hidden(scope, artist, title, store, *, year=None):
                for stored_year in stored_years)
 
 
-def hide(scope, items, gap_fill=None, album_ids=None):
+def hide(scope, items, gap_fill=None, album_ids=None, versions=None):
     """Record dismissals. `items` is an iterable of (artist, title, year).
 
     `gap_fill`, when given, is a matching list of booleans marking which rows
@@ -272,6 +292,8 @@ def hide(scope, items, gap_fill=None, album_ids=None):
     than a fully missing one, so the Dismissed page can say so. Missing
     entirely for an older caller, every row is treated as not Gap Fill.
     `album_ids`, when given, is a matching list of each row's Qobuz album.
+    `versions`, when given, is a matching list of each row's version, empty
+    for a plain release, with the title already from versioned_title.
 
     Returns the number of rows newly recorded, matching the review rows removed.
     This may exceed the number of fingerprints when multiple editions of one
@@ -280,12 +302,14 @@ def hide(scope, items, gap_fill=None, album_ids=None):
     items = list(items)
     flags = list(gap_fill) if gap_fill is not None else [False] * len(items)
     ids = list(album_ids) if album_ids is not None else [None] * len(items)
+    kinds = list(versions) if versions is not None else [None] * len(items)
     with _store_lock():
         store = load()
         bucket = store.setdefault(scope, {})
         now = datetime.now(timezone.utc).isoformat()
         added = 0
-        for (artist, title, year), is_gap, album_id in zip(items, flags, ids):
+        for (artist, title, year), is_gap, album_id, version in zip(
+                items, flags, ids, kinds):
             title, year = _split_stored_year(title, year)
             fp = album_fingerprint(artist, title)
             if fp is None:
@@ -295,6 +319,8 @@ def hide(scope, items, gap_fill=None, album_ids=None):
                 row["gap_fill"] = True
             if album_id:
                 row["album_id"] = str(album_id)
+            if version is not None:
+                row["version"] = _stored_text(version)
             entry = bucket.get(fp)
             if entry is None:
                 bucket[fp] = {"artist": artist or "", "title": title or "",

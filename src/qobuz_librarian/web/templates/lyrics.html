@@ -24,7 +24,7 @@
     </span>
     {% if lyrics_running or lyrics_failed or (have_lyrics and (last_run or lyrics_stopped)) %}
     <span>
-      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% elif lyrics_stopped %}The next scan carries on from where it stopped.{% else %}Last lyrics scan {{ last_run }}.{% endif %}
+      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% elif lyrics_stopped %}The next scan carries on from where it stopped.{% else %}Last lyrics scan {{ last_run }}{% if lyrics_summary %}: {{ lyrics_summary }}{% else %}.{% endif %}{% endif %}
     </span>
     {% endif %}
     {% if have_lyrics and not lyrics_running %}

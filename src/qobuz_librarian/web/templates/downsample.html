@@ -46,6 +46,11 @@
     {% if downsample_failed.summary and downsample_failed.summary != downsample_failed.error %}<p>{{ downsample_failed.summary }}</p>{% endif %}
     <p>{% if downsample_failed.error %}{{ downsample_failed.error }} {% endif %}<a href="/jobs/{{ downsample_failed.id }}" class="ql-inline-link">Open details →</a></p>
   </div>
+  {% elif downsample_stopped and not downsample_running %}
+  <div class="ql-tool-note ql-tool-note-info">
+    <p class="ql-tool-note-title">Last Downsample run {% if downsample_stopped.interrupted_by_restart %}interrupted{% else %}stopped{% endif %}</p>
+    <p>{{ downsample_stopped.error or downsample_stopped.summary }} <a href="/jobs/{{ downsample_stopped.id }}" class="ql-inline-link">Open details →</a></p>
+  </div>
   {% endif %}
 
   {% if have_downsample %}

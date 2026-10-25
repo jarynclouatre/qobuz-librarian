@@ -164,6 +164,7 @@ def visible_of(specs, hidden=None):
             spec.get("title"),
             hidden,
             year=(spec.get("payload") or {}).get("year"),
+            version=(spec.get("payload") or {}).get("version") or "",
         )
     ]
 
