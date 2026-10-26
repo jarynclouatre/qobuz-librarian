@@ -725,7 +725,9 @@ def parse_args():
     getting.add_argument("--consolidate",  dest="consolidate",
                    action=argparse.BooleanOptionalAction,
                    default=cfg.CONSOLIDATE,
-                   help="after import, scan sibling folders and offer to consolidate")
+                   help="after import, scan sibling folders and offer to "
+                        "consolidate; in Artist mode and the walks, offer "
+                        "first to keep one folder of each group of siblings")
     getting.add_argument("--migrate-multi-artist", dest="migrate_multi_artist",
                    action=argparse.BooleanOptionalAction,
                    help="after import, safely re-file 'Primary, Other' albums "

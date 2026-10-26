@@ -129,7 +129,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--no-import` | Download without importing; the download stays in staging for the `beet import -m` command `--help` and the end of the run print, to run with Qobuz Librarian stopped (the web app too), and other downloads, in the terminal or the web app, go ahead beside it and leave it there |
 | `--no-upgrade` | Turn off quality upgrades for this run |
 | `--no-downsample` | Skip downsampling new downloads for this run |
-| `--[no-]consolidate` | After import, look at sibling folders and offer to merge them |
+| `--[no-]consolidate` | After import, look at sibling folders and offer to merge them; in Artist mode, the Library walk and Gap Fill, offer first to keep one folder of each group of siblings |
 | `--[no-]migrate-multi-artist` | After import, file 'Primary, Other' albums under 'Primary' |
 | `--lyrics-rescan`, `--lyrics-synced-only` | With `--lyrics-walk`: also look up tracks checked in the last 30 days; write only timed lyrics |
 | `--migrate-src PATH`, `--migrate-dest PATH`, `--in-place`, `--acoustid` | With `--migrate`: source, destination, move instead of copy, fingerprint untagged files (see [Existing libraries](existing-libraries.md)) |

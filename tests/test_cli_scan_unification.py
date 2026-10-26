@@ -321,7 +321,8 @@ def test_switching_to_a_sibling_keeps_the_folder_the_user_picked(
                            no_upgrade=False)
 
     with pytest.raises(KeyboardInterrupt):
-        artist.run_artist_gap_fill("Artist", root, args, "tok", fresh=True)
+        artist.run_artist_gap_fill("Artist", root, args, "tok", fresh=True,
+                                   consolidate=True)
 
     assert queued[0]["album_dir"] == other
     assert queued[0]["siblings_to_delete"] == [third]

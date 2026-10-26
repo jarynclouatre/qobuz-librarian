@@ -415,6 +415,7 @@ def run_album_walk_mode(args, token):
                         parked or queue_full or ad in seen_dirs),
                     save_callback=_save_now,
                     hidden=hidden,
+                    consolidate=saved_consolidate,
                     numbered=False,
                 )
                 stopped = False
@@ -725,6 +726,7 @@ def run_walk_queued_mode(args, token):
                             shared_queue=shared_queue,
                             save_callback=_save_now,
                             hidden=hidden,
+                            consolidate=saved_consolidate,
                         )
                         (step_one, owned_titles, handled_ids, resolved_dirs,
                          artist_id, prefetched_catalog) = gap_fill_result

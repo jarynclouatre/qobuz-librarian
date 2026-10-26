@@ -142,8 +142,8 @@ def _folder_quality_label(album_dir):
 def _consolidation_disabled_notice(args, mode_name):
     if args.consolidate:
         log.info(fmt(C.GRAY, wrap(
-            f"{mode_name} skips sibling-folder consolidation. Use Album mode "
-            "with --consolidate to check one album.",
+            f"{mode_name} asks about each artist's sibling folders before "
+            "checking its albums, not after each import.",
             indent="  · ", hanging="    ")))
 
 
@@ -168,7 +168,7 @@ def _skipped(skip_predicate, album_dir):
 def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                       shared_queue=None, flush_callback=None,
                       skip_predicate=None, save_callback=None, fresh=False,
-                      hidden=None, numbered=True):
+                      hidden=None, numbered=True, consolidate=False):
     """Walk every album dir under artist_dir, match each to Qobuz, prompt to fill
     gaps. The matching is library.discovery.match_album_dir; this function is
     the prompting + sibling cleanup around it. Returns (results, owned_titles,
@@ -180,6 +180,10 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
 
     ``numbered`` heads the section as step 1 of 2, for the callers that go on
     to the missing-albums step.
+
+    ``consolidate`` (--consolidate) offers to keep one folder of each group of
+    sibling folders and delete the others after a fill. Without it every
+    folder is checked on its own and none is offered for deletion.
     """
     album_dirs = list_artist_album_dirs(artist_dir)
     if not album_dirs:
@@ -228,13 +232,17 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             f"  ⚠  No Qobuz artist matches {artist_name!r} closely enough; "
             "matching each folder on its own."))
 
-    skip_set = set()  # folders set aside while picking among duplicate groups
+    skip_set = set()  # the folders not picked to keep in a duplicate group
     no_answer = False
+    # Folder bare-titles seed the owned set the missing-albums step reads, so a
+    # catalog album already on disk isn't re-offered; a sibling set aside below
+    # is still on disk.
+    owned_titles = owned_album_titles(album_dirs)
     # A group whose folders the walk has all settled was answered before.
     sibling_groups = [
         (bare, dirs) for bare, dirs in detect_sibling_album_groups(album_dirs)
         if not all(_skipped(skip_predicate, d) for d in dirs)
-    ]
+    ] if consolidate else []
     if sibling_groups:
         log.info(fmt(C.YELLOW,
             f"\n  ⚠  Detected {plural(len(sibling_groups), 'sibling folder group')}:"))
@@ -243,13 +251,16 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             log.info(fmt(C.WHITE, f"  Group '{bare}':"))
             for j, d in enumerate(dirs, 1):
                 n_audio = _count_audio_files_in(d)
-                log.info(f"    {fmt(C.BOLD, str(j))}. "
-                         f"{fmt(C.WHITE, d.name)}  "
-                         f"{fmt(C.GRAY, f'[{plural(n_audio, "audio file")}]')}"
-                         f"  {fmt(C.CYAN, _folder_quality_label(d))}")
+                log.info(f"    {fmt(C.BOLD, str(j))}. {fmt(C.WHITE, d.name)}")
+                log.info(fmt(C.GRAY, wrap(
+                    f"{plural(n_audio, 'audio file')} · "
+                    f"{_folder_quality_label(d)}", indent="       ")))
+            log.info(fmt(C.GRAY, wrap(
+                "Pick which to keep. After a successful fill, each of the "
+                "others is deleted if every track in it is also in the one "
+                "you keep.", indent="    ")))
             log.info(fmt(C.GRAY,
-                "    Pick which to keep; others are deleted after a successful fill."))
-            log.info(fmt(C.GRAY, "    Enter to skip the entire group."))
+                "    Enter leaves them all, and checks each on its own."))
             picked = None
             yes_skip_delete = False  # --yes picks but never deletes
             if args.yes:
@@ -260,7 +271,7 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                     f"(siblings preserved; deletion needs interactive confirm)"))
             else:
                 while True:
-                    rr = ask(f"    Pick [1-{len(dirs)}, enter=skip]: ",
+                    rr = ask(f"    Pick [1-{len(dirs)}, Enter = leave all]: ",
                              lower=False)
                     if rr is None:
                         no_answer = True
@@ -270,13 +281,11 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                         picked = dirs[int(rr) - 1]
                         break
                     log.info(fmt(C.GRAY,
-                        f"    Enter 1-{len(dirs)} or blank to skip."))
+                        f"    Enter 1-{len(dirs)}, or blank to leave them all."))
             if no_answer:
                 break
             if picked is None:
-                log.info(fmt(C.GRAY, "    Skipped entire group."))
-                for d in dirs:
-                    skip_set.add(d)
+                log.info(fmt(C.GRAY, "    Left as they are."))
                 continue
             others = [d for d in dirs if d is not picked]
             # Under --yes, pick but DO NOT enqueue siblings for delete-after-fill;
@@ -289,9 +298,6 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             log.info(fmt(C.GRAY,
                 f"  → {plural(len(album_dirs), 'folder')} to scan."))
 
-    # Folder bare-titles seed the owned set the missing-albums step reads, so a
-    # catalog album already on disk isn't re-offered.
-    owned_titles = owned_album_titles(album_dirs)
     handled_ids = set()     # Qobuz ids matched here; the missing step skips them
     resolved_dirs = set()   # folders matched here, so a different edition of the
                             # same album doesn't re-surface them as missing
@@ -1107,8 +1113,9 @@ def run_artist_mode(artist_name, args, token):
         # albums.
         try:
             (gap_fill_results, owned_titles, handled_ids, resolved_dirs,
-             artist_id, catalog) = run_artist_gap_fill(artist_name, artist_dir, args,
-                                                       token, fresh=True)
+             artist_id, catalog) = run_artist_gap_fill(
+                artist_name, artist_dir, args, token, fresh=True,
+                consolidate=saved_consolidate)
         except KeyboardInterrupt:
             kept, mode = load_queue_journal().pending_items()
             if kept and mode == "artist":
