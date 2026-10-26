@@ -195,7 +195,7 @@ def run_downsample_walk_mode(args):
     n_attempted = 0
     total_saved = 0
     # A preview never reaches the counters below, so it keeps its own running
-    # total of what it listed and what that would reclaim.
+    # total of what it listed and how much smaller that would make it.
     n_albums_found = 0
     est_total_saving = 0
     total_errors = 0
@@ -221,8 +221,8 @@ def run_downsample_walk_mode(args):
             est_total_saving += est_total
             log.info(fmt(C.BOLD + C.WHITE, f"  {artist_name}"))
             log.info(fmt(C.MAGENTA,
-                f"  {plural(n_albums, 'album')} above 48 kHz, "
-                f"~{format_size(est_total)} reclaimable:"))
+                f"  {plural(n_albums, 'album')} above 48 kHz would be "
+                f"~{format_size(est_total)} smaller:"))
             log.info("")
             for c in candidates:
                 log.info(f"    • {fmt(C.WHITE, truncate(c.label, 48))}   "
@@ -303,7 +303,7 @@ def run_downsample_walk_mode(args):
         log.info(fmt(C.GRAY,
             f"     Checked {plural(n_scanned, 'artist')}; found "
             f"{plural(n_albums_found, 'album')} to downsample, "
-            f"~{format_size(est_total_saving)} reclaimable."))
+            f"~{format_size(est_total_saving)} smaller."))
     else:
         log.info(fmt(C.GRAY,
             f"     Checked {plural(n_scanned, 'artist')}; downsampled "

@@ -15,13 +15,13 @@
   </div>
   {% if census.top %}
   <hr class="ql-census-rule">
-  <p class="ql-census-subhead">Most hi-res disk</p>
+  <p class="ql-census-subhead">Most hi-res by artist</p>
   <div class="ql-census-artists">
     {% for a in census.top %}<span><b>{{ a.name }}</b> {{ a.size }}</span>{% endfor %}
   </div>
   {% endif %}
   {% if census.reclaim %}
-  <p class="ql-census-foot">Downsampling the files above 48 kHz would reclaim about <b>{{ census.reclaim }}</b>. <a href="/downsample" class="ql-inline-link">Review albums</a></p>
+  <p class="ql-census-foot">Downsampling the files above 48 kHz would make them about <b>{{ census.reclaim }}</b> smaller. <a href="/downsample" class="ql-inline-link">Review albums</a></p>
   {% endif %}
   <p class="ql-census-foot">Counts are from your last library scan and the app's own changes since.</p>
 </div>

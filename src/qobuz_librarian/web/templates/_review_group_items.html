@@ -24,6 +24,8 @@
     {% set _release_label = {'live': 'Live', 'compilation': 'Compilation', 'epSingle': 'EP or single'}.get(c.payload.release_type) if review_tab|default('') == 'missing' %}
     {% if _release_label and (c.payload.version or '') | lower == _release_label | lower %}{% set _release_label = '' %}{% endif %}
     {% set _detail = (c.detail | replace('gap-fill: ', '')) if review_tab|default('') == 'gaps' else c.detail %}
+    {# Downsample results saved by 1.5.0 and earlier name the saving "reclaimable". #}
+    {% if job.execute_kind == 'downsample' %}{% set _detail = (_detail or '') | replace(' reclaimable', ' smaller') %}{% endif %}
     {# Each "·" part stays on one line, so "24-bit/96kHz" or "9 missing of
        10" never breaks inside on a phone. #}
     <span class="ql-review-candidate-detail">{% if _release_label %}{{ _release_label }} · {% endif %}{% if job.execute_kind in ('upgrade', 'downsample') and c.payload.year | known_year %}{{ c.payload.year | known_year }} · {% endif %}{% if job.execute_kind == 'repair' %}{{ _detail }}{% else %}{% for _part in (_detail or '').split(' · ') %}{% if not loop.first %} · {% endif %}{% if loop.first and _part | length == 4 and _part.isdigit() and not _part | known_year %}{% set _part = '?' %}{% endif %}{% for _step in _part.split(' → ') %}{% if not loop.first %} {% endif %}<span class="whitespace-nowrap">{% if not loop.first %}→ {% endif %}{{ _step }}</span>{% endfor %}{% endfor %}{% endif %}</span>

@@ -30,7 +30,7 @@ class DownsampleCandidate:
     n_flac: int           # all FLACs in the folder
     source_rates: list    # sorted unique source sample rates (Hz)
     target_rates: list    # sorted unique target sample rates (Hz)
-    est_saving: int       # estimated bytes reclaimable (audio scaled by the rate cut)
+    est_saving: int       # estimated bytes saved (audio scaled by the rate cut)
     album: str = ""       # the album tag, for display; title stays the folder name
     year: str = ""
 
@@ -51,7 +51,7 @@ class DownsampleCandidate:
     @property
     def detail(self):
         part = "" if self.n_hires == self.n_flac else f" · {self.n_hires} of {self.n_flac} tracks"
-        return f"{self.rate_label}{part} · ~{format_size(self.est_saving)} reclaimable"
+        return f"{self.rate_label}{part} · ~{format_size(self.est_saving)} smaller"
 
 
 _FOLDER_YEAR = re.compile(r"\((\d{4})\)\s*$")
