@@ -2180,7 +2180,7 @@ def history_page(limit: int, offset: int,
     for row in rows:
         recoveries, recovery_unreadable = _decode_recoveries(row[12])
         execute_args, execute_args_unreadable = _decode_execute_args(row[8])
-        _single, single_unreadable = _decode_single(row[14])
+        single, single_unreadable = _decode_single(row[14])
         result.append({
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
@@ -2196,6 +2196,7 @@ def history_page(limit: int, offset: int,
             "quality_shortfall": _decode_object(row[15])[0],
             "tracks_missing": _tracks_missing(row[16], row[4], row[5]),
             "recovery_unreadable": recovery_unreadable,
+            "single": single,
             "single_unreadable": single_unreadable,
         })
     return result

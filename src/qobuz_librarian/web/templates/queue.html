@@ -165,7 +165,7 @@
       <path d="M6.5 6.75h11M6.5 12h11M6.5 17.25h7.5"/>
     </svg>
   </div>
-  <p class="font-medium text-base-content/70">{% if writes_paused %}Nothing is running.{% else %}Queue is empty.{% endif %}</p>
+  <p class="font-medium text-base-content/70">{% if cli_mode or health_lock_busy %}Nothing is running here.{% elif writes_paused %}Nothing is running.{% else %}Queue is empty.{% endif %}</p>
   <div class="ql-empty-actions">
     {# Nothing can start, so a Search button here only leads back to a greyed
        download; the notice above carries the one thing that lifts the pause. #}

@@ -1574,6 +1574,20 @@
     var dd = btn.closest(".ql-mobile-drawer");
     if (dd) closeDrawer(dd);
   });
+  // The dimmed backdrop is the drawer's own ::before. On iOS Safari a tap
+  // there fires no click unless the drawer itself listens for one.
+  function listenOnDrawerBackdrops() {
+    document.querySelectorAll(".ql-mobile-drawer").forEach(function (dd) {
+      dd.addEventListener("click", function (evt) {
+        if (evt.target === dd && drawerIsOpen(dd)) closeDrawer(dd);
+      });
+    });
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", listenOnDrawerBackdrops);
+  } else {
+    listenOnDrawerBackdrops();
+  }
   // One-shot flash flags should not stay in the URL after first paint.
   var FLASH_PARAMS = ["approved", "stale", "saved", "queued", "connected",
                       "unverified", "mode", "error", "noselection", "skipped",

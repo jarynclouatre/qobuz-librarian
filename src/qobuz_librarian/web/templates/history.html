@@ -86,16 +86,18 @@
         <span class="ql-status-chip is-warning" title="Finished below your target quality; open it for details.">Below target quality</span>
       {% endif %}
       <span class="ql-activity-time tabular-nums"{% if job.when_exact %} title="{{ job.when_exact }}"{% endif %}>{{ job.when }}</span>
+      {# No empty actions box: on a phone it pins a wrapped time to the left. #}
+      {% if (job.status in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and job.attention != 'recovery' and not job.recoveries and not job.recovery_unreadable %}
       <div class="ql-activity-actions">
-        {% if (job.status in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and job.attention != 'recovery' and not job.recoveries and not job.recovery_unreadable %}
         {% set retry_paused = downloads_paused %}
+        {% set retry_quiet = job.status == 'canceled' and not job.interrupted_by_restart %}
         <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           <input type="hidden" name="return_to" value="/queue/history{% if request.url.query %}?{{ request.url.query }}{% endif %}">
-          <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if retry_paused %} disabled title="{{ downloads_paused_reason }}" aria-disabled="true"{% else %} title="Retry"{% endif %}>Retry</button>
+          <button type="submit" class="ql-btn {{ 'ql-btn-secondary' if retry_quiet else 'ql-btn-primary' }} ql-btn-sm"{% if retry_paused %} disabled title="{{ downloads_paused_reason }}" aria-disabled="true"{% else %} title="Retry"{% endif %}>Retry</button>
         </form>
-        {% endif %}
       </div>
+      {% endif %}
     </div>
 {%- endmacro %}
 
@@ -169,7 +171,11 @@
       {{ labels.kind_tile(job, 'ql-job-tile--done') }}
       <div class="ql-activity-main">
         <p class="ql-row-title">
+          {% if job.single and job.single.get('track_id') %}
+          <a href="/jobs/{{ job.id }}" class="ql-row-link"><span>{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }} <span class="ql-row-kind">Track</span></span></a>
+          {% else %}
           <a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
+          {% endif %}
         </p>
       </div>
       {{ job_side(job) }}

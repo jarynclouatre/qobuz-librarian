@@ -80,6 +80,12 @@
     /* Keep counts, sizes, and timestamps stable while text changes. */
     font-feature-settings: "cv11", "ss01";
   }
+  /* The app's focus ring for whatever has none of its own; the component
+     rules below are unlayered, so theirs still win. */
+  :where(a, button, summary, [tabindex]):focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
+    outline-offset: 2px;
+  }
 }
 
 /* The component rules below are unlayered, so they outrank Tailwind's layered
@@ -391,15 +397,18 @@ svg.ql-nav-icon-stroke {
 .ql-tab-slot > .ql-tab {
   height: 100%;
 }
+/* The target ends where the Queue icon starts, so a tap on the icon's left
+   edge still opens the Queue; the dot sits at the target's right end. */
 .ql-tab-attention {
   position: absolute;
   z-index: 2;
   top: -0.35rem;
-  right: calc(50% + 0.2rem);
+  right: calc(50% + 0.7rem);
   display: grid;
   width: 2rem;
   height: 2rem;
-  place-items: center;
+  place-items: center end;
+  padding-right: 0.2rem;
   border-radius: 50%;
   text-decoration: none;
 }
@@ -2188,8 +2197,10 @@ details.ql-mobile-drawer[open]::before {
 .ql-grid-tile:hover {
   border-color: var(--ql-line);
 }
-/* Discover tiles open nothing in place, so a row of them can share one
-   height with the download buttons along the bottom. */
+/* A row of tiles shares one height, with the download buttons along the
+   bottom. While a tile has its tracks or versions open the grid goes back
+   to tiles of their own height, or the rest of that row would stretch to
+   the open one. */
 .ql-grid-view--even .ql-grid-tile {
   display: flex;
   flex-direction: column;
@@ -2197,6 +2208,9 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-grid-view--even .ql-grid-footer {
   margin-top: auto;
+}
+.ql-grid-view--even:has(.ql-tracklist-panel:not(.hidden), .ql-grid-version-panel:not(.hidden)) .ql-grid-tile {
+  align-self: start;
 }
 .ql-grid-tile:has(.ql-checkbox:checked) {
   border-color: color-mix(in oklab, var(--ql-text) 40%, transparent);
@@ -2778,6 +2792,11 @@ details.ql-mobile-drawer[open]::before {
 .ql-history-row--compact .ql-row-title {
   font-size: 0.84rem;
 }
+.ql-row-kind {
+  color: var(--ql-text-3);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
 .ql-history-row .ql-activity-side {
   grid-template-columns: auto auto auto;
   align-items: center;
@@ -2913,7 +2932,7 @@ details.ql-mobile-drawer[open]::before {
     /* Capped so a busy row wraps its own chips instead of squeezing the
        name into a column two words wide. A length, not a percentage: a
        percentage resolves against the column the chips themselves sized. */
-    max-width: 10rem;
+    max-width: 11.5rem;
     gap: 0.4rem;
   }
   .ql-history-row .ql-activity-side .ql-activity-actions {
@@ -3699,6 +3718,7 @@ details.ql-mobile-drawer[open]::before {
   }
   .ql-migrate-page > :not(.ql-page-header) {
     width: min(100%, 54rem);
+    margin-inline: 0;
   }
 }
 .ql-job-page .ql-page-header h1 {
