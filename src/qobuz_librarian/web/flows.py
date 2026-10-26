@@ -324,6 +324,36 @@ def left_out_note(left_out, cap) -> str:
             "Work through or dismiss some, then refresh to list them.")
 
 
+_LISTED_MISSING = 12
+
+
+def _missing_track_lines(album, missing):
+    """The first missing tracks in album order, each with its number and
+    title. An album on more than one disc numbers them disc-track."""
+    def disc(track):
+        return track.get("media_number") or 1
+
+    tracks = (album.get("tracks") or {}).get("items") or []
+    several = (album.get("media_count") or 1) > 1 or len(
+        {disc(t) for t in (*tracks, *missing)}) > 1
+    lines = []
+    for track in sorted(missing, key=lambda t: (disc(t), t.get("track_number") or 0)
+                        )[:_LISTED_MISSING]:
+        number = track.get("track_number")
+        if type(number) is not int:
+            number = ""
+        elif several:
+            number = f"{disc(track)}-{number:02d}"
+        else:
+            number = f"{number:02d}"
+        title = (track.get("title") or "?").strip()
+        version = (track.get("version") or "").strip()
+        if version and version.lower() not in title.lower():
+            title = f"{title} ({version})"
+        lines.append({"n": number, "title": title})
+    return lines
+
+
 def _gap_candidate_spec(
     gap,
     artist_name,
@@ -340,6 +370,8 @@ def _gap_candidate_spec(
     extra_payload = {"_artist_dir": artist_key} if artist_key else {}
     if gap.on_disk_dir is not None:
         extra_payload["album_dir"] = str(gap.on_disk_dir)
+        extra_payload["missing_tracks"] = _missing_track_lines(
+            gap.qobuz_album, gap.missing)
         if gap.bonus_only:
             extra_payload["bonus_only"] = True
         premise = candidate_premise.capture("gap-fill", gap.on_disk_dir)
@@ -1270,14 +1302,23 @@ def _partial_gap_fill_spec(full_album, artist_name, n_missing, *,
     premise = candidate_premise.capture("gap-fill", album_dir)
     if premise is None:
         return None
+    extra_payload = {
+        "album_dir": str(album_dir),
+        "exact_edition": exact_edition,
+        "_premise": premise,
+        "_gap_fill_receipts": candidate_premise.gap_fill_receipts(premise),
+    }
+    # The folder names the tracks still missing; the list is shown only when
+    # it agrees with the count the download left, which leaves out tracks
+    # Qobuz does not stream.
+    existing, _ = catalog.find_existing_tracks(full_album, album_dir=album_dir)
+    missing, _present = catalog.edition_missing(full_album, existing, album_dir)
+    missing = [t for t in missing if t.get("streamable") is not False]
+    if len(missing) == n_missing:
+        extra_payload["missing_tracks"] = _missing_track_lines(full_album, missing)
     return _album_candidate_spec(
         {**full_album, "_partial_missing_count": n_missing},
-        artist_name, selected=False, extra_payload={
-            "album_dir": str(album_dir),
-            "exact_edition": exact_edition,
-            "_premise": premise,
-            "_gap_fill_receipts": candidate_premise.gap_fill_receipts(premise),
-        })
+        artist_name, selected=False, extra_payload=extra_payload)
 
 
 def _fold_partial_gap_fill(full_album, artist_name, n_missing, *,

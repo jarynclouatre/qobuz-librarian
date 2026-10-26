@@ -29,6 +29,19 @@
     {# Each "·" part stays on one line, so "24-bit/96kHz" or "9 missing of
        10" never breaks inside on a phone. #}
     <span class="ql-review-candidate-detail">{% if _release_label %}{{ _release_label }} · {% endif %}{% if job.execute_kind in ('upgrade', 'downsample') and c.payload.year | known_year %}{{ c.payload.year | known_year }} · {% endif %}{% if job.execute_kind == 'repair' %}{{ _detail }}{% else %}{% for _part in (_detail or '').split(' · ') %}{% if not loop.first %} · {% endif %}{% if loop.first and _part | length == 4 and _part.isdigit() and not _part | known_year %}{% set _part = '?' %}{% endif %}{% for _step in _part.split(' → ') %}{% if not loop.first %} {% endif %}<span class="whitespace-nowrap">{% if not loop.first %}→ {% endif %}{{ _step }}</span>{% endfor %}{% endfor %}{% endif %}</span>
+    {% if c.payload.missing_tracks and review_tab|default('') == 'gaps' %}
+    <span class="ql-review-truncated ql-review-truncated--missing">
+      {% for t in c.payload.missing_tracks %}
+      <span class="ql-review-truncated-line">
+        <span class="readout ql-review-track-number">{{ t.n or '··' }}</span>
+        {{ t.title }}
+      </span>
+      {% endfor %}
+      {% if (c.payload.gap_fill or 0) > (c.payload.missing_tracks | length) %}
+      <span class="ql-review-truncated-more">+{{ c.payload.gap_fill - (c.payload.missing_tracks | length) }} more</span>
+      {% endif %}
+    </span>
+    {% endif %}
     {% if c.payload.verified_truncated %}
     <span class="ql-review-truncated">
       {% for t in c.payload.verified_truncated[:12] %}

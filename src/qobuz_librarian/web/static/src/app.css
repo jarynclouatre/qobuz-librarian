@@ -5570,6 +5570,10 @@ details[open] > summary .ql-review-chevron {
   border-left: 2px solid color-mix(in oklab, var(--color-warning) 44%, transparent);
   padding-left: var(--ql-space-2);
 }
+/* The tracks a Gap Fill row downloads: a list, not a warning. */
+.ql-review-truncated--missing {
+  border-left-color: var(--ql-line);
+}
 .ql-review-truncated-line,
 .ql-review-truncated-more {
   display: block;
