@@ -1795,6 +1795,19 @@
     });
   }
 
+  // A review row whose cover fails to load gets the record a row with no
+  // artwork shows. Listening on the document catches a row however it was
+  // added and however early its image failed.
+  document.addEventListener("error", function (evt) {
+    var img = evt.target;
+    if (!img || img.tagName !== "IMG" || !img.classList.contains("ql-review-cover")) return;
+    var fallback = document.createElement("span");
+    fallback.className = "ql-review-cover ql-review-cover--empty";
+    fallback.setAttribute("aria-hidden", "true");
+    fallback.innerHTML = '<svg viewBox="0 0 24 24" class="ql-review-cover-mark"><circle cx="12" cy="12" r="7.5" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="1.9" fill="currentColor"/></svg>';
+    img.replaceWith(fallback);
+  }, true);
+
   function searchResponseState(results) {
     var marker = results && results.querySelector("[data-search-response-state]");
     return marker ? marker.dataset.searchResponseState || "" : "";

@@ -238,11 +238,20 @@ def _review_artist_groups(job, query="", tab="", artist=None):
     groups: dict = {}
     for c in cands:
         groups.setdefault(c.get("artist") or "", []).append(c)
+    # A scan lists each artist's albums by year; a refresh's finds join the
+    # end of the review, so a library review sorts them back into place.
+    row_key = (_year_then_seq if job.execute_kind == "library"
+               else lambda c: c.get("seq", 0))
     ordered = []
     for artist in sorted(groups, key=_artist_sort_key):
-        items = sorted(groups[artist], key=lambda c: c.get("seq", 0))
+        items = sorted(groups[artist], key=row_key)
         ordered.append((artist, items))
     return ordered
+
+
+def _year_then_seq(c):
+    year = str((c.get("payload") or {}).get("year") or "")
+    return (int(year) if year.isdigit() else 99999, c.get("seq", 0))
 
 
 def _paginate_groups(groups, page, rows=lambda group: len(group[1]), *,

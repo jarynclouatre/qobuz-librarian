@@ -4,7 +4,7 @@ import html
 import time
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import QobuzAccess
@@ -265,6 +265,16 @@ def _library_header_context():
     }
 
 
+def _first_scan_offered(header, job):
+    """Whether /library offers the first scan: the music folder can be
+    scanned, nothing has been yet, and no scan is on its way."""
+    return bool(header["library_scan_state"]["ready"]
+                and not header["library_baseline_exists"]
+                and not header["library_refresh_scanning"]
+                and (job is None
+                     or job.status == job_mgr.JobStatus.AWAITING_REVIEW))
+
+
 def _library_page_context(page, tab, q):
     """Everything /library reads from the data and music volumes."""
     badge_generation = review_badges.ready_generation("library")
@@ -303,6 +313,7 @@ def _library_page_context(page, tab, q):
         else:
             ljob = _review_job_from_library_state()
     ctx["library_job"] = ljob
+    ctx["first_scan_offered"] = _first_scan_offered(ctx, ljob)
     ctx["census"] = None
     # Resume hint: an interrupted scan's checkpoint, while no scan runs. A
     # parked review can sit above it, so it is not tied to an idle surface.
@@ -397,6 +408,20 @@ async def library_refresh_note(request: Request):
 
     ctx = await loop.run_in_executor(None, _context)
     return rendering._tr(request, "_library_refresh.html", ctx)
+
+
+@router.get("/library/scan-offer")
+async def library_scan_offer():
+    """Polled by the first-scan offer, so a page left open on it follows a
+    scan started from another tab or device: once the offer no longer
+    stands, the reply reloads the page."""
+    loop = asyncio.get_running_loop()
+    offered = await loop.run_in_executor(
+        None, lambda: _first_scan_offered(_library_header_context(),
+                                          _library_current_job()))
+    if offered:
+        return Response(status_code=204)
+    return HTMLResponse("", headers={"HX-Refresh": "true"})
 
 
 @router.post("/library")
