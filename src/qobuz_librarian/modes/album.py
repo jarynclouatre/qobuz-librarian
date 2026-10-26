@@ -470,7 +470,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
 
     def _download_queued():
         nonlocal stopped
-        banner(f"Executing queue: {plural(len(album_queue), 'album')}", C.GREEN)
+        banner(f"Downloading {plural(len(album_queue), 'album')}", C.GREEN)
         while album_queue:
             item = album_queue[0]
             if item.get("keep_edition") or args.force:

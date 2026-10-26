@@ -21,7 +21,8 @@ from qobuz_librarian.integrations.staging import (
 from qobuz_librarian.library import scanner
 from qobuz_librarian.recovery import normalise_recovery_owner
 from qobuz_librarian.ui_cli.colors import C, fmt
-from qobuz_librarian.ui_cli.logging import log, vlog, wrap_thread_target
+from qobuz_librarian.ui_cli.errors import plural
+from qobuz_librarian.ui_cli.logging import console_line, log, vlog, wrap_thread_target
 
 # Optional cancel-check hook. The web JobManager installs a callable here that
 # returns True when the active job has been cancelled; rip_url polls it
@@ -268,7 +269,9 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
 
     live_output=True: stream rip's output to the terminal in real time via a
     reader thread - used for full-album downloads where silence for many minutes
-    is unacceptable on mobile.
+    is unacceptable on mobile. On a pipe streamrip prints no progress, so a
+    terminal also gets a line every few seconds counting the tracks in
+    ``staging_dir``.
 
     start_new_session=True puts rip in its own process group so that on timeout
     OR Ctrl-C, os.killpg kills the entire tree (rip spawns its own downloader
@@ -300,14 +303,35 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
             return 1, message
         return _run_rip(
             [*cmd, "--config-path", str(config_path), "url", url],
-            timeout, live_output)
+            timeout, live_output,
+            heartbeat_dir=staging_dir if live_output else None)
 
 
 # streamrip updating the run's copy of an older config; noted once instead.
 _CONFIG_UPDATE_LINES = ("Need to update config from", "Auto-updating config file")
 
+_HEARTBEAT_SECONDS = 10
 
-def _run_rip(cmd, timeout, live_output):
+
+def _tracks_written(folder):
+    """Audio files under ``folder`` that nothing has written to for a few
+    seconds: the tracks streamrip has finished."""
+    settled = time.time() - 3
+    count = 0
+    try:
+        for path in Path(folder).rglob("*"):
+            try:
+                if (path.suffix.lower() in cfg.AUDIO_EXTS
+                        and path.stat().st_mtime < settled):
+                    count += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return count
+
+
+def _run_rip(cmd, timeout, live_output, heartbeat_dir=None):
     try:
         proc = subprocess.Popen(
             cmd,
@@ -411,11 +435,18 @@ def _run_rip(cmd, timeout, live_output):
     reader.start()
 
     deadline = time.monotonic() + timeout if timeout else None
+    next_beat = (time.monotonic() + _HEARTBEAT_SECONDS
+                 if heartbeat_dir is not None else None)
     try:
         while True:
             if _CANCEL_CHECK is not None and _CANCEL_CHECK():
                 _terminate(proc, reader)
                 return 130, "".join(lines) + "\n<<< canceled by user >>>"
+            if next_beat is not None and time.monotonic() >= next_beat:
+                next_beat = time.monotonic() + _HEARTBEAT_SECONDS
+                written = _tracks_written(heartbeat_dir)
+                console_line(fmt(C.GRAY,
+                    f"    {plural(written, 'track')} downloaded so far…"))
             poll_for = 1.0
             if deadline is not None:
                 remaining = deadline - time.monotonic()

@@ -18,7 +18,7 @@ from qobuz_librarian.quality.decision import album_max_quality
 from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, term_width, truncate
-from qobuz_librarian.ui_cli.errors import plural, unreadable_artist
+from qobuz_librarian.ui_cli.errors import plural, shown_path, unreadable_artist
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.sentinels import MORE, NO_ANSWER, URL_QUERY
 
@@ -185,34 +185,34 @@ def prompt_album_selection(albums, prefer_hires=False, can_load_more=False,
 
 
 def parse_number_list(s, max_n):
-    """Parse '1,3,5-7' → [1,3,5,6,7]; 'a' or 'all' → all numbers; '' → []."""
+    """Parse '1,3,5-7' → ([1,3,5,6,7], []); 'a' or 'all' → every number;
+    '' → ([], []). The second list holds the parts that name nothing in
+    1..max_n."""
     s = s.strip().lower()
     if not s:
-        return []
+        return [], []
     if s in ("a", "all"):
-        return list(range(1, max_n + 1))
+        return list(range(1, max_n + 1)), []
     selected = set()
+    rejected = []
     # Split on commas AND whitespace so the natural "1 3" reads as two picks,
     # not the single token "13" (which would select the wrong album, or nothing).
     for tok in re.split(r"[\s,]+", s):
         if not tok:
             continue
-        if "-" in tok:
-            a, _, b = tok.partition("-")
-            if a.isdecimal() and b.isdecimal():
-                lo, hi = int(a), int(b)
-                if lo > hi:
-                    lo, hi = hi, lo
-                lo = max(1, lo)
-                hi = min(max_n, hi)
-                if lo <= hi:
-                    for n in range(lo, hi + 1):
-                        selected.add(n)
+        a, dash, b = tok.partition("-")
+        if dash and a.isdecimal() and b.isdecimal():
+            lo, hi = sorted((int(a), int(b)))
         elif tok.isdecimal():
-            n = int(tok)
-            if 1 <= n <= max_n:
-                selected.add(n)
-    return sorted(selected)
+            lo = hi = int(tok)
+        else:
+            rejected.append(tok)
+            continue
+        if lo < 1 or hi > max_n:
+            rejected.append(tok)
+            continue
+        selected.update(range(lo, hi + 1))
+    return sorted(selected), rejected
 
 
 def _is_qobuz_url(text: str) -> bool:
@@ -231,7 +231,7 @@ def _is_qobuz_url(text: str) -> bool:
 
 def interactive_query():
     """Return one of: None (cancel), (URL_QUERY, url), or (artist, album)."""
-    section("Album mode - interactive query", color=C.CYAN)
+    section("Search", color=C.CYAN)
     print()
     while True:
         line = ask(
@@ -496,9 +496,10 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
 
     other_dir = None if album_dir else catalog.other_version_dir(album)
     if album_dir:
-        log.info(f"  {fmt(C.GRAY, 'found:')}    {album_dir}")
+        log.info(f"  {fmt(C.GRAY, 'found:')}    {shown_path(album_dir)}")
     elif other_dir:
-        log.info(f"  {fmt(C.GRAY, 'found:')}    another version in {other_dir}")
+        log.info(f"  {fmt(C.GRAY, 'found:')}    another version in "
+                 f"{shown_path(other_dir)}")
     else:
         log.info(f"  {fmt(C.GRAY, 'found:')}    not found on disk")
 

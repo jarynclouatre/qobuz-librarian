@@ -1,6 +1,6 @@
 """Artist mode: two-step run for one artist.
 
-  Step 1, Gap fill: walk every album you own by this artist and offer to
+  Step 1, Gap Fill: walk every album you own by this artist and offer to
            download the missing tracks of each.
   Step 2, Missing albums: list the releases Qobuz files as this artist's
            albums that you don't have, and offer to download.
@@ -10,6 +10,7 @@ and what's a false match) lives in library.discovery, the one engine the web
 scans share. This module is the terminal face: prompts, sibling cleanup, the
 two-step presentation.
 """
+import shlex
 import time
 
 from qobuz_librarian import config as cfg
@@ -76,7 +77,12 @@ from qobuz_librarian.queue.persistence import (
 )
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, section, truncate, wrap
-from qobuz_librarian.ui_cli.errors import EXIT_GENERAL, plural
+from qobuz_librarian.ui_cli.errors import (
+    EXIT_GENERAL,
+    cli_command,
+    plural,
+    shown_path,
+)
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import (
     _flush_stdin,
@@ -139,6 +145,12 @@ def _folder_quality_label(album_dir):
     return "mixed " + ", ".join(labels)
 
 
+def _all_present(n_tracks):
+    if n_tracks == 1:
+        return "The album's one track is present"
+    return f"All {n_tracks} tracks present"
+
+
 def _consolidation_disabled_notice(args, mode_name):
     if args.consolidate:
         log.info(fmt(C.GRAY, wrap(
@@ -187,7 +199,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     """
     album_dirs = list_artist_album_dirs(artist_dir)
     if not album_dirs:
-        log.info(fmt(C.YELLOW, f"  ⚠  No album folders found under {artist_dir}."))
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  No album folders found under {shown_path(artist_dir)}."))
         # catalog=None, not []: the missing-albums step treats a non-None
         # catalog as authoritative.
         return [], {}, set(), set(), None, None
@@ -302,7 +315,7 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     resolved_dirs = set()   # folders matched here, so a different edition of the
                             # same album doesn't re-surface them as missing
 
-    heading = f"Gap fill ({plural(len(album_dirs), 'album')} by {artist_name})"
+    heading = f"Gap Fill ({plural(len(album_dirs), 'album')} by {artist_name})"
     section(f"Step 1: {heading}" if numbered else heading)
     # Asking for one artist by name shows the whole catalogue, dismissals
     # included. Read the store anyway so each one can say why it is here.
@@ -512,11 +525,10 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                         save_own_queue(queue)
                     continue
                 log.info(fmt(C.GRAY,
-                    f"    ✓  All {plural(n_total, 'track')} present "
+                    f"    ✓  {_all_present(n_total)} "
                     f"(Qobuz higher-quality but you have bonus tracks; preserving)"))
             else:
-                log.info(fmt(C.GREEN,
-                    f"    ✓  All {plural(n_total, 'track')} present"))
+                log.info(fmt(C.GREEN, f"    ✓  {_all_present(n_total)}"))
             results.append({"dir": ad, "result": "already_complete", "n_total": n_total})
             # Don't delete the picked album's siblings here: the sibling-group
             # prompt promised deletion "on successful fill", but this branch
@@ -597,7 +609,10 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                     answer = "y"
                     log.info(fmt(C.GRAY,
                         "    Auto-yes for the rest of this artist's albums."))
-                break
+                if answer in ("", "y", "yes", "n", "no", "s"):
+                    break
+                log.info(fmt(C.YELLOW, "    Answer y, n, a"
+                             + (", d" if _flush_hint else "") + " or s."))
 
         if answer is None:
             results.append({"dir": ad, "result": "no_answer"})
@@ -746,24 +761,35 @@ def _gap_fill_result_bucket(result):
     return "other"
 
 
+_UNLISTED_TYPES = (
+    (missing_types.LIVE, "live release", "live releases", "--include-live"),
+    (missing_types.COMPILATION, "compilation", "compilations",
+     "--include-comps"),
+    (missing_types.EP, "EP or single", "EPs and singles", "--include-singles"),
+)
+
+
 def _unlisted_types_note(release_types):
     """Name what the --include-* flags would add, or ""."""
-    flags = (
-        (missing_types.LIVE, "live release", "live releases", "--include-live"),
-        (missing_types.COMPILATION, "compilation", "compilations",
-         "--include-comps"),
-        (missing_types.EP, "EP or single", "EPs and singles",
-         "--include-singles"),
-    )
-    parts = [f"{plural(release_types.count(name), one, many)} ({flag})"
-             for name, one, many, flag in flags if name in release_types]
+    parts = [plural(release_types.count(name), one, many)
+             for name, one, many, _flag in _UNLISTED_TYPES
+             if name in release_types]
     return ("Not listed: " + ", ".join(parts) + ".") if parts else ""
+
+
+def _say_unlisted(note, release_types, artist_name):
+    """The note, and the command that lists those releases."""
+    flags = " ".join(flag for name, _one, _many, flag in _UNLISTED_TYPES
+                     if name in release_types)
+    log.info(fmt(C.GRAY, wrap(f"{note} To list them:")))
+    log.info(fmt(C.GRAY, "    " + cli_command(
+        f"--artist {shlex.quote(artist_name)} {flags}")))
 
 
 def run_artist_missing_albums(artist_name, owned_titles, args, token,
                       artist_id=None, handled_ids=None, resolved_dirs=None,
                       prefetched_catalog=None, *, shared_queue=None, fresh=False,
-                      hidden=None, artist_dir=None):
+                      hidden=None, artist_dir=None, heading_name=None):
     """List the artist's Qobuz albums with already-owned ones filtered out,
     prompt to download some. The matching is discovery.discover_fully_missing;
     this is the numbered-list presentation around it. Returns
@@ -776,8 +802,12 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     ``artist_dir`` is the folder a whole-library walk is on. An album in
     another folder that resolves to the same artist is left to that folder,
     where the walk offers it.
+
+    ``heading_name`` is the artist as the library names it, when that differs
+    from what was typed.
     """
-    section(f"Step 2: Missing albums by {artist_name}, not yet in your library")
+    shown_name = heading_name or artist_name
+    section(f"Step 2: Missing albums by {shown_name}, not yet in your library")
 
     if artist_id is None:
         log.info(fmt(C.GRAY, "  Looking up artist on Qobuz …"))
@@ -845,14 +875,15 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
              and missing_types.shown(g.release_type, included)]
     ordered = partials + fully
     n_partial = len(partials)
-    unlisted = _unlisted_types_note(
-        [g.release_type for g in gaps if g.on_disk_dir is None
-         and not missing_types.shown(g.release_type, included)])
+    unlisted_types = [g.release_type for g in gaps if g.on_disk_dir is None
+                      and not missing_types.shown(g.release_type, included)]
+    unlisted = _unlisted_types_note(unlisted_types)
 
     if not ordered:
         log.info(fmt(C.GREEN, "\n  ✓  No new albums to suggest.\n"))
         if unlisted:
-            log.info(fmt(C.GRAY, f"  {unlisted}\n"))
+            _say_unlisted(unlisted, unlisted_types, shown_name)
+            print()
         return 0, False
 
     print()
@@ -874,7 +905,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
                        "listed because you asked for this artist)")
     log.info(fmt(C.BOLD + C.WHITE, header + ":"))
     if unlisted:
-        log.info(fmt(C.GRAY, f"  {unlisted}"))
+        _say_unlisted(unlisted, unlisted_types, shown_name)
     print()
     for i, gap in enumerate(ordered, 1):
         a = gap.qobuz_album
@@ -886,10 +917,12 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         tracks = a.get("tracks_count") or "?"
         track_word = "track" if tracks == 1 else "tracks"
         qual   = album_quality_label(a)
+        explicit = " • Explicit" if a.get("parental_warning") else ""
 
         line1 = (f"  {fmt(C.BOLD, str(i).rjust(3))}.  "
                  f"{fmt(C.WHITE, truncate(title, 55))}")
-        line2 = f"        {fmt(C.GRAY, f'{year} • {tracks} {track_word} • {qual}')}"
+        line2 = (f"        "
+                 f"{fmt(C.GRAY, f'{year} • {tracks} {track_word} • {qual}{explicit}')}")
         if gap.on_disk_dir is not None:
             n_have = len(gap.present)
             n_tot = n_have + len(gap.missing)
@@ -902,13 +935,20 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         log.info(fmt(C.YELLOW, "  --dry-run: stopping here, nothing prompted."))
         return 0, False
 
-    _flush_stdin()
-    raw = ask(
-        "  Pick numbers to download (e.g. 1,3,5-7 / a=all / blank=skip): ",
-        lower=False)
-    if raw is None:
-        return 0, True
-    picks = parse_number_list(raw, len(ordered))
+    verb = "download" if shared_queue is None else "queue"
+    span = "1" if len(ordered) == 1 else f"1-{len(ordered)}"
+    while True:
+        _flush_stdin()
+        raw = ask(
+            f"  Pick numbers to {verb} (e.g. 1,3,5-7 / a=all / blank=skip): ",
+            lower=False)
+        if raw is None:
+            return 0, True
+        picks, rejected = parse_number_list(raw, len(ordered))
+        if not rejected:
+            break
+        log.info(fmt(C.YELLOW,
+            f"  No album {' or '.join(rejected)}; pick {span}."))
     if not picks:
         return 0, False
 
@@ -1057,8 +1097,7 @@ def _gap_fill_exit_code(counts, *, stopped=False):
         retry = _ATTENTION_BUCKETS - {"own_files_left"}
         if queue_parked():
             clauses.append(
-                "run Qobuz Librarian with no mode or search argument to "
-                "settle the stopped album")
+                "run the CLI menu again to settle the stopped album")
             retry -= {"stopped"}
         if any(counts[bucket] for bucket in retry):
             clauses.append("retry the unfinished albums above")
@@ -1076,13 +1115,16 @@ def _gap_fill_exit_code(counts, *, stopped=False):
 def run_artist_mode(artist_name, args, token):
     """Top-level artist mode entry point. Runs both phases."""
     clear_scan_caches()
-    banner(f"Artist mode: {artist_name}")
+    various = normalize(artist_name) in VA_NORMALIZED
+    artist_dir = None if various else resolve_artist_dir(artist_name)
+    shown_name = artist_dir.name if artist_dir is not None else artist_name
+    banner(f"Artist mode: {shown_name}")
 
-    if normalize(artist_name) in VA_NORMALIZED:
+    if various:
         log.warning(fmt(C.YELLOW,
             "\n  ⚠  'Various Artists' isn't a real artist; artist mode doesn't support it."))
         log.info(fmt(C.GRAY,
-            "     Use album mode for individual compilation albums."))
+            "     Search for each compilation album instead."))
         return EXIT_GENERAL
 
     # --consolidate inside artist mode would prompt per album (a LOT on a
@@ -1093,9 +1135,9 @@ def run_artist_mode(artist_name, args, token):
         args.consolidate = False
 
     try:
-        artist_dir = resolve_artist_dir(artist_name)
         if artist_dir is None:
-            log.info(fmt(C.YELLOW, f"\n  ⚠  No matching artist directory in {cfg.MUSIC_ROOT}."))
+            log.info(fmt(C.YELLOW, "\n  ⚠  No matching artist folder in "
+                         f"{shown_path(cfg.MUSIC_ROOT)}."))
             if confirm("\n  Continue anyway and just look for albums by this artist on Qobuz?",
                        default_yes=False, auto_yes=args.yes):
                 _, needs_attention = run_artist_missing_albums(
@@ -1126,7 +1168,7 @@ def run_artist_mode(artist_name, args, token):
         path_mis     = [r for r in gap_fill_results if r.get("result") == "predicted_path_mismatch"]
         false_match  = [r for r in gap_fill_results if r.get("result") == "false_match"]
 
-        section("Step 1: Gap-fill summary")
+        section("Step 1: Gap Fill summary")
         print()
         counts = _report_gap_fill_summary(gap_fill_results)
 
@@ -1169,9 +1211,10 @@ def run_artist_mode(artist_name, args, token):
             artist_id=artist_id, handled_ids=handled_ids,
             resolved_dirs=resolved_dirs,
             prefetched_catalog=catalog,
+            heading_name=shown_name,
         )
         if n_added:
-            log.info(fmt(C.GREEN, f"\n  ✓  Added {plural(n_added, 'new album')} for {artist_name}.\n"))
+            log.info(fmt(C.GREEN, f"\n  ✓  Added {plural(n_added, 'new album')} for {shown_name}.\n"))
         if step_two_attention:
             clause = "review the missing albums step above and retry"
             log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))

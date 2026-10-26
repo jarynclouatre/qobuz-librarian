@@ -47,8 +47,10 @@ from qobuz_librarian.ui_cli.errors import (
     EXIT_LOCK_BUSY,
     EXIT_TRANSIENT,
     auth_lost_msg,
+    compose_service_name,
     die,
     plural,
+    shown_path,
 )
 from qobuz_librarian.ui_cli.logging import attach_file_handler, log, set_quiet, set_verbose, vlog
 
@@ -189,11 +191,11 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
                       "being checked.", BLOCKED_DOWNLOAD_LOG_ENTRY)
         # A state this stop is reached in survives a restart, so the message
         # names where the outstanding work is instead of prescribing one.
-        outstanding = " and ".join(str(folder) for folder, holds in (
+        outstanding = " and ".join(shown_path(folder) for folder, holds in (
             (cfg.STAGING_DIR, any(entry.holds_staging for entry in blocked)),
             (cfg.UPGRADE_BACKUP_DIR,
              any(entry.holds_backup for entry in blocked)),
-        ) if holds) or cfg.STAGING_DIR
+        ) if holds) or shown_path(cfg.STAGING_DIR)
         message = (
             "\n✗  An interrupted download could not be cleared safely.\n"
             "   Its files were left as they were, and no other work was "
@@ -205,15 +207,6 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
     die(fmt(C.RED, message), EXIT_GENERAL)
 
 
-def _compose_service_name() -> str:
-    """Best-effort docker compose service name for diagnostic hints."""
-    import os
-    h = os.environ.get("HOSTNAME", "").strip()
-    if not h or (len(h) == 12 and all(c in "0123456789abcdef" for c in h)):
-        return "qobuz-librarian"
-    return h
-
-
 def acquire_run_lock():
     """Acquire the single-writer run lock or exit."""
     global _RUN_LEASE
@@ -223,8 +216,7 @@ def acquire_run_lock():
         if busy.holder == "web":
             message = "\n✗  The web app is using the library.\n"
         elif busy.holder == "terminal":
-            message = (f"\n✗  Another terminal run (pid {busy.pid}) is using "
-                       "the library.\n")
+            message = "\n✗  Another terminal run is using the library.\n"
         else:
             message = (
                 f"\n✗  Another Qobuz Librarian process (pid {busy.pid}) holds "
@@ -245,7 +237,7 @@ def acquire_run_lock():
                 "        Choose Resume web app there when you are done.\n"
             )
             if _in_container():
-                _svc = _compose_service_name()
+                _svc = compose_service_name()
                 message += (
                     "     2. Or stop the web container with\n"
                     f"        `docker compose stop {_svc}`, run this command\n"
@@ -516,7 +508,7 @@ def _beets_recovery_command(album_dirs=()):
     # again, whatever the user's own beets config says about copying.
     command = f"beet import -m {targets}"
     if _in_container():
-        service = shlex.quote(_compose_service_name())
+        service = shlex.quote(compose_service_name())
         if not album_dirs:
             command = f"sh -c {shlex.quote(command)}"
         return f"docker compose run --rm {service} {command}"
@@ -681,7 +673,7 @@ def parse_args():
                    default=None,
                    help="offer to fill an album whose only missing tracks are "
                         "other versions of songs it has (remixes, live takes, "
-                        "demos) in Artist mode, Library walk and Gap fill "
+                        "demos) in Artist mode, Library walk and Gap Fill "
                         "(default: the Library review's Bonus versions switch)")
     # Default comes from config (PREFER_HIRES, env/Settings overridable) so
     # CLI and web behave the same. --no-prefer-hires overrides per-run.
@@ -906,8 +898,9 @@ def main():
         set_color_enabled(False)
 
     if args.reset_walk_seen and args.dry_run:
-        present = [str(f) for f in (cfg.WALK_SEEN_FILE, cfg.ALBUM_WALK_SEEN_FILE)
-                   if f.exists()]
+        present = dict.fromkeys(
+            shown_path(f) for f in (cfg.WALK_SEEN_FILE, cfg.ALBUM_WALK_SEEN_FILE)
+            if f.exists())
         if present:
             log.info(fmt(C.GRAY, "  --dry-run: would clear the lists of artists and albums already checked:"))
             for r in present:
@@ -916,7 +909,12 @@ def main():
             log.info(fmt(C.GRAY, "  No list of checked artists or albums to clear."))
         return
 
-    banner("Qobuz Librarian: search · artist · library · repair · upgrade")
+    # Printing the saved settings changes nothing, so it needs no run lock.
+    if args.settings and args.dry_run:
+        from qobuz_librarian.modes.settings_cli import run_settings_mode
+        raise SystemExit(run_settings_mode(args))
+
+    banner("Qobuz Librarian")
 
     # Single-instance lock first; fail fast before doing any other work.
     # Hold the file handle for the lifetime of main() so the lock persists.
@@ -967,8 +965,8 @@ def main():
                 C.YELLOW,
                 "\n⚠  A saved download queue must be resumed or discarded before "
                 "another download.\n"
-                f"   It is in {cfg.QUEUE_JOURNAL_DIR}. Run Qobuz Librarian without "
-                "a mode or search argument to choose.\n",
+                f"   It is in {shown_path(cfg.QUEUE_JOURNAL_DIR)}. Run Qobuz "
+                "Librarian without a mode or search argument to choose.\n",
             )
         return None
 
@@ -982,7 +980,7 @@ def main():
         for f in (cfg.WALK_SEEN_FILE, cfg.ALBUM_WALK_SEEN_FILE):
             try:
                 f.unlink()
-                removed.append(str(f))
+                removed.append(shown_path(f))
             except FileNotFoundError:
                 pass
             except OSError as e:
@@ -992,7 +990,7 @@ def main():
                     EXIT_GENERAL)
         if removed:
             log.info(fmt(C.GREEN, "  ✓  Cleared the lists of artists and albums already checked:"))
-            for r in removed:
+            for r in dict.fromkeys(removed):
                 log.info(fmt(C.GRAY, f"     {r}"))
         else:
             log.info(fmt(C.GRAY, "  No list of checked artists or albums to clear."))
@@ -1118,8 +1116,8 @@ def main():
                 ))
             else:
                 log.info(fmt(C.YELLOW, wrap(
-                    f"Queue kept in {cfg.QUEUE_JOURNAL_DIR}. Other downloads "
-                    "wait until it is resumed or discarded.")))
+                    f"Queue kept in {shown_path(cfg.QUEUE_JOURNAL_DIR)}. Other "
+                    "downloads wait until it is resumed or discarded.")))
         return choice
 
     def read_saved_queue():
@@ -1170,17 +1168,18 @@ def main():
                 if backup is not None and backup_mod.restore_upgrade_backup(
                         backup, origin, replace_partial=False):
                     log.info(fmt(C.YELLOW,
-                        f"  ⟲  Put back {origin}, which an interrupted "
-                        "upgrade or repair had moved aside."))
+                        f"  ⟲  Put back {shown_path(origin)}, which an "
+                        "interrupted upgrade or repair had moved aside."))
             for origin in backup_mod.put_back_interrupted_backups():
                 log.info(fmt(C.YELLOW,
-                    f"  ⟲  Put back {origin}, which an interrupted "
-                    "upgrade or repair had moved aside."))
+                    f"  ⟲  Put back {shown_path(origin)}, which an "
+                    "interrupted upgrade or repair had moved aside."))
             for backup, origin in backup_mod.repair_backups_to_fill_in():
                 count = backup_mod.fill_in_from_repair_backup(backup, origin)
                 if count:
                     log.info(fmt(C.YELLOW,
-                        f"  ⟲  Put back {plural(count, 'track')} of {origin}, "
+                        f"  ⟲  Put back {plural(count, 'track')} of "
+                        f"{shown_path(origin)}, "
                         "which an interrupted repair had moved aside."))
             left = backup_mod.albums_left_in_backups()
             if left:
@@ -1188,7 +1187,7 @@ def main():
                     f"{plural(len(left), 'album')} "
                     f"{'is' if len(left) == 1 else 'are'} in the backup "
                     "folder and missing from the library: "
-                    + "; ".join(str(origin) for _path, origin in left)
+                    + "; ".join(shown_path(origin) for _path, origin in left)
                     + f". Restore {'it' if len(left) == 1 else 'them'} in "
                     "Settings > Diagnostics in the web app.",
                     indent="  ", hanging="  ")))
@@ -1393,6 +1392,11 @@ def main():
                         setattr(args, flag, getattr(cfg, setting))
         except _BackToMenu:
             continue
+        except KeyboardInterrupt:
+            # Ctrl-C stops the tool, not the session; at the menu's own
+            # prompt it still quits.
+            log.info(fmt(C.GRAY, "\n  Interrupted."))
+            continue
 
 
 class _BackToMenu(BaseException):
@@ -1475,9 +1479,18 @@ def _note_held_staging():
         log.info(fmt(C.GRAY, wrap(
             f"{plural(held, 'kept download item')} "
             f"{'is' if held == 1 else 'are'} held in "
-            f"{cfg.STAGING_DIR / cfg.BEETS_RETRY_DIR}. Settings > Diagnostics "
-            f"in the web app lists {'it' if held == 1 else 'them'}.",
+            f"{shown_path(cfg.STAGING_DIR / cfg.BEETS_RETRY_DIR)}. Settings > "
+            f"Diagnostics in the web app lists {'it' if held == 1 else 'them'}.",
             indent="  ", hanging="  ")))
+
+
+def _note_web_paused():
+    """Remind, at the end of a run, that the web app is still paused."""
+    if _RUN_LEASE is None or not run_lock.web_paused_marker().exists():
+        return
+    log.info(fmt(C.GRAY, wrap(
+        "The web app stays paused until you press Resume web app in "
+        "Settings → Mode.", indent="  ", hanging="  ")))
 
 
 def _maybe_drop_privileges():
@@ -1530,9 +1543,14 @@ def _entry():
     """Console-script entry point. Centralizes interrupt and AuthLost
     handling so every mode dispatch in main() can let them propagate."""
     _maybe_drop_privileges()
+    finished = False
     try:
         try:
             main()
+            finished = True
+        except SystemExit as stop:
+            finished = stop.code in (None, 0)
+            raise
         except KeyboardInterrupt:
             die(fmt(C.GRAY, "\n  Interrupted."), EXIT_INTERRUPT)
         except AuthLost as e:
@@ -1570,6 +1588,8 @@ def _entry():
         flush_resolve_cache()
         _check_staging_occupied()
         _note_held_staging()
+        if finished:
+            _note_web_paused()
 
 
 if __name__ == "__main__":

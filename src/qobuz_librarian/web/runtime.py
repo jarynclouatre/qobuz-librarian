@@ -2,6 +2,7 @@
 import threading
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian import run_lock
 from qobuz_librarian.api import lastfm
 
 # Held for the lifetime of the web process. Module-level so Python won't
@@ -59,6 +60,20 @@ def cli_mode() -> bool:
 def set_cli_mode(on: bool) -> None:
     global _CLI_MODE
     _CLI_MODE = on
+    mark_web_paused(on)
+
+
+def mark_web_paused(on: bool) -> None:
+    """Leave the terminal a note, in the data folder, while the web app is
+    paused for it."""
+    marker = run_lock.web_paused_marker()
+    try:
+        if on:
+            marker.touch()
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def lock_unenforceable() -> bool:

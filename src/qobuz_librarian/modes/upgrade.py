@@ -21,7 +21,7 @@ from qobuz_librarian.quality.decision import (
     load_capped,
     mark_album_capped,
 )
-from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, truncate
+from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, truncate, wrap
 from qobuz_librarian.ui_cli.errors import (
     EXIT_GENERAL,
     EXIT_INTERRUPT,
@@ -186,9 +186,9 @@ def run_upgrade_walk_mode(args, token):
         f"{plural(n, 'artist')}."))
     log.info(fmt(C.GRAY, "  Ctrl-C to stop at any point."))
     if not dry_run:
-        log.info(fmt(C.YELLOW,
-            "  Your current copy is removed once the replacement verifies. "
-            "This cannot be undone."))
+        log.info(fmt(C.YELLOW, wrap(
+            "Your current copy is removed once the replacement verifies. "
+            "This cannot be undone.")))
 
     # Auto-accept-all gate. Skipped under --dry-run (which changes nothing), so
     # a preview run doesn't prompt to "run unattended", matching downsample.py.

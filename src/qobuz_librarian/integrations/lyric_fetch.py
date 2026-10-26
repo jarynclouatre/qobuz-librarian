@@ -2756,6 +2756,7 @@ def fetch_for_paths(
     owned_root: Path,
     busy_patience: float = BUSY_PATIENCE,
     skips: Optional[Counter] = None,
+    track_detail: bool = False,
 ) -> Counter:
     """
     Run the lyrics pipeline over `paths`. Returns Counter of outcome → n.
@@ -2776,6 +2777,9 @@ def fetch_for_paths(
     `skips`, if supplied, counts the tracks the state file lets this pass
     leave alone: under ``lyrics`` those it records with lyrics, under
     ``checked`` the rest.
+
+    `track_detail` logs each track by its file name as a detail line, which
+    the terminal shows only with --verbose.
 
     `workers` controls per-file concurrency. Each file's work is dominated
     by network I/O (multi-provider HTTP), which releases the GIL - so
@@ -2869,7 +2873,11 @@ def fetch_for_paths(
                 counts[outcome] += 1
                 said = _outcome_label(outcome, synced_only)
                 state.save()
-            log.info("[%d/%d] %s - %s", at, of, said, label)
+            if track_detail:
+                log.info("     [%d/%d] %s - %s", at, of, said, fp.stem,
+                         extra={"detail": True})
+            else:
+                log.info("[%d/%d] %s - %s", at, of, said, label)
             if line := progress.due_line():
                 log.info(line)
             if progress_cb:
@@ -2979,8 +2987,8 @@ def index_existing(
             _commit(state, key, st)
             return f"indexed-{kind}"
 
-    log.info("indexing %d files with %d workers (no provider calls)",
-             total, workers)
+    log.debug("indexing %d files with %d workers (no provider calls)",
+              total, workers)
     completed = 0
 
     def take(fp, outcome):

@@ -34,6 +34,7 @@ from qobuz_librarian.ui_cli.colors import C, banner, fmt, truncate, wrap
 from qobuz_librarian.ui_cli.errors import (
     EXIT_GENERAL,
     EXIT_INTERRUPT,
+    cli_command,
     no_artist_folders,
     plural,
     unreadable_artist,
@@ -209,6 +210,10 @@ _ALBUM_WALK_DECIDED = {
 _NAMED_LEFTOVERS = 3
 
 
+def _reset_command():
+    return cli_command("--reset-walk-seen", interactive=False)
+
+
 def _write_collection_snapshot():
     """Record the library after a completed CLI walk."""
     clear_scan_caches()
@@ -308,8 +313,7 @@ def run_album_walk_mode(args, token):
     log.info(fmt(C.GRAY,
         "  Per album: y=queue, enter/N=skip, d=download queue now, s=stop."))
     log.info(fmt(C.GRAY, wrap(
-        "Albums already complete or checked on earlier walks are skipped; "
-        "--reset-walk-seen brings the checked ones back.",
+        "Albums already complete or checked on earlier walks are skipped.",
         indent="  ", hanging="  ")))
     print()
 
@@ -541,8 +545,9 @@ def run_album_walk_mode(args, token):
         one = n_albums_left_out == 1
         log.info(fmt(C.GRAY, wrap(
             f"{plural(n_albums_left_out, 'album')} checked on earlier walks "
-            f"{'was' if one else 'were'} left out; --reset-walk-seen brings "
-            f"{'it' if one else 'them'} back.", indent="    ", hanging="    ")))
+            f"{'was' if one else 'were'} left out. To bring "
+            f"{'it' if one else 'them'} back:", indent="    ", hanging="    ")))
+        log.info(fmt(C.GRAY, f"      {_reset_command()}"))
     if (n_artists_scanned and not needs_attention and not walk_stopped
             and not args.dry_run):
         _write_collection_snapshot()
@@ -595,8 +600,9 @@ def run_walk_queued_mode(args, token):
         one = n_hidden == 1
         log.info(fmt(C.GRAY, wrap(
             f"{plural(n_hidden, 'artist')} answered on earlier walks "
-            f"{'is' if one else 'are'} left out; --reset-walk-seen brings "
-            f"{'it' if one else 'them'} back.", indent="  ", hanging="  ")))
+            f"{'is' if one else 'are'} left out. To bring "
+            f"{'it' if one else 'them'} back:", indent="  ", hanging="  ")))
+        log.info(fmt(C.GRAY, f"    {_reset_command()}"))
     if not all_artists:
         if not discovery_errors:
             log.info(fmt(C.GREEN, "  ✓  All artists already decided."))

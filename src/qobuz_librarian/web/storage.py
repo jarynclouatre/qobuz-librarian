@@ -241,33 +241,4 @@ def _census_view():
     return view
 
 
-# The bundled compose file passes each bind mount's host folder in under the
-# .env name that sets it.
-_HOST_FOLDERS = (
-    ("/music", "QL_MUSIC_DIR"),
-    ("/staging", "QL_STAGING_DIR"),
-    ("/upgrade_backups", "QL_UPGRADE_BACKUPS"),
-    ("/collection_backups", "QL_COLLECTION_BACKUPS"),
-)
-
-
-def _resolve_host_path(container_path: str) -> tuple[str, bool]:
-    """Return (display_path, is_host_path) for a path inside the container.
-
-    Only the compose file knows which host folder a mount comes from, so a
-    path is translated only under a mount whose host folder it passed in.
-    Anything else, and every path outside a container, is shown as it is.
-    """
-    container_path = str(container_path)
-    if not cfg.in_container():
-        return container_path, False
-    for mount_point, variable in _HOST_FOLDERS:
-        host_root = os.environ.get(variable, "").strip()
-        if not host_root:
-            continue
-        if container_path == mount_point:
-            return host_root, True
-        if container_path.startswith(mount_point + "/"):
-            suffix = container_path[len(mount_point):]
-            return host_root.rstrip("/") + suffix, True
-    return container_path, False
+_resolve_host_path = cfg.host_path

@@ -126,6 +126,12 @@ def require_authority(authority: RunLockLease, error) -> None:
 _current: Optional[tuple[int, weakref.ReferenceType[RunLockLease]]] = None
 
 
+def web_paused_marker():
+    """The file that is present while the web app has handed the lock to the
+    terminal."""
+    return cfg.DATA_DIR / ".qobuz_web_paused"
+
+
 def current_lease() -> Optional[RunLockLease]:
     """Return this process's live acquired lease while it still holds the lock."""
     if _current is None:

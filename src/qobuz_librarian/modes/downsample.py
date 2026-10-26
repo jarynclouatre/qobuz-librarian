@@ -23,7 +23,16 @@ from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.quality.decision import mark_local_album_capped
-from qobuz_librarian.ui_cli.colors import C, banner, block, fmt, format_size, truncate
+from qobuz_librarian.ui_cli.colors import (
+    C,
+    banner,
+    block,
+    fit_line,
+    fmt,
+    format_size,
+    term_width,
+    truncate,
+)
 from qobuz_librarian.ui_cli.errors import (
     EXIT_CONFIG,
     EXIT_GENERAL,
@@ -118,11 +127,13 @@ def run_downsample_walk_mode(args):
     log.info(fmt(C.GRAY, "  Ctrl-C to stop at any point."))
 
     hidden = hidden_mod.load()
+    # One column short of the edge, where a terminal would wrap.
+    status_width = term_width() - 1
 
     def _on_artist(artist_dir, _candidates, error, done, total):
         _scan_line = f"  [{done}/{total}] Scanning {truncate(artist_dir.name, 46).removesuffix('…')}…"
         if sys.stdout.isatty():
-            print(f"\r{_scan_line:<80}", end="", flush=True)
+            print(f"\r{fit_line(_scan_line, status_width)}", end="", flush=True)
         if error is not None and artist_dir.name not in discovery_errors:
             log.info("")
             log.info(fmt(C.YELLOW,
@@ -135,6 +146,8 @@ def run_downsample_walk_mode(args):
         discovery_errors=discovery_errors,
         persist=not args.dry_run,
     )
+    if sys.stdout.isatty():
+        print(f"\r{' ' * status_width}\r", end="", flush=True)
     unchecked = len(refresh.errors)
     # The snapshot keeps albums the user chose to keep at hi-res; this run only
     # offers the ones still on the list.

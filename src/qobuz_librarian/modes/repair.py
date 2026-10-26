@@ -55,7 +55,7 @@ from qobuz_librarian.queue.executor import (
 )
 from qobuz_librarian.repair_log import append_repair_log, scan_dir_for_isrc_repairs
 from qobuz_librarian.ui_cli.ask import ask
-from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
+from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate, wrap
 from qobuz_librarian.ui_cli.errors import (
     EXIT_AUTH,
     EXIT_GENERAL,
@@ -1183,20 +1183,20 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     damaged = len(verified_truncated) + sum(
         bool(x.get("diagnostic"))
         for x in (*isrc_no_match, *no_isrc_tag, *isrc_mismatch))
-    log.info(fmt(C.GRAY,
-        f"  {verified_ok} complete  ·  "
-        f"{damaged} damaged  ·  "
-        f"{len(isrc_no_match)} recording ID not on Qobuz  ·  "
-        f"{len(no_isrc_tag)} no recording ID  ·  "
-        f"{len(isrc_mismatch)} recording or edition not confirmed"))
+    log.info(fmt(C.GRAY, wrap(
+        f"{verified_ok} complete · "
+        f"{damaged} damaged · "
+        f"{len(isrc_no_match)} recording ID not on Qobuz · "
+        f"{len(no_isrc_tag)} no recording ID · "
+        f"{len(isrc_mismatch)} recording or edition not confirmed")))
     if unverified:
         log.warning(fmt(C.YELLOW,
             f"  ⚠  Scan incomplete: {unverified} unverified."))
 
     if isrc_no_match:
-        log.info(fmt(C.GRAY,
-            "\n  Skipped (Qobuz has no track with this recording ID; it may "
-            "come from another store or have left Qobuz):"))
+        log.info(fmt(C.GRAY, "\n" + wrap(
+            "Skipped (Qobuz has no track with this recording ID; it may "
+            "come from another store or have left Qobuz):")))
         for x in isrc_no_match[:10]:
             diag = x.get("diagnostic")
             if diag:
@@ -1211,9 +1211,9 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             log.info(fmt(C.GRAY,
                 f"    ... and {len(isrc_no_match) - 10} more"))
     if no_isrc_tag:
-        log.info(fmt(C.GRAY,
-            "\n  Skipped (no recording ID (ISRC) tag, so the recording "
-            "can't be confirmed):"))
+        log.info(fmt(C.GRAY, "\n" + wrap(
+            "Skipped (no recording ID (ISRC) tag, so the recording "
+            "can't be confirmed):")))
         for x in no_isrc_tag[:10]:
             diag = x.get("diagnostic")
             if diag:
@@ -1427,9 +1427,9 @@ def run_album_repair_mode(args, token, *, loop=False):
 
     try:
         if not getattr(args, "dry_run", False):
-            log.info(fmt(C.YELLOW,
-                "  The damaged tracks are removed once their replacements "
-                "verify. This cannot be undone."))
+            log.info(fmt(C.YELLOW, wrap(
+                "The damaged tracks are removed once their replacements "
+                "verify. This cannot be undone.")))
         while True:
             clear_scan_caches()
             try:

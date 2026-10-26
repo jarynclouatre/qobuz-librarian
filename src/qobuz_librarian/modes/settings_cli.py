@@ -8,10 +8,12 @@ toggles without ever opening the web UI.
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, wrap
 from qobuz_librarian.ui_cli.logging import log
-from qobuz_librarian.ui_cli.prompts import confirm
+from qobuz_librarian.ui_cli.sentinels import NO_ANSWER
 from qobuz_librarian.web import settings_store
 
 _QUALITY_CHOICES = ["4", "3", "2"]
+# What a prompt returns for q.
+_QUIT = "quit"
 
 # Only the web Library scan and New releases checks follow it.
 _WEB_ONLY = {"SUPPRESS_SINGLE_TRACK_GAPS"}
@@ -30,7 +32,9 @@ def _pick_quality(current_value):
     current_label = labels.get(current_value, "current")
     r = ask(f"  Choice (Enter = keep {current_label}): ", quiet=True)
     if r is None:
-        return None
+        return NO_ANSWER
+    if r == "q":
+        return _QUIT
     if r == "":
         return current_value
     if r in ("1", "2", "3"):
@@ -40,18 +44,26 @@ def _pick_quality(current_value):
 
 
 def _pick_downsample_policy(current_value):
-    if current_value in ("keep", "delete"):
-        default_yes = current_value == "keep"
-        note = f" (current: {_KEEP_CHOICES[current_value]})"
+    """keep or delete; Enter leaves the current choice, made or not."""
+    if current_value == "keep":
+        prompt = f"  {_KEEP_LABEL}? (current: {_KEEP_CHOICES['keep']}) [Y/n]: "
+    elif current_value == "delete":
+        prompt = f"  {_KEEP_LABEL}? (current: {_KEEP_CHOICES['delete']}) [y/N]: "
     else:
-        default_yes = True
-        note = " (not chosen yet)"
-    keep = confirm(
-        f"  {_KEEP_LABEL}?{note}",
-        default_yes=default_yes, auto_yes=False, on_eof=None, quiet=True)
-    if keep is None:
-        return None
-    return "keep" if keep else "delete"
+        prompt = f"  {_KEEP_LABEL}? (not chosen yet) [y/n, Enter = decide later]: "
+    while True:
+        r = ask(prompt, quiet=True)
+        if r is None:
+            return NO_ANSWER
+        if r == "q":
+            return _QUIT
+        if not r:
+            return current_value
+        if r in ("y", "yes"):
+            return "keep"
+        if r in ("n", "no"):
+            return "delete"
+        print(fmt(C.YELLOW, "  Answer y or n."))
 
 
 def _pick_toggle(label, help_text, current_on):
@@ -60,17 +72,19 @@ def _pick_toggle(label, help_text, current_on):
     while True:
         r = ask(f"    {label}{suffix}", quiet=True)
         if r is None:
-            return None
+            return NO_ANSWER
         if not r:
             return current_on
         if r in ("y", "yes"):
             return True
         if r in ("n", "no"):
             return False
+        if r == "q":
+            return _QUIT
         if r == "?":
             log.info(fmt(C.GRAY, wrap(help_text, indent="      ")))
             continue
-        print(fmt(C.YELLOW, "  Answer y, n or ?."))
+        print(fmt(C.YELLOW, "  Answer y, n, ? or q."))
 
 
 def _show_current(values):
@@ -88,6 +102,14 @@ def _show_current(values):
         log.info(fmt(C.GRAY, f"    {label}: {state}"))
 
 
+def _nothing_saved(answer):
+    if answer == _QUIT:
+        log.info(fmt(C.GRAY, "\n  Nothing saved."))
+        return 0
+    log.info(fmt(C.GRAY, "\n  No answer was given. Nothing saved."))
+    return 1
+
+
 def run_settings_mode(args):
     """Set download quality, downsample policy and behaviour toggles from
     the terminal, saved the same way the web Settings page saves them."""
@@ -99,18 +121,17 @@ def run_settings_mode(args):
         return 0
 
     changes = {}
+    log.info(fmt(C.GRAY, "  Enter keeps each current value; q stops without saving."))
 
     quality = _pick_quality(values.get("STREAMRIP_QUALITY"))
-    if quality is None:
-        log.info(fmt(C.GRAY, "\n  No answer was given. Nothing saved."))
-        return 1
+    if quality in (NO_ANSWER, _QUIT):
+        return _nothing_saved(quality)
     if quality != values.get("STREAMRIP_QUALITY"):
         changes["STREAMRIP_QUALITY"] = quality
 
     policy = _pick_downsample_policy(values.get("DOWNSAMPLE_KEEP_ORIGINALS"))
-    if policy is None:
-        log.info(fmt(C.GRAY, "\n  No answer was given. Nothing saved."))
-        return 1
+    if policy in (NO_ANSWER, _QUIT):
+        return _nothing_saved(policy)
     if policy != values.get("DOWNSAMPLE_KEEP_ORIGINALS"):
         changes["DOWNSAMPLE_KEEP_ORIGINALS"] = policy
 
@@ -122,9 +143,8 @@ def run_settings_mode(args):
             continue
         current_on = bool(values.get(key))
         answer = _pick_toggle(label, help_text, current_on)
-        if answer is None:
-            log.info(fmt(C.GRAY, "\n  No answer was given. Nothing saved."))
-            return 1
+        if answer in (NO_ANSWER, _QUIT):
+            return _nothing_saved(answer)
         if answer != current_on:
             changes[key] = answer
 

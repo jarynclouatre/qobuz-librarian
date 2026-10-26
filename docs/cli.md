@@ -16,6 +16,8 @@ Set `QL_CLI_ONLY=1` to start in terminal mode (the web UI still serves browsing 
 docker compose run --rm -it qobuz-librarian cli
 ```
 
+Ctrl-C inside a menu tool stops it and returns to the menu; at the menu itself it quits.
+
 Every menu mode has a flag that jumps straight to it; `--help` lists them all. The walks below stay interactive (they confirm per artist or prompt for one), so keep `-it`:
 
 ```bash
@@ -43,7 +45,7 @@ stop with `s` exits with status 0.
 
 Choose `s` in the menu to open Settings, or use the flag to jump straight in.
 It writes to the same store the web Settings page saves to, and `--dry-run`
-prints the current values without saving:
+prints the current values without saving, even while the web app runs:
 
 ```bash
 docker compose run --rm -it qobuz-librarian cli --settings
@@ -120,7 +122,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--reset-walk-seen` | Forget which artists and albums the walks have answered, and exit |
 | `--no-catalog` | Skip the missing-albums step in Artist mode and the Library walk |
 | `--[no-]include-live`, `--[no-]include-comps`, `--[no-]include-singles` | List live releases, compilations, or EPs and singles among missing albums (default: the Library review's switches) |
-| `--[no-]include-bonus` | Offer to fill albums whose only missing tracks are other versions of songs they have, in Artist mode, the Library walk and Gap fill (default: the Library review's Bonus versions switch) |
+| `--[no-]include-bonus` | Offer to fill albums whose only missing tracks are other versions of songs they have, in Artist mode, the Library walk and Gap Fill (default: the Library review's Bonus versions switch) |
 | `--[no-]prefer-hires` | List each album's highest-resolution edition first, keeping the search order (default: the Prefer hi-res setting) |
 | `--dry-run` | Show the plan and change nothing; a download a restart cut off is still settled first, as at every start |
 | `--force` | Download every track of the album again (search or album URL only) |

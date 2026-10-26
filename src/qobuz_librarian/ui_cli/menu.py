@@ -58,7 +58,7 @@ def interactive_session_mode():
     falling through to album mode on a typo."""
     print()
     log.info(fmt(C.GRAY, wrap(
-        "Qobuz Librarian: download Qobuz albums and fill your library's gaps.")))
+        "Download Qobuz albums and fill your library's gaps.")))
     log.info(fmt(C.BOLD + C.CYAN, "  What would you like to do?"))
     _print_choices()
     log.info(fmt(C.WHITE, "    s) Settings"))

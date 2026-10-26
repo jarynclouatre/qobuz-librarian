@@ -534,14 +534,14 @@ async def _lifespan(_app: FastAPI):
     # Acquire the shared run lock so separate CLI runs cannot overlap Web work.
     if os.environ.get("QL_CLI_ONLY", "").strip().lower() in ("1", "true", "yes", "on"):
         # Terminal-first deployment leaves the lock free for a CLI process.
-        runtime._CLI_MODE = True
+        runtime.set_cli_mode(True)
         runtime._LOCK_BUSY_PID = None
         queue_recovery._STARTUP_RECOVERY_RESULT = None
         queue_recovery._STARTUP_RECOVERY_UNKNOWN = False
         _log.info("QL_CLI_ONLY set: starting in terminal (CLI) mode; the web "
                   "app holds no lock and download/scan endpoints are paused.")
     else:
-        runtime._CLI_MODE = False
+        runtime.set_cli_mode(False)
         try:
             runtime._RUN_LOCK_HANDLE = run_lock.acquire("web")
             runtime._LOCK_BUSY_PID = None
@@ -691,6 +691,7 @@ async def _lifespan(_app: FastAPI):
     finally:
         await _finish_web_lifespan(
             ticker, lock_retry_task, maintenance_task, token_probe_task)
+        runtime.mark_web_paused(False)
 
 
 def _put_back_albums_left_in_backups() -> None:

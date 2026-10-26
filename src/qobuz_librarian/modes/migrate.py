@@ -28,13 +28,23 @@ def _resolve_paths(args):
     what's wrong."""
     src = (getattr(args, "migrate_src", "") or config.MIGRATE_SRC).strip()
     dest = (getattr(args, "migrate_dest", "") or config.MIGRATE_DEST).strip()
+    mounted = config.in_container()
     if not src:
-        src = _prompt_path("  Source library to organise: ")
+        src = _prompt_path(
+            "  Source library to organise"
+            + (" (a folder mounted into the container, e.g. /migrate-source)"
+               if mounted else "") + ": ")
     if not src:
         log.warning(fmt(C.RED, "\n  ✗  No source was given. Nothing changed."))
         return None, None
+    if not Path(src).is_dir():
+        log.warning(fmt(C.RED, f"  ✗  Source isn't a readable directory: {src}"))
+        return None, None
     if not dest:
-        dest = _prompt_path("  Destination for the organised copy: ")
+        dest = _prompt_path(
+            "  Destination for the organised copy"
+            + (" (a folder mounted into the container, e.g. /migrate-dest)"
+               if mounted else "") + ": ")
     if not dest:
         log.warning(fmt(C.RED,
             "\n  ✗  No destination was given. Nothing changed."))

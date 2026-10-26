@@ -18,7 +18,7 @@ from qobuz_librarian.queue.journal import (
 )
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, clock_zone, fmt, truncate, wrap
-from qobuz_librarian.ui_cli.errors import plural
+from qobuz_librarian.ui_cli.errors import plural, shown_path
 from qobuz_librarian.ui_cli.logging import log, vlog
 
 
@@ -106,8 +106,8 @@ def kept_queue_note(queue):
     """Where a run's unfinished queue waits, and how to run it."""
     return fmt(C.GRAY, wrap(
         f"{plural(len(queue), 'album')} kept in the saved queue in "
-        f"{cfg.QUEUE_JOURNAL_DIR}. Run Qobuz Librarian with no mode or search "
-        "argument to resume it.",
+        f"{shown_path(cfg.QUEUE_JOURNAL_DIR)}. The CLI menu offers to resume "
+        "it.",
         indent="  ", hanging="  "))
 
 

@@ -1,5 +1,6 @@
 """Error-message and copy helpers shared across CLI/web."""
 import errno
+import os
 import sys
 
 from qobuz_librarian import config as cfg
@@ -28,6 +29,34 @@ def plural(n: int, singular: str, plural_form: str | None = None) -> str:
     """Format `n singular` / `n plural` with auto pluralization."""
     word = singular if n == 1 else (plural_form or singular + "s")
     return f"{n} {word}"
+
+
+def shown_path(path) -> str:
+    """A folder as the user finds it: under a bind mount, the host folder it
+    comes from. The data volume has no host folder to name."""
+    shown, on_host = cfg.host_path(path)
+    if on_host or not cfg.in_container():
+        return shown
+    data = str(cfg.DATA_DIR).rstrip("/")
+    if shown == data or shown.startswith(data + "/"):
+        return "the app's data folder"
+    return shown
+
+
+def compose_service_name() -> str:
+    """Best-effort docker compose service name for diagnostic hints."""
+    h = os.environ.get("HOSTNAME", "").strip()
+    if not h or (len(h) == 12 and all(c in "0123456789abcdef" for c in h)):
+        return "qobuz-librarian"
+    return h
+
+
+def cli_command(options, *, interactive=True) -> str:
+    """The command that runs the CLI with ``options`` on this install."""
+    if not cfg.in_container():
+        return f"qobuz-librarian {options}"
+    tty = "-it " if interactive else ""
+    return f"docker compose run --rm {tty}{compose_service_name()} cli {options}"
 
 
 def no_artist_folders() -> str:

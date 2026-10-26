@@ -112,6 +112,7 @@ def _run_lyric_hook(album_dir):
             progress_cb=lambda c, t, name, note: report_progress(
                 " · ".join(filter(None, ("Fetching lyrics", note))), c, t, name),
             busy_patience=0,
+            track_detail=True,
         )
     except Exception as e:
         log.info(fmt(C.YELLOW, f"  ⚠  Lyric hook failed: {e}."))

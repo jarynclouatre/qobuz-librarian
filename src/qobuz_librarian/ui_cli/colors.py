@@ -5,6 +5,7 @@ import shutil
 import sys
 import textwrap
 import time
+import unicodedata
 
 
 class C:
@@ -136,6 +137,20 @@ def truncate(s, n):
     if n <= 1:
         return "…" if n == 1 else ""
     return s[: n - 1].rstrip() + "…"
+
+
+def fit_line(text, width):
+    """``text`` cut or padded to fill ``width`` terminal columns, counting a
+    wide (CJK) character as two."""
+    kept, used = [], 0
+    for ch in str(text):
+        cols = (0 if unicodedata.combining(ch)
+                else 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1)
+        if used + cols > width:
+            break
+        kept.append(ch)
+        used += cols
+    return "".join(kept) + " " * (width - used)
 
 
 def banner(title, color=None):

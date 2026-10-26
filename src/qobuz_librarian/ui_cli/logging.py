@@ -40,8 +40,10 @@ log.setLevel(logging.INFO)
 log.addFilter(_RedactFilter())
 _sh = logging.StreamHandler(sys.stdout)
 _sh.setFormatter(logging.Formatter("%(message)s"))
-# Lines logged with extra={"file_only": True} reach the log file alone.
+# Lines logged with extra={"file_only": True} reach the log file alone, and
+# ones with extra={"detail": True} the terminal only under --verbose.
 _sh.addFilter(lambda record: not getattr(record, "file_only", False))
+_sh.addFilter(lambda record: _VERBOSE or not getattr(record, "detail", False))
 # Pin the console to INFO so lowering the LOGGER to DEBUG for the file handler
 # (see attach_file_handler) doesn't flood the terminal - DEBUG belongs in the
 # log file, not on screen. set_quiet() raises this to WARNING for --quiet.
@@ -143,6 +145,13 @@ def set_quiet(quiet: bool):
     console stays at INFO even when LOG_LEVEL=DEBUG lowered the logger for the
     file handler."""
     _sh.setLevel(logging.WARNING if quiet else logging.INFO)
+
+
+def console_line(text):
+    """A passing status line for a terminal: not the log file, a job log or
+    a --quiet run."""
+    if sys.stdout.isatty() and _sh.level <= logging.INFO:
+        print(text, flush=True)
 
 
 def vlog(msg):
