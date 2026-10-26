@@ -191,7 +191,7 @@ Migration keeps each file's permissions and modification time. Its copies take t
 
 ## Timezone
 
-Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in History and on job pages show your local time instead of UTC. Relative labels like "2 hr ago" are correct either way.
+Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in History and on job pages show your local time instead of UTC, which they are marked with otherwise. Relative labels like "2 hr ago" are correct either way.
 
 ## Deployment
 

@@ -16,6 +16,7 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import download as download_mod
 from qobuz_librarian.library import generation_state
 from qobuz_librarian.library.tags import known_year
+from qobuz_librarian.ui_cli import colors
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import (
     job_labels,
@@ -154,7 +155,10 @@ def _retire_gone_recoveries(rows: list[dict]) -> list[dict]:
 
 
 def _fmt_clock(ts):
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
+    if not ts:
+        return ""
+    return (datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+            + colors.clock_zone())
 
 
 def _fmt_elapsed(seconds):

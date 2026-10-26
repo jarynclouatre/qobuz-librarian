@@ -338,6 +338,20 @@ def _path_template_problem(key, value):
             "Remove the \u201c..\u201d parts.")
 
 
+def _path_template_warning(key, value):
+    """Said when a beets path template saves but beets would not read all of
+    it, or ""."""
+    if key not in _PATH_TEMPLATE_KEYS or not value:
+        return ""
+    from qobuz_librarian.integrations.beets import unfinished_path_template
+
+    if not unfinished_path_template(value):
+        return ""
+    return (f"\u201c{_FIELD_LABELS.get(key, key)}\u201d has an unmatched brace "
+            "or a %function with no { after it, so beets would name folders "
+            "with that part as typed.")
+
+
 _ROOT_NAMES = {
     "MUSIC_ROOT": "the music folder",
     "STAGING_DIR": "the staging folder",
@@ -787,6 +801,9 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
                 # quietly file music outside the library.
                 return None, [problem]
             clean[key] = value
+            unread = _path_template_warning(key, value)
+            if unread:
+                warnings.append(unread)
 
     persisted = _read_settings() or {}
     cleared = _blank_overrides(clean)

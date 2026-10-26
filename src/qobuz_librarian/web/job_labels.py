@@ -4,6 +4,7 @@ import math
 import time
 from datetime import datetime
 
+from qobuz_librarian.ui_cli import colors
 from qobuz_librarian.web import job_persistence, runtime
 from qobuz_librarian.web import jobs as job_mgr
 
@@ -104,7 +105,8 @@ def _when_label(ts) -> tuple[str, str]:
     minute."""
     if not ts:
         return "", ""
-    exact = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    exact = (datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+             + colors.clock_zone())
     if time.time() - ts < 7 * 86400:
         return _format_age(ts), exact
     dt = datetime.fromtimestamp(ts)

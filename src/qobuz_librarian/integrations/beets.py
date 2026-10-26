@@ -121,6 +121,41 @@ def unsafe_path_template(value: str) -> str:
     return ""
 
 
+def unfinished_path_template(value: str) -> bool:
+    """Whether a beets path template has a brace that pairs with nothing or a
+    %function with no {arguments}. beets keeps such a part as typed, and the
+    rest of the template too after a stray }, so it lands in folder names. A
+    plain { is ordinary text to beets."""
+    text = str(value or "")
+    depth = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "$":
+            if text[index + 1:index + 2] in ("$", "%", "}", ","):
+                index += 2
+                continue
+            if text[index + 1:index + 2] == "{":
+                field = re.match(r"\w*\}", text[index + 2:])
+                if not field:
+                    return True
+                index += 2 + field.end()
+                continue
+        elif char == "%":
+            name = re.match(r"\w+", text[index + 1:])
+            if name:
+                index += 1 + name.end()
+                if text[index:index + 1] != "{":
+                    return True
+                depth += 1
+        elif char == "}":
+            if not depth:
+                return True
+            depth -= 1
+        index += 1
+    return depth > 0
+
+
 def _template_components(template):
     """Split a beets path template at the slashes outside function braces."""
     components = []

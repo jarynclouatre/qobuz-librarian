@@ -204,7 +204,6 @@
 {% set _qobuz_errors = ("creds", "envcreds", "rejected", "savedrejected", "unreachable", "envrejected",
                         "envunreachable", "empty", "needuser", "credsbusy",
                         "credschanged", "credsmode") %}
-{% if rerendered %}{{ behaviour_notices() }}{% endif %}
 <div class="ql-settings-page">
 <header class="ql-page-header ql-settings-header">
   <h1>Settings</h1>
@@ -243,6 +242,8 @@
   </form>
 </div>
 {% endif %}
+
+{% if rerendered %}{{ behaviour_notices() }}{% endif %}
 
 {% if password_error %}
 <div class="ql-notice ql-notice-error mb-6" data-flash>
@@ -293,8 +294,9 @@
     </details>
     {% endif %}
     {# Once connected the whole form collapses. Replacing the account or
-       token is a rare event and two open inputs read as a chore to fill. #}
-    {% if auth_token_set %}<details class="ql-settings-details"{% if error in _qobuz_errors %} open{% endif %}>
+       token is a rare event and two open inputs read as a chore to fill.
+       It stays open while downloads still wait for the user ID. #}
+    {% if auth_token_set %}<details class="ql-settings-details"{% if error in _qobuz_errors or not downloader_ready %} open{% endif %}>
       <summary class="ql-disclosure-summary">Change account or token</summary>
     {% endif %}
 
@@ -522,6 +524,10 @@
     <div class="ql-notice ql-notice-error mb-6">
       <span>Last.fm rejected this key, so it was not saved. Check it was copied whole.</span>
     </div>
+    {% elif lastfm_check == 'empty' %}
+    <div class="ql-notice ql-notice-warning mb-6">
+      <span>Paste a key first.</span>
+    </div>
     {% elif lastfm_check == 'down' %}
     <div class="ql-notice ql-notice-warning mb-6">
       <span>The key was saved, but Last.fm could not be reached to check it.{% if queued %} It takes effect once no job is running.{% endif %}</span>
@@ -742,7 +748,7 @@
 </details>
 
 {% if web_login_available %}
-<details class="ql-settings-section">
+<details class="ql-settings-section"{% if settings_section == 'web-login' %} open{% endif %}>
   <summary class="ql-settings-summary">
     <h2 id="web-login" tabindex="-1" class="ql-anchor-target">Web login</h2>
     <span class="ql-review-chevron" aria-hidden="true"></span>
@@ -840,7 +846,7 @@
     {% if mode_changed == "refused" and error %}
     <div class="ql-notice ql-notice-warning" data-flash><span>{{ error }}</span></div>
     {% endif %}
-    <details class="ql-settings-details">
+    <details class="ql-settings-details"{% if cli_mode %} open{% endif %}>
       <summary class="ql-disclosure-summary">
         CLI command
       </summary>
@@ -884,7 +890,7 @@
         <p class="ql-mode-help">Web scans and downloads are paused. The web app takes the library back within about 30 seconds of that run ending; switch to terminal mode to keep it for the terminal.</p>
         {% else %}
         <p class="ql-mode-state">Web app active</p>
-        <p class="ql-mode-help">Switch to terminal mode to run the command above. Web scans and downloads pause until you resume.</p>
+        <p class="ql-mode-help">Switch to terminal mode to run the CLI command above. Web scans and downloads pause until you resume.</p>
         {% endif %}
       </div>
       <form action="/settings/mode" method="post" class="w-full sm:ml-auto sm:w-auto">

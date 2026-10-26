@@ -42,7 +42,7 @@
   {% set _show_qobuz = _show_qobuz_missing or _show_token or _show_user_id %}
   {% set _status_msg = "Your Qobuz token was rejected. Reconnect it in Settings" if _show_token
                        else "Connect Qobuz in Settings" if _show_qobuz_missing
-                       else "Add your Qobuz user ID in Settings to download" if _show_user_id
+                       else "Add your Qobuz email or user ID in Settings to download" if _show_user_id
                        else "Another Qobuz Librarian run is active, so downloads are paused" %}
 
   <div class="ql-app-shell">

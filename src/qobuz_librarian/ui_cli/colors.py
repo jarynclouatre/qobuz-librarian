@@ -4,6 +4,7 @@ import re
 import shutil
 import sys
 import textwrap
+import time
 
 
 class C:
@@ -158,6 +159,12 @@ def section(title, color=None):
     color = color or C.BLUE
     log.info("")
     log.info(f"  {fmt(C.BOLD + color, '── ' + title + ' ──')}")
+
+
+def clock_zone():
+    """" UTC" to follow a clock time when this machine keeps UTC, as a
+    container started without TZ does; "" where it keeps a local zone."""
+    return " UTC" if time.timezone == 0 and not time.daylight else ""
 
 
 def format_size(n):

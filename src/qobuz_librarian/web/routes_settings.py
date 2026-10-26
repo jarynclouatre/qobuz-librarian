@@ -157,7 +157,8 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "collection_backup_generation": generations["collection-backup"],
         "collection_backup": diagnostics_mod._collection_backup_status(),
         "lastfm_check": (lastfm_check
-                         if lastfm_check in ("ok", "rejected", "down") else ""),
+                         if lastfm_check in ("ok", "rejected", "down", "empty")
+                         else ""),
         "option_labels": settings_store.ENUM_OPTION_LABELS,
         # Which dropdowns keep their unset entry after something is picked, so
         # a choice the app asks for once can still be handed back to it.
@@ -473,6 +474,9 @@ async def save_behavior(request: Request):
             values["LASTFM_API_KEY"] = ""
         elif not str(values.get("LASTFM_API_KEY") or "").strip():
             values.pop("LASTFM_API_KEY", None)
+            if not settings_store.current().get("LASTFM_API_KEY"):
+                return RedirectResponse(url="/settings?lastfm=empty#discover",
+                                        status_code=303)
     # A new Last.fm key is checked before it is saved, with one cheap chart
     # call bounded by the web timeout. A key Last.fm refuses is not saved, so
     # a working key is not replaced by a broken one; a key that could not be
@@ -589,7 +593,7 @@ async def change_web_password(request: Request):
             password_error=(rendering._lockout_notice(ip, username)
                             or "Sign-in checks are busy. Try again shortly."),
             password_locked=True, diagnostics=diags, rerendered=True,
-            status_code=429)
+            section="web-login", status_code=429)
     # The KDF is deliberately slow, so it runs off the event loop; on the loop
     # it would stall every other request for the length of the hash.
     try:
@@ -630,7 +634,8 @@ async def change_web_password(request: Request):
         diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
         return _settings_response(request, password_error=error,
                                   password_locked=password_locked,
-                                  diagnostics=diags, rerendered=True)
+                                  diagnostics=diags, rerendered=True,
+                                  section="web-login")
     return RedirectResponse(url="/login?changed=1", status_code=303)
 
 
@@ -803,7 +808,7 @@ async def set_mode(request: Request, target: str = Form("")):
         if outcome == "busy":
             # A CLI session still holds the lock, so we can't take it back yet.
             return _mode_refused(
-                "The terminal is still using it. Finish your CLI command, then "
+                "The terminal still holds the library. Quit the CLI, then "
                 "resume.")
         if outcome == "failed":
             return _mode_refused(

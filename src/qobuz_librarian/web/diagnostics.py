@@ -22,7 +22,7 @@ from qobuz_librarian.integrations import staging as staging_mod
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import collection_snapshot, scanner
 from qobuz_librarian.queue import startup_recovery
-from qobuz_librarian.ui_cli.colors import format_size
+from qobuz_librarian.ui_cli.colors import clock_zone, format_size
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import job_labels, storage, write_gate
 
@@ -317,7 +317,7 @@ def _staging_leftovers():
             kept = _kept_at(Path(leftover["path"]))
             if kept is not None:
                 leftover["label"] += (f", kept {kept:%b} {kept.day}, "
-                                      f"{kept:%H:%M:%S}")
+                                      f"{kept:%H:%M:%S}{clock_zone()}")
     for leftover in leftovers:
         if leftover["size"]:
             leftover["label"] += f" · {format_size(leftover['size'])}"
@@ -890,7 +890,8 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             except (AttributeError, ValueError):
                 pass
             else:
-                kept = f", kept {when:%b} {when.day}, {when:%H:%M:%S}"
+                kept = (f", kept {when:%b} {when.day}, {when:%H:%M:%S}"
+                        f"{clock_zone()}")
         if repaired:
             restore_confirm = (
                 f"Put these damaged tracks back in {where}? They replace "

@@ -17,7 +17,7 @@ from qobuz_librarian.queue.journal import (
     save_pending_queue,
 )
 from qobuz_librarian.ui_cli.ask import ask
-from qobuz_librarian.ui_cli.colors import C, fmt, truncate, wrap
+from qobuz_librarian.ui_cli.colors import C, clock_zone, fmt, truncate, wrap
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log, vlog
 
@@ -32,7 +32,7 @@ def _queue_heading(kind, items, mode, saved_at):
         "artist": "Artist mode",
     }.get(mode or "", "an earlier run")
     when = (datetime.fromisoformat(saved_at).astimezone().strftime(
-        "%Y-%m-%d %H:%M") if saved_at else "at an unknown time")
+        "%Y-%m-%d %H:%M") + clock_zone() if saved_at else "at an unknown time")
     return fmt(C.BOLD + C.YELLOW, wrap(
         f"{kind} download queue from {source}: "
         f"{plural(len(items), 'album')}, saved {when}.",
