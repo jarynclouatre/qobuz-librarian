@@ -669,6 +669,12 @@ def parse_args():
                    help="list EPs and singles among missing albums in "
                         "Artist mode and Library walk (default: the Library "
                         "review's EPs & singles switch)")
+    offers.add_argument("--include-other", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="list releases Qobuz files under other, such as label "
+                        "reissues, among missing albums in Artist mode and "
+                        "Library walk (default: the Library review's Other "
+                        "releases switch)")
     offers.add_argument("--include-bonus", action=argparse.BooleanOptionalAction,
                    default=None,
                    help="offer to fill an album whose only missing tracks are "
@@ -781,7 +787,8 @@ def parse_args():
                 "apply with --migrate")
     # The --include-* flags only affect the missing-albums step of artist
     # mode, which the library walk runs per artist, so they apply there too.
-    for flag in ("include_live", "include_comps", "include_singles"):
+    for flag in ("include_live", "include_comps", "include_singles",
+                 "include_other"):
         if (getattr(args, flag) and not (args.artist or args.library_walk)
                 and (args.query or other_run_mode)):
             p.error(f"--{flag.replace('_', '-')} only applies to artist mode "
@@ -853,7 +860,8 @@ def parse_args():
     switched_on = missing_types.load()
     for flag, release_type in (("include_live", missing_types.LIVE),
                                ("include_comps", missing_types.COMPILATION),
-                               ("include_singles", missing_types.EP)):
+                               ("include_singles", missing_types.EP),
+                               ("include_other", missing_types.OTHER)):
         if getattr(args, flag) is None:
             setattr(args, flag, release_type in switched_on)
     if args.include_bonus is None:

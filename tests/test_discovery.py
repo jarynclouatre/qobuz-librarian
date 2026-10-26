@@ -365,9 +365,11 @@ def test_missing_albums_are_what_qobuz_files_as_the_artists_albums(
         monkeypatch, tmp_path):
     # What Qobuz files as the artist's albums lists as albums, except that a
     # two-track one counts as a single and one credited first to another
-    # artist as a compilation; a label reissue filed elsewhere is not offered
-    # at all. When the lists can't be read the artist keeps every album,
-    # untyped, rather than losing them all.
+    # artist as a compilation. One filed under other lists as an other
+    # release, behind its switch: for Charles Mingus that list held 354 label
+    # reissues, all listed as albums. A label reissue in no list is not
+    # offered at all. When the lists can't be read the artist keeps every
+    # album, untyped, rather than losing them all.
     owned = _album("o1", "Vænir", "Monolord", 2015,
                    [_qt(f"v{i}", f"ISRCV{i}") for i in range(4)])
     short = _album("s1", "It's All The Same", "Monolord", 2023,
@@ -378,7 +380,9 @@ def test_missing_albums_are_what_qobuz_files_as_the_artists_albums(
     reissue = _album("r1", "Empress Rising", "Monolord", 2012,
                      [_qt(f"e{i}") for i in range(5)])
     studio = _album("a1", "Rust", "Monolord", 2017, [_qt(f"r{i}") for i in range(5)])
-    catalog = [owned, short, duet, live, reissue, studio]
+    budget = _album("x1", "Lord of Suffering", "Monolord", 2016,
+                    [_qt(f"x{i}") for i in range(4)])
+    catalog = [owned, short, duet, live, reissue, studio, budget]
     layout = {"Monolord": {"Vænir (2015)":
                            [_et(f"v{i}", f"ISRCV{i}") for i in range(4)]}}
     artists = [{"name": "Monolord", "id": "monolord", "albums_count": 5}]
@@ -386,18 +390,21 @@ def test_missing_albums_are_what_qobuz_files_as_the_artists_albums(
     _library(monkeypatch, tmp_path, layout)
     FakeQobuz(artists=artists, catalog=catalog, release_types={
         "o1": "album", "s1": "album", "d1": "album", "l1": "live", "a1": "album",
+        "x1": "other",
     }).install(monkeypatch)
     res = find_missing_for_artist("Monolord", token="tok",
                                   artist_dir=tmp_path / "Monolord")
     typed = {g.qobuz_album["title"]: g.release_type for g in res.fully_missing}
     assert typed == {"Rust": "album", "It's All The Same": "epSingle",
-                     "Split": "compilation", "Live at Roadburn": "live"}
+                     "Split": "compilation", "Live at Roadburn": "live",
+                     "Lord of Suffering": "other"}
 
     FakeQobuz(artists=artists, catalog=catalog).install(monkeypatch)
     res = find_missing_for_artist("Monolord", token="tok",
                                   artist_dir=tmp_path / "Monolord")
     assert {g.qobuz_album["title"]: g.release_type for g in res.fully_missing} == {
-        "Live at Roadburn": None, "Empress Rising": None, "Rust": None}
+        "Live at Roadburn": None, "Empress Rising": None, "Rust": None,
+        "Lord of Suffering": None}
 
 
 def test_zero_overlap_match_is_skipped_as_false_match(monkeypatch, tmp_path, beatles_search):

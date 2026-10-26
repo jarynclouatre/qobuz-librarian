@@ -766,6 +766,7 @@ _UNLISTED_TYPES = (
     (missing_types.COMPILATION, "compilation", "compilations",
      "--include-comps"),
     (missing_types.EP, "EP or single", "EPs and singles", "--include-singles"),
+    (missing_types.OTHER, "other release", "other releases", "--include-other"),
 )
 
 
@@ -847,7 +848,8 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     opts = DiscoveryOpts(prefer_hires=args.prefer_hires,
                          include_comps=args.include_comps,
                          include_singles=args.include_singles,
-                         include_live=args.include_live)
+                         include_live=args.include_live,
+                         include_other=args.include_other)
     handled_keys = {str(album_id) for album_id in handled_ids or ()}
     release_types = artist_release_types(
         artist_id, artist_name, token,

@@ -107,6 +107,7 @@ def build_args():
         include_comps=False,
         include_singles=False,
         include_live=False,
+        include_other=False,
         no_catalog=False,
         auto_safe=False,
         # Whole-album replacement belongs to the explicit Upgrade review,
@@ -635,14 +636,15 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
     match again, so Download would refuse it after every refresh.
     Candidates the user dismissed while the refresh ran are checked against a
     fresh hidden snapshot so the fold can't resurrect them. Returns
-    (added, updated, removed, held_back, left_out, notes), False when the
-    changed review could not be saved, or None when the review stopped being
-    parked mid-refresh (approved/discarded). ``updated`` and ``removed`` count
-    the rows the review lists that changed or left; ``held_back`` maps the
-    switches (switch_holding) to the added rows they keep out of the list;
-    ``left_out`` maps artist folders to the listed rows the review had
-    no room for; ``notes`` are the lines the fold added to the review's log
-    besides the counts, which the refresh's own summary gives."""
+    (added, updated, removed, held_back, switched_off, left_out, notes),
+    False when the changed review could not be saved, or None when the review
+    stopped being parked mid-refresh (approved/discarded). ``updated`` and
+    ``removed`` count the rows the review lists that changed or left;
+    ``held_back`` maps the switches (switch_holding) to the added rows they
+    keep out of the list, and ``switched_off`` to the listed rows the refresh
+    moved under them; ``left_out`` maps artist folders to the listed rows the
+    review had no room for; ``notes`` are the lines the fold added to the
+    review's log besides the counts, which the refresh's own summary gives."""
     _key = fold_key
     def _fold():
         if parked.status != job_mgr.JobStatus.AWAITING_REVIEW:
@@ -685,6 +687,7 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         in_library = []
         unoffered = []
         moved = {}
+        switched_off = {}
         seals = {}
         for c in cands:
             payload = c.get("payload") or {}
@@ -739,7 +742,10 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                     and not switched_on(fresh)):
                 switch = switch_holding(fresh)
                 moved[switch] = moved.get(switch, 0) + 1
-            if (_row_shows_change(_fold_row(fresh), _fold_row(c))
+            if listed(c) and not listed(replacement):
+                switch = switch_holding(replacement)
+                switched_off[switch] = switched_off.get(switch, 0) + 1
+            elif (_row_shows_change(_fold_row(fresh), _fold_row(c))
                     and (listed(fresh) or listed(c))):
                 updated += 1
         # Older builds matched rows by album id alone and could leave an
@@ -807,12 +813,13 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                 "_library_review_generation": int(review_generation),
             }
         held = sum(held_back.values())
+        away = sum(switched_off.values())
         counted = []
         notes = []
         changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
             ("added", added - held), ("updated", updated), ("removed", removed))
             if n]
-        if coverage is not None and (changes or held):
+        if coverage is not None and (changes or held or away):
             # Say what the refresh changed in the list the review shows.
             line = "A refresh "
             if changes:
@@ -822,9 +829,13 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                 if held:
                     line += (f" {held} more {'is' if held == 1 else 'are'} "
                              f"under {missing_types.named(held_back)}.")
-            else:
+            elif held:
                 line += (f"added {plural(held, 'album')} under "
                          f"{missing_types.named(held_back)}.")
+            if away:
+                moved_line = (f"moved {plural(away, 'album')} under "
+                              f"{missing_types.named(switched_off)}.")
+                line += (" It " if changes or held else "") + moved_line
             counted.append(line)
         if in_library:
             n = len(in_library)
@@ -847,7 +858,7 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         # Saved with this change; the review's lock is already held.
         parked.log_lines.extend(counted + notes)
         parked._trim_log_lines_locked()
-        return added, updated, removed, held_back, left_out, notes
+        return added, updated, removed, held_back, switched_off, left_out, notes
 
     with job_mgr._library_review_state_guard(parked), parked._review_action_lock:
         saved, result = job_persistence.persist_review_mutation(parked, _fold)
@@ -2794,6 +2805,7 @@ def scan_new_releases(job, token):
         include_live=missing_types.LIVE in switched_on,
         include_comps=missing_types.COMPILATION in switched_on,
         include_singles=missing_types.EP in switched_on,
+        include_other=missing_types.OTHER in switched_on,
     )
     log.info(f"Checking {plural(len(artists), 'artist')} for new releases…")
     total = 0

@@ -469,6 +469,7 @@ class DiscoveryOpts:
     include_comps: bool = False
     include_singles: bool = False
     include_live: bool = False
+    include_other: bool = False
 
     def included_types(self) -> frozenset:
         """The release types listed beside albums."""
@@ -476,6 +477,7 @@ class DiscoveryOpts:
             (missing_types.LIVE, self.include_live),
             (missing_types.COMPILATION, self.include_comps),
             (missing_types.EP, self.include_singles),
+            (missing_types.OTHER, self.include_other),
         ) if on)
 
 
@@ -832,7 +834,8 @@ def _typed_albums(albums, release_types, artist_name, opts):
     anything else shorter than MISSING_ALBUMS_MIN_TRACKS as an EP or single,
     and with EXCLUDE_LIVE_ALBUMS an album or compilation titled as a live
     recording as live. From the other and download-only lists only a full
-    release credited to the artist is offered, as an album or live."""
+    release credited to the artist is offered: from other as an other
+    release, from download-only as an album or live."""
     by_type = {}
     for album in albums:
         rtype = release_types.get(str(album.get("id")))
@@ -842,8 +845,9 @@ def _typed_albums(albums, release_types, artist_name, opts):
             if (_short(album)
                     or not filter_compilation_albums([(album, 1)], artist_name)):
                 continue
-            rtype = (missing_types.LIVE if _looks_live(album)
-                     else missing_types.ALBUM)
+            if rtype != missing_types.OTHER:
+                rtype = (missing_types.LIVE if _looks_live(album)
+                         else missing_types.ALBUM)
         elif not filter_compilation_albums([(album, 1)], artist_name):
             if rtype in (missing_types.LIVE, missing_types.EP):
                 continue
@@ -895,11 +899,12 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
     folder isn't re-offered as missing.
 
     release_types (artist_release_types) decides what counts as missing: only
-    albums Qobuz files as the artist's albums, live releases, compilations or
-    EPs and singles, each gap carrying its type for the caller to show or not
-    (missing_types.shown). Without it, missing albums pass the older
-    compilation, length and live-title filters and carry no type. The track
-    gaps always do.
+    albums Qobuz files as the artist's albums, live releases, compilations,
+    EPs and singles, and the artist's own full releases it files under other
+    or download-only (_typed_albums), each gap carrying its type for the
+    caller to show or not (missing_types.shown). Without it, missing albums
+    pass the older compilation, length and live-title filters and carry no
+    type. The track gaps always do.
 
     quick=True is the new-release path: only fully-missing albums are returned
     and no track lists are fetched, so the cost stays at the catalog list alone.

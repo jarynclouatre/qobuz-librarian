@@ -2,9 +2,10 @@
 whether Gap Fill lists bonus versions.
 
 Qobuz files each of an artist's releases as an album, a live release, a
-compilation or an EP or single (or as something else, which is never offered).
-Albums always show; the Library review's switches add the other three, and
-that choice is saved here. CLI runs start from it too.
+compilation, an EP or single, or under other, where label reissues sit beside
+some of an artist's own records. Albums always show; the Library review's
+switches add the other four, and that choice is saved here. CLI runs start
+from it too.
 
 An album whose only missing tracks are other versions of songs its folder
 holds (a remix, a live take, a demo) counts as complete. Gap Fill lists it
@@ -19,12 +20,13 @@ ALBUM = "album"
 LIVE = "live"
 COMPILATION = "compilation"
 EP = "epSingle"
+OTHER = "other"
 BONUS = "bonusVersions"
-OPTIONAL = (LIVE, COMPILATION, EP)
+OPTIONAL = (LIVE, COMPILATION, EP, OTHER)
 SWITCHES = OPTIONAL + (BONUS,)
 # What the Library review's switches call them.
 LABELS = {LIVE: "Live", COMPILATION: "Compilations", EP: "EPs & singles",
-          BONUS: "Bonus versions"}
+          OTHER: "Other releases", BONUS: "Bonus versions"}
 _lock = threading.Lock()
 
 

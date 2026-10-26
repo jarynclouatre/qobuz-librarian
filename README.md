@@ -24,7 +24,7 @@ It has a web UI and a CLI.
 
 ## Features
 
-- **Missing albums.** A Library scan lists albums you don't have by artists you do. Live releases, compilations, EPs and singles can be switched on in the review.
+- **Missing albums.** A Library scan lists albums you don't have by artists you do. Live releases, compilations, EPs and singles, and what Qobuz files under other (mostly label reissues) can be switched on in the review.
 - **Gap Fill.** Finds albums you own that are missing tracks and downloads just those tracks, from the same edition you have.
 - **Editions.** Search marks the editions you own as **In library** by matching recording IDs; remasters and different mixes count as separate releases. [How matching works](docs/existing-libraries.md#how-editions-are-matched).
 - **Single tracks.** Switch Search to **Track** to download one song into its album's folder.

@@ -17,7 +17,7 @@ STATE_VERSION = 1
 # Raised when the rules that decide which albums a scan offers change, so a
 # refresh derives results saved under older rules again instead of reusing
 # them for unchanged folders.
-CANDIDATE_RULES = 5
+CANDIDATE_RULES = 6
 
 # save_kind and mark_review_retired both read-modify-write the shared file;
 # serialise them so a scan's periodic save and a review retire (discard /

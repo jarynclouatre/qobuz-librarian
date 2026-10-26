@@ -341,7 +341,8 @@ def _fold_into_parked_library_review(job):
         return
     # Use the counts from the locked mutation itself. Complete ownership is
     # reconciled at approval, when exact edition tracks can be compared safely.
-    added, updated, removed, held_back, fold_left_out, notes = folded
+    (added, updated, removed, held_back, switched_off, fold_left_out,
+     notes) = folded
     # The review keeps these lines only while it waits; the refresh's own log
     # is stored when it finishes, so History still has them after a restart.
     for line in notes:
@@ -375,6 +376,9 @@ def _fold_into_parked_library_review(job):
             ("updated", updated), ("removed", removed)) if n]
         bits.append(f"{' and '.join(changes).capitalize()} in the open "
                     "Library review.")
+    if switched_off:
+        bits.append(f"Moved {plural(sum(switched_off.values()), 'album')} "
+                    f"under {missing_types.named(switched_off)}.")
     unchecked = job.unchecked_artists
     upgrades = getattr(job, "upgrade_finds", 0)
     caveats = list(getattr(job, "scan_caveats", ()))

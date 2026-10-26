@@ -59,9 +59,10 @@ Both ask before anything downloads, so keep `-it`. Search results come 25 at a t
 # Download a specific album (URL or "Artist Album" string)
 docker compose run --rm -it qobuz-librarian cli https://open.qobuz.com/album/abcd1234
 
-# Work through one artist's catalogue (--include-live, --include-comps and
-# --include-singles also list live releases, compilations, and EPs and
-# singles; each defaults to its switch in the web Library review)
+# Work through one artist's catalogue (--include-live, --include-comps,
+# --include-singles and --include-other also list live releases,
+# compilations, EPs and singles, and other releases; each defaults to its
+# switch in the web Library review)
 docker compose run --rm -it qobuz-librarian cli --artist "Paysage d'Hiver"
 ```
 
@@ -121,7 +122,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--settings` | Set download quality, whether downsampling keeps the originals, and the behaviour toggles |
 | `--reset-walk-seen` | Forget which artists and albums the walks have answered, and exit |
 | `--no-catalog` | Skip the missing-albums step in Artist mode and the Library walk |
-| `--[no-]include-live`, `--[no-]include-comps`, `--[no-]include-singles` | List live releases, compilations, or EPs and singles among missing albums (default: the Library review's switches) |
+| `--[no-]include-live`, `--[no-]include-comps`, `--[no-]include-singles`, `--[no-]include-other` | List live releases, compilations, EPs and singles, or releases Qobuz files under other among missing albums (default: the Library review's switches) |
 | `--[no-]include-bonus` | Offer to fill albums whose only missing tracks are other versions of songs they have, in Artist mode, the Library walk and Gap Fill (default: the Library review's Bonus versions switch) |
 | `--[no-]prefer-hires` | List each album's highest-resolution edition first, keeping the search order (default: the Prefer hi-res setting) |
 | `--dry-run` | Show the plan and change nothing; a download a restart cut off is still settled first, as at every start |
