@@ -122,13 +122,16 @@
     {% set _bar_total = review_counts.total %}
     {% set _bar_selected = review_counts.selected %}
     {% endif %}
-    <form id="review-form" action="/jobs/{{ job.id }}/approve" method="post"
+    {# Off, so Back shows the saved ticks rather than the ones the browser
+       remembers from before another tab changed them. #}
+    <form id="review-form" action="/jobs/{{ job.id }}/approve" method="post" autocomplete="off"
           data-job-id="{{ job.id }}" data-review-kind="{{ job.execute_kind }}"
           data-review-blocked="{{ '1' if _review_qobuz_blocked or _review_paused else '0' }}">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="selection_token" value="{{ review_selection_token }}">
       {% if job.execute_kind == 'downsample' %}<input type="hidden" name="downsample_policy" value="{{ downsample_originals_choice or '' }}">{% endif %}
-      {% if review_tab %}<input type="hidden" name="tab" id="review-tab-field" value="{{ review_tab }}">{% endif %}
+      {% if review_tab %}<input type="hidden" name="tab" id="review-tab-field" value="{{ review_tab }}">
+      <input type="hidden" name="q" id="review-q-field" value="{{ review_query }}">{% endif %}
       {% if job.execute_kind == 'migration' and job.execute_args.get('requires_low_space_override') %}
       <label class="ql-option-row">
         <input type="checkbox" name="allow_low_space" class="ql-checkbox" required>

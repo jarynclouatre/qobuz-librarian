@@ -2054,7 +2054,7 @@ def test_library_approve_downloads_the_checked_choices_and_parks_the_rest(
                         data={"tab": "missing", "selection_token": current["selection_tokens"]["missing"]},
                         follow_redirects=False)
         assert r.status_code == 303
-        assert r.headers["location"] == "/library?approved=1"
+        assert r.headers["location"] == "/library?approved=1&tab=missing"
         assert [c["title"] for c in job.candidates] == ["Third"]
         assert job.status != jm.JobStatus.AWAITING_REVIEW
         split = split_review(job)

@@ -931,6 +931,18 @@
     }, 0);
   });
 
+  // The Library refresh lands back on the review tab and filter the address
+  // bar holds now, which tab switches and the filter keep current.
+  document.addEventListener("submit", function (evt) {
+    var form = evt.target;
+    if (!form || !form.matches || !form.matches("form[data-review-place]")) return;
+    var params = new URLSearchParams(location.search);
+    ["tab", "q"].forEach(function (key) {
+      var field = form.elements.namedItem(key);
+      if (field) field.value = params.get(key) || "";
+    });
+  });
+
   function restoreBusySubmitButtons(root) {
     (root || document).querySelectorAll("form[data-busy-submit] button[type=submit]").forEach(function (b) {
       if (b.dataset.busyHtml == null) return;
@@ -3146,7 +3158,7 @@
       // An empty tab of a review that still has rows on the other tab has
       // nothing to select or download.
       if (footer) footer.classList.toggle("hidden", c.total > 0 && tc.total === 0);
-      if (selectTools) selectTools.classList.toggle("hidden", tc.total === 0);
+      if (selectTools) selectTools.classList.toggle("hidden", tc.total === 0 || shownTotal() === 0);
       var tabsNav = cont.querySelector("[data-review-tabs]");
       if (tabsNav) tabsNav.classList.toggle("hidden", c.total === 0);
       if (filterRow && !curQuery()) filterRow.classList.toggle("hidden", c.artists < 4 || tc.total === 0);
@@ -3218,6 +3230,21 @@
       btn.textContent = allOpen ? "Collapse all" : "Expand all";
     }
     cont.addEventListener("toggle", syncExpandAll, true);
+
+    // The rows the list can show: the tab's, or under a filter the ones it
+    // matches.
+    function shownTotal() {
+      var box = pageBox();
+      if (!curQuery() || !box) return tabCounts(lastCounts).total;
+      return parseInt(box.dataset.filteredTotal || "0", 10) || 0;
+    }
+
+    function syncSelectPage() {
+      var btn = cont.querySelector("[data-select-page]");
+      var box = pageBox();
+      if (!btn || !box) return;
+      btn.classList.toggle("hidden", !(parseInt(box.dataset.pages || "1", 10) > 1));
+    }
 
     function updateDismissRest() {
       if (!dismissRest) return;
@@ -3798,6 +3825,8 @@
             syncUrl(requestedTab, requestedQuery, mode);
             loadedQuery = requestedQuery;
             if (filterInput) filterInput.value = requestedQuery;
+            var queryField = document.getElementById("review-q-field");
+            if (queryField) queryField.value = requestedQuery;
             var focusSpot = pendingReviewFocus || reviewFocusSpot(document.activeElement);
             pendingReviewFocus = null;
             host.innerHTML = txt;
@@ -3809,6 +3838,7 @@
             updateHideLabels();
             updateArtistChecks();
             syncExpandAll();
+            syncSelectPage();
             updateDismissRest();
             var waits = [];
             host.querySelectorAll("details[data-artist][open]").forEach(function (d) {
@@ -4158,6 +4188,7 @@
     updateHideLabels();
     updateArtistChecks();
     syncMaster();
+    updateDismissRest();
 
     // Keep review pages in sync across tabs.
     var rsrc = new EventSource("/api/jobs/" + id + "/review-stream");

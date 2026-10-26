@@ -405,6 +405,8 @@ async def library_scan(
     mode: str = Form("missing_albums"),
     force_full: str = Form(""),
     return_to: str = Form(""),
+    tab: str = Form(""),
+    q: str = Form(""),
 ):
     busy = refusals._lock_busy_response(request)
     if busy is not None:
@@ -484,8 +486,12 @@ async def library_scan(
         return RedirectResponse(
             url="/library?notice=" + rendering._notice_key(msg),
             status_code=303)
+    # The refresh icon sends the review's tab and filter, so the page comes
+    # back on them.
+    place = review_pages.library_place(tab, q)
     if existing is not None:
-        return RedirectResponse(url="/library", status_code=303)
+        return RedirectResponse(url="/library" + ("?" + place if place else ""),
+                                status_code=303)
     try:
         credentials = await qobuz_access._authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION
@@ -512,7 +518,9 @@ async def library_scan(
     )
     if job is None:
         return scans._scan_submission_failure_response(request, error_home)
-    return RedirectResponse(url=f"/library?refreshed={job.id}", status_code=303)
+    return RedirectResponse(
+        url=f"/library?refreshed={job.id}" + ("&" + place if place else ""),
+        status_code=303)
 
 
 @router.post("/library/skip-setup")

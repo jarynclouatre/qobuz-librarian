@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+import urllib.parse
 
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import missing_types
@@ -275,6 +276,17 @@ def _paginate_groups(groups, page, rows=lambda group: len(group[1]), *,
                     break
         return [group for batch in pages[:page] for group in batch], page, n_pages
     return (pages[page - 1] if pages else []), page, n_pages
+
+
+def library_place(tab, query):
+    """A Library review's tab and filter as a query string, for the page a
+    form posted from it lands on. Empty when it names neither."""
+    params = {}
+    if tab in ("missing", "gaps"):
+        params["tab"] = tab
+    if (query or "").strip():
+        params["q"] = query.strip()
+    return urllib.parse.urlencode(params)
 
 
 def _filtered_rest_of(groups):

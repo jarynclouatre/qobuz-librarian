@@ -254,6 +254,20 @@ def _build_unapproved_review(job, tab, *, admission_filter=None,
 
 @router.post("/jobs/{job_id}/approve")
 async def job_approve(request: Request, job_id: str):
+    response = await _approve(request, job_id)
+    # A Library review is worked through a tab and a filter at a time, so the
+    # page an approval lands on keeps the ones it was pressed on.
+    location = response.headers.get("location") or ""
+    if location == "/library" or location.startswith("/library?"):
+        form = await request.form()
+        place = review_pages.library_place(form.get("tab"), form.get("q"))
+        if place:
+            response.headers["location"] = (
+                location + ("&" if "?" in location else "?") + place)
+    return response
+
+
+async def _approve(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id)
     downloads = write_gate._review_downloads(job)
     busy = refusals._lock_busy_response(request, downloads=downloads)

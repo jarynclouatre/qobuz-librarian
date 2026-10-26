@@ -24,9 +24,11 @@
   {# Said once, by the poll, at the moment the work ends. #}
   <span class="ql-refresh-note ql-flash-info" role="status" data-flash>{{ library_refresh_outcome }}</span>
   {% endif %}
-  <form action="/library" method="post" data-busy-submit>
+  <form action="/library" method="post" data-busy-submit data-review-place>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="missing_albums">
+    <input type="hidden" name="tab" value="">
+    <input type="hidden" name="q" value="">
     <button type="submit" class="ql-header-refresh"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
             title="{% if writes_paused %}{{ writes_paused_reason }}{% elif qobuz_ready %}Scan for music added outside the app{% else %}Connect Qobuz before refreshing{% endif %}"
             aria-label="Scan for music added outside the app">
