@@ -31,6 +31,7 @@ from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
     catalog,
     collection_snapshot,
+    discovery,
     generation_state,
     new_releases,
     scan_checkpoint,
@@ -564,6 +565,7 @@ async def _search_artists(query, token):
             })
     except asyncio.TimeoutError:
         error = "Timed out reaching the Qobuz API."
+    artist_results.sort(key=lambda a: not discovery._same_name(a["name"], query))
     return artist_results, error
 
 
@@ -962,10 +964,13 @@ def _search_error(exc, query):
 
 def _search_origin(kind, q):
     """The album or track search an artist page was opened from, which its
-    Search results link goes back to."""
+    Search results link goes back to, or the Discover list, searched for
+    ``q`` when it is set."""
     kind = str(kind or "").strip().lower()
     q = str(q or "").strip()
     if kind in ("album", "track") and q:
+        return {"kind": kind, "q": q}
+    if kind == "discover":
         return {"kind": kind, "q": q}
     return None
 

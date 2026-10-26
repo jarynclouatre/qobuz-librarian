@@ -488,7 +488,9 @@
     <div class="ql-search-context">
       <div class="ql-search-context-main">
         {% if selected_artist %}
-        {% if back.q %}
+        {% if back.kind == 'discover' %}
+        <a href="{% if back.q %}/discover/search?q={{ back.q | urlencode }}{% else %}/discover{% endif %}" class="ql-search-back">&larr; Discover</a>
+        {% elif back.q %}
         <form method="post" action="/search"
               hx-post="/search" hx-target="#search-results" hx-swap="innerHTML"
               class="ql-search-back-form" data-search-artist-id="{{ selected_artist.id }}">
