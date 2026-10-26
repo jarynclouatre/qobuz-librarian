@@ -2,7 +2,7 @@
 # Builds a self-contained virtualenv and the Tailwind CSS bundle. `git`,
 # build-essential, and the Node toolchain live ONLY here, so they never
 # reach the runtime image.
-FROM python:3.14-slim@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151 AS builder
+FROM python:3.14-slim@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8 AS builder
 
 # git: for the pinned streamrip install (git+https). build-essential: some
 # transitive deps compile C extensions if no wheel is available. nodejs/npm:
@@ -62,7 +62,7 @@ RUN npm ci --no-audit --no-fund \
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 # No git, no compilers, no pip caches, just the venv + ffmpeg + tiny helpers.
-FROM python:3.14-slim@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151 AS runtime
+FROM python:3.14-slim@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8 AS runtime
 
 LABEL org.opencontainers.image.title="Qobuz Librarian"
 LABEL org.opencontainers.image.description="Qobuz downloader + library maintenance (CLI + web UI)"
