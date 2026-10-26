@@ -2,6 +2,21 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.5.1] - 2026-10-26
+
+Library reviews that stay where you left them, job pages that say what a run did, and a switch for the reissues Qobuz files under other.
+
+- Releases Qobuz files under other list under **Other releases**, a fourth switch on the Library review, off like the others, and `--include-other` adds them for one run. The next Library refresh says how many albums moved under a switch. An album's own recording is picked over a live, acoustic or demo edition with the same title and year.
+- A Library review keeps its ticks, tab and filter through Back, **Download selected** and refresh, and lists each artist's albums by year. Gap Fill rows list the tracks they download, a one-track grab from Search leaves the rest of its album under Gap Fill, and quick ticks wait their turn to save. The summary leaves out the rename advice, and its upgrade count follows Upgrade's own results.
+- Artist pages open without waiting on lists they never use, an artist whose name matches the search comes first, and an artist opened from Discover goes back to Discover. An artist brought back from Dismissed returns to rebuilt Discover lists.
+- Job pages and History name the albums a run handled and say what a stop left and where it went. Downloads show "track 5 of 9", New releases checks say Checking, a stopped Upgrade or Downsample run shows on its page, **Back up now** says when nothing changed, and History marks track grabs, which **Clear history** clears too.
+- Repair verifies a whole-album re-download of a track with no usable recording ID, and offers a retry after a stop without a new scan. An Upgrade album put back after a hard stop stays ticked, Upgrade leaves out albums shrunk with Downsample, and an Upgrade dismissal keeps the version, such as "Acoustic". A migration run again holds back a second copy of an album.
+- Downsample, Lyrics, Gap Fill and Upgrade leave read-only tracks and folders alone and say so. A backup folder the app can't write is refused when saved, and a backup that runs out of room names the backup folder. Diagnostics lists kept backups with their sizes, Downsample names albums by their tags, and its undo points to Settings → Diagnostics.
+- On a phone, a review group opens with a tap on its arrow, text fields neither zoom nor capitalise, the review's less used buttons sit in a menu, and buttons in a work card stack full width. Search grid tiles line up, every control has the app's focus ring, and in terminal mode greyed buttons say why.
+- A path template with an unmatched brace saves with a warning, clock times end in "UTC" when the machine keeps UTC, and a setup page refused behind a proxy names `FORWARDED_ALLOW_IPS`. The configuration guide says the web UI needs its own host name or port and that Nginx Proxy Manager's Block Common Exploits refuses some searches.
+- In the terminal, the walks offer sibling folders only with `--consolidate` and never group the app's separate editions, a typo or a number outside the list asks again, and Ctrl-C in a menu tool returns to the menu. Messages name host folders and print whole commands, and a full-album download reports its progress about every 10 seconds.
+- The Docker image runs Python 3.14.9 with certifi 2026.10.23, Pillow 13.0.0 and aiohttp 3.14.5, which carry security fixes.
+
 ## [1.5.0] - 2026-10-22
 
 Fuller search results, lighter scans of big libraries, New releases for every artist, lyrics suited to a whole library, and Repair, Migrate and restarts that finish cleanly.
