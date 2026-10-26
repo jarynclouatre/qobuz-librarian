@@ -248,7 +248,10 @@
     {% endif %}
   {% else %}
     {% if job.finished_at %}
-    <p class="ql-job-finished">{{ 'Finished' if job.status.value == 'done' else 'Ended' }} {{ fmt_clock(job.finished_at) }}{% if job.started_at %} · took {{ fmt_elapsed(job.finished_at - job.started_at) }}{% endif %}</p>
+    {# A review that ended unapproved took as long as its sweep, not the time
+       it then sat waiting. #}
+    {% set _swept = (job.execute_args or {}).get('_scan_finished_at') if job.phase == 'scan' else none %}
+    <p class="ql-job-finished">{{ 'Finished' if job.status.value == 'done' else 'Ended' }} {{ fmt_clock(job.finished_at) }}{% if job.started_at %} · took {{ fmt_elapsed((_swept or job.finished_at) - job.started_at) }}{% endif %}</p>
     {% endif %}
     {# A partial run sets both: the summary is what it managed, the error is
        what went wrong. Showing only the error threw away the outcome. #}

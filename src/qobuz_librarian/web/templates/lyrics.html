@@ -27,6 +27,7 @@
       {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% elif lyrics_stopped %}The next scan carries on from where it stopped.{% else %}Last lyrics scan {{ last_run }}{% if lyrics_summary %}: {{ lyrics_summary }}{% else %}.{% endif %}{% endif %}
     </span>
     {% endif %}
+    {% if lyrics_running %}<a href="/jobs/{{ lyrics_running.id }}">Watch progress →</a>{% endif %}
     {% if have_lyrics and not lyrics_running %}
     <span>
       Output: {{ lyrics_format }}. Providers: {{ providers }}.
@@ -36,12 +37,7 @@
   </div>
 
   {% if have_lyrics %}
-  {% if lyrics_running %}
-  <div class="ql-tool-note ql-tool-note-info">
-    <p class="ql-tool-note-title">Lyrics scan running</p>
-    <p>Fetching missing lyrics across your library. <a href="/jobs/{{ lyrics_running.id }}" class="ql-inline-link">Watch progress →</a></p>
-  </div>
-  {% else %}
+  {% if not lyrics_running %}
   {% if lyrics_failed %}
   <div class="ql-tool-note ql-tool-note-warning" role="alert">
     <p class="ql-tool-note-title">Last lyrics scan failed</p>

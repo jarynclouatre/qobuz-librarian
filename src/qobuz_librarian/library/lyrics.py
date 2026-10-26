@@ -10,6 +10,8 @@ Local apart from the provider HTTP; no Qobuz login needed. Honours the
 ``LYRICS_FORMAT`` / ``LYRICS_PROVIDERS`` settings; ``LYRICS_ENABLED`` only
 gates the automatic import-time fetch, so an explicit backfill runs regardless.
 """
+from collections import Counter
+
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations import lyric_fetch
 from qobuz_librarian.library.scanner import (
@@ -70,7 +72,8 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     """Fetch lyrics across the whole library (or a subset of artists).
 
     Returns the fetch engine's outcome counts (``wrote-synced``,
-    ``already-synced``, ``not-found``, …) with a ``total`` of files considered.
+    ``already-synced``, ``not-found``, …) with a ``total`` of files considered
+    and ``had_lyrics``, the tracks it skipped for already carrying lyrics.
     Re-running is cheap: the state file lets each pass skip tracks already
     resolved, and provider-unavailable tracks are re-tried on the next run.
 
@@ -106,13 +109,13 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     # tracks that actually need them, and its progress count reflects real
     # work instead of ticking through thousands of already-lyriced files.
     if not rescan and not dry_run:
-        report_progress("Scanning library lyrics", 0, total, "")
+        report_progress("Scanning library lyrics", 0, total, "", "track")
         indexed = lyric_fetch.index_existing(
             paths, owned_root=cfg.MUSIC_ROOT,
             state_path=cfg.LYRIC_FETCH_STATE_FILE, log=log,
             should_stop=should_stop,
             progress_cb=lambda c, t, name: report_progress(
-                "Scanning library lyrics", c, t, name),
+                "Scanning library lyrics", c, t, name, "track"),
         )
         if indexed.get("stopped"):
             processed = sum(
@@ -127,6 +130,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
                 "unreadable_artists": unreadable,
             }
 
+    skips = Counter()
     counts = lyric_fetch.fetch_for_paths(
         paths,
         owned_root=cfg.MUSIC_ROOT,
@@ -138,11 +142,13 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
         state_path=cfg.LYRIC_FETCH_STATE_FILE,
         log=log,
         should_stop=should_stop,
-        # The job page's chip already says "Fetching lyrics".
         progress_cb=lambda c, t, name, note: report_progress(
-            note[:1].upper() + note[1:] or "Fetching lyrics", c, t, name),
+            " · ".join(filter(None, ("Looking up lyrics", note))),
+            c, t, name, "track"),
+        skips=skips,
     )
     result = dict(counts)
+    result["had_lyrics"] = skips["lyrics"]
     result["unreadable_artists"] = unreadable
     result["total"] = total
     result["processed"] = sum(
@@ -209,12 +215,15 @@ def summarize_lyrics_result(result):
     def count(*outcomes):
         return sum(int(result.get(outcome, 0)) for outcome in outcomes)
 
+    # Tracks the pass skipped because they already carry lyrics, which the
+    # summary counts as having them rather than as checked before.
+    had_lyrics = max(0, int(result.get("had_lyrics", 0)))
     summary = {
         "total": total,
         "processed": processed,
         "stopped": stopped,
         "candidate_total": candidate_total,
-        "already_checked": max(0, total - candidate_total),
+        "already_checked": max(0, total - candidate_total - had_lyrics),
         "unfinished": max(0, candidate_total - processed),
         # Tracks a stop left for NetEase after the other providers found
         # nothing synced for them; the next run looks them up again.
@@ -251,6 +260,7 @@ def summarize_lyrics_result(result):
         )
     )
     summary["other_errors"] = max(0, processed - accounted)
+    summary["already"] += had_lyrics
     summary["failures"] = (
         summary["unsafe"] + summary["unavailable"]
         + summary["errors"] + summary["other_errors"]

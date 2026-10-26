@@ -56,17 +56,16 @@
   <a href="/repair/history">View history</a>
 </div>
 
-{% if repair_resume %}
-<div class="ql-tool-note ql-tool-note-info">
-  <p class="ql-tool-note-title">Scan can resume</p>
-  <p>A repair scan did not finish{% if repair_resume.found %}; it had found {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }}{% endif %}.</p>
-</div>
-{% endif %}
-
 <section class="ql-work-card">
   <div class="ql-work-card-copy">
-    <p class="ql-work-card-title">{% if repair_resume %}Resume repair scan{% else %}Scan for damaged files{% endif %}</p>
+    {% if repair_resume %}
+    {% set _checked = repair_resume.total or repair_resume.saved %}
+    <p class="ql-work-card-title">Resume repair scan</p>
+    <p class="ql-work-card-text">{{ repair_resume.saved }}{% if repair_resume.total %} of {{ repair_resume.total }}{% endif %} artist{{ 's' if _checked != 1 }} checked{% if repair_resume.found %}, {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }} found{% endif %}.</p>
+    {% else %}
+    <p class="ql-work-card-title">Scan for damaged files</p>
     <p class="ql-work-card-text">Scans FLAC files for damage. Damaged tracks are listed for review.</p>
+    {% endif %}
   </div>
   <form action="/repair" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">

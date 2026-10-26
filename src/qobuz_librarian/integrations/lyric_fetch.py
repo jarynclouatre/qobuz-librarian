@@ -2755,6 +2755,7 @@ def fetch_for_paths(
     *,
     owned_root: Path,
     busy_patience: float = BUSY_PATIENCE,
+    skips: Optional[Counter] = None,
 ) -> Counter:
     """
     Run the lyrics pipeline over `paths`. Returns Counter of outcome → n.
@@ -2771,6 +2772,10 @@ def fetch_for_paths(
 
     `progress_cb` gets the tracks done, their total, the track last seen
     and a note of the paced provider being waited on and the time left.
+
+    `skips`, if supplied, counts the tracks the state file lets this pass
+    leave alone: under ``lyrics`` those it records with lyrics, under
+    ``checked`` the rest.
 
     `workers` controls per-file concurrency. Each file's work is dominated
     by network I/O (multi-provider HTTP), which releases the GIL - so
@@ -2791,10 +2796,15 @@ def fetch_for_paths(
 
     paths = [Path(p) for p in paths]
     state = _StateWriter(state_path, log, dry_run=dry_run)
-    candidates = [p for p in paths
-                  if should_process(p, state.get(str(p)), rescan,
-                                    lyrics_format=lyrics_format,
-                                    synced_only=synced_only)]
+    candidates = []
+    for p in paths:
+        st = state.get(str(p))
+        if should_process(p, st, rescan, lyrics_format=lyrics_format,
+                          synced_only=synced_only):
+            candidates.append(p)
+        elif skips is not None:
+            skips["lyrics" if st.status in ("synced", "plain")
+                  else "checked"] += 1
 
     counts: Counter = Counter()
     total = len(candidates)

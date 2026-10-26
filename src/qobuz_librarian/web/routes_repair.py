@@ -10,6 +10,7 @@ from qobuz_librarian.library import scan_checkpoint
 from qobuz_librarian.web import (
     flows,
     job_labels,
+    job_persistence,
     job_runs,
     qobuz_access,
     refusals,
@@ -77,15 +78,24 @@ async def repair_page(request: Request, page: int = 1):
                 for value in bundles.values()
                 if isinstance(value, dict)
             )
+            total = cp["meta"].get("artists_total")
             ctx["repair_resume"] = {
                 "saved": len(bundles),
+                "total": total if type(total) is int else None,
                 "found": found,
             }
-        ctx["last_run"] = job_labels._tool_last_run_age("repair")
+        # The failed or interrupted job shown above is the latest word; a scan
+        # that finished before it started is not news beside it.
+        last_scan = job_persistence.last_finished_at("repair")
+        if last_scan is not None and (
+                rjob is None or last_scan >= (rjob.created_at or 0)):
+            ctx["last_run"] = job_labels._format_age(last_scan)
         latest = max((j for j in job_mgr.registry.all()
                       if j.execute_kind == "repair"),
                      key=lambda j: j.created_at or 0, default=None)
-        if latest is not None and latest.status == job_mgr.JobStatus.DONE:
+        # Only a scan's own outcome; an approved run's would read as the scan's.
+        if (latest is not None and latest.status == job_mgr.JobStatus.DONE
+                and latest.phase == "scan"):
             ctx["last_summary"] = latest.summary
     badge_ack = None
     if (rjob is not None

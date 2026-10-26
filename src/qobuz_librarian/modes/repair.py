@@ -1180,9 +1180,12 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         log.info(fmt(C.BOLD + C.WHITE,
             f"  {artist_name} - {truncate(album_dir.name, 50)}"))
 
+    damaged = len(verified_truncated) + sum(
+        bool(x.get("diagnostic"))
+        for x in (*isrc_no_match, *no_isrc_tag, *isrc_mismatch))
     log.info(fmt(C.GRAY,
         f"  {verified_ok} complete  ·  "
-        f"{len(verified_truncated)} damaged  ·  "
+        f"{damaged} damaged  ·  "
         f"{len(isrc_no_match)} recording ID not on Qobuz  ·  "
         f"{len(no_isrc_tag)} no recording ID  ·  "
         f"{len(isrc_mismatch)} recording or edition not confirmed"))
@@ -1382,9 +1385,11 @@ def _all_library_album_dirs(*, on_artist_error=None):
     return pairs
 
 
-def _report_repair_run(tally, started, *, interrupted=False, clause=None):
-    """Give a finished terminal Repair its History card and hook report."""
-    parts = [f"{plural(count, 'album')} {what}" for count, what in (
+def _report_repair_run(tally, started, *, interrupted=False, clause=None,
+                       album=None):
+    """Give a finished terminal Repair its History card and hook report.
+    ``album`` names the one album a single-album run worked on."""
+    parts = [f"{album or plural(count, 'album')} {what}" for count, what in (
         (tally.get("repaired", 0), "repaired"),
         (tally.get("attention", 0), "did not finish cleanly"),
         (tally.get("failed", 0), "failed"),
@@ -1392,10 +1397,11 @@ def _report_repair_run(tally, started, *, interrupted=False, clause=None):
     ) if count]
     summary = ("Stopped early. " if interrupted else "") + (
         f"{', '.join(parts)}." if parts else "No damaged tracks found.")
-    if tally.get("unmatched"):
-        summary += (f" {plural(tally['unmatched'], 'track')} couldn't be "
-                    "matched to a Qobuz recording, so their length wasn't "
-                    "checked.")
+    unmatched = tally.get("unmatched")
+    if unmatched:
+        summary += (f" {plural(unmatched, 'track')} couldn't be matched to a "
+                    f"Qobuz recording, so {'its' if unmatched == 1 else 'their'} "
+                    "length wasn't checked.")
     if tally.get("cd_quality"):
         summary += f" {cd_quality_note(tally['cd_quality'])}"
     failed = tally.get("failed", 0)
@@ -1559,11 +1565,12 @@ def run_album_repair_mode(args, token, *, loop=False):
                 )
             except AuthLost as exc:
                 die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
-            if status in {"repaired", "attention", "failed", "recovery"}:
+            if (status in {"repaired", "attention", "failed", "recovery"}
+                    and not getattr(args, "dry_run", False)):
                 _report_repair_run({status: 1, **single}, started, clause={
                     "attention": "the album did not finish cleanly",
                     "recovery": "the album kept a recovery backup",
-                }.get(status))
+                }.get(status), album=f"{artist_dir.name} · {album_dir.name}")
 
             if not loop:
                 needs_attention = status in {"attention", "failed", "recovery"}

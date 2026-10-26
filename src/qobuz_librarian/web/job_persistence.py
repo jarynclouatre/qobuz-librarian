@@ -2256,10 +2256,12 @@ def recovery_history(*, attention_only: bool = False,
 
 def last_finished_at(execute_kind: str) -> Optional[float]:
     """When a job of this ``execute_kind`` last finished cleanly, or None. Backs
-    the per-tool "Last scan …" freshness line. Only DONE counts (a failed/cancelled
-    run isn't a completed pass), and the archive outlives the in-memory cap, so the
-    line survives restarts. Reads the durable jobs.db rather than a separate stamp
-    file so there's nothing extra to keep in sync."""
+    the per-tool "Last scan …" freshness line. A failed/cancelled run isn't a
+    completed pass, but a scan that saved when its sweep finished
+    (``_scan_finished_at``) counts from then, whatever became of its review.
+    The archive outlives the in-memory cap, so the line survives restarts.
+    Reads the durable jobs.db rather than a separate stamp file so there's
+    nothing extra to keep in sync."""
     if not execute_kind:
         return None
     with _lock:
@@ -2268,13 +2270,35 @@ def last_finished_at(execute_kind: str) -> Optional[float]:
             return None
         try:
             row = conn.execute(
-                "SELECT MAX(finished_at) FROM jobs "
-                "WHERE status='done' AND execute_kind=? AND finished_at IS NOT NULL",
+                "SELECT MAX(COALESCE("
+                " CASE WHEN json_valid(execute_args) THEN"
+                "  json_extract(execute_args, '$._scan_finished_at') END,"
+                " CASE WHEN status='done' THEN finished_at END)) "
+                "FROM jobs WHERE execute_kind=?",
                 (execute_kind,),
             ).fetchone()
         except sqlite3.Error:
             return None
     return _decode_timestamp(row[0]) if row else None
+
+
+def settle_summaries(execute_kind: str, stale: str, settled: str) -> int:
+    """Replace the summary ``stale`` on this kind's cancelled jobs with
+    ``settled``, for a line that no longer holds."""
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            return 0
+        try:
+            with conn:
+                return conn.execute(
+                    "UPDATE jobs SET summary=? WHERE status='canceled' "
+                    "AND execute_kind=? AND summary=?",
+                    (settled, execute_kind, stale),
+                ).rowcount
+        except sqlite3.Error as exc:
+            _note_write_failure("settle summaries", exc)
+            return 0
 
 
 def acknowledge_listed_attention(job_ids) -> int:

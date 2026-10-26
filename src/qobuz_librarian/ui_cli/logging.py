@@ -103,10 +103,10 @@ def set_progress_reporter(fn):
     _progress_reporter = fn
 
 
-def report_progress(phase, current=0, total=0, item=""):
+def report_progress(phase, current=0, total=0, item="", unit=""):
     if _progress_reporter is not None:
         try:
-            _progress_reporter(phase, current, total, item)
+            _progress_reporter(phase, current, total, item, unit)
         except Exception:
             pass
 

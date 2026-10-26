@@ -183,10 +183,10 @@ api_client.set_stop_check(_current_scan_cancel_requested)
 set_thread_wrapper(_propagate_job_to_thread)
 
 
-def _report_progress_to_current_job(phase, current, total, item):
+def _report_progress_to_current_job(phase, current, total, item, unit=""):
     j = getattr(_TLS, "current_job", None)
     if j is not None:
-        j.push_progress(phase, current, total, item)
+        j.push_progress(phase, current, total, item, unit=unit)
 
 
 set_progress_reporter(_report_progress_to_current_job)
@@ -2740,6 +2740,23 @@ _RUN_DONE_VERBS = {
 }
 
 
+_REPAIR_RESUME_NOTE = ("Start the repair scan again and it continues "
+                       "from where it left off.")
+
+
+def settle_repair_resume_notes() -> None:
+    """Drop the resume line from repair scans a restart cut short, once a
+    later scan has finished or dropped their saved progress."""
+    restart = job_persistence.RESTART_INTERRUPTED
+    stale = f"{restart} {_REPAIR_RESUME_NOTE}"
+    for j in registry.all():
+        with j._lock:
+            if (j.execute_kind == "repair" and j.status is JobStatus.CANCELED
+                    and j.summary == stale):
+                j.summary = restart
+    job_persistence.settle_summaries("repair", stale, restart)
+
+
 def _interrupted_scan_summary(job: Job) -> str:
     """What a scan cut short by a restart says it left behind. A library or
     whole-library repair scan keeps its progress in a checkpoint; every other
@@ -2753,8 +2770,7 @@ def _interrupted_scan_summary(job: Job) -> str:
     if job.execute_kind == "repair":
         if scan_checkpoint.load("repair") is None:
             return restart + "Start the scan again from the Repair page."
-        return (restart + "Start the repair scan again and it continues "
-                "from where it left off.")
+        return restart + _REPAIR_RESUME_NOTE
     if job.execute_kind == "downsample":
         return restart + "Start it again from Downsample."
     if job.execute_kind == "new_releases":

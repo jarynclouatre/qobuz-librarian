@@ -4486,12 +4486,13 @@ def _scan_repair_artist(artist_dir, token, job, beat=None):
 
 
 def _repair_item(artist, albums, flagged):
-    """One consistent live-status line for the whole-library repair sweep."""
+    """One consistent live-status line for the whole-library repair sweep.
+    The counts are the whole sweep's so far, the artist the one it is on."""
     if not artist and not albums:
         return "Starting…"
-    who = artist or "your library"
     albums_word = "album" if albums == 1 else "albums"
-    return f"{who} · {albums:,} {albums_word} checked · {flagged:,} flagged"
+    item = f"{albums:,} {albums_word} checked · {flagged:,} flagged"
+    return f"{item} · now {artist}" if artist else item
 
 
 def _emit_repair_heartbeat(beat, job, artist_name):
@@ -4637,6 +4638,7 @@ def _scan_repairs_impl(job, token, checkpoint):
             artists=repair_bundles,
             meta={
                 "repair_checkpoint_version": _REPAIR_CHECKPOINT_VERSION,
+                "artists_total": n,
             },
         )
         if force and saved is not False:
@@ -4688,6 +4690,8 @@ def _scan_repairs_impl(job, token, checkpoint):
                     )
                     job.summary += warning
                     warn_checkpoint(warning.strip())
+                else:
+                    job_mgr.settle_repair_resume_notes()
                 return
             done += 1
             try:
@@ -4756,7 +4760,8 @@ def _scan_repairs_impl(job, token, checkpoint):
         n_linked_artists)
     unmatched = (
         f" {plural(n_unmatched, 'track')} couldn't be matched to a Qobuz "
-        "recording, so their length wasn't checked."
+        f"recording, so {'its' if n_unmatched == 1 else 'their'} length "
+        "wasn't checked."
         if n_unmatched else "")
     if total:
         job.summary = (f"{plural(total, 'album')} flagged with damaged files. "
@@ -4782,8 +4787,13 @@ def _scan_repairs_impl(job, token, checkpoint):
         )
     if n_failed_artists and not total:
         _mark_job_failed(job)
-    elif n_failed_artists or n_failed_albums or n_unverified:
-        job.attention = "unchecked"
+    else:
+        # Kept through approval and discard, for "Last repair scan" and the
+        # time the sweep took.
+        job.execute_args["_scan_finished_at"] = time.time()
+        if n_failed_artists or n_failed_albums or n_unverified:
+            job.attention = "unchecked"
+    job_mgr.settle_repair_resume_notes()
     log.info(job.summary)
 
 
