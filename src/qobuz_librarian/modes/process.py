@@ -2290,7 +2290,8 @@ def process_album(album, args, *, allow_force=True, label=None,
             post_dir = find_album_dir_filesystem(album)
         if post_dir:
             if resampled_n > 0:
-                mark_local_album_capped(post_dir, qobuz_album=album)
+                mark_local_album_capped(post_dir, qobuz_album=album,
+                                        origin="auto")
             # Materialise .lrc sidecars next to the final renamed files
             # (no-op unless LYRICS_FORMAT is sidecar/both).
             try:

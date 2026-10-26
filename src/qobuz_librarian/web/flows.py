@@ -4089,6 +4089,7 @@ def execute_downsamples(
                                      base_dir=album_dir, log=log.info,
                                      keep_originals=keep_originals,
                                      cancel_check=lambda: job.cancel_requested)
+                quality_decision.seal_local_album_cap(album_dir)
         except CandidateStale as e:
             log.info(f"  skipped: {e}")
             skipped_changed += 1

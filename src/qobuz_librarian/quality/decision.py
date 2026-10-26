@@ -309,10 +309,52 @@ def _local_album_cap_key(album_dir):
     return f"local:{digest}"
 
 
-def is_local_album_capped(album_dir, capped, album=None):
+def _album_audio_signature(album_dir):
+    """A digest of the album's FLAC audio, which tag and lyric edits leave
+    alone, or "" when there is none to read."""
+    from mutagen import MutagenError
+    from mutagen.flac import FLAC
+
+    streams = []
+    try:
+        paths = [p for p in Path(album_dir).rglob("*")
+                 if p.suffix.lower() == ".flac" and p.is_file()]
+        for path in paths:
+            info = FLAC(path).info
+            streams.append(f"{info.md5_signature:032x}:{info.sample_rate}:"
+                           f"{info.bits_per_sample}:{info.total_samples}")
+    except (OSError, MutagenError):
+        return ""
+    if not streams:
+        return ""
+    return hashlib.sha256("\n".join(sorted(streams)).encode()).hexdigest()
+
+
+def is_local_album_capped(album_dir, capped, album=None, *, auto_caps=True):
+    """Whether a local cap keeps ``album_dir`` out of Upgrade.
+
+    A cap the user made with Downsample holds until the album's audio
+    changes, and one written by downsampling a download only while
+    ``auto_caps`` (Downsample new hi-res downloads) is on. A cap saved before
+    caps recorded their origin counts as the user's.
+    """
     capped = capped or {}
+    current = []
+
+    def holds(entry):
+        if not isinstance(entry, dict):
+            return True
+        if entry.get("origin") == "auto":
+            return auto_caps
+        sealed = entry.get("audio")
+        if not sealed:
+            return True
+        if not current:
+            current.append(_album_audio_signature(album_dir))
+        return not current[0] or current[0] == sealed
+
     key = _local_album_cap_key(album_dir)
-    if key and key in capped:
+    if key and key in capped and holds(capped[key]):
         return True
     # Path-independent fallback: a folder move / rename / migrate /
     # consolidate changes the path-derived key, but it's the same album the
@@ -328,10 +370,11 @@ def is_local_album_capped(album_dir, capped, album=None):
         for v in capped.values():
             if not isinstance(v, dict) or v.get("scope") != "local_album":
                 continue
-            if aid and str(v.get("qobuz_album_id") or "") == aid:
+            if aid and str(v.get("qobuz_album_id") or "") == aid and holds(v):
                 return True
             if fp and hidden_mod.album_fingerprint(
-                    v.get("artist") or "", v.get("title") or "") == fp:
+                    v.get("artist") or "", v.get("title") or "") == fp \
+                    and holds(v):
                 return True
     return False
 
@@ -407,21 +450,42 @@ def _mark_album_capped_locked(album_id, qobuz_album, post_qual):
     return save_capped(capped)
 
 
-def mark_local_album_capped(album_dir, qobuz_album=None, post_qual=None):
+def mark_local_album_capped(album_dir, qobuz_album=None, post_qual=None, *,
+                            origin="manual"):
+    """Keep a downsampled album out of Upgrade. ``origin`` is "manual" for
+    Downsample and "auto" for a download downsampled as it arrived."""
     key = _local_album_cap_key(album_dir)
     if not key:
         return False
     with _capped_lock, state_file.store_lock(cfg.CAPPED_FILE):
         return _mark_local_album_capped_locked(
-            key, album_dir, qobuz_album, post_qual)
+            key, album_dir, qobuz_album, post_qual, origin)
 
 
-def _mark_local_album_capped_locked(key, album_dir, qobuz_album, post_qual):
+def seal_local_album_cap(album_dir):
+    """Record the audio a Downsample left in ``album_dir``, so its cap ends
+    when that audio is replaced."""
+    key = _local_album_cap_key(album_dir)
+    signature = _album_audio_signature(album_dir) if key else ""
+    if not signature:
+        return False
+    with _capped_lock, state_file.store_lock(cfg.CAPPED_FILE):
+        capped = load_capped()
+        entry = capped.get(key)
+        if not isinstance(entry, dict):
+            return False
+        entry["audio"] = signature
+        return save_capped(capped)
+
+
+def _mark_local_album_capped_locked(key, album_dir, qobuz_album, post_qual,
+                                    origin):
     album_path = Path(album_dir)
     post_qual = post_qual or {}
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "scope": "local_album",
+        "origin": origin,
         "album_dir": str(album_path),
         "title": album_path.name,
         "artist": album_path.parent.name,
@@ -532,10 +596,11 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
         if qobuz_album is None or not is_lossless_album(qobuz_album):
             continue
 
-        # Skip albums Qobuz can't actually deliver at target. One the user
-        # downsampled is offered again once Downsample is off.
-        if (capped and downsampling()
-                and is_local_album_capped(album_dir, capped, qobuz_album)):
+        # Skip albums Qobuz can't actually deliver at target, and ones the user
+        # downsampled. One downsampled as it downloaded is offered again once
+        # Downsample new hi-res downloads is off.
+        if capped and is_local_album_capped(
+                album_dir, capped, qobuz_album, auto_caps=downsampling()):
             vlog(f"    {album_dir.name}: capped (locally downsampled)")
             continue
         if capped and is_album_capped(qobuz_album.get("id"), capped):

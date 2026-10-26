@@ -64,7 +64,8 @@ def test_upgrade_scan_leaves_downsampled_albums_alone_while_downsample_is_on(
     album's Qobuz rating hid nothing, and with Downsample on every download
     of it would be downsampled again. While Downsample is on, a file is held
     to what a download keeps after it; once it is off, to the full quality,
-    and an album downsampled earlier is offered again."""
+    and an album downsampled as it downloaded is offered again. One the user
+    shrank with Downsample stays out either way."""
     from qobuz_librarian import config as cfg
     from qobuz_librarian.library import discovery
     from qobuz_librarian.quality import decision
@@ -92,7 +93,7 @@ def test_upgrade_scan_leaves_downsampled_albums_alone_while_downsample_is_on(
     assert decision.compare_album_quality([kept], master)["classification"] == "all_equal"
     assert decision.compare_album_quality([cd], master)["classification"] == "all_lower"
 
-    decision.mark_local_album_capped(album_dir)
+    decision.mark_local_album_capped(album_dir, origin="auto")
     monkeypatch.setattr(decision, "list_artist_album_dirs",
                         lambda _artist_dir: [album_dir])
     monkeypatch.setattr(discovery, "_resolve_cache", {})
@@ -123,6 +124,11 @@ def test_upgrade_scan_leaves_downsampled_albums_alone_while_downsample_is_on(
             "Artist", artist_dir, "tok",
             type("Args", (), {"prefer_hires": True, "no_upgrade": False})(),
             capped=decision.load_capped())
+    decision.mark_local_album_capped(album_dir)
+    assert decision.scan_artist_for_upgrades(
+        "Artist", artist_dir, "tok",
+        type("Args", (), {"prefer_hires": True, "no_upgrade": False})(),
+        capped=decision.load_capped()) == []
 
 
 def test_upgrade_scan_offers_only_the_edition_on_disk(tmp_path, monkeypatch):

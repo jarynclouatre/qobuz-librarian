@@ -1104,7 +1104,8 @@ def _resolve_queue_item(
     if had_any_success:
         if post_dir:
             if item.get("resampled_n", 0) > 0:
-                mark_local_album_capped(post_dir, qobuz_album=item["album"])
+                mark_local_album_capped(post_dir, qobuz_album=item["album"],
+                                        origin="auto")
         # A sibling is only eligible for retirement after a clean, complete
         # replacement. Bind each move to its pre-download receipt, carry its
         # unique companion files without overwrite, then retire only the exact

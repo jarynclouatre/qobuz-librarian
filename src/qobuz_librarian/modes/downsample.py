@@ -22,7 +22,10 @@ from qobuz_librarian.library import downsample_state, generation_state
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library.scanner import clear_scan_caches, list_library_artists
 from qobuz_librarian.quality import upgrade_state
-from qobuz_librarian.quality.decision import mark_local_album_capped
+from qobuz_librarian.quality.decision import (
+    mark_local_album_capped,
+    seal_local_album_cap,
+)
 from qobuz_librarian.ui_cli.colors import (
     C,
     banner,
@@ -286,6 +289,7 @@ def run_downsample_walk_mode(args):
                     state_refresh_warnings += 1
                 n_attempted += 1
                 res, stopped = _downsample_album(c.album_dir, keep_originals)
+                seal_local_album_cap(c.album_dir)
                 if res.get("resampled"):
                     n_albums_done += 1
                 total_saved += res.get("saved_bytes", 0)
