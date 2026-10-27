@@ -295,11 +295,18 @@ class ArtistScanStore:
         return f"saved {self.surface} view needs refresh"
 
     def update_artist(self, artist_dir, scan, *, load, write_state):
-        """Scan one artist again and merge it into the saved snapshot. Rows
-        found under another quality policy keep no fingerprint, so the
-        folder is checked again once the policy returns."""
+        """Scan one artist again and merge it into the saved snapshot. A
+        snapshot saved under another quality policy is left for a refresh:
+        rows found now would pass as current once the policy returns. Rows
+        found while the policy changed mid-scan keep no fingerprint, so the
+        folder is checked again."""
         name = artist_dir.name
         policy = self.quality_signature() if self.quality_signature else ""
+        if (self.quality_signature is not None
+                and load().get("quality_signature") != policy):
+            return RefreshResult(
+                [], [name], {name: "saved under another quality setting"},
+                False, {})
         fingerprints = {}
         try:
             fingerprints[name] = artist_fingerprint(artist_dir)

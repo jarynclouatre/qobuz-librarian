@@ -63,22 +63,19 @@ def test_update_artist_replaces_only_that_artists_upgrade_candidates(
     ]
     assert state["artists_scanned"] == ["Artist", "Other Artist"]
 
-    # Rows found under another quality setting are not reused once the
-    # setting returns to the one the saved results were made under.
+    # An album downloaded under another quality setting leaves the saved
+    # results for a refresh, so CD-quality rows can't pass as current once
+    # the setting returns.
     monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 4)
     upgrade_state.save(upgrade_state.refresh_for_artists(
         [artist_dir], token="tok", args=SimpleNamespace(), capped={},
         scan_artist=lambda _ad: [_upgrade_candidate(title="Hi-res Album")],
         persist=False))
     monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 2)
-    upgrade_state.update_artist(
+    result = upgrade_state.update_artist(
         artist_dir, token="tok", args=SimpleNamespace(), capped={},
         scan_artist=lambda _ad: [])
-    monkeypatch.setattr(cfg, "STREAMRIP_QUALITY", 4)
-    upgrade_state.save(upgrade_state.refresh_for_artists(
-        [artist_dir], token="tok", args=SimpleNamespace(), capped={},
-        scan_artist=lambda _ad: [_upgrade_candidate(title="Hi-res Album")],
-        skip_unchanged=True, persist=False))
+    assert result.complete is False
     assert [c["title"] for c in upgrade_state.load()["candidates"]] == [
         "Hi-res Album"]
 
