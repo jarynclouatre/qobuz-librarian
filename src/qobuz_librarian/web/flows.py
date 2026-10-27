@@ -679,12 +679,14 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         updated = 0
         removed = 0
         # A ticked row stays whatever the refresh makes of it, unless the
-        # scan found the album on disk. The log names the ticked ones that
-        # left, says once which ones it no longer offers (then marks them)
-        # and how many moved under a switch that is off. A kept missing album
-        # takes the seal of its artist folder as the refresh read it, so its
-        # pick is not refused for a change the refresh has already looked at.
+        # scan found the album on disk or its folder is gone. The log names
+        # the ticked ones that left, says once which ones it no longer offers
+        # (then marks them) and how many moved under a switch that is off. A
+        # kept missing album takes the seal of its artist folder as the
+        # refresh read it, so its pick is not refused for a change the
+        # refresh has already looked at.
         in_library = []
+        gone = []
         unoffered = []
         moved = {}
         switched_off = {}
@@ -702,6 +704,8 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
             if fresh is None and drop_gone and _folder_gone(c):
                 if listed(c):
                     removed += 1
+                if c.get("selected"):
+                    gone.append(c)
                 continue
             if fresh is None and covered and _scan_would_offer(c, covered):
                 album_id = str((c.get("payload") or {}).get("album_id") or "")
@@ -843,6 +847,12 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                 f"{plural(n, 'ticked album')} {'is' if n == 1 else 'are'} "
                 f"now in the library and left the review: "
                 f"{named_albums(in_library)}.")
+        if gone:
+            n = len(gone)
+            notes.append(
+                f"{plural(n, 'ticked album')} left the review because "
+                f"{'its folder is' if n == 1 else 'their folders are'} no "
+                f"longer in the library: {named_albums(gone)}.")
         if unoffered:
             n = len(unoffered)
             notes.append(
@@ -2568,7 +2578,13 @@ def _scan_library_impl(
         elif (scanned or job.candidates or baseline_seen
                 or unreadable_artists):
             checkpoint.save(scanned, baseline_seen, state_artists)
-    if job.cancel_requested:
+    if job.cancel_requested and any(
+            other.execute_kind == "library" and other is not job
+            for other in job_mgr.registry.awaiting_review()):
+        # Its count holds the rows carried over from the saved scan, and a
+        # stopped refresh folds none of it in.
+        job.summary = "Stopped early. The open Library review is unchanged."
+    elif job.cancel_requested:
         job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
                        if total else "Stopped before anything turned up.")
     elif total:
@@ -2674,8 +2690,9 @@ def _scan_library_impl(
 
 
 def _offered_upgrades():
-    return {((c.get("payload") or {}).get("album_id"),
-             (c.get("payload") or {}).get("album_dir"))
+    # By Qobuz album, so a folder renamed outside the app is not a new find.
+    return {(c.get("payload") or {}).get("album_id")
+            or (c.get("payload") or {}).get("album_dir")
             for c in upgrade_state.visible_candidates()}
 
 

@@ -3652,7 +3652,7 @@ def test_refresh_folds_into_parked_library_review(monkeypatch, tmp_path):
                 for c in parked.candidates] == [
             ("al1", True), ("gap1", True), ("ma1", False), ("al4", True)]
         assert parked.candidates[-1]["payload"]["_premise"] == {"seal": "fresh"}
-        assert rescan.log_lines[:-1] == parked.log_lines[-2:]
+        assert rescan.log_lines[:-1] == parked.log_lines[-3:]
     finally:
         _remove_job(parked)
         _remove_job(scan)
