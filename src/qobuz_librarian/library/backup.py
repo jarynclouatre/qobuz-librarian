@@ -4053,6 +4053,7 @@ def list_undo_copies():
     try:
         for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
             if (entry.is_dir() and not is_disposal_leftover(entry)
+                    and not entry.name.startswith(_PARTIAL_COPY_PREFIX)
                     and (entry / _REAP_AFTER_RETENTION_SENTINEL).is_file()):
                 out.append((
                     entry,
@@ -4225,7 +4226,7 @@ def stash_downsample_originals(files, album_dir):
     a failed copy downgrades that file to "skipped", never to "unprotected".
     Each copy is content-verified (sha256) before it counts, because the undo
     path later trusts these bytes with an overwrite. A stop part way deletes
-    the copies made so far."""
+    the copies made so far; after a hard stop the next start does."""
     files = [Path(f) for f in files]
     if not files:
         return None, set(), {}
@@ -4241,22 +4242,26 @@ def stash_downsample_originals(files, album_dir):
             "  ⚠  Couldn't bind the album's real no-follow path; leaving "
             "every file untouched."))
         return None, set(), {}
-    bp = None
+    partial = None
     try:
         cfg.UPGRADE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         bp = Path(os.path.abspath(os.fspath(cfg.UPGRADE_BACKUP_DIR))) / (
             _backup_dir_name(public, kind="downsample"))
-        os.mkdir(bp)
+        # Copied under a temporary name, so a hard stop leaves an unfinished
+        # copy the next start clears, not a backup without a record.
+        folder = bp.with_name(_PARTIAL_COPY_PREFIX + bp.name)
+        os.mkdir(folder)
+        partial = folder
         fsync_dir(bp.parent, strict=True)
-        if not _write_backup_origin(bp, public):
+        if not _write_backup_origin(partial, public):
             raise OSError("its origin could not be recorded")
     except OSError as exc:
         log.info(fmt(
             C.YELLOW,
             f"  ⚠  Couldn't create the keep-originals dir ({exc}); "
             "leaving every file untouched."))
-        if bp is not None and os.path.lexists(bp):
-            delete_tree_verified(bp, snapshot_tree(bp) or {})
+        if partial is not None:
+            delete_tree_verified(partial, snapshot_tree(partial) or {})
         return None, set(), {}
 
     copied = set()
@@ -4276,7 +4281,7 @@ def stash_downsample_originals(files, album_dir):
                     "will be left untouched."))
                 continue
             source = rooted[0]
-            target = bp.joinpath(*rooted[2])
+            target = partial.joinpath(*rooted[2])
             try:
                 descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW
                                      | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -4301,9 +4306,9 @@ def stash_downsample_originals(files, album_dir):
             receipts[source_path] = receipt
             payload["/".join(rooted[2])] = (receipt["size"], receipt["sha256"])
         if not copied:
-            delete_tree_verified(bp, snapshot_tree(bp) or {})
+            delete_tree_verified(partial, snapshot_tree(partial) or {})
             return None, set(), {}
-        folder_fd = _open_backup_directory(bp)
+        folder_fd = _open_backup_directory(partial)
         try:
             if not _write_text_noreplace_at(
                 folder_fd,
@@ -4315,12 +4320,16 @@ def stash_downsample_originals(files, album_dir):
                 vlog("couldn't mark the undo copy age-reapable")
             result = _seal_backup_result(
                 bp, folder_fd, public, kind="downsample", complete=True,
-                requested=len(copied), backed_up=len(copied))
+                requested=len(copied), backed_up=len(copied), folder=partial)
         finally:
             os.close(folder_fd)
+        _rename_noreplace_at(AT_FDCWD, partial, AT_FDCWD, bp)
+        partial = None
+        fsync_dir(bp.parent, strict=True)
     except BaseException:
         # Only copies were made, and no original has been rewritten yet.
-        delete_tree_verified(bp, snapshot_tree(bp) or {})
+        if partial is not None:
+            delete_tree_verified(partial, snapshot_tree(partial) or {})
         raise
     if not result.complete:
         log.info(fmt(
@@ -5457,26 +5466,32 @@ def put_back_interrupted_backups():
 
 def _clear_unfinished_track_copies():
     """Delete the unfinished copy a stop left of tracks being set aside for
-    a Gap Fill, a Repair or a consolidation while every track in it is
-    still in its album with the same bytes. No track leaves its album
-    before its copy is finished, so such a copy holds only duplicates. One
-    whose album no longer holds them all stays, and Diagnostics lists it."""
+    a Gap Fill, a Repair or a consolidation, or kept before a Downsample,
+    while every track in it is still in its album with the same bytes. No
+    track leaves its album or is rewritten before its copy is finished, so
+    such a copy holds only duplicates. One whose album no longer holds them
+    all stays, and Diagnostics lists it."""
     try:
         names = sorted(os.listdir(cfg.UPGRADE_BACKUP_DIR))
     except OSError:
         return
     for name in names:
-        if not re.match(re.escape(_PARTIAL_COPY_PREFIX)
-                        + r"\d{8}_\d{6}_\d{6}_(?:gapfill|repair)_", name):
-            continue
         partial = cfg.UPGRADE_BACKUP_DIR / name
+        if not re.match(re.escape(_PARTIAL_COPY_PREFIX) + r"\d{8}_\d{6}_\d{6}_"
+                        r"(?:gapfill|repair|downsample)_", name) and not (
+                # Version 1.5.1 and earlier copied a Downsample's originals
+                # under the backup's own name, recorded only once complete.
+                re.match(r"\d{8}_\d{6}_\d{6}_downsample_", name)
+                and not os.path.lexists(partial / _RECEIPT_SIDECAR)):
+            continue
         copied = _plain_tree(partial)
         if copied is None:
             continue
         tracks = {
             relative: value[3] for relative, value in copied.items()
             if stat.S_ISREG(value[2])
-            and relative not in (_ORIGIN_SIDECAR, _RECEIPT_SIDECAR)
+            and relative not in (_ORIGIN_SIDECAR, _RECEIPT_SIDECAR,
+                                 _REAP_AFTER_RETENTION_SENTINEL)
             and not _COPY_TEMP.fullmatch(os.path.basename(relative))
         }
         origin = _read_backup_origin(partial)

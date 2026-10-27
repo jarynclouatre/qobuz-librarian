@@ -1422,3 +1422,40 @@ def test_downsample_stash_marks_the_undo_window_that_release_requires(
     assert (carried.path / "01.flac").read_bytes() == b"HIRES-1"
 
 
+def test_a_hard_stop_while_downsample_copies_originals_is_cleared_on_restart(
+        tmp_path, monkeypatch):
+    """Nothing is rewritten before the copy is sealed, so what a kill leaves
+    of it is duplicates, cleared at the next start, not a backup Diagnostics
+    lists with no record to restore from."""
+    from qobuz_librarian.library import backup as bk
+    monkeypatch.setattr("qobuz_librarian.config.UPGRADE_BACKUP_DIR", tmp_path / "bk")
+    monkeypatch.setattr("qobuz_librarian.config.MUSIC_ROOT", tmp_path)
+    album = tmp_path / "music" / "A" / "Album (2020)"
+    album.mkdir(parents=True)
+    tracks = [album / f"0{n}.flac" for n in (1, 2, 3)]
+    for track in tracks:
+        track.write_bytes(track.name.encode() * 1000)
+
+    child = os.fork()
+    if child == 0:
+        try:
+            real = bk.copy_file
+
+            def copy_then_die(source, target, **kwargs):
+                if source == tracks[1]:
+                    os._exit(77)
+                return real(source, target, **kwargs)
+
+            bk.copy_file = copy_then_die
+            bk.stash_downsample_originals(tracks, album)
+        except BaseException:
+            os._exit(91)
+        os._exit(92)
+    _pid, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 77
+    assert bk.list_retained_backups() == []
+
+    bk.put_back_interrupted_backups()
+    assert os.listdir(tmp_path / "bk") == []
+    assert [t.read_bytes() for t in tracks] == [
+        t.name.encode() * 1000 for t in tracks]
