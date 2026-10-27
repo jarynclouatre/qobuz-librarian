@@ -1381,20 +1381,64 @@ def prune_library_review_candidates(album, keep=None):
     album_id = str((album or {}).get("id") or "")
     if not album_id:
         return 0
+    return _prune_reviews(
+        ("library", "new_releases", "collection_restore"),
+        lambda c: (str((c.get("payload") or {}).get("album_id") or "")
+                   == album_id and not (keep is not None and keep(c))))
+
+
+def drop_owned_new_releases(job):
+    """Take the albums a Library scan found on disk out of the New releases
+    review, as the scan takes them out of the Library review: a new release
+    copied in from outside is owned as much as one downloaded here."""
+    coverage = job.scan_coverage
+    if job.cancel_requested or not coverage or not coverage[2]:
+        return 0
+    on_disk = coverage[2]
+    return _prune_reviews(
+        ("new_releases",),
+        lambda c: str((c.get("payload") or {}).get("album_id") or "")
+        in on_disk)
+
+
+def _drop_dismissed_elsewhere(job, dismissed):
+    """The Library review and the New releases review share one Dismissed
+    list, so an album dismissed in one leaves the other too, unless it is
+    ticked there."""
+    fingerprints = {hidden_mod.album_fingerprint(artist, title)
+                    for artist, title, _year in dismissed}
+    fingerprints.discard(None)
+    if not fingerprints:
+        return 0
+    store = hidden_mod.load()
+
+    def gone(c):
+        artist, title = c.get("artist"), c.get("title")
+        return (not c.get("selected")
+                and hidden_mod.album_fingerprint(artist, title) in fingerprints
+                and hidden_mod.is_hidden(
+                    hidden_mod.SCOPE_MISSING, artist, title, store,
+                    year=(c.get("payload") or {}).get("year")))
+
+    other = "new_releases" if job.execute_kind == "library" else "library"
+    return _prune_reviews((other,), gone, exclude=job)
+
+
+def _prune_reviews(kinds, gone, exclude=None):
+    """Drop the rows ``gone`` accepts from every parked or still-scanning
+    review of ``kinds`` but ``exclude``. Returns how many rows left."""
     dropped = 0
     states = (job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.SCANNING)
     for job in job_mgr.registry.all():
-        if (getattr(job, "execute_kind", "") not in (
-                "library", "new_releases", "collection_restore")
+        if (job is exclude
+                or getattr(job, "execute_kind", "") not in kinds
                 or job.status not in states):
             continue
         try:
             def _drop():
                 if job.status not in states:
                     return 0
-                kept = [c for c in job.candidates
-                        if str((c.get("payload") or {}).get("album_id") or "")
-                        != album_id or (keep is not None and keep(c))]
+                kept = [c for c in job.candidates if not gone(c)]
                 n = len(job.candidates) - len(kept)
                 if not n:
                     return 0
@@ -1411,8 +1455,8 @@ def prune_library_review_candidates(album, keep=None):
             job.notify_review_changed()
             job_mgr.finalize_review_if_empty(job)
         except Exception as e:
-            # Pruning is housekeeping on the side of a successful download,
-            # never let it turn that success into a failure.
+            # Pruning is housekeeping on the side of a download, dismissal or
+            # scan that succeeded, never let it turn that into a failure.
             log.info(f"  couldn't prune review {job.id}: {e}")
     return dropped
 
@@ -1720,6 +1764,9 @@ def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
                 str((c.get("payload") or {}).get("year") or "")) in new_keys
         ]
         hidden_mod.restore_rows(scope, raced_specs)
+    if (scope == hidden_mod.SCOPE_MISSING
+            and job.execute_kind in ("library", "new_releases")):
+        _drop_dismissed_elsewhere(job, specs)
     return len(to_hide) - len(ticked_meanwhile)
 
 

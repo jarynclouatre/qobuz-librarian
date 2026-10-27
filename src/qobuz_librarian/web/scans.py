@@ -273,6 +273,7 @@ def _start_library_scan(credentials, partial_only=False, force_full=False):
             flows.scan_library(j, active.token, partial_only=partial_only,
                                force_full=force_full)
             _fold_into_parked_library_review(j)
+            flows.drop_owned_new_releases(j)
 
         return job_mgr.submit_scan(
             job,

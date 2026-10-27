@@ -665,3 +665,32 @@ def test_a_fresh_new_release_check_joins_the_list_already_waiting(
     # and it has to be SAVED with it: a summary rewritten in memory only came
     # back after a restart still claiming the count from before the fold.
     assert (parked.id, parked.summary, 3) in saves
+
+
+def test_an_album_dismissed_in_one_review_leaves_the_other(
+        tmp_path, monkeypatch):
+    """The Library review and New releases share one Dismissed list, yet an
+    album dismissed in New releases stayed offered in Missing Albums, and
+    one dismissed there stayed in New releases."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(cfg, "HIDDEN_FILE", tmp_path / "hidden.json")
+    monkeypatch.setattr(job_persistence, "persist_review_mutation",
+                        lambda _job, mutate: (True, mutate()))
+    news = _parked_new_release_review(
+        ("TV Dinner", False), ("Lost Weekend", False), ("Kept", True))
+    library = jm.Job(title="Library scan", execute_kind="library",
+                     status=jm.JobStatus.AWAITING_REVIEW)
+    for title, selected in (("TV Dinner", False), ("Lost Weekend", False),
+                            ("Kept", False), ("Super Mega Ultra", True)):
+        library.add_candidate("album", title, "Good",
+                              payload={"album_id": title}, selected=selected)
+    jm.registry.add(library)
+
+    assert flows.dismiss_albums(news, ["Good"], query="TV Dinner") == 1
+    assert [c["title"] for c in library.candidates] == [
+        "Lost Weekend", "Kept", "Super Mega Ultra"]
+
+    assert flows.dismiss_albums(library, ["Good"]) == 2
+    assert [c["title"] for c in news.candidates] == ["Kept"]
