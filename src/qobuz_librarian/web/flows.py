@@ -5488,9 +5488,10 @@ def run_collection_snapshot(job, *, force=False):
         previous = collection_snapshot.load_latest()
     except OSError:
         previous = None
+    unread = []
     try:
         document = collection_snapshot.build_snapshot(
-            previous=previous, source="manual")
+            previous=previous, source="manual", unread=unread)
         written, refusal = collection_snapshot.write_snapshot(
             document, force=force)
     except OSError as e:
@@ -5508,19 +5509,27 @@ def run_collection_snapshot(job, *, force=False):
         _mark_job_failed(job)
         log.info(job.summary)
         return
+    unread_note = ""
+    if unread:
+        names = ", ".join(sorted(unread, key=str.casefold)[:5])
+        more = f" (+{len(unread) - 5} more)" if len(unread) > 5 else ""
+        unread_note = (
+            f" {plural(len(unread), 'artist folder')} couldn't be read in "
+            "full, so the backup keeps what the last one recorded there: "
+            f"{names}{more}.")
     if (not force and previous is not None
             and collection_snapshot.same_collection(document, previous)):
         age = job_labels._format_age(previous.get("updated_at_epoch"))
         job.summary = (f"Nothing changed since the last backup"
                        f"{f' ({age})' if age else ''}, so it was kept as it "
-                       "is.")
+                       "is." + unread_note)
         log.info(job.summary)
         _close_completed_job(job)
         return
     job.summary = (
         f"Backed up {plural(counts['albums'], 'album')} by "
         f"{plural(counts['artists'], 'artist')} to "
-        f"{collection_snapshot.latest_path()}."
+        f"{collection_snapshot.latest_path()}." + unread_note
     )
     log.info(job.summary)
     _close_completed_job(job)

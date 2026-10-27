@@ -131,8 +131,8 @@ def music_root_write_state() -> tuple[str, int]:
     return "ready", 0
 
 
-def _previous_ids(previous):
-    """Map artist name to (artist id, {album folder: album id}) from a snapshot.
+def _previous_albums(previous):
+    """Map artist name to (artist id, {album folder: album}) from a snapshot.
 
     A scan skips artists whose folders have not changed, so it reports no Qobuz
     ids for them. Carrying the previous snapshot's ids forward is what keeps a
@@ -148,9 +148,20 @@ def _previous_ids(previous):
         albums = {}
         for album in artist.get("albums") or []:
             if isinstance(album, dict) and album.get("name"):
-                albums[album["name"]] = album.get("qobuz_album_id")
+                albums[album["name"]] = album
         index[name] = (artist.get("qobuz_artist_id"), albums)
     return index
+
+
+def _may_exist(path):
+    """False only when the folder is known to be gone."""
+    try:
+        path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        pass
+    return True
 
 
 def _track_entry(meta):
@@ -166,16 +177,21 @@ def _track_entry(meta):
 
 
 def build_snapshot(*, owned_qobuz=None, artist_ids=None, previous=None,
-                   source="scan", walk_errors=None):
+                   source="scan", unread=None):
     """Walk the library and return the snapshot document.
 
     The walk goes through the scanner rather than the track cache: the cache is
     an accelerator the scanner already uses, and it is known to disagree with
     disk by a few tracks, which is not a difference a rebuild record can carry.
+
+    An album the walk cannot read keeps what ``previous`` recorded for it,
+    unless its folder is gone, and its artist folder's name goes on the
+    ``unread`` list when one is passed. Only a music folder that cannot be
+    listed raises.
     """
     owned_qobuz = owned_qobuz or {}
     artist_ids = artist_ids or {}
-    carried = _previous_ids(previous)
+    carried = _previous_albums(previous)
     # Artist ids every past scan has ever resolved, keyed by folder name. An
     # ordinary scan skips unchanged folders and reports nothing for them, so
     # without this a library that never changes would back up id-less forever.
@@ -184,13 +200,20 @@ def build_snapshot(*, owned_qobuz=None, artist_ids=None, previous=None,
     artists = []
     album_count = 0
     track_count = 0
-    for artist_dir in scanner.list_library_artists(walk_errors=walk_errors):
+    for artist_dir in scanner.list_library_artists(
+            on_artist_error=lambda _dir, _error: None):
         name = artist_dir.name
         prev_artist_id, prev_albums = carried.get(name, (None, {}))
         albums = []
+        errors = []
         for album_dir in scanner.list_artist_album_dirs(
-                artist_dir, walk_errors=walk_errors):
-            tracks = scanner.read_album_dir(album_dir, walk_errors=walk_errors)
+                artist_dir, walk_errors=errors):
+            read_errors = []
+            tracks = scanner.read_album_dir(album_dir, walk_errors=read_errors)
+            if read_errors:
+                errors += read_errors
+                if album_dir.name in prev_albums:
+                    continue
             if not tracks:
                 continue
             album = {"name": album_dir.name}
@@ -199,14 +222,22 @@ def build_snapshot(*, owned_qobuz=None, artist_ids=None, previous=None,
                 album["title"] = tagged
             album["qobuz_album_id"] = (
                 owned_qobuz.get(name, {}).get(album_dir.name)
-                or prev_albums.get(album_dir.name)
+                or (prev_albums.get(album_dir.name) or {}).get("qobuz_album_id")
                 or None)
             album["tracks"] = [_track_entry(t) for t in tracks]
             albums.append(album)
-            album_count += 1
-            track_count += len(tracks)
+        if errors:
+            read = {album["name"] for album in albums}
+            albums += [album for folder, album in prev_albums.items()
+                       if folder not in read
+                       and _may_exist(artist_dir / folder)]
+            albums.sort(key=lambda album: album["name"].lower())
+            if unread is not None:
+                unread.append(name)
         if not albums:
             continue
+        album_count += len(albums)
+        track_count += sum(len(album.get("tracks") or []) for album in albums)
         hit = resolved.get(name)
         cached_id = (str(hit[0])
                      if isinstance(hit, (list, tuple)) and len(hit) > 1 and hit[0]

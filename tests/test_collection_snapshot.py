@@ -1,5 +1,6 @@
 """Collection snapshot tests."""
 import json
+import os
 import shutil
 
 import pytest
@@ -110,6 +111,27 @@ def test_an_empty_music_folder_leaves_the_saved_snapshot_alone(library):
     ok, reason = snap.write_snapshot(snap.build_snapshot(previous=good))
     assert ok is False and reason
     assert snap.latest_path().read_bytes() == kept
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+def test_an_artist_folder_that_cannot_be_read_keeps_its_last_record(library):
+    library.add("Bonobo", "Migration", [_track("Migration", 1)])
+    library.add("Four Tet", "Sixteen Oceans", [_track("School", 1)])
+    good = snap.build_snapshot()
+    assert snap.write_snapshot(good)[0] is True
+
+    # One folder the app can't read used to fail the whole backup with a
+    # message blaming the backup folder.
+    (library.root / "Four Tet").chmod(0)
+    unread = []
+    try:
+        doc = snap.build_snapshot(previous=good, unread=unread)
+    finally:
+        (library.root / "Four Tet").chmod(0o755)
+
+    assert unread == ["Four Tet"]
+    assert doc["artists"] == good["artists"]
+    assert doc["counts"] == good["counts"]
 
 
 def test_a_big_shrink_is_held_back_until_it_is_forced(library):
