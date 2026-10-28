@@ -7188,6 +7188,28 @@ def _backup_retirement(connection, old_paths, replacement_paths, whole_album):
             album_attribute_columns, item_attribute_columns)
 
 
+def backup_listed_in_beets(backup):
+    """Whether Beets lists a track at the place ``backup`` was moved from,
+    or None when that can't be read."""
+    try:
+        receipt = _backup_receipt(backup)
+        old_paths = _receipt_audio_paths(receipt, receipt["origin"])
+    except (TypeError, KeyError):
+        return None
+    if old_paths is None:
+        return None
+    old_paths = frozenset(old_paths)
+    database = beets_db.path()
+    try:
+        if database is None or not database.is_file():
+            return False
+        return beets_db.read(database, lambda connection: any(
+            _catalogue_item_path(path, allow_external=True) in old_paths
+            for (path,) in connection.execute("SELECT path FROM items")))
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
 def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
                                *, replacement_audio_paths=None):
     """Retire exact old rows before disposing a moved-aside backup."""

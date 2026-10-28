@@ -49,6 +49,7 @@ from qobuz_librarian.integrations.beets import (
     MusicDiskFull,
     _consolidate_duplicate_albums,
     _prepare_staging_tags,
+    backup_listed_in_beets,
     beets_import_albums,
     capture_beets_album_entries,
     durable_import_possible,
@@ -82,10 +83,12 @@ from qobuz_librarian.library.backup import (
     capture_album_source_receipt,
     capture_album_tree_identity,
     carry_backup_companions,
+    companions_in_the_way,
     dispose_backup,
     pin_unverified_upgrade_backup,
     restore_gap_fill_backup,
     restore_upgrade_backup,
+    some_names,
     unwritable_folder,
     warn_pin_failed,
 )
@@ -1161,6 +1164,29 @@ def _resolve_queue_item(
                             f"be compared with {post_dir.name}.",
                         ))
                         continue
+                    # Its own cover, log or lyrics would have to stay in
+                    # the backup, away from the library, for good.
+                    held = capture_album_source_receipt(sibling_path)
+                    clashes = None if held is None else companions_in_the_way(
+                        held, replacement_receipt)
+                    if clashes is None:
+                        log.info(fmt(
+                            C.YELLOW,
+                            f"  ⚠  Kept sibling {name}; its other files "
+                            f"couldn't be compared with {post_dir.name}.",
+                        ))
+                        continue
+                    if clashes:
+                        item["_siblings_preserved"].remove(
+                            os.fspath(sibling_path))
+                        one = len(clashes) == 1
+                        log.info(fmt(
+                            C.GRAY,
+                            f"  ·  Kept {name}; its {some_names(clashes)} "
+                            f"{'differs' if one else 'differ'} from the "
+                            f"{'one' if one else 'ones'} in {post_dir.name}.",
+                        ))
+                        continue
                     sibling_backup = backup_album_dir(
                         sibling_path, expected_receipt=receipt)
                     if sibling_backup is None:
@@ -1205,7 +1231,10 @@ def _resolve_queue_item(
                         ))
                         break
                     replacement_receipt = carried_receipt
-                    if not retire_backup_beets_entries(
+                    # With no entries to retire, the kept album needn't be
+                    # one Beets lists whole: it may know only the new tracks.
+                    listed = backup_listed_in_beets(sibling_backup)
+                    if listed is not False and not retire_backup_beets_entries(
                         sibling_backup,
                         post_dir,
                         replacement_receipt,

@@ -2962,6 +2962,32 @@ def companion_conflicts(backup, replacement_receipt, renamed=None):
         return None
 
 
+def companions_in_the_way(source_receipt, replacement_receipt):
+    """The non-audio files of the folder ``source_receipt`` seals that the
+    album holds a different file or a folder for, so a carry would leave
+    them behind."""
+    try:
+        source_files = source_receipt["tree"]["files"]
+        album_files = replacement_receipt["tree"]["files"]
+        album_folders = replacement_receipt["tree"]["directories"]
+        album = replacement_receipt["origin"]
+        clashes = []
+        for relative, expected in source_files.items():
+            name = PurePosixPath(relative).name
+            if (name in _SIDECARS
+                    or Path(name).suffix.lower() in cfg.AUDIO_EXTS):
+                continue
+            held = album_files.get(relative)
+            if held is None and (alias := _case_alias(album, album_files, relative)):
+                held = album_files[alias]
+            if (held is not None and held["sha256"] != expected["sha256"]
+                    or relative in album_folders):
+                clashes.append(relative)
+        return sorted(clashes)
+    except (AttributeError, KeyError, TypeError):
+        return None
+
+
 def _write_backup_origin(bp: Path, origin: Path) -> bool:
     """Write the protective origin sidecar. Returns True only if it's actually
     on disk afterwards - the sidecar is the sole signal that keeps the age sweep
