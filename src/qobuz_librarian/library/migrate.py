@@ -543,7 +543,10 @@ def _statx_directory_identity(descriptor, path, flags) -> list:
     # Only the fields the identity reads must be present; a filesystem that
     # omits unused stats such as atime (ZFS atime=off) can still be proved.
     required = _STATX_TYPE | _STATX_MODE | _STATX_INO | _STATX_BTIME | _STATX_MNT_ID
-    if value.mask & required != required or value.btime.tv_nsec >= 1_000_000_000:
+    # A saved identity needs a mount ID; qemu's user-mode emulation reports
+    # the field as present and leaves it 0.
+    if (value.mask & required != required or value.btime.tv_nsec >= 1_000_000_000
+            or value.mnt_id <= 0):
         raise OSError("this filesystem doesn't support the identity check "
                        "migration needs")
     device = os.makedev(value.dev_major, value.dev_minor)

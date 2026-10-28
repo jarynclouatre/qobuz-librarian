@@ -67,8 +67,9 @@ _FEATURES = {
         "staging": ("noreplace", "exchange"),
         "music": ("noreplace", "exchange", "identity"),
         "backups": ("noreplace",)}),
+    # Repair records each artist's folders before and after it reads them.
     "repair": ("Repair needs", ("Repair",), {
-        "music": ("noreplace",), "backups": ("noreplace",)}),
+        "music": ("noreplace", "identity"), "backups": ("noreplace",)}),
     "replacements": (None, ("replacing tracks in Gap Fill or Consolidation",), {
         "music": ("noreplace",), "backups": ("noreplace",)}),
     "lyrics": ("Lyrics need", ("Lyrics",), _lyric_needs),
