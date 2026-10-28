@@ -40,6 +40,17 @@ from qobuz_librarian.web.csrf import (
 _log = logging.getLogger("qobuz_librarian")
 
 
+def _not_a_passing_health_check(record: logging.LogRecord) -> bool:
+    """Docker's health check calls /readyz every 30 seconds, 2,880 lines a
+    day of the container log; only a failing one is worth a line there."""
+    args = record.args
+    return not (isinstance(args, tuple) and len(args) == 5
+                and args[2] in ("/healthz", "/readyz") and args[4] == 200)
+
+
+logging.getLogger("uvicorn.access").addFilter(_not_a_passing_health_check)
+
+
 app = FastAPI(title="Qobuz Librarian", docs_url=None, redoc_url=None,
               openapi_url=None, lifespan=lifespan._lifespan)
 
