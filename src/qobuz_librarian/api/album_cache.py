@@ -35,6 +35,10 @@ _db = CacheDB(
         "CREATE TABLE IF NOT EXISTS stamps "
         "(kind TEXT NOT NULL, key TEXT NOT NULL, at REAL NOT NULL, "
         "PRIMARY KEY (kind, key)) WITHOUT ROWID",
+        # fetched_at sits after the payload, so finding old rows without
+        # these read every payload in the table: 350 MB for a big library.
+        "CREATE INDEX IF NOT EXISTS albums_fetched ON albums (fetched_at, id)",
+        "CREATE INDEX IF NOT EXISTS catalogs_fetched ON catalogs (fetched_at, key)",
     ),
     enabled=lambda: cfg.ALBUM_CACHE_ENABLED,
 )
@@ -70,6 +74,8 @@ def get(album_id) -> dict | None:
 # lifetime. A row's fetched_at moves forward whenever it is read, and only
 # rows unused for _KEEP_USED_SECONDS count against the cap, so a library
 # scanned at least that often keeps every album it owns however many.
+# Catalogs, up to 1.7 MB each, go once unconfirmed that long and past their
+# TTL, so an artist only ever opened from Search doesn't stay for good.
 _CACHE_MAX_ALBUMS = 10000
 _KEEP_USED_SECONDS = 60 * 86400
 _TRIM_EVERY = 200
@@ -96,8 +102,9 @@ def _record_use() -> None:
         _db.handle_db_error(e)
 
 
-def _trim_albums() -> None:
+def _trim() -> None:
     _record_use()
+    now = time.time()
     try:
         conn = _db.conn()
         used = ("SELECT a.id, MAX(COALESCE(a.fetched_at, 0), COALESCE(s.at, 0)) "
@@ -107,16 +114,30 @@ def _trim_albums() -> None:
             f"DELETE FROM albums WHERE id IN (SELECT id FROM ({used}) "
             "WHERE at < ? AND id NOT IN "
             f"(SELECT id FROM ({used}) ORDER BY at DESC LIMIT ?))",
-            (time.time() - _KEEP_USED_SECONDS, _CACHE_MAX_ALBUMS))
+            (now - _KEEP_USED_SECONDS, _CACHE_MAX_ALBUMS))
+        conn.execute(
+            "DELETE FROM catalogs WHERE key IN (SELECT c.key FROM catalogs c "
+            "LEFT JOIN stamps s ON s.kind = 'catalog' AND s.key = c.key "
+            "WHERE MAX(COALESCE(c.fetched_at, 0), COALESCE(s.at, 0)) < ?)",
+            (now - max(_KEEP_USED_SECONDS, cfg.ARTIST_CATALOG_CACHE_TTL),))
         conn.execute("DELETE FROM stamps WHERE kind = 'album' AND key NOT IN "
                      "(SELECT id FROM albums)")
+        conn.execute("DELETE FROM stamps WHERE kind = 'catalog' AND key NOT IN "
+                     "(SELECT key FROM catalogs)")
         conn.commit()
     except sqlite3.Error as e:
         vlog(f"album cache trim failed: {e}")
 
 
-def put(album_id, payload) -> None:
+def _count_put() -> None:
     global _puts_since_trim
+    _puts_since_trim += 1
+    if _puts_since_trim >= _TRIM_EVERY:
+        _puts_since_trim = 0
+        _trim()
+
+
+def put(album_id, payload) -> None:
     if not album_id or not isinstance(payload, dict) or not _db.ensure():
         return
     try:
@@ -133,10 +154,7 @@ def put(album_id, payload) -> None:
         vlog(f"album cache write failed: {e}")
         _db.handle_db_error(e)
         return
-    _puts_since_trim += 1
-    if _puts_since_trim >= _TRIM_EVERY:
-        _puts_since_trim = 0
-        _trim_albums()
+    _count_put()
 
 
 def get_catalog(key, ttl_seconds) -> dict | None:
@@ -229,6 +247,8 @@ def put_catalog(key, payload) -> None:
     except sqlite3.Error as e:
         vlog(f"catalog cache write failed: {e}")
         _db.handle_db_error(e)
+        return
+    _count_put()
 
 
 def _reset_for_tests() -> None:
