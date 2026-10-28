@@ -45,6 +45,14 @@ def _lyric_needs():
     return {"music": ("noreplace", "exchange")}
 
 
+def _new_album_needs():
+    # A new lossless album downloads in one crash-safe step unless
+    # import-time Downsample is on.
+    if cfg.DOWNSAMPLE_HIRES_ENABLED or cfg.STREAMRIP_QUALITY not in (2, 3, 4):
+        return {}
+    return {"music": ("noreplace",)}
+
+
 # Each feature: how its refusal starts, what Diagnostics calls it, and what
 # it needs of each folder.
 _FEATURES = {
@@ -53,6 +61,8 @@ _FEATURES = {
     "whole_albums": (
         "This album downloads in one crash-safe step, which needs",
         ("crash-safe whole-album downloads",), {"music": ("noreplace",)}),
+    "new_albums": ("New albums download in one crash-safe step, which needs",
+                   (), _new_album_needs),
     "upgrade": ("Upgrade needs", ("Upgrade",), {
         "staging": ("noreplace", "exchange"),
         "music": ("noreplace", "exchange", "identity"),
@@ -210,7 +220,7 @@ def refusal(*features) -> str | None:
             label, _title, path = folders[key]
             lacks = _lacking(path, wanted)
             if lacks:
-                return f"{start} {label} on a local disk: {path} {_joined(lacks)}."
+                return f"{start} {label} on a local Linux disk: {path} {_joined(lacks)}."
     return None
 
 
@@ -258,7 +268,7 @@ def destination_refusal(path, sample=None) -> str | None:
         lacks.append(_LACKS["exact_times"])
     if not lacks:
         return None
-    return f"Migrate needs a destination on a local disk: {path} {_joined(lacks)}."
+    return f"Migrate needs a destination on a local Linux disk: {path} {_joined(lacks)}."
 
 
 def report(display=str) -> list[tuple[str, bool, str]]:
@@ -284,5 +294,5 @@ def report(display=str) -> list[tuple[str, bool, str]]:
         rows.append((f"{title} disk", False,
                      f"{display(path)} {_joined(_LACKS[need] for need in lacks)}, "
                      f"so {_joined(affected)} can't run on it. Use a local "
-                     "disk for it."))
+                     "Linux disk for it."))
     return rows

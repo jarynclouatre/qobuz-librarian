@@ -33,7 +33,17 @@ from qobuz_librarian.web import (
 )
 from qobuz_librarian.web import jobs as job_mgr
 
-_DISK_TOOLS = ("upgrade", "downsample", "lyrics", "repair")
+# What the work each page starts needs of the disks it writes to.
+_DISK_TOOLS = {
+    "upgrade": ("upgrade",),
+    "downsample": ("downsample",),
+    "lyrics": ("lyrics",),
+    "repair": ("repair",),
+    "library": ("downloads", "picks"),
+    "dashboard": ("downloads", "new_albums"),
+    "search": ("downloads", "new_albums"),
+    "discover": ("downloads", "new_albums"),
+}
 
 
 def _ql_notice_html(kind: str, body: str) -> str:
@@ -326,8 +336,8 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     # A tool the music disk cannot run says so before anything is picked,
     # not only once a start or an approval is refused.
     if (not context.get("writes_paused_notice")
-            and context.get("page") in _DISK_TOOLS
-            and (why := disk_support.refusal(context["page"]))):
+            and (why := disk_support.refusal(
+                *_DISK_TOOLS.get(context.get("page"), ())))):
         context["disk_notice"] = why
         context["writes_paused_notice"] = {
             "reason": why, "msg": why, "action": None}
