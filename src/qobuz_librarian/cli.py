@@ -728,8 +728,8 @@ def parse_args():
                         "first to keep one folder of each group of siblings")
     getting.add_argument("--migrate-multi-artist", dest="migrate_multi_artist",
                    action=argparse.BooleanOptionalAction,
-                   help="after import, safely re-file 'Primary, Other' albums "
-                        "under 'Primary'")
+                   help="after import, safely re-file 'Primary, Other' and "
+                        "'Other, Primary' albums under 'Primary'")
 
     lyrics.add_argument("--lyrics-rescan", action="store_true",
                    help="also look up tracks checked in the last 30 days.")

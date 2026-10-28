@@ -133,7 +133,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--no-upgrade` | Turn off quality upgrades for this run |
 | `--no-downsample` | Skip downsampling new downloads for this run |
 | `--[no-]consolidate` | After import, look at sibling folders and offer to merge them; in Artist mode, the Library walk and Gap Fill, offer first to keep one folder of each group of siblings |
-| `--[no-]migrate-multi-artist` | After import, file 'Primary, Other' albums under 'Primary' |
+| `--[no-]migrate-multi-artist` | After import, file 'Primary, Other' and 'Other, Primary' albums under 'Primary' |
 | `--lyrics-rescan`, `--lyrics-synced-only` | With `--lyrics-walk`: also look up tracks checked in the last 30 days; write only timed lyrics |
 | `--migrate-src PATH`, `--migrate-dest PATH`, `--in-place`, `--acoustid` | With `--migrate`: source, destination, move instead of copy, fingerprint untagged files (see [Existing libraries](existing-libraries.md)) |
 | `--verbose`, `--quiet` / `-q`, `--no-color` | More detail, warnings and errors only (a search, `--artist`, `--gap-fill` or `--library-walk` also needs `--yes`), no colours |

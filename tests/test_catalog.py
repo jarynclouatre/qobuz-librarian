@@ -19,8 +19,9 @@ from qobuz_librarian.library.catalog import (
 def test_multi_artist_migration_is_fail_closed_and_keeps_a_band_name_whole(
         tmp_path, monkeypatch):
     """An unattended multi-artist folder migration moves nothing and drops a
-    stale ownership capture, and a band name with a comma in it is not split
-    into artists."""
+    stale ownership capture, a band name with a comma in it is not split
+    into artists, and an album filed under an artist Qobuz credits second
+    moves under that artist."""
     music_root = tmp_path / "music"
     source = music_root / "Artist, Other" / "Album"
     destination = music_root / "Artist" / "Album"
@@ -49,6 +50,14 @@ def test_multi_artist_migration_is_fail_closed_and_keeps_a_band_name_whole(
     assert catalog.multi_artist_migration_destination(
         {"artist": {"name": "Earth, Wind & Fire"}}, source,
     ) == music_root / "Earth, Wind & Fire" / "Boogie Wonderland"
+
+    source = music_root / "Resin Dogs, Abstract Rude" / "Set It Off (2002)"
+    source.mkdir(parents=True)
+    assert catalog.multi_artist_migration_destination(
+        {"artist": {"name": "Abstract Rude"},
+         "artists": [{"name": "Resin Dogs"}, {"name": "Abstract Rude"}]},
+        source,
+    ) == music_root / "Abstract Rude" / "Set It Off (2002)"
 
 
 def _qt(title, isrc="", disc=1, **kw):

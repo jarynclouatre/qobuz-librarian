@@ -115,6 +115,18 @@ def _is_migration_candidate(folder_name, qartist):
     return _has_separator_match(folder_name, qartist, _MIGRATION_SEPS)
 
 
+def _is_credits_folder(folder_name, album, qartist):
+    """True iff ``folder_name`` is every artist Qobuz credits on ``album``,
+    joined as streamrip tags the album artist, and ``qartist`` is one of them.
+    Qobuz can file an album under an artist it credits second ("Resin Dogs,
+    Abstract Rude" for an Abstract Rude album), which the prefix form misses."""
+    names = [(a or {}).get("name") or "" for a in album.get("artists") or ()]
+    if len(names) < 2 or not all(names) or qartist not in names:
+        return False
+    return (folder_name.strip().lower()
+            == beets_sanitize(", ".join(names)).strip().lower())
+
+
 # Lookups over the cached MUSIC_ROOT listing, kept while that listing is the
 # current one: one artist's thousand albums ask the same questions thousands
 # of times.
@@ -1899,7 +1911,8 @@ def multi_artist_migration_destination(album, source_dir):
         return None
 
     # Keep the historical comma-only guard.
-    if not _is_migration_candidate(current.parent.name, qartist_raw):
+    if not (_is_migration_candidate(current.parent.name, qartist_raw)
+            or _is_credits_folder(current.parent.name, album, qartist_raw)):
         return None
     return _artist_folder(primary, exclude=current.parent) / current.name
 
