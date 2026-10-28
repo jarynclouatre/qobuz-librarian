@@ -621,7 +621,7 @@ def _music_root_listed():
 
 
 def fold_new_candidates(parked, cands, *, review_generation=None,
-                        coverage=None):
+                        coverage=None, retire=()):
     """Merge a refresh's finds into a parked review, keyed by artist and
     Qobuz album id (see fold_key).
 
@@ -633,7 +633,8 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
     Qobuz ids it found on disk: a row there that the scan no longer offers is
     removed when it is unticked or on disk, and a ticked one otherwise stays.
     A row whose folder is gone leaves too, ticked or not: its seal can never
-    match again, so Download would refuse it after every refresh.
+    match again, so Download would refuse it after every refresh. So does a
+    row ``retire`` names by fold key that the refresh did not find again.
     Candidates the user dismissed while the refresh ran are checked against a
     fresh hidden snapshot so the fold can't resurrect them. Returns
     (added, updated, removed, held_back, switched_off, left_out, notes),
@@ -687,6 +688,7 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         # refresh has already looked at.
         in_library = []
         gone = []
+        retired = []
         unoffered = []
         moved = {}
         switched_off = {}
@@ -701,6 +703,11 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
         for c in parked.candidates:
             key = _key(c)
             fresh = fresh_by_key.get(key)
+            if fresh is None and key in retire:
+                if listed(c):
+                    removed += 1
+                retired.append(c)
+                continue
             if fresh is None and drop_gone and _folder_gone(c):
                 if listed(c):
                     removed += 1
@@ -853,6 +860,14 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
                 f"{plural(n, 'ticked album')} left the review because "
                 f"{'its folder is' if n == 1 else 'their folders are'} no "
                 f"longer in the library: {named_albums(gone)}.")
+        if retired:
+            n = len(retired)
+            notes.append(
+                f"{plural(n, 'album')} left the review because "
+                f"{'its artist folder' if n == 1 else 'their artist folders'} "
+                f"changed and the check no longer offers "
+                f"{'it' if n == 1 else 'them'}: "
+                f"{named_albums(retired)}.")
         if unoffered:
             n = len(unoffered)
             notes.append(
@@ -924,7 +939,8 @@ def refold_restored_missing(artists, fingerprints):
     return added
 
 
-def refold_into_living_review(picks, execute_kind="library", ticked=True):
+def refold_into_living_review(picks, execute_kind="library", ticked=True,
+                              retire=()):
     """Fold a list of picks back into the newest parked review of
     ``execute_kind``, ticked by default, so they come back ready to retry
     instead of stranding in a dead job. Callers include picks a cancelled
@@ -933,7 +949,8 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True):
     is the split-off review left behind at approval; when the whole review was
     selected, those paths rebuild or re-park their own review instead. Dedups by
     fold key, so re-adding a pick already in the review is safe. Returns how
-    many rejoined, or None when there's no review to fold into."""
+    many rejoined, or None when there's no review to fold into. ``retire``
+    is passed on to fold_new_candidates."""
     parked = None
     for j in job_mgr.registry.awaiting_review():
         if j.execute_kind != execute_kind:
@@ -949,7 +966,7 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True):
     # caveats a bare count would throw away.
     ours = (parked.summary or "") == split_review_summary(
         parked.execute_kind, parked.candidates)
-    folded = fold_new_candidates(parked, specs)
+    folded = fold_new_candidates(parked, specs, retire=retire)
     if folded is False:
         return False
     if folded is None:
@@ -2771,41 +2788,70 @@ def _parked_new_release_review(exclude=None):
     return parked
 
 
-def _append_to_parked_new_release_review(job):
+def _new_release_rows_to_recheck(job):
+    """The waiting New releases rows that Download refuses because their
+    artist folder changed after they were listed, or because they were
+    sealed by an older version: album id to row. A check asks about these
+    as if it had never seen them, so each comes back sealed afresh or
+    leaves the review."""
+    parked = _parked_new_release_review(exclude=job)
+    if parked is None:
+        return {}
+    with parked._lock:
+        rows = list(parked.candidates)
+    captures = {}
+    stale = {}
+    for c in rows:
+        album_id = str((c.get("payload") or {}).get("album_id") or "")
+        if not album_id or candidate_premise.expected_kind(c) != "missing":
+            continue
+        try:
+            candidate_premise.validate(c, missing_premises=captures)
+        except CandidateStale as exc:
+            if exc.cause in ("changed", "older"):
+                stale[album_id] = c
+    return stale
+
+
+def _append_to_parked_new_release_review(job, found=0, retire=()):
     """Fold this check's finds into the new-release list already waiting.
 
     A second list beside the first would split one person's picks across two
     pages and leave the ticks and dismissals they had already made stranded on
     the older one. Folding keeps every earlier choice: a row the user dismissed
     while this ran is checked against a fresh hidden snapshot and not brought
-    back, and a row already in the list keeps its tick. This job then finishes
-    as a plain result pointing at the list it fed, never as a review of its own.
-    Returns True when the finds were folded."""
+    back, and a row already in the list keeps its tick. ``found`` counts this
+    check's new releases; the rest of its rows were already listed and were
+    checked again, as were the rows ``retire`` names by fold key, which leave.
+    This job then finishes as a plain result pointing at the list it fed,
+    never as a review of its own. Returns True when the finds were folded."""
     parked = _parked_new_release_review(exclude=job)
     if parked is None:
         return False
     added = refold_into_living_review(
-        list(job.candidates), execute_kind="new_releases", ticked=False)
+        list(job.candidates), execute_kind="new_releases", ticked=False,
+        retire=retire)
     if added is None or added is False:
         return False
     with job._lock:
         job.candidates = []
     waiting = len(parked.candidates)
-    if added:
+    if added or retire:
         # Through persist_review_mutation, not a bare assignment: the fold was
         # already written with the old summary, so a summary left in memory
         # only would come back after a restart claiming the count the review
         # had BEFORE the fold. A save that fails restores the old text rather
         # than leaving disk and screen disagreeing.
-        restated = (f"{plural(waiting, 'new release')} waiting to review, "
-                    f"{added} of them from the latest check.")
+        restated = f"{plural(waiting, 'new release')} waiting to review" + (
+            f", {added} of them from the latest check." if added else ".")
         job_persistence.persist_review_mutation(
             parked, lambda: setattr(parked, "summary", restated))
+    if added:
         job.summary += (
             f" {added:,} added to the New releases review already waiting, "
             f"now {plural(waiting, 'new release')}.")
         job_mgr._start_post_job_hook_for_job(parked)
-    else:
+    elif found:
         job.summary += " All were already in the New releases review."
     parked.notify_review_changed()
     job.status = job_mgr.JobStatus.DONE
@@ -2860,6 +2906,14 @@ def scan_new_releases(job, token):
     cur_limit = int(cfg.ARTIST_CATALOG_LIMIT)
     prev_limit = state.get("baseline_limit")
     rebaseline = prev_limit is None or cur_limit > int(prev_limit)
+    # A waiting row that Download refuses because its artist folder changed
+    # is asked about again as if never seen: found again, it is sealed
+    # afresh and keeps its tick; not offered any more, it leaves the review.
+    recheck = {} if rebaseline else _new_release_rows_to_recheck(job)
+    asked = seen
+    if recheck:
+        asked = {artist_id: [a for a in ids if a not in recheck]
+                 for artist_id, ids in seen.items()}
     hidden = hidden_mod.load()
     single_store = hidden if cfg.SUPPRESS_SINGLE_TRACK_GAPS else None
     # A new release shows only where the Missing Albums switches would list it.
@@ -2891,10 +2945,12 @@ def scan_new_releases(job, token):
     capped_recent = {}
     missing_premises = {}
     listed_ids = set()
+    reached = set()
+    refound = set()
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newrel",
                             **job_mgr.pool_initializer_kwargs()) as ex:
         futures = {ex.submit(find_new_releases_for_artist, ad.name, token=token,
-                             opts=opts, seen_by_id=seen, hidden=hidden,
+                             opts=opts, seen_by_id=asked, hidden=hidden,
                              single_store=single_store, artist_dir=ad,
                              baseline_only=rebaseline,
                              capped_ids=capped_ids,
@@ -2923,6 +2979,7 @@ def scan_new_releases(job, token):
                 continue
             if result.artist_id and not getattr(result, "fetch_failed", False):
                 current_seen[result.artist_id] = result.current_ids
+                reached.add(ad.name)
                 if getattr(result, "capped_recent", False):
                     capped_recent[result.artist_id] = window
             elif getattr(result, "unresolved", False):
@@ -2940,6 +2997,7 @@ def scan_new_releases(job, token):
                     continue
                 listed_ids.add(album_id)
                 new_gaps.append(gap)
+            found = 0
             for gap in new_gaps:
                 # Leave new releases UN-ticked, like the library gap list: a
                 # review is for picking, and one tap must never queue the whole
@@ -2953,15 +3011,20 @@ def scan_new_releases(job, token):
                     artist_key=ad.name,
                     missing_premises=missing_premises,
                 )
-                total += 1
-            hit = ({"artist": result.artist_name, "albums": len(new_gaps)}
-                   if new_gaps else None)
+                album_id = str(gap.qobuz_album.get("id") or "")
+                if album_id in recheck:
+                    refound.add(album_id)
+                else:
+                    found += 1
+            total += found
+            hit = ({"artist": result.artist_name, "albums": found}
+                   if found else None)
             job.push_progress("Checking for new releases", done, n,
                               result.artist_name or ad.name,
                               found=total, hit=hit, unit="artist")
-            if new_gaps:
+            if found:
                 log.info(f"  {result.artist_name} - "
-                         f"{plural(len(new_gaps), 'new release')}")
+                         f"{plural(found, 'new release')}")
     flush_resolve_cache()
     saved = None
     if not job.cancel_requested:
@@ -3046,6 +3109,24 @@ def scan_new_releases(job, token):
                        "saved. Check again.")
     else:
         job.summary = "No new releases since the last Library scan or check."
+    retire = {fold_key(c) for album_id, c in recheck.items()
+              if album_id not in refound
+              and ((c.get("payload") or {}).get("_artist_dir") in reached
+                   or _folder_gone(c))}
+    if refound:
+        one = len(refound) == 1
+        job.summary += (
+            f" {plural(len(refound), 'album')} already in the New releases "
+            f"review {'was' if one else 'were'} checked again after "
+            f"{'its artist folder' if one else 'their artist folders'} "
+            "changed.")
+    if retire:
+        one = len(retire) == 1
+        job.summary += (
+            f" {plural(len(retire), 'album')} left the New releases review "
+            f"because {'its artist folder' if one else 'their artist folders'}"
+            f" changed and this check no longer offers "
+            f"{'it' if one else 'them'}.")
     if skipped_note:
         job.summary += f" {skipped_note}"
     if not total and (failed_count or saved is False):
@@ -3056,10 +3137,10 @@ def scan_new_releases(job, token):
         # already names the reason and the remedy; a separate job.error would
         # only restate it, and the FAILED status carries its own marker.
         _mark_job_failed(job)
-    elif total:
+    elif total or refound or retire:
         # An earlier check's list may still be parked and half-worked. Join it
         # rather than parking a rival list beside it.
-        _append_to_parked_new_release_review(job)
+        _append_to_parked_new_release_review(job, found=total, retire=retire)
     # Not logged here: job.summary already renders on the job page, and the
     # activity log below it would otherwise repeat the exact same sentence.
 

@@ -667,6 +667,77 @@ def test_a_fresh_new_release_check_joins_the_list_already_waiting(
     assert (parked.id, parked.summary, 3) in saves
 
 
+def test_a_waiting_new_release_whose_folder_changed_is_checked_again(
+        tmp_path, monkeypatch):
+    """A new release whose artist folder changed after it was listed is
+    refused at Download with "Run Check new releases, then try again", yet
+    the check skipped it as already seen, so it stayed refused for good."""
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library.candidate_premise import CandidateStale
+    from qobuz_librarian.web import flows, job_persistence
+
+    monkeypatch.setattr(job_persistence, "persist_review_mutation",
+                        lambda _job, mutate: (True, mutate()))
+    parked = jm.Job(title="New-release check", execute_kind="new_releases",
+                    status=jm.JobStatus.AWAITING_REVIEW)
+    for title, selected in (("moved", True), ("owned", False),
+                            ("untouched", False)):
+        parked.add_candidate("album", title, "Good", payload={
+            "album_id": title, "_artist_dir": "Good", "_premise": "old"},
+            selected=selected)
+    jm.registry.add(parked)
+
+    def validate(c, **_kwargs):
+        if c["payload"]["album_id"] in ("moved", "owned"):
+            raise CandidateStale("changed")
+
+    asked = {}
+
+    def find(_name, *, seen_by_id, **_kwargs):
+        asked.update(seen_by_id)
+        offered = [] if "moved" in seen_by_id["artist-id"] else [
+            SimpleNamespace(qobuz_album={"id": "moved"})]
+        return SimpleNamespace(
+            artist_id="artist-id", fetch_failed=False, unresolved=False,
+            current_ids=["moved", "owned", "untouched"], new_gaps=offered,
+            artist_name="Good")
+
+    good = tmp_path / "Good"
+    good.mkdir()
+    marked = {}
+    monkeypatch.setattr(flows.candidate_premise, "validate", validate)
+    monkeypatch.setattr(cfg, "ARTIST_SCAN_WORKERS", 1)
+    monkeypatch.setattr(flows, "list_library_artists", lambda **_k: [good])
+    monkeypatch.setattr(flows, "find_new_releases_for_artist", find)
+    monkeypatch.setattr(flows.new_releases_mod, "load", lambda: {
+        "seen": {"artist-id": ["moved", "owned", "untouched"]},
+        "baseline_limit": int(cfg.ARTIST_CATALOG_LIMIT),
+    })
+    monkeypatch.setattr(flows.new_releases_mod, "mark_run",
+                        lambda *_args, **kwargs: marked.update(kwargs) or True)
+    monkeypatch.setattr(flows, "_add_gap_candidate",
+                        lambda job, gap, *_args, **_kwargs: job.add_candidate(
+                            "album", gap.qobuz_album["id"], "Good",
+                            payload={"album_id": gap.qobuz_album["id"],
+                                     "_artist_dir": "Good",
+                                     "_premise": "fresh"}))
+    job = jm.Job(title="New-release check", execute_kind="new_releases")
+
+    flows.scan_new_releases(job, "tok")
+
+    assert asked == {"artist-id": ["untouched"]}
+    assert marked["started_from"] == {
+        "artist-id": ["moved", "owned", "untouched"]}
+    # Found again, the album keeps its tick and takes the folder as it is now;
+    # no longer offered, it leaves instead of being refused after every check.
+    by_title = {c["title"]: c for c in parked.candidates}
+    assert set(by_title) == {"moved", "untouched"}
+    assert by_title["moved"]["selected"] is True
+    assert by_title["moved"]["payload"]["_premise"] == "fresh"
+    assert by_title["untouched"]["payload"]["_premise"] == "old"
+    assert job.status is jm.JobStatus.DONE
+
+
 def test_an_album_dismissed_in_one_review_leaves_the_other(
         tmp_path, monkeypatch):
     """The Library review and New releases share one Dismissed list, yet an
