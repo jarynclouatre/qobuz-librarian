@@ -1225,15 +1225,17 @@ def run_album_download(
     full_album_rc = None
     rate_limited = False
 
+    some = (f"{len(missing)} of {n_tracks_total} tracks "
+            + ("to upgrade" if upgrade_only else "missing"))
     if download_full_album:
         whole = (plural(n_tracks_total, "track") if len(missing) == n_tracks_total
-                 else f"{len(missing)} of {n_tracks_total} tracks missing")
+                 else some)
         log.info(fmt(C.GRAY, f"  Whole album ({whole})"))
     else:
         why = (
             plural(len(missing), "track")
             if force_track_by_track
-            else f"{len(missing)} of {n_tracks_total} tracks missing"
+            else some
         )
         log.info(fmt(C.GRAY, f"  Track by track ({why})"))
     if len(to_fetch) < len(missing):
