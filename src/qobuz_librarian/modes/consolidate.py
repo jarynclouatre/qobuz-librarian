@@ -24,7 +24,7 @@ from qobuz_librarian.quality.decision import quality_change_summary
 from qobuz_librarian.safefile import snapshot_tree, stat_identity
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate
-from qobuz_librarian.ui_cli.errors import plural
+from qobuz_librarian.ui_cli.errors import plural, shown_path
 from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import (
     confirm,
@@ -910,6 +910,10 @@ def _reviewed_sibling_albums(album, primary):
         or _years_in(album.get("title") or "")
     )
     api_bare = strip_album_decorations(album.get("title") or "")
+    # An edition kept apart on purpose has no siblings, as in the walks.
+    if catalog.separate_edition_folder(primary.path.name):
+        return []
+    primary_words = catalog._other_release_words(primary.path.name)
     artist = primary.path.parent
     try:
         names = sorted(os.listdir(artist))
@@ -924,12 +928,16 @@ def _reviewed_sibling_albums(album, primary):
         if (
             not stat.S_ISDIR(value.st_mode)
             or (value.st_dev, value.st_ino) == primary.identity
+            or catalog.separate_edition_folder(name)
         ):
             continue
         years = _years_in(name)
         if primary_years and years and primary_years.isdisjoint(years):
             continue
         bare = strip_album_decorations(name)
+        if (catalog._numbers_differ(bare, primary_bare)
+                or catalog._other_release_words(name) != primary_words):
+            continue
         score = max(
             similarity(bare, primary_bare),
             similarity(bare, api_bare) if api_bare else 0.0,
@@ -1081,7 +1089,7 @@ def execute_consolidation(summary):
                 C.RED,
                 "      ✗  consolidation did not reach a fully verified "
                 "commit; its protected copy is retained at "
-                f"{backup_result.path}.",
+                f"{shown_path(backup_result.path)}.",
             ))
             log.info(fmt(
                 C.YELLOW,
@@ -1102,7 +1110,7 @@ def execute_consolidation(summary):
     if backup_result is not None:
         expires = binding.kept is not None and backup_mod.mark_consolidated(
             backup_result, binding.primary.path, binding.kept)
-        log.info(fmt(C.GRAY, f"    ⤷  Backup folder: {backup_result.path}"
+        log.info(fmt(C.GRAY, f"    ⤷  Backup folder: {shown_path(backup_result.path)}"
                      + (f" (cleared after "
                         f"{plural(config.UPGRADE_BACKUP_RETENTION_DAYS, 'day')})"
                         if expires else "")))
@@ -1165,7 +1173,7 @@ def consolidate_albums(album, args):
             ))
             log.info(fmt(C.GRAY, "     Skipping consolidation."))
             return 0, 0
-        log.info(fmt(C.GRAY, f"  Primary: {primary.path}"))
+        log.info(fmt(C.GRAY, f"  Primary: {shown_path(primary.path)}"))
         if not primary.tracks:
             log.info(fmt(
                 C.YELLOW,
@@ -1192,7 +1200,9 @@ def consolidate_albums(album, args):
                 sibling.tracks,
                 primary.tracks,
             )
-            if summary["overlap"]:
+            # A folder with tracks the album lacks stays whole, so a
+            # single never takes its song out of the album it came from.
+            if summary["overlap"] and not summary["unique"]:
                 try:
                     _bind_summary(summary, primary, sibling)
                 except (OSError, sqlite3.Error) as exc:
@@ -1206,13 +1216,15 @@ def consolidate_albums(album, args):
             summaries.append(summary)
 
         print_consolidation_overview(summaries)
+        if not any(s["overlap"] and not s["unique"] for s in summaries):
+            return 0, 0
         print()
         log.info(fmt(C.BOLD + C.CYAN, "  Per-sibling actions:"))
 
         for summary in summaries:
             sibling_dir = summary["dir"]
             overlap_count = len(summary["overlap"])
-            if not overlap_count:
+            if not overlap_count or summary["unique"]:
                 continue
             if summary.get("_blocked"):
                 log.info(fmt(
@@ -1233,9 +1245,7 @@ def consolidate_albums(album, args):
             ))
             log.info(fmt(
                 C.GRAY,
-                f"    {plural(overlap_count, 'track')} "
-                f"{'overlaps' if overlap_count == 1 else 'overlap'} • "
-                f"{plural(len(summary['unique']), 'bonus track')} will remain",
+                f"    {plural(overlap_count, 'track')}, all in the primary album",
             ))
             if warning:
                 if quality["unknown"]:

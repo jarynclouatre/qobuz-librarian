@@ -2,7 +2,6 @@
 import json
 import math
 import os
-import re
 import stat
 from pathlib import Path
 
@@ -78,6 +77,7 @@ from qobuz_librarian.library.catalog import (
     folder_holds_all_tracks,
     is_lossless_album,
     prompt_and_migrate_multi_artist_folder,
+    separate_edition_folder,
     track_signatures_for_album_dirs,
 )
 from qobuz_librarian.library.scanner import (
@@ -932,17 +932,13 @@ def _replacement_audio_paths(replacement_path, receipt):
         return ()
 
 
-# The names the app gives an edition it files beside another one.
-_SEPARATE_EDITION_RE = re.compile(r"\((?:Explicit|Qobuz [A-Za-z0-9]+)\)$")
-
-
 def detect_sibling_album_groups(album_dirs):
     """Group album dirs whose names strip to the same bare title.
     Returns [(bare_title, [dirs])] for groups with 2+ members. A folder named
     as a separate edition is never one."""
     groups = {}
     for d in album_dirs:
-        if _SEPARATE_EDITION_RE.search(tags.strip_year_decoration(d.name)):
+        if separate_edition_folder(d.name):
             continue
         bare = normalize(tags.strip_album_decorations(d.name))
         if not bare:

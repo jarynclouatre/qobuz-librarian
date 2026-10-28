@@ -370,9 +370,9 @@ def print_consolidation_overview(summaries):
     log.info(fmt(C.GRAY,
         f"  Found {plural(len(summaries), 'similar album folder')} for the same artist."))
     log.info(fmt(C.GRAY,
-        "  Tracks that match the primary album can move from each sibling to the backup folder."))
+        "  A sibling whose tracks are all in the primary album can move to the backup folder."))
     log.info(fmt(C.GRAY,
-        "  Bonus tracks (no match) will be left in place."))
+        "  One with tracks the primary album lacks is left as it is."))
 
     for i, s in enumerate(summaries, 1):
         sib_dir = s["dir"]
@@ -385,10 +385,13 @@ def print_consolidation_overview(summaries):
         log.info(fmt(C.GRAY, f"      similarity: {s['score']:.2f}"))
         log.info(fmt(C.GRAY, f"      overlap:    {n_over} of {n_total} tracks"))
         if n_uniq:
-            log.info(fmt(C.GRAY, f"      bonus:      {plural(n_uniq, 'track')} unique to sibling"))
+            log.info(fmt(C.GRAY, f"      not in the primary: {plural(n_uniq, 'track')}"))
 
         if not n_over:
             log.info(fmt(C.GREEN, "      → nothing to consolidate"))
+            continue
+        if n_uniq:
+            log.info(fmt(C.GRAY, "      → left as it is"))
             continue
 
         qc = quality_decision.quality_change_summary(s["overlap"])

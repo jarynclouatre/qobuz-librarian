@@ -1138,12 +1138,13 @@ def _bind_consolidation_summary(summary, tmp_path, monkeypatch):
     return summary["_binding"]
 
 
-def test_consolidation_never_groups_distinct_years_or_acts_in_a_dry_run(
+def test_consolidation_never_groups_distinct_works_or_acts_in_a_dry_run(
         tmp_path, monkeypatch):
     """Two folders that BOTH carry a year and don't share one are distinct
     works with a similar name, and consolidation deletes "duplicate" tracks -
     grouping them would feed a real recording to the deleter. A one-sided year
-    still groups: that's the same release re-tagged. A dry run looks nothing
+    still groups: that's the same release re-tagged. Another volume, or an
+    edition kept as its own folder, never groups. A dry run looks nothing
     up and touches no file."""
     from argparse import Namespace
 
@@ -1166,6 +1167,14 @@ def test_consolidation_never_groups_distinct_years_or_acts_in_a_dry_run(
     assert "Live at Wembley 1992" not in names
     assert "Live at Wembley" in names
 
+    # An edition the app filed beside the album, and the album's next
+    # volume, share most of its name and many of its recordings.
+    for name in ("Live at Wembley 1990 (Explicit)", "Live at Wembley 1990 Vol. 2"):
+        (artist / name).mkdir()
+    found = c._reviewed_sibling_albums(
+        {"title": "Live at Wembley 1990"}, c._review_album(primary))
+    assert {sibling.path.name for sibling, _score in found} == {"Live at Wembley"}
+
     def _boom(*a, **k):
         raise AssertionError("dry-run consolidation must not look up or touch files")
     monkeypatch.setattr(catmod, "find_album_dir_filesystem", _boom)
@@ -1173,6 +1182,41 @@ def test_consolidation_never_groups_distinct_years_or_acts_in_a_dry_run(
     album = {"id": "x", "title": "Revolver", "artist": {"name": "The Beatles"}}
     assert c.consolidate_albums(album, Namespace(dry_run=True, consolidate=True,
                                                  yes=False)) == (0, 0)
+
+
+def test_consolidating_after_a_single_leaves_its_album_whole(
+        tmp_path, monkeypatch, tagged_flac):
+    """A single shares its song with the album it came from. Consolidating
+    after the single's download must not take that track out of the album;
+    after the album's download the single's folder, which the album holds
+    whole, goes."""
+    from argparse import Namespace
+
+    import qobuz_librarian.config as cfg
+    import qobuz_librarian.library.catalog as catmod
+    from qobuz_librarian.modes import consolidate as c
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    monkeypatch.setattr(cfg, "BEETS_DB_PATH", tmp_path / "beets.db")
+    monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    single = tmp_path / "Exodus" / "Goliath (feat. Katie Jacoby) (2026)"
+    album = tmp_path / "Exodus" / "Goliath (2026)"
+    tagged_flac(single / "01 Goliath.flac", seconds=300, TITLE="Goliath",
+                ISRC="USEX12600001", TRACKNUMBER=1, DISCNUMBER=1)
+    for n, title in enumerate(("Goliath", "Prophet", "Lunatic"), 1):
+        tagged_flac(album / f"0{n} {title}.flac", seconds=300 + n, TITLE=title,
+                    ISRC=f"USEX1260000{n}", TRACKNUMBER=n, DISCNUMBER=1)
+    monkeypatch.setattr(c, "ask", lambda *a, **k: "d")
+    monkeypatch.setattr(c, "confirm", lambda *a, **k: True)
+
+    monkeypatch.setattr(catmod, "find_album_dir_filesystem", lambda _album: single)
+    assert c.consolidate_albums({"title": single.name}, Namespace(dry_run=False)) == (0, 0)
+    assert len(list(album.iterdir())) == 3
+
+    monkeypatch.setattr(catmod, "find_album_dir_filesystem", lambda _album: album)
+    assert c.consolidate_albums({"title": "Goliath"}, Namespace(dry_run=False)) == (1, 0)
+    assert not single.exists()
+    assert len(list(album.iterdir())) == 3
 
 
 def test_execute_consolidation_backs_up_overlap_and_refuses_a_replacement(

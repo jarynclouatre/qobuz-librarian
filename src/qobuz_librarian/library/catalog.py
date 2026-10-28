@@ -775,6 +775,16 @@ def edition_album_title(album, *, separate=False):
     return None
 
 
+# The names edition_album_title gives an edition filed beside another one.
+_SEPARATE_EDITION_RE = re.compile(r"\((?:Explicit|Qobuz [A-Za-z0-9]+)\)$")
+
+
+def separate_edition_folder(name):
+    """Whether an album folder is named as an edition kept apart from the
+    one beside it."""
+    return bool(_SEPARATE_EDITION_RE.search(strip_year_decoration(name)))
+
+
 def _recording_labels(labels):
     return {label for label in labels if not _PACKAGING_LABEL_RE.fullmatch(label)}
 
