@@ -2,6 +2,19 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.5.2] - 2026-10-28
+
+Library and New releases reviews that stay in step, a notice up front where the music disk can't take downloads, and terminal consolidation that offers only real duplicates.
+
+- An album dismissed in Missing Albums or New releases leaves both reviews unless it is ticked in the other, and a Library refresh takes the albums it finds on disk out of New releases too. A New releases check asks again about a waiting album whose artist folder has changed: one it still offers keeps its tick and can be downloaded, and the rest leave the review.
+- A Library refresh names the ticked albums whose folder has gone, and a refresh stopped by hand says the open review is unchanged. After a download at another Download quality, Upgrade's results wait for a refresh.
+- The collection backup keeps the last record of an artist folder the app can't read, and **Back up now** names the folder.
+- Library, Search and Discover say before anything is picked when the music disk can't take downloads, as on an NFS share, and Repair says so on a disk that doesn't record when folders were created. These messages ask for a local Linux disk.
+- With **Migrate multi-artist folders** on, an album filed under all its credited artists, such as `Resin Dogs, Abstract Rude`, moves under its main artist.
+- In the terminal, `--consolidate` offers only a folder whose tracks are all in the album just downloaded, and leaves out the app's separate editions, other volumes, and live or remix releases. Artist mode keeps a covered sibling folder in place, and names it, when its cover or other files differ from the kept album's. Consolidation messages show host folders.
+- Unfinished copies of Downsample's kept originals left by a hard stop are cleared at the next start.
+- The album cache drops artist catalogs unused for 60 days and trims quickly on big libraries, and passing health checks stay out of the container log. `.env.example` and the troubleshooting guide say how to keep a `$` in the web password.
+
 ## [1.5.1] - 2026-10-26
 
 Library reviews that stay where you left them, job pages that say what a run did, and a switch for the reissues Qobuz files under other.
