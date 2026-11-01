@@ -12,15 +12,15 @@ anyio==4.15.1
     #   watchfiles
 certifi==2026.10.23
     # via requests
-charset-normalizer==3.5.1
+charset-normalizer==3.5.2
     # via requests
 click==8.5.0
     # via uvicorn
-fastapi==0.141.1
+fastapi==0.162.0
     # via qobuz-librarian (pyproject.toml)
 h11==0.16.0
     # via uvicorn
-httptools==0.8.0
+httptools==0.9.0
     # via uvicorn
 idna==3.20
     # via
@@ -28,15 +28,15 @@ idna==3.20
     #   requests
 jinja2==3.1.6
     # via qobuz-librarian (pyproject.toml)
-markupsafe==3.0.3
+markupsafe==3.0.4
     # via jinja2
 mutagen==1.48.1
     # via qobuz-librarian (pyproject.toml)
-pydantic==2.13.5
+pydantic==2.14.1
     # via fastapi
 pydantic-core==2.46.5
     # via pydantic
-python-dotenv==1.2.3
+python-dotenv==1.2.4
     # via uvicorn
 python-multipart==0.0.32
     # via qobuz-librarian (pyproject.toml)
@@ -44,9 +44,9 @@ pyyaml==6.0.3
     # via uvicorn
 requests==2.34.2
     # via qobuz-librarian (pyproject.toml)
-starlette==1.7.0
+starlette==1.10.0
     # via fastapi
-tomlkit==0.15.1
+tomlkit==0.15.2
     # via qobuz-librarian (pyproject.toml)
 typing-extensions==4.16.0
     # via
@@ -65,9 +65,9 @@ urllib3==2.8.0
     #   requests
 uvicorn==0.54.0
     # via qobuz-librarian (pyproject.toml)
-uvloop==0.22.1
+uvloop==0.23.0
     # via uvicorn
 watchfiles==1.3.0
     # via uvicorn
-websockets==17.1
+websockets==17.3
     # via uvicorn
