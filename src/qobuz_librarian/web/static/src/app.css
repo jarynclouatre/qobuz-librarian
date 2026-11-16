@@ -95,8 +95,7 @@
    `hidden lg:flex` reveal pattern and take the desktop sidebar with it. */
 .ql-count.hidden,
 .ql-tabbar-count.hidden,
-.ql-history-attention.hidden,
-.ql-tab-attention.hidden,
+.ql-attention-badge.hidden,
 .ql-review-tool.hidden,
 .ql-discover-album.hidden {
   display: none;
@@ -221,38 +220,6 @@ h1, h2, h3 {
   padding-top: 0.625rem;
   border-top: 1px solid var(--ql-line-soft);
 }
-.ql-nav-attention-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--ql-space-1);
-}
-.ql-history-attention {
-  display: grid;
-  width: 2.25rem;
-  height: 2.25rem;
-  place-items: center;
-  border-radius: var(--ql-radius);
-  color: var(--ql-warning);
-  text-decoration: none;
-}
-.ql-history-attention:hover {
-  background-color: color-mix(in oklab, var(--ql-warning) 11%, transparent);
-}
-.ql-history-attention:focus-visible {
-  background-color: color-mix(in oklab, var(--ql-warning) 11%, transparent);
-  outline: 2px solid var(--ql-warning);
-  outline-offset: 2px;
-}
-/* History attention is a dot, like the review-ready dots: a number here sat
-   beside the queue count pill and read as a second, contradictory queue count.
-   The linked count lives in the title and aria-label. */
-.ql-attention-dot {
-  width: 0.4375rem;
-  height: 0.4375rem;
-  border-radius: 50%;
-  background: var(--ql-warning);
-}
 .ql-nav-link,
 .ql-sidebar-action {
   position: relative;
@@ -311,6 +278,11 @@ svg.ql-nav-icon-stroke {
   align-self: center;
   border-radius: 50%;
   background-color: var(--ql-gold);
+}
+/* A finished job needs attention: the same dot in the warning colour. */
+.ql-attention-badge,
+.ql-tabbar .ql-tab-dot.ql-attention-badge {
+  background-color: var(--ql-warning);
 }
 .ql-sidebar-alert {
   display: flex;
@@ -390,32 +362,6 @@ svg.ql-nav-icon-stroke {
 .ql-tabbar .ql-tab.is-active {
   color: var(--ql-text);
 }
-.ql-tab-slot {
-  position: relative;
-  min-width: 0;
-}
-.ql-tab-slot > .ql-tab {
-  height: 100%;
-}
-/* The target ends where the Queue icon starts, so a tap on the icon's left
-   edge still opens the Queue; the dot sits at the target's right end. */
-.ql-tab-attention {
-  position: absolute;
-  z-index: 2;
-  top: -0.35rem;
-  right: calc(50% + 0.7rem);
-  display: grid;
-  width: 2rem;
-  height: 2rem;
-  place-items: center end;
-  padding-right: 0.2rem;
-  border-radius: 50%;
-  text-decoration: none;
-}
-.ql-tab-attention:focus-visible {
-  outline: 2px solid var(--ql-warning);
-  outline-offset: -2px;
-}
 .ql-tabbar .ql-tab-dot {
   position: absolute;
   top: 0.2rem;
@@ -449,6 +395,10 @@ svg.ql-nav-icon-stroke {
   /* Ring in the bar's own color, so the pill reads as a badge sitting near
      the icon instead of a blob merged into it. */
   box-shadow: 0 0 0 1.5px var(--ql-bar);
+}
+.ql-tabbar-count.is-attention {
+  background: var(--ql-warning);
+  color: var(--ql-bar);
 }
 .ql-tab-more {
   position: static;
@@ -2754,6 +2704,21 @@ details.ql-mobile-drawer[open]::before {
   background: var(--ql-gold);
   transition: width 400ms ease;
 }
+/* Work that reports no count yet: a moving bar rather than one stuck at 0. */
+.ql-progress.is-uncounted i {
+  width: 30%;
+  animation: ql-progress-slide 1.8s ease-in-out infinite;
+}
+@keyframes ql-progress-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(334%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ql-progress.is-uncounted i {
+    width: 0;
+    animation: none;
+  }
+}
 .ql-activity-row + .ql-activity-row {
   border-top: 1px solid var(--ql-line-soft);
 }
@@ -2845,13 +2810,6 @@ details.ql-mobile-drawer[open]::before {
   gap: var(--ql-space-2);
   margin-top: var(--ql-space-4);
 }
-.ql-activity-maintenance {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--ql-space-4);
-  padding: var(--ql-space-2) var(--ql-space-1) 0;
-}
 @media (min-width: 640px) {
   .ql-empty-actions {
     flex-direction: row;
@@ -2938,6 +2896,19 @@ details.ql-mobile-drawer[open]::before {
   .ql-history-row .ql-activity-side .ql-activity-actions {
     width: auto;
     margin-left: auto;
+  }
+  /* Two chips or a button beside a name leave it a column a few words
+     wide, so they drop to their own line under it. */
+  .ql-history-row:has(.ql-activity-side > .ql-status-chip ~ .ql-status-chip) .ql-activity-main,
+  .ql-history-row:has(.ql-activity-side > .ql-status-chip ~ .ql-status-chip) .ql-activity-side,
+  .ql-history-row:has(.ql-activity-side > .ql-activity-actions) .ql-activity-main,
+  .ql-history-row:has(.ql-activity-side > .ql-activity-actions) .ql-activity-side {
+    grid-column: 2 / -1;
+  }
+  .ql-history-row:has(.ql-activity-side > .ql-status-chip ~ .ql-status-chip) .ql-activity-side,
+  .ql-history-row:has(.ql-activity-side > .ql-activity-actions) .ql-activity-side {
+    max-width: none;
+    justify-content: flex-start;
   }
   .ql-history-row .ql-activity-actions > form,
   .ql-history-row .ql-activity-actions > .ql-btn {
@@ -4443,6 +4414,31 @@ details.ql-mobile-drawer[open]::before {
 .ql-census-seg-h96   { background: color-mix(in oklab, var(--ql-gold) 55%, transparent); }
 .ql-census-seg-h192  { background: color-mix(in oklab, var(--ql-gold) 88%, var(--ql-surface)); }
 .ql-census-seg-other { background: color-mix(in oklab, var(--ql-text-3) 35%, var(--ql-surface-2)); }
+.ql-activity-section-action {
+  margin: 0 0 0 auto;
+}
+.ql-activity-section-header .ql-inline-link {
+  font-size: 0.8125rem;
+}
+.ql-queue-idle {
+  margin: 0;
+  padding-inline: 0.15rem;
+  color: var(--ql-text-2);
+  font-size: 0.9375rem;
+}
+/* A waiting job is its name and a way to drop it: one line. */
+.ql-activity-row--waiting {
+  padding-block: 0.3rem;
+}
+.ql-activity-row--waiting .ql-row-title {
+  font-weight: 550;
+}
+.ql-activity-row--waiting .ql-row-meta {
+  margin: -0.35rem 0 0.4rem;
+}
+.ql-activity-row--waiting .ql-job-tile svg {
+  stroke: var(--ql-text-3);
+}
 /* The whole queue card opens its job's surface, a thumb target, not just the
    title text. Buttons sit above the stretched link so they still win the tap. */
 .ql-activity-row--queue {

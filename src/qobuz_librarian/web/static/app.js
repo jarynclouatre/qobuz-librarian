@@ -200,8 +200,11 @@
     var controller = null;
     var queueSignatureKey = "ql-queue-count-signature";
 
-    function apply(n) {
+    // The phone tab carries one mark: the count while work is in flight,
+    // tinted when a finished job needs attention, and a dot when nothing is.
+    function apply(n, attention) {
       document.querySelectorAll(".js-queue-badge").forEach(function (badge) {
+        badge.classList.toggle("is-attention", !!attention);
         if (!n) {
           badge.classList.add("hidden");
           badge.textContent = "";
@@ -210,18 +213,14 @@
         badge.classList.remove("hidden");
         badge.textContent = n > 99 ? "99+" : String(n);
       });
-    }
-
-    function applyAttention(n) {
       document.querySelectorAll("[data-attention-badge]").forEach(function (badge) {
-        badge.classList.toggle("hidden", !n);
-        if (!n) return;
-        var items = n + " History item" + (n === 1 ? "" : "s");
-        badge.setAttribute("aria-label", "Open " + items + " needing attention");
-        if (badge.hasAttribute("title")) {
-          badge.setAttribute("title", items + (n === 1 ? " needs" : " need")
-            + " attention");
-        }
+        var solo = badge.hasAttribute("data-attention-solo");
+        badge.classList.toggle("hidden", !attention || (solo && !!n));
+        if (!attention) return;
+        var label = attention + " finished job"
+          + (attention === 1 ? " needs" : "s need") + " attention";
+        badge.setAttribute("aria-label", label);
+        if (badge.hasAttribute("title")) badge.setAttribute("title", label);
       });
     }
 
@@ -248,8 +247,7 @@
             }
             sessionStorage.setItem(queueSignatureKey, signature);
           } catch (e) {}
-          apply(data.count);
-          applyAttention(data.attention || 0);
+          apply(data.count, data.attention || 0);
           // Redraw when the rendered rows no longer match the live queue.
           var body = document.getElementById("queue-body");
           var rows = data.rows || String(data.count);
@@ -258,7 +256,7 @@
               && (moved
                   || body.querySelectorAll("[data-queue-row]").length
                      !== data.count)) {
-            window.htmx.ajax("GET", "/queue",
+            window.htmx.ajax("GET", body.dataset.queueSrc || "/queue",
               { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
           }
         })
@@ -2512,6 +2510,15 @@
     var runFallback = jobActivityFallback(kind, status);
     if (!id) return;
     var importing = card.dataset.jobImporting === "1";
+    // A full-album download reports its own title as the item, which the row
+    // already carries.
+    var ownTitle = card.dataset.jobTitle || "";
+    function ownItem(item) {
+      if (!ownTitle || !item) return item;
+      if (item === ownTitle) return "";
+      return item.indexOf(ownTitle + " · ") === 0
+        ? item.slice(ownTitle.length + 3) : item;
+    }
     var progId = "card-prog-" + id;
     var containerId = "queue-body";
     var reconnect = document.getElementById("card-reconnect-" + id);
@@ -2564,7 +2571,8 @@
         window.addEventListener("online", refreshSurface, { once: true });
         return;
       }
-      window.htmx.ajax("GET", "/queue",
+      var body = document.getElementById(containerId);
+      window.htmx.ajax("GET", (body && body.dataset.queueSrc) || "/queue",
         { target: "#queue-body", swap: "outerHTML", select: "#queue-body" });
     }
     function openStream() {
@@ -2610,12 +2618,15 @@
       var el = document.getElementById(progId);
       if (!el) return;
       var verb = status === "scanning" ? runFallback : (p.phase || runFallback);
-      var txt = fmtProgress(p, verb);
+      var txt = fmtProgress(
+        { current: p.current, total: p.total, unit: p.unit, phase: p.phase,
+          item: ownItem(p.item) }, verb);
       if (txt) el.textContent = txt;
       var bar = document.getElementById("card-bar-" + id);
       if (bar && p.total > 0) {
         var fill = bar.querySelector("i");
         var share = typeof p.fraction === "number" ? p.fraction : p.current / p.total;
+        bar.classList.remove("is-uncounted");
         if (fill) fill.style.width = Math.min(100, share * 100) + "%";
       }
     }

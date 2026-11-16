@@ -2139,7 +2139,9 @@ def history_page(limit: int, offset: int,
                  bulk: Optional[bool] = None,
                  status: Optional[str] = None, *,
                  exclude_recoveries: bool = False,
-                 attention_only: bool = False) -> list[dict]:
+                 attention_only: bool = False,
+                 work_only: bool = False,
+                 exclude_ids=()) -> list[dict]:
     """A page of finished jobs, newest first: the browsable record behind the
     History view. Lighter than ``load_all`` (no candidates or log lines): what a
     history row shows, plus the id to open the full job. The ``id`` tiebreaker
@@ -2147,12 +2149,20 @@ def history_page(limit: int, offset: int,
     card layer (True), the downloads table (False), or everything (None).
     ``status`` narrows in SQL. A caller filtering the returned page itself
     would silently lose older matching rows whenever the newest ``limit``
-    rows are mostly other statuses."""
+    rows are mostly other statuses. ``work_only`` leaves out scans that
+    finished cleanly, whose results are on their own pages."""
     clause, params = _kind_clause(bulk)
     if exclude_recoveries:
         clause += "AND COALESCE(recoveries, '[]') = '[]' "
     if attention_only:
         clause += f"AND {_TERMINAL_SQL} AND attention != '' "
+    if work_only:
+        clause += (f"AND {_TERMINAL_SQL} "
+                   "AND NOT (status = 'done' AND phase = 'scan') ")
+    exclude_ids = [str(job_id) for job_id in exclude_ids if job_id]
+    if exclude_ids:
+        clause += f"AND id NOT IN ({','.join('?' * len(exclude_ids))}) "
+        params = (*params, *exclude_ids)
     if status:
         clause += "AND status = ? "
         params = (*params, status)
@@ -2198,6 +2208,7 @@ def history_page(limit: int, offset: int,
             "recovery_unreadable": recovery_unreadable,
             "single": single,
             "single_unreadable": single_unreadable,
+            "bulk": (row[7] or "") in BULK_KINDS or not row[3],
         })
     return result
 

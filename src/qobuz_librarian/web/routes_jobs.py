@@ -1311,14 +1311,20 @@ _RETRY_RETURN_KEYS = ("p", "jp", "attention")
 
 
 def _retry_return_url(raw: object, **extra: str) -> str | None:
-    """The History page a Retry was clicked on, or None for anything else.
+    """The History or Queue page a Retry was clicked on, or None for anything
+    else.
 
-    History sends its own address with the click so the outcome arrives where
+    The page sends its own address with the click so the outcome arrives where
     the user is already looking instead of dragging them into the job card.
-    Only that one surface is honoured and only its own paging keys ride along,
-    so a forged field cannot aim the redirect somewhere else.
+    Only those two surfaces are honoured and only History's own paging keys
+    ride along, so a forged field cannot aim the redirect somewhere else.
     """
     path, _, query = (raw if isinstance(raw, str) else "").partition("?")
+    if path == "/queue":
+        # The retried job shows in the list itself; only a refusal needs words.
+        error = extra.get("error")
+        return path + ("?" + urllib.parse.urlencode({"error": error})
+                       if error else "")
     if path != "/queue/history":
         return None
     params = [(k, v) for k, v in urllib.parse.parse_qsl(query)

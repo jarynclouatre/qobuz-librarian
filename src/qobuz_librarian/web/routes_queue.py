@@ -1,6 +1,7 @@
 """Routes for the Queue and History pages."""
 import asyncio
 import logging
+import re
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -25,21 +26,80 @@ async def queue_head():
     return Response(status_code=200)
 
 
+# Enough of each to read on a phone without pushing the live rows away.
+_QUEUE_ATTENTION = 5
+_QUEUE_FINISHED = 8
+_JOB_ID_RE = re.compile(r"[0-9a-f]{6,64}")
+
+
+def _stamp(rows):
+    for r in rows:
+        ts = r.get("finished_at") or r.get("created_at")
+        r["when"], r["when_exact"] = job_labels._when_label(ts)
+        r["download_notes"] = download_notes_in(r.get("summary"))
+        if r.get("status") == "awaiting_review":
+            # A parked review's count changes as it is worked; its own
+            # page has the live one.
+            r["summary"] = review_pages.review_summary_without_count(
+                r.get("execute_kind"), r.get("summary"))
+        else:
+            r["summary"] = review_pages.summary_without_old_advice(
+                r.get("execute_kind"), r.get("summary"))
+    return rows
+
+
+def _queue_attention():
+    """The finished jobs that need attention, as many as the Queue shows, and
+    how many more History holds. Listing them is what acknowledges them, as on
+    History's own attention list."""
+    recoveries = rendering._retire_gone_recoveries(
+        job_persistence.recovery_history(attention_only=True))
+    for row in recoveries:
+        row["bulk"] = True
+    rows = (recoveries + job_persistence.history_page(
+        _QUEUE_ATTENTION, 0, exclude_recoveries=True, attention_only=True)
+    )[:_QUEUE_ATTENTION]
+    total = len(recoveries) + job_persistence.history_count(
+        exclude_recoveries=True, attention_only=True)
+    job_persistence.acknowledge_listed_attention([r["id"] for r in rows])
+    return _stamp(rows), max(0, total - len(rows))
+
+
 @router.get("/queue", response_class=HTMLResponse)
-async def queue_page(request: Request, error: str = "", notice: str = ""):
-    """The Queue tab: jobs in flight (pending / scanning / running). Parked
+async def queue_page(request: Request, error: str = "", notice: str = "",
+                     shown: str = ""):
+    """The Queue tab: finished jobs that need attention, jobs in flight
+    (pending / scanning / running), and the latest finished work. Parked
     reviews ride along in ``pending`` but the template and the badge both
-    filter them out; they render on their own surfaces. Finished jobs live in
-    the History tab, which reads the durable archive rather than the capped
-    in-memory set."""
+    filter them out; they render on their own surfaces. The whole record of
+    finished jobs is the History tab.
+
+    The page redraws its live part as jobs move. ``shown`` names the attention
+    rows already on the page above it, so a redraw does not list them a second
+    time under Finished."""
     pending = job_mgr.registry.pending_and_running()
+    loop = asyncio.get_running_loop()
+    attention, attention_more = [], 0
+    if rendering._is_htmx(request):
+        shown_ids = [i for i in shown.split(",") if _JOB_ID_RE.fullmatch(i)]
+    else:
+        attention, attention_more = await loop.run_in_executor(
+            None, _queue_attention)
+        shown_ids = [row["id"] for row in attention]
+    finished = await loop.run_in_executor(
+        None, lambda: _stamp(job_persistence.history_page(
+            _QUEUE_FINISHED, 0, work_only=True, exclude_ids=shown_ids)))
     return rendering._tr(request, "queue.html", {
         "pending": pending,
         "queue_rows_signature": job_labels._queue_rows_signature(pending),
-        # Per-pending-job "waiting behind X" explainer, the same one the single
-        # job page shows, so the Queue list says why a job hasn't started
-        # instead of a bare "Queued". None for anything already running.
+        # Why a waiting job hasn't started, where that is more than its place
+        # in the list. None for anything already running.
         "queue_waits": {j.id: job_labels._queue_wait(j) for j in pending},
+        "attention_jobs": attention,
+        "attention_more": attention_more,
+        "finished_jobs": finished,
+        "queue_src": "/queue" + (
+            "?shown=" + ",".join(shown_ids) if shown_ids else ""),
         "error": rendering._notice_text(error),
         "notice": rendering._notice_text(notice),
         "page": "queue",
@@ -78,21 +138,6 @@ async def queue_history(
         # past rows nobody saw, so it always shows the first page and the next
         # visit shows what is left.
         p = jp = 1
-    def _stamp(rows):
-        for r in rows:
-            ts = r.get("finished_at") or r.get("created_at")
-            r["when"], r["when_exact"] = job_labels._when_label(ts)
-            r["download_notes"] = download_notes_in(r.get("summary"))
-            if r.get("status") == "awaiting_review":
-                # A parked review's count changes as it is worked; its own
-                # page has the live one.
-                r["summary"] = review_pages.review_summary_without_count(
-                    r.get("execute_kind"), r.get("summary"))
-            else:
-                r["summary"] = review_pages.summary_without_old_advice(
-                    r.get("execute_kind"), r.get("summary"))
-        return rows
-
     def _load_page(page, bulk_page):
         # Two layers: meaningful jobs as cards, plain downloads as the table
         # underneath. Both walk the archive a page at a time.
@@ -100,6 +145,8 @@ async def queue_history(
             job_persistence.recovery_history(attention_only=True)
             if attention else job_persistence.recovery_history()
         )
+        for row in recoveries:
+            row["bulk"] = True
         recoveries = _stamp(recoveries)
         bulk_rest = job_persistence.history_count(
             bulk=True, exclude_recoveries=True, attention_only=attention)

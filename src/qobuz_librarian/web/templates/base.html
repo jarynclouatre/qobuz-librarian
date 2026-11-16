@@ -36,6 +36,7 @@
 
   {% set _qbadge = pending_job_count or 0 %}
   {% set _att = history_attention.count if history_attention else 0 %}
+  {% set _att_label = _att ~ ' finished job' ~ ('s need' if _att != 1 else ' needs') ~ ' attention' %}
   {% set _show_qobuz_missing = health_qobuz_missing %}
   {% set _show_token = health_token_invalid %}
   {% set _show_user_id = health_user_id_missing | default(false) %}
@@ -108,21 +109,12 @@
           </div>
 
           <div class="ql-nav-group">
-            <div class="ql-nav-attention-row">
-              <a href="/queue" data-nav-tab-link="queue" class="ql-nav-link {% if page=='queue' %}is-active{% endif %}"{% if page=='queue' %} aria-current="page"{% endif %}>
-                <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
-                Queue / History
-                <span class="js-queue-badge ql-count{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
-              </a>
-              {# A dot, not a second number: a count here reads as more queued
-                 work sitting right next to the real queue count. #}
-              <a href="/queue/history?attention=1"
-                 class="ql-history-attention{% if not _att %} hidden{% endif %}" data-attention-badge
-                 aria-label="Open {{ _att }} History item{% if _att != 1 %}s{% endif %} needing attention"
-                 title="{{ _att }} History item{% if _att != 1 %}s need{% else %} needs{% endif %} attention">
-                <span class="ql-attention-dot" aria-hidden="true"></span>
-              </a>
-            </div>
+            <a href="/queue" data-nav-tab-link="queue" class="ql-nav-link {% if page=='queue' %}is-active{% endif %}"{% if page=='queue' %} aria-current="page"{% endif %}>
+              <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
+              Queue / History
+              <span class="ql-review-badge ql-attention-badge{% if not _att %} hidden{% endif %}" data-attention-badge aria-label="{{ _att_label }}" title="{{ _att_label }}"></span>
+              <span class="js-queue-badge ql-count{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
+            </a>
           </div>
 
           <div class="ql-nav-group">
@@ -207,18 +199,14 @@
       <span>Library</span>
       {% if nav_review_badges.get('library') %}<span class="ql-tab-dot" data-review-badge="library" aria-label="Library review ready"></span>{% endif %}
     </a>
-    <div class="ql-tab-slot">
-      <a href="/queue" data-nav-tab-link="queue" class="ql-tab {% if page=='queue' %}is-active{% endif %}"{% if page=='queue' %} aria-current="page"{% endif %}>
-        <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
-        <span>Queue</span>
-        <span class="js-queue-badge ql-tabbar-count{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
-      </a>
-      <a href="/queue/history?attention=1"
-         class="ql-tab-attention{% if not _att %} hidden{% endif %}" data-attention-badge
-         aria-label="Open {{ _att }} History item{% if _att != 1 %}s{% endif %} needing attention">
-        <span class="ql-attention-dot" aria-hidden="true"></span>
-      </a>
-    </div>
+    {# One mark on the icon: the count while work is in flight, tinted when a
+       finished job needs attention, and a dot for that when nothing is. #}
+    <a href="/queue" data-nav-tab-link="queue" class="ql-tab {% if page=='queue' %}is-active{% endif %}"{% if page=='queue' %} aria-current="page"{% endif %}>
+      <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M5 12h14"/><path d="M5 17h8"/></svg>
+      <span>Queue</span>
+      <span class="js-queue-badge ql-tabbar-count{% if _att %} is-attention{% endif %}{% if not _qbadge %} hidden{% endif %}">{% if _qbadge %}{% if _qbadge > 99 %}99+{% else %}{{ _qbadge }}{% endif %}{% endif %}</span>
+      <span class="ql-tab-dot ql-attention-badge{% if not _att or _qbadge %} hidden{% endif %}" data-attention-badge data-attention-solo aria-label="{{ _att_label }}"></span>
+    </a>
     <a href="/settings" data-nav-tab-link="settings" class="ql-tab {% if page=='settings' %}is-active{% endif %}"{% if page=='settings' %} aria-current="page"{% endif %}>
       <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h10"/><path d="M18 8h2"/><path d="M4 16h2"/><path d="M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="8" cy="16" r="2"/></svg>
       <span>Settings</span>

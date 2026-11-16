@@ -2,7 +2,8 @@
 {% block title %}History - Qobuz Librarian{% endblock %}
 {% block content %}
 
-{% import "_job_labels.html" as labels %}
+{% import "_history_rows.html" as rows with context %}
+{% set _return_to = "/queue/history" ~ ("?" ~ request.url.query if request.url.query else "") %}
 {% set active_tab = 'history' %}
 <div class="ql-list-page ql-activity-page">
 <header class="ql-page-header ql-page-header--actions">
@@ -39,68 +40,6 @@
 </div>
 {% endif %}
 
-{% macro job_side(job) -%}
-    <div class="ql-activity-side">
-      {% if job.tracks_missing %}
-        <span class="ql-status-chip is-warning">Imported, {{ job.tracks_missing }} track{{ 's' if job.tracks_missing != 1 }} missing</span>
-      {% elif job.status == 'done' %}
-        <span class="ql-status-chip is-success">Done</span>
-      {% elif job.interrupted_by_restart %}
-        <span class="ql-status-chip is-neutral">Interrupted</span>
-      {% elif job.status == 'canceled' %}
-        <span class="ql-status-chip is-neutral">Cancelled</span>
-      {% elif job.status == 'awaiting_review' %}
-        <span class="ql-status-chip is-info">Needs review</span>
-      {% elif job.status == 'pending' %}
-        <span class="ql-status-chip is-info">Queued</span>
-      {% elif job.status in ['running', 'scanning'] %}
-        <span class="ql-status-chip is-info">In progress</span>
-      {% else %}
-        <span class="ql-status-chip is-error">Failed</span>
-      {% endif %}
-      {% if job.recovery_unreadable %}
-        <span class="ql-status-chip is-warning" title="The saved Repair recovery details could not be read.">Recovery unreadable</span>
-      {% elif job.recoveries %}
-        <span class="ql-status-chip is-warning"{% if job.execute_kind != 'migration' %} title="Original files remain in a Repair recovery folder."{% endif %}>Recovery needed</span>
-      {% elif job.execute_args_unreadable %}
-        <span class="ql-status-chip is-warning" title="The saved details needed to retry this job could not be read.">Retry unavailable</span>
-      {% elif job.single_unreadable %}
-        <span class="ql-status-chip is-warning" title="The saved single-track recovery details could not be read.">Actions unavailable</span>
-      {% elif job.attention == 'recovery' %}
-        <span class="ql-status-chip is-warning" title="The saved download recovery must be settled before retrying.">Recovery attention</span>
-      {% elif job.attention == 'partial' and not job.tracks_missing %}
-        <span class="ql-status-chip is-warning" title="This album is missing tracks; open it for details.">Incomplete</span>
-      {% elif job.attention == 'lossy' and not job.tracks_missing %}
-        <span class="ql-status-chip is-warning" title="Qobuz does not have every track in lossless quality.">Lossless unavailable</span>
-      {% elif job.attention == 'backup' %}
-        <span class="ql-status-chip is-warning" title="A retained safety backup needs review under Settings and Diagnostics.">Backup retained</span>
-      {% elif job.attention == 'processing' %}
-        <span class="ql-status-chip is-warning" title="Post-download work did not finish cleanly; open it for details.">Post-download attention</span>
-      {% elif job.attention == 'unchecked' %}
-        <span class="ql-status-chip is-warning" title="Some artists or tracks could not be read; open it for details.">Scan incomplete</span>
-      {% elif job.attention == 'cancel_late' %}
-        <span class="ql-status-chip is-warning" title="It finished before the stop could take effect.">Cancelled too late</span>
-      {% elif job.attention == 'catalog' %}
-        <span class="ql-status-chip is-warning" title="The deleted track still has a stale Beets catalogue entry.">Catalogue cleanup</span>
-      {% elif job.attention == 'quality' %}
-        <span class="ql-status-chip is-warning" title="Finished below your target quality; open it for details.">Below target quality</span>
-      {% endif %}
-      <span class="ql-activity-time tabular-nums"{% if job.when_exact %} title="{{ job.when_exact }}"{% endif %}>{{ job.when }}</span>
-      {# No empty actions box: on a phone it pins a wrapped time to the left. #}
-      {% if (job.status in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and job.attention != 'recovery' and not job.recoveries and not job.recovery_unreadable %}
-      <div class="ql-activity-actions">
-        {% set retry_paused = downloads_paused %}
-        {% set retry_quiet = job.status == 'canceled' and not job.interrupted_by_restart %}
-        <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
-          <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-          <input type="hidden" name="return_to" value="/queue/history{% if request.url.query %}?{{ request.url.query }}{% endif %}">
-          <button type="submit" class="ql-btn {{ 'ql-btn-secondary' if retry_quiet else 'ql-btn-primary' }} ql-btn-sm"{% if retry_paused %} disabled title="{{ downloads_paused_reason }}" aria-disabled="true"{% else %} title="Retry"{% endif %}>Retry</button>
-        </form>
-      </div>
-      {% endif %}
-    </div>
-{%- endmacro %}
-
 {% if bulk_jobs or jobs %}
 {% if not attention_only %}
 <div class="ql-activity-toolbar">
@@ -121,24 +60,7 @@
   </header>
   <div class="ql-activity-list">
     {% for job in bulk_jobs %}
-    <article class="ql-activity-row ql-history-row ql-history-row--bulk">
-      {{ labels.kind_tile(job, 'ql-job-tile--done') }}
-      <div class="ql-activity-main">
-        <p class="ql-row-title">
-          {# Its saved row cannot be loaded as a job, so the title is not a
-             link; the line below is the one way on. #}
-          {% if job.recovery_unreadable %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}{% else %}<a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>{% endif %}
-        </p>
-        {% if job.recovery_unreadable %}
-        <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Inspect the backups under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
-        {% elif job.recoveries and job.execute_kind != 'migration' %}
-        <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
-        {% endif %}
-      </div>
-      {{ job_side(job) }}
-      {% if job.summary and job.summary != job.error %}<p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>{% endif %}
-      {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta {{ 'ql-row-meta--warning' if job.interrupted_by_restart else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>{% endif %}
-    </article>
+    {{ rows.row(job, _return_to) }}
     {% endfor %}
   </div>
   {% if bulk_pages > 1 and not attention_only %}
@@ -167,27 +89,7 @@
   </header>
   <div class="ql-activity-list">
     {% for job in jobs %}
-    <article class="ql-activity-row ql-history-row ql-history-row--compact">
-      {{ labels.kind_tile(job, 'ql-job-tile--done') }}
-      <div class="ql-activity-main">
-        <p class="ql-row-title">
-          {% if job.single and job.single.get('track_id') %}
-          <a href="/jobs/{{ job.id }}" class="ql-row-link"><span>{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }} <span class="ql-row-kind">Track</span></span></a>
-          {% else %}
-          <a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
-          {% endif %}
-        </p>
-      </div>
-      {{ job_side(job) }}
-      {% if job.error %}
-      {% set reason = job.error | strip_log_pointer(none) %}
-      <p class="ql-row-meta {{ 'ql-row-meta--warning' if job.tracks_missing or job.interrupted_by_restart else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>
-      {% elif job.status == 'canceled' and job.summary %}
-      <p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>
-      {% elif job.download_notes %}
-      <p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.download_notes }}</p>
-      {% endif %}
-    </article>
+    {{ rows.row(job, _return_to) }}
     {% endfor %}
   </div>
 </section>

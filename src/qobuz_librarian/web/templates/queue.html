@@ -2,7 +2,8 @@
 {% block title %}Queue - Qobuz Librarian{% endblock %}
 {% block content %}
 {% import "_job_labels.html" as labels %}
-<div id="queue-body" class="ql-list-page ql-activity-page" data-queue-rows="{{ queue_rows_signature }}">
+{% import "_history_rows.html" as rows with context %}
+<div class="ql-list-page ql-activity-page">
 
 {% set active_tab = 'queue' %}
 <header class="ql-page-header ql-page-header--actions">
@@ -12,11 +13,23 @@
   </div>
 </header>
 
+{# A full-album download reports its own title as the item, which the row
+   already carries. #}
+{% macro progress_item(job) -%}
+  {%- set item = job.progress_item or '' -%}
+  {%- if job.title and item == job.title -%}
+  {%- elif job.title and item.startswith(job.title ~ ' · ') -%}{{ item[(job.title | length) + 3:] }}
+  {%- else -%}{{ item }}
+  {%- endif -%}
+{%- endmacro %}
+
 {% macro queue_job_row(job) -%}
-<article class="ql-activity-row ql-activity-row--queue"
+{% set live = job.status.value in ('running', 'scanning') %}
+{% set qw = (queue_waits or {}).get(job.id) %}
+<article class="ql-activity-row ql-activity-row--queue{% if not live %} ql-activity-row--waiting{% endif %}"
      data-queue-row
-     {%- if job.status.value in ('running', 'scanning') %} data-job-card data-job-id="{{ job.id }}" data-job-surface="queue" data-job-status="{{ job.status.value }}" data-job-kind="{{ job.execute_kind or job.kind }}"{% if job.importing %} data-job-importing="1"{% endif %}{% endif %}>
-  {{ labels.kind_tile(job, 'is-live' if job.status.value in ('running', 'scanning') else '') }}
+     {%- if live %} data-job-card data-job-id="{{ job.id }}" data-job-surface="queue" data-job-status="{{ job.status.value }}" data-job-kind="{{ job.execute_kind or job.kind }}" data-job-title="{{ job.title }}"{% if job.importing %} data-job-importing="1"{% endif %}{% endif %}>
+  {{ labels.kind_tile(job, 'is-live' if live else '') }}
 
   <div class="ql-activity-main">
     <p class="ql-row-title">
@@ -24,52 +37,28 @@
         {% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}
       </a>
     </p>
-    {% if job.status.value in ('running', 'scanning', 'pending') %}
+    {% if live %}
     <span id="card-reconnect-{{ job.id }}" class="ql-status-chip ql-status-chip--wrap is-warning hidden">Reconnecting</span>
-    {% endif %}
-    {% if job.status.value == 'scanning' %}
+    {% set _verb = labels.job_activity(job) if job.status.value == 'scanning' else (job.progress_phase or labels.job_activity(job)) %}
+    {% set _item = progress_item(job) | trim %}
     <p id="card-prog-{{ job.id }}" class="ql-row-meta">
       {%- if job.progress_total > 0 -%}
-      {{ labels.job_activity(job) }} {{ job.progress_current }} / {{ job.progress_total }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if job.progress_total != 1 }}{% endif %}{% if job.progress_item %} · {{ job.progress_item }}{% endif %}
+      {{ _verb }} {{ job.progress_current }} / {{ job.progress_total }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if job.progress_total != 1 }}{% endif %}{% if _item %} · {{ _item }}{% endif %}
       {%- elif job.progress_phase -%}
-      {{ job.progress_phase }}
+      {{ job.progress_phase }}{% if _item %} · {{ _item }}{% endif %}
       {%- else -%}
       {{ labels.job_activity(job) }}…
       {%- endif -%}
     </p>
-    {% elif job.status.value == 'running' %}
-    {% set _runverb = labels.job_activity(job) %}
-    <p id="card-prog-{{ job.id }}" class="ql-row-meta">
-      {%- if job.progress_total > 0 -%}
-      {{ job.progress_phase or _runverb }} {{ job.progress_current }} / {{ job.progress_total }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if job.progress_total != 1 }}{% endif %}{% if job.progress_item %} · {{ job.progress_item }}{% endif %}
-      {%- elif job.progress_phase -%}
-      {{ job.progress_phase }}
-      {%- else -%}
-      {{ _runverb }}…
-      {%- endif -%}
-    </p>
-    {% elif job.status.value == 'pending' %}
-    {% set qw = (queue_waits or {}).get(job.id) %}
-    <p id="card-prog-{{ job.id }}" class="ql-row-meta">
-      {%- if qw and qw.paused -%}
-      Waiting until downloads can run again.
-      {%- elif qw and qw.for_qobuz -%}
-      Waiting for Qobuz.
-      {%- elif qw -%}
-      Behind {{ qw.position }} job{{ 's' if qw.position != 1 }}.
-      {%- else -%}
-      Next.
-      {%- endif -%}
-    </p>
-    {% endif %}
-    {% if job.status.value in ('running', 'scanning') %}
-    <div class="ql-progress" id="card-bar-{{ job.id }}">
-      <i style="width: {% if job.progress_fraction is not none %}{{ (job.progress_fraction * 100) | round(1) }}{% elif job.progress_total > 0 %}{{ ((job.progress_current / job.progress_total) * 100) | round(1) }}{% else %}0{% endif %}%"></i>
+    {% set _counted = job.progress_fraction is not none or job.progress_total > 0 %}
+    <div class="ql-progress{% if not _counted %} is-uncounted{% endif %}" id="card-bar-{{ job.id }}">
+      <i{% if _counted %} style="width: {% if job.progress_fraction is not none %}{{ (job.progress_fraction * 100) | round(1) }}{% else %}{{ ((job.progress_current / job.progress_total) * 100) | round(1) }}{% endif %}%"{% endif %}></i>
     </div>
+    {% elif qw and (qw.paused or qw.for_qobuz) %}
+    <p class="ql-row-meta">{% if qw.paused %}Waiting until downloads can run again.{% else %}Waiting for Qobuz.{% endif %}</p>
     {% endif %}
   </div>
 
-  {% if job.status.value in ('pending', 'running', 'scanning') %}
   {% if job.importing %}
   {# Beets runs to its own end, so a Cancel here would be a dead control. Say
      what is happening instead of greying a button whose reason only lives in
@@ -87,14 +76,13 @@
   <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-activity-actions">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="return_to" value="/queue">
-    {% set _act = 'Remove' if job.status.value == 'pending' else 'Cancel' %}
-    <button type="submit" class="ql-btn ql-btn-sm{% if job.status.value == 'pending' %} ql-btn-secondary{% endif %}"
-            title="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
-            aria-label="{{ _act }} {{ 'job' if job.status.value != 'pending' else 'from queue' }}"
-            data-confirm="{% if job.status.value == 'pending' %}Remove this waiting job from the queue?{% else %}{{ labels.cancel_confirm(job) }}{% endif %}"
-            data-confirm-action="{% if job.status.value == 'pending' %}Remove{% else %}Stop job{% endif %}"{% if job.status.value != 'pending' %} data-confirm-dismiss="Keep running" data-irreversible{% endif %}>{{ _act }}</button>
+    {% set _act = 'Cancel' if live else 'Remove' %}
+    <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
+            title="{{ _act }} {{ 'job' if live else 'from queue' }}"
+            aria-label="{{ _act }} {{ 'job' if live else 'from queue' }}"
+            data-confirm="{% if live %}{{ labels.cancel_confirm(job) }}{% else %}Remove this waiting job from the queue?{% endif %}"
+            data-confirm-action="{% if live %}Stop job{% else %}Remove{% endif %}"{% if live %} data-confirm-dismiss="Keep running" data-irreversible{% endif %}>{{ _act }}</button>
   </form>
-  {% endif %}
   {% endif %}
 </article>
 {%- endmacro %}
@@ -104,60 +92,75 @@
 <div class="ql-notice ql-notice-error" data-flash><span>{{ error }}</span></div>
 {% endif %}
 
-{# Outside the activity list: the outcomes that send one here (clearing the
-   queue, giving up on an interrupted download) usually leave nothing running,
-   and inside the list the notice went unseen in exactly those cases. #}
 {% if notice %}
 <div class="ql-notice ql-notice-warning" data-flash><span>{{ notice }}</span></div>
 {% endif %}
 
+{# Above the part that redraws: these rows stop needing attention once the
+   page has listed them, and a redraw would take them away mid-read. #}
+{% if attention_jobs %}
+<section class="ql-activity-section" aria-labelledby="queue-attention-heading">
+  <header class="ql-activity-section-header">
+    <h2 id="queue-attention-heading">Needs attention</h2>
+    {% if attention_more %}<a href="/queue/history?attention=1" class="ql-inline-link ql-activity-section-action">{{ attention_more }} more</a>{% endif %}
+  </header>
+  <div class="ql-activity-list">
+    {% for job in attention_jobs %}{{ rows.row(job, '/queue') }}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{# The queue is work in flight; parked reviews live on their own pages.
+   `pending` still carries them, so the lists below take the in-flight jobs
+   only. #}
+{% set active_jobs = (pending | selectattr('status.value', 'equalto', 'running') | list) + (pending | selectattr('status.value', 'equalto', 'scanning') | list) %}
+{% set waiting_jobs = pending | selectattr('status.value', 'equalto', 'pending') | list %}
+<div id="queue-body" class="ql-activity-stack" data-queue-rows="{{ queue_rows_signature }}" data-queue-src="{{ queue_src }}">
 {% include "_writes_paused_notice.html" %}
 {% include "_qobuz_hold_notice.html" %}
 
-{# The queue is work in flight; parked reviews live on their own pages.
-   `pending` still carries them, so the empty state gates on the in-flight
-   lists or a review-only registry would render a blank page. #}
-{% set active_jobs = (pending | selectattr('status.value', 'equalto', 'running') | list) + (pending | selectattr('status.value', 'equalto', 'scanning') | list) %}
-{% set waiting_jobs = pending | selectattr('status.value', 'equalto', 'pending') | list %}
-{% if active_jobs or waiting_jobs %}
-<div class="ql-activity-stack">
-  {% if active_jobs %}
-  <section class="ql-activity-section" aria-labelledby="queue-active-heading">
-    <header class="ql-activity-section-header">
-      <h2 id="queue-active-heading">Running now</h2>
-      <span class="ql-count">{{ active_jobs | length }}</span>
-    </header>
-    <div class="ql-activity-list">
-      {% for job in active_jobs %}{{ queue_job_row(job) }}{% endfor %}
-    </div>
-  </section>
-  {% endif %}
-
-  {% if waiting_jobs %}
-  <section class="ql-activity-section" aria-labelledby="queue-waiting-heading">
-    <header class="ql-activity-section-header">
-      <h2 id="queue-waiting-heading">Waiting</h2>
-      <span class="ql-count">{{ waiting_jobs | length }}</span>
-    </header>
-    <div class="ql-activity-list">
-      {% for job in waiting_jobs %}{{ queue_job_row(job) }}{% endfor %}
-    </div>
-  </section>
-  {% endif %}
-</div>
+{% macro clear_queue(active_jobs, waiting_jobs) -%}
+{# What clearing does is spelled out by the confirm dialog the button opens. #}
 {% if (active_jobs | length) + (waiting_jobs | length) > 1 %}
-{# What clearing does is spelled out by the confirm dialog the button opens;
-   repeating it here as standing text made two jobs read like a warning. #}
 {% set _scan = active_jobs | selectattr('status.value', 'equalto', 'scanning') | selectattr('execute_kind', 'in', ['library', 'repair']) | first %}
-<div class="ql-activity-maintenance">
-  <form action="/queue/cancel-pending" method="post">
-    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-    <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
-            data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %} Completed work and parked reviews are untouched."
-            data-confirm-action="Clear queue" data-irreversible>Clear the queue</button>
-  </form>
-</div>
+<form action="/queue/cancel-pending" method="post" class="ql-activity-section-action">
+  <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+  <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
+          data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %} Completed work and parked reviews are untouched."
+          data-confirm-action="Clear queue" data-irreversible>Clear queue</button>
+</form>
 {% endif %}
+{%- endmacro %}
+
+{% if active_jobs %}
+<section class="ql-activity-section" aria-labelledby="queue-active-heading">
+  <header class="ql-activity-section-header">
+    <h2 id="queue-active-heading">Running</h2>
+    {{ clear_queue(active_jobs, waiting_jobs) }}
+  </header>
+  <div class="ql-activity-list">
+    {% for job in active_jobs %}{{ queue_job_row(job) }}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if waiting_jobs %}
+<section class="ql-activity-section" aria-labelledby="queue-waiting-heading">
+  <header class="ql-activity-section-header">
+    <h2 id="queue-waiting-heading">Up next</h2>
+    <span class="ql-count">{{ waiting_jobs | length }}</span>
+    {% if not active_jobs %}{{ clear_queue(active_jobs, waiting_jobs) }}{% endif %}
+  </header>
+  <div class="ql-activity-list">
+    {% for job in waiting_jobs %}{{ queue_job_row(job) }}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if not active_jobs and not waiting_jobs %}
+{% set _idle = 'Nothing is running here.' if cli_mode or health_lock_busy else 'Nothing is running.' if writes_paused else 'Queue is empty.' %}
+{% if finished_jobs or attention_jobs %}
+<p class="ql-queue-idle">{{ _idle }}</p>
 {% else %}
 <div class="ql-empty-state ql-empty-state--activity">
   <div class="ql-state-icon" aria-hidden="true">
@@ -165,7 +168,7 @@
       <path d="M6.5 6.75h11M6.5 12h11M6.5 17.25h7.5"/>
     </svg>
   </div>
-  <p class="font-medium text-base-content/70">{% if cli_mode or health_lock_busy %}Nothing is running here.{% elif writes_paused %}Nothing is running.{% else %}Queue is empty.{% endif %}</p>
+  <p class="font-medium text-base-content/70">{{ _idle }}</p>
   <div class="ql-empty-actions">
     {# Nothing can start, so a Search button here only leads back to a greyed
        download; the notice above carries the one thing that lifts the pause. #}
@@ -176,6 +179,20 @@
   </div>
 </div>
 {% endif %}
+{% endif %}
+
+{% if finished_jobs %}
+<section class="ql-activity-section" aria-labelledby="queue-finished-heading">
+  <header class="ql-activity-section-header">
+    <h2 id="queue-finished-heading">Finished</h2>
+    <a href="/queue/history" class="ql-inline-link ql-activity-section-action">All history</a>
+  </header>
+  <div class="ql-activity-list">
+    {% for job in finished_jobs %}{{ rows.row(job, '/queue') }}{% endfor %}
+  </div>
+</section>
+{% endif %}
+</div>
 
 </div>
 {% endblock %}
