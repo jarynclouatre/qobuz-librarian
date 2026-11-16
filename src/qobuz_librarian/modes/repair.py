@@ -881,20 +881,20 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         # verify by" is unproven, not proven.
         back_in_place = download_clean and _refills_present_in(
             album_dir, wanted_counts, baseline_counts)
-        if (download_clean and baseline_counts is not None
-                and not back_in_place):
+        if download_clean and not back_in_place:
             pin_repair_recovery(
                 "repair backup kept, refill location could not be proven")
+            if baseline_counts is None:
+                unproven = ("The album folder could not be read in full "
+                            "before the import, so the replacement tracks "
+                            "could not be checked in it.")
+            else:
+                unproven = ("The replacement tracks could not be found in "
+                            "the album folder after import.")
             log.info(fmt(C.RED,
-                "  ✗  The refilled tracks were imported but could not be "
-                "found in the album folder. The originals are preserved at:\n"
+                f"  ✗  {unproven} The originals are preserved at:\n"
                 f"     {backup_path}"))
-            checkpoint_recovery(
-                backup_path,
-                "placement",
-                "The replacement tracks could not be found in the album "
-                "folder after import.",
-            )
+            checkpoint_recovery(backup_path, "placement", unproven)
             return {
                 "n_ok": 0,
                 "n_fail": max(n_fail_final, len(verified_truncated)),

@@ -551,7 +551,7 @@
 <div class="ql-empty-state ql-search-empty">
   {% if artist_only_count %}
   <p>{{ artist_only_label }} matched only the artist name.</p>
-  <span><button type="button" class="ql-inline-link ql-inline-link-hit" data-search-by-artist="{{ q }}">Search by Artist</button> to see them.</span>
+  <span><button type="button" class="ql-inline-link ql-inline-link-hit" data-search-by-artist="{{ q }}">Search by Artist</button> to see {{ 'them' if artist_only_count != 1 else 'it' }}.</span>
   {% else %}
   <p>
     {% if kind == 'artist' and selected_artist %}No albums found for {{ selected_artist.name }}.

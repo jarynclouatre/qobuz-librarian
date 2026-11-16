@@ -4379,7 +4379,8 @@ def _prepare_for_beets_run(
                     plugin_config,
                     ownership_enabled=ownership_enabled,
                     album_folder=album_folder,
-                    flat=album_folder is not None and tracks_sit_flat(album_dir),
+                    flat=(album_folder is not None and album_dir is not None
+                          and tracks_sit_flat(album_dir)),
                     places=places if album_folder is not None else None,
                     disc_folders=(
                         _album_disc_folders(album_dir)

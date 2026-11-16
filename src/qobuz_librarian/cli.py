@@ -1294,9 +1294,8 @@ def main():
         raise SystemExit(run_album_repair_mode(args, catalogue_token()))
 
     if args.upgrade_walk:
-        if args.consolidate:
-            # The walk switches this off (per-album prompts are unbearable at
-            # scale). Say so instead of accepting the flag silently.
+        if args.consolidate and not cfg.CONSOLIDATE:
+            # The walk switches this off: a prompt per album is too many.
             log.info(fmt(C.GRAY,
                 "  · The upgrade walk always skips sibling-folder "
                 "consolidation; ignoring --consolidate."))

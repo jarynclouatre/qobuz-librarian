@@ -383,8 +383,12 @@ def run_migrate_mode(args):
         f"  Results:     {results_manifest}\n"
         "  Spot-check it before pointing the tool at it as your main library."))
     n_errors = result.failed + companion_failed
-    if result.interrupted or result.cancelled:
+    if result.interrupted:
         log.info(fmt(C.GRAY, "  Interrupted."))
+    elif result.cancelled:
+        log.warning(fmt(C.RED,
+            "  ✗  Stopped early"
+            + (f" with {plural(n_errors, 'error')}" if n_errors else "") + "."))
     elif n_errors:
         log.warning(fmt(C.RED, f"  ✗  Finished with {plural(n_errors, 'error')}."))
     elif result.lingered:

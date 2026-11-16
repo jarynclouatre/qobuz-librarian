@@ -246,9 +246,10 @@ def read_album_dir(album_dir: Path, walk_errors=None):
         for f in iter_tree_no_symlinks(album_dir, errors=walk_errors):
             try:
                 # A hidden name is a Downsample temp or a macOS "._"
-                # resource file, never a track.
+                # resource file, and a hidden or system folder holds a
+                # share's own copies (.AppleDouble, #recycle), never tracks.
                 if (f.suffix.lower() in _exts
-                        and not is_library_system_folder(f.name)
+                        and not in_system_folder(f, album_dir)
                         and not _undecodable(f.parent) and not _undecodable(f)
                         and _is_type(f, stat.S_ISREG)):
                     audio_files.append(f)
@@ -397,6 +398,13 @@ def is_library_system_folder(name: str) -> bool:
         or (name.startswith(".")
             and (second == "_" or (second.isascii() and second.isalpha())))
     )
+
+
+def in_system_folder(path: Path, root: Path) -> bool:
+    """Whether path, or a folder between it and root, is hidden or a system
+    folder."""
+    return any(is_library_system_folder(part)
+               for part in path.relative_to(root).parts)
 
 
 def list_library_artists(walk_errors=None, *, on_artist_error=None):

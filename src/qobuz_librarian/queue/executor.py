@@ -2189,10 +2189,10 @@ def _durable_completion_line(result, elapsed):
         details.append(f"{unresolved} unresolved")
     errors = result.get("downsample_errors", 0)
     if errors:
-        details.append(f"{errors} downsample failed")
+        details.append(f"{errors} failed to downsample")
     flush_warnings = result.get("downsample_flush_warnings", 0)
     if flush_warnings:
-        details.append(f"{flush_warnings} flush warning")
+        details.append(plural(flush_warnings, "flush warning"))
     if result.get("downsample_cancelled", False):
         details.append("downsample stopped")
     detail = " · ".join(details) or "needs attention"

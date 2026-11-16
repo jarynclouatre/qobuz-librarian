@@ -181,10 +181,11 @@ async def _restore_hidden(request, scope, redirect):
             msg = "Brought back. " + _held_note(held, len(dismissed_ids))
         else:
             msg = "Brought back. Nothing needs adding to the Library review."
-        if relisted and (rejoined == 0 or waits_for_scan):
-            msg = "Brought back. " + relisted_note
-        elif relisted and rejoined is not False:
-            msg += " " + _relisted_note(relisted)
+        if relisted and rejoined is not False:
+            if rejoined == 0 or waits_for_scan:
+                msg = "Brought back. " + relisted_note
+            else:
+                msg += " " + _relisted_note(relisted)
         return RedirectResponse(
             url=redirect + _hidden_query(q, msg, p), status_code=303)
     # Upgrade and Downsample scopes: nothing to fold.

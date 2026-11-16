@@ -136,3 +136,17 @@ def test_an_artist_with_audio_survives_an_unreadable_subfolder(tmp_path, monkeyp
 
     assert found == [artist]
     assert reported == [artist]
+
+
+def test_a_share_copy_inside_an_album_is_not_read_as_a_track(tmp_path, tagged_flac):
+    from qobuz_librarian.library import scanner
+
+    album = tmp_path / "Artist" / "Album (2001)"
+    tagged_flac(album / "CD1" / "01 - Song.flac", TITLE="Song", TRACKNUMBER="1")
+    tagged_flac(album / ".AppleDouble" / "01 - Song.flac", TITLE="Song")
+    tagged_flac(album / "CD1" / "#recycle" / "01 - Song.flac", TITLE="Song")
+    scanner.clear_scan_caches()
+
+    tracks = scanner.read_album_dir(album)
+
+    assert [t["path"] for t in tracks] == [str(album / "CD1" / "01 - Song.flac")]

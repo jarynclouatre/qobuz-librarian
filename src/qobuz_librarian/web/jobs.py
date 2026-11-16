@@ -1187,8 +1187,8 @@ def _friendly_job_error(exc, fallback: str) -> str:
     if isinstance(exc, FileNotFoundError):
         # job.error is rendered through Jinja autoescape, so don't escape here
         # too (that double-encodes characters like & in a path).
-        fname = str(exc.filename) if exc.filename else "see log"
-        return f"Required tool or path missing; see log ({fname})."
+        named = f" ({exc.filename})" if exc.filename else ""
+        return f"Required tool or path missing; see log{named}."
     if isinstance(exc, beets.MusicDiskFull):
         return f"{exc.strerror}."
     if isinstance(exc, OSError):

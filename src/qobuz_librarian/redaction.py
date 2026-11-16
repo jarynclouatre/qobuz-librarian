@@ -7,11 +7,10 @@ MASK = "[redacted]"
 
 # Names whose value is an account secret, in a query string, a form body, a
 # JSON body, a dumped header, or a Python tuple/list repr such as
-# ('X-User-Auth-Token', 'abc123'). The separator tolerates the quotes a dict,
-# a JSON blob or a tuple repr puts around the name, so one rule covers all
-# five shapes; the comma alternative is what a printed header tuple uses in
-# place of = or :.
-_SEP = r'["\']?\s*(?:=|%3D|:|,)\s*["\']?'
+# ('X-User-Auth-Token', 'abc123'). The separator tolerates the quotes a dict
+# or a JSON blob puts around the name. A comma separates only between quotes,
+# as in the tuple repr, so a comma in a sentence is left alone.
+_SEP = r'(?:["\']?\s*(?:=|%3D|:)\s*["\']?|["\']\s*,\s*["\'])'
 _VALUE = r'[^\s&;,"\'<>\\]+'
 # No word boundary before the name: a long URL reaches the log already wrapped,
 # so the parameter can arrive with its first characters on the line above.

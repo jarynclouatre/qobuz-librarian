@@ -1180,7 +1180,7 @@ def return_interrupted_picks(job):
     job_persistence.persist(job)
     if unfinished and saved:
         return (f"{named_albums(unfinished)} went back to the review, ticked, "
-                "to download again.")
+                "to try again.")
     if unfinished:
         return (f"{named_albums(unfinished)} could not be put back in the "
                 "review.")
@@ -3322,11 +3322,14 @@ def execute_albums(job, chosen, token):
     def _apply_non_track_attention():
         messages = []
         if attention_counts["backup"]:
+            one = attention_counts["backup"] == 1
             messages.append(
                 f"{plural(attention_counts['backup'], 'album')} "
-                "retained a safety backup because its replacement or recovery "
-                "could not be verified. Review it under Settings > Diagnostics "
-                "before downloading that album again."
+                "retained a safety backup because "
+                f"{'its' if one else 'their'} replacement or recovery "
+                f"could not be verified. Review {'it' if one else 'them'} "
+                "under Settings > Diagnostics before downloading "
+                f"{'that album' if one else 'those albums'} again."
             )
             job.attention = "backup"
         if attention_counts["quality"]:
@@ -3339,7 +3342,8 @@ def execute_albums(job, chosen, token):
         if attention_counts["processing"]:
             messages.append(
                 f"{plural(attention_counts['processing'], 'imported album')} "
-                "has post-download work that did not finish cleanly; see the "
+                f"{'has' if attention_counts['processing'] == 1 else 'have'} "
+                "post-download work that did not finish cleanly; see the "
                 "job log."
             )
             if not job.attention:
@@ -3611,7 +3615,8 @@ def execute_albums(job, chosen, token):
         )
     if attention_counts["processing"]:
         parts.append(
-            f"{plural(attention_counts['processing'], 'imported album')} needs "
+            f"{plural(attention_counts['processing'], 'imported album')} "
+            f"{'needs' if attention_counts['processing'] == 1 else 'need'} "
             "post-download attention"
         )
     if attention_counts["partial"]:
@@ -3934,7 +3939,8 @@ def execute_upgrades(job, chosen, token):
         job.summary += _put_back_note(put_back_notes)
         if catalogue_failed:
             job.summary += (
-                f" {plural(catalogue_failed, 'replacement')} needs catalogue "
+                f" {plural(catalogue_failed, 'replacement')} "
+                f"{'needs' if catalogue_failed == 1 else 'need'} catalogue "
                 "attention; backup retained."
             )
         if quality_attention:
@@ -3944,7 +3950,8 @@ def execute_upgrades(job, chosen, token):
             )
         if processing_attention:
             job.summary += (
-                f" {plural(processing_attention, 'album')} needs "
+                f" {plural(processing_attention, 'album')} "
+                f"{'needs' if processing_attention == 1 else 'need'} "
                 "post-download attention."
             )
         if kept or catalogue_failed:
@@ -3989,7 +3996,8 @@ def execute_upgrades(job, chosen, token):
     if cd_quality_tracks:
         msg += f" {cd_quality_note(cd_quality_tracks)}"
     if catalogue_failed:
-        msg += (f" {plural(catalogue_failed, 'replacement')} needs catalogue "
+        msg += (f" {plural(catalogue_failed, 'replacement')} "
+                f"{'needs' if catalogue_failed == 1 else 'need'} catalogue "
                 "attention; backup retained.")
     if quality_attention:
         msg += (
@@ -3998,7 +4006,8 @@ def execute_upgrades(job, chosen, token):
         )
     if processing_attention:
         msg += (
-            f" {plural(processing_attention, 'album')} needs post-download "
+            f" {plural(processing_attention, 'album')} "
+            f"{'needs' if processing_attention == 1 else 'need'} post-download "
             "attention."
         )
     job.summary = msg
@@ -4031,7 +4040,8 @@ def execute_upgrades(job, chosen, token):
             )
         if processing_attention:
             problems.append(
-                f"{plural(processing_attention, 'album')} has post-download "
+                f"{plural(processing_attention, 'album')} "
+                f"{'has' if processing_attention == 1 else 'have'} post-download "
                 "work needing attention"
             )
         if kept or catalogue_failed:

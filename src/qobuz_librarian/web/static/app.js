@@ -1271,12 +1271,26 @@
   // asks htmx for the list, and the request is dropped here once the panel
   // holds one, so a press after a failed fetch (empty panel, or a notice)
   // asks again. Discover's album lists work the same way.
+  function panelHoldsNotice(panel) {
+    var first = panel && panel.firstElementChild;
+    return !!first && first.hasAttribute("data-flash");
+  }
   document.addEventListener("htmx:beforeRequest", function (evt) {
     var btn = evt.detail && evt.detail.elt;
     if (!btn || !btn.matches("[data-tracks-toggle],[data-discover-toggle]")) return;
     var panel = document.getElementById(btn.getAttribute("aria-controls"));
-    var first = panel && panel.firstElementChild;
-    if (first && !first.hasAttribute("data-flash")) evt.preventDefault();
+    if (panel && panel.firstElementChild && !panelHoldsNotice(panel)) evt.preventDefault();
+  });
+  // A fetch that failed leaves an empty panel: close it, so the next press
+  // opens it and asks again.
+  document.addEventListener("htmx:afterRequest", function (evt) {
+    var btn = evt.detail && evt.detail.elt;
+    if (!btn || !btn.matches || !btn.matches("[data-tracks-toggle],[data-discover-toggle]")) return;
+    if (evt.detail.successful) return;
+    var panel = document.getElementById(btn.getAttribute("aria-controls"));
+    if (!panel || panel.firstElementChild) return;
+    btn.setAttribute("aria-expanded", "false");
+    panel.classList.add("hidden");
   });
   var discoverFocus = null;
   document.addEventListener("htmx:beforeSwap", function (evt) {
@@ -1304,6 +1318,8 @@
     var panel = document.getElementById(btn.getAttribute("aria-controls"));
     if (!panel) return;
     var open = btn.getAttribute("aria-expanded") === "true";
+    // A press on an open panel that holds a notice asks again in place.
+    if (open && panelHoldsNotice(panel)) return;
     var nextOpen = !open;
     btn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
     panel.classList.toggle("hidden", !nextOpen);
@@ -1342,6 +1358,7 @@
     var panel = document.getElementById(btn.getAttribute("aria-controls"));
     if (!panel) return;
     var next = btn.getAttribute("aria-expanded") !== "true";
+    if (!next && panelHoldsNotice(panel)) return;
     btn.setAttribute("aria-expanded", next ? "true" : "false");
     panel.classList.toggle("hidden", !next);
   });

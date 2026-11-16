@@ -379,13 +379,18 @@ def run_downsample_walk_mode(args):
             parts.append(f"{plural(total_flush_warns, 'file')} not flushed "
                          "to disk")
         failed = total_errors or total_flush_warns
+        error = None
+        if total_errors:
+            error = f"Finished with {plural(total_errors, 'error')}."
+        elif total_flush_warns:
+            error = (f"Needs attention: {plural(total_flush_warns, 'file')} "
+                     "could not be flushed to disk.")
         post_job_hook.report_terminal_run(
             kind="downsample", title="Downsample run",
             status="canceled" if interrupted else "failed" if failed else "done",
             summary=(("Stopped early. " if interrupted else "")
                      + ", ".join(parts) + "."),
-            error=(f"Finished with {plural(failed, 'error')}."
-                   if failed and not interrupted else None),
+            error=None if interrupted else error,
             started_at=started)
     if interrupted:
         return EXIT_INTERRUPT

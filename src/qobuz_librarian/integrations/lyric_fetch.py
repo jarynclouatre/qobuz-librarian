@@ -124,6 +124,11 @@ _OUTCOME_LABELS = {
 }
 
 
+# A library-wide pass counts these without a line for each track.
+_QUIET_OUTCOMES = frozenset({
+    "already-synced", "already-plain", "kept-existing-plain"})
+
+
 def _outcome_label(outcome, synced_only=False):
     if synced_only and outcome == "not-found":
         return "no synced lyrics found"
@@ -2876,7 +2881,7 @@ def fetch_for_paths(
             if track_detail:
                 log.info("     [%d/%d] %s - %s", at, of, said, fp.stem,
                          extra={"detail": True})
-            else:
+            elif outcome not in _QUIET_OUTCOMES:
                 log.info("[%d/%d] %s - %s", at, of, said, label)
             if line := progress.due_line():
                 log.info(line)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import post_job_hook, saved_views
-from qobuz_librarian.api.auth import AuthLost
+from qobuz_librarian.api.auth import AuthLost, QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import get_album
 from qobuz_librarian.download_result import download_attention_kind
 from qobuz_librarian.library import (
@@ -178,6 +178,7 @@ def run_upgrade_walk_mode(args, token):
     no_answer = False
     n_attempted = 0
     interrupted = False
+    unavailable = None
     stopped_during_removal = None
     unsafe_artists = []  # --auto-safe skipped artists, for end-of-run review
 
@@ -209,7 +210,8 @@ def run_upgrade_walk_mode(args, token):
                     "  ✓ Auto-accepting every artist."))
         log.info("")
 
-        for artist_name, candidates in by_artist.items():
+        for artist_name, candidates in sorted(
+                by_artist.items(), key=lambda group: group[0].casefold()):
             n_reviewed += 1
             log.info("")
             log.info("")
@@ -302,11 +304,14 @@ def run_upgrade_walk_mode(args, token):
                     continue
                 try:
                     album = get_album(album_id, token)
-                    if not album:
-                        log.info(fmt(C.YELLOW,
-                            f"  Album {album_id} is no longer on Qobuz; skipping."))
-                        n_failed_albums += 1
-                        continue
+                except QobuzError as exc:
+                    log.info(fmt(C.YELLOW,
+                        "  It is no longer on Qobuz. Skipped."
+                        if exc.status_code == 404 else
+                        f"  Qobuz couldn't supply it ({exc}). Skipped."))
+                    n_failed_albums += 1
+                    continue
+                try:
                     # Upgrade_only=True so partial-album cases
                     # only re-rip the present tracks, not download missing ones.
                     n_attempted += 1
@@ -385,6 +390,9 @@ def run_upgrade_walk_mode(args, token):
             log.info("")
     except KeyboardInterrupt:
         interrupted = True
+    except QobuzUnavailable as exc:
+        interrupted = True
+        unavailable = exc
     finally:
         args.consolidate = saved_consolidate
 
@@ -422,7 +430,8 @@ def run_upgrade_walk_mode(args, token):
         ))
     if n_catalogue_failed:
         log.info(fmt(C.YELLOW,
-            f"     ⚠  {plural(n_catalogue_failed, 'replacement')} needs "
+            f"     ⚠  {plural(n_catalogue_failed, 'replacement')} "
+            f"{'needs' if n_catalogue_failed == 1 else 'need'} "
             "Beets catalogue attention (backup retained)."))
     if n_unverified_albums:
         log.info(fmt(C.YELLOW,
@@ -459,7 +468,8 @@ def run_upgrade_walk_mode(args, token):
     elif n_gone and not (n_upgraded_albums or n_would_upgrade):
         clause = f"{plural(n_gone, 'candidate')} no longer in the library"
     if interrupted:
-        log.info(fmt(C.GRAY, "  Interrupted."))
+        if not unavailable:
+            log.info(fmt(C.GRAY, "  Interrupted."))
     elif n_failed_attempts:
         log.warning(fmt(C.RED, f"  ✗  Finished with {plural(n_failed_attempts, 'error')}."))
     elif clause:
@@ -489,6 +499,8 @@ def run_upgrade_walk_mode(args, token):
             error=(f"Finished with {plural(n_failed_attempts, 'error')}."
                    if n_failed_attempts and not interrupted else None),
             started_at=started)
+    if unavailable:
+        raise unavailable
     if interrupted:
         return EXIT_INTERRUPT
     return EXIT_GENERAL if no_answer or n_failed_attempts else 0

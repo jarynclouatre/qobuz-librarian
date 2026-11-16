@@ -690,8 +690,8 @@ async def _approve(request: Request, job_id: str):
     if approved == "review_changed":
         return RedirectResponse(
             url=dest + "?error=" + rendering._notice_key(
-                "That review changed while approval was being checked. "
-                "Nothing changed; review the current selections and try again."
+                "That review changed while it was being approved. Nothing "
+                "was started; check the selections and try again."
             ),
             status_code=303,
         )
