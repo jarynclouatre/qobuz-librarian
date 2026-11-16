@@ -45,6 +45,7 @@ from qobuz_librarian.web import (
     diagnostics,
     download_admission,
     download_outcomes,
+    flows,
     job_runs,
     new_release_checks,
     qobuz_access,
@@ -1445,6 +1446,8 @@ async def queue_download(request: Request, album_id: str = Form(""),
             # override has to live on the job. Closure-only, a retried "get
             # this edition too" would fall back to the owned-album skip.
             job.execute_args = {"new_edition": True}
+        if cover := flows._album_cover(album):
+            job.execute_args["cover"] = cover
 
         # Re-check under the lock right before submitting: closes the race with
         # a concurrent /download for the same album across the get_album await.

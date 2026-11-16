@@ -211,6 +211,10 @@
 {%- endmacro %}
 
 {% macro kind_tile(job, tile_class='') -%}
+{% set _cover = job.execute_args.get('cover') %}
+{% if _cover %}
+<img src="{{ _cover }}" alt="" loading="lazy" width="32" height="32" class="ql-job-cover">
+{% else %}
 <span class="ql-job-tile{% if tile_class %} {{ tile_class }}{% endif %}" aria-hidden="true">
   {% if job.execute_kind in ('library', 'new_releases') %}
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v16M9 4v16M14 5.5l4.5 14"/></svg>
@@ -230,4 +234,5 @@
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
   {% endif %}
 </span>
+{% endif %}
 {%- endmacro %}

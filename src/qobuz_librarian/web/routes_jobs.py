@@ -1512,6 +1512,8 @@ async def job_retry(request: Request, job_id: str):
                 }
             elif retry_as_new:
                 new_job.execute_args = {"new_edition": True}
+            if cover := flows._album_cover(album):
+                new_job.execute_args["cover"] = cover
             if job_mgr.submit(new_job, run) is None:
                 return refusals._job_admission_response(request)
             # The retry is the answer to the failure, so the old row stops

@@ -343,7 +343,7 @@ def _requeued_download_run(job):
         or job.execute_kind
         or job.recoveries
         or job.execute_args_unreadable
-        or set(args) - {"new_edition", "restart_requeues",
+        or set(args) - {"new_edition", "restart_requeues", "cover",
                         job_persistence.SAVED_QUEUE}
     ):
         return None

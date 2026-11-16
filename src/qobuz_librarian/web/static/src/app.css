@@ -2665,9 +2665,22 @@ details.ql-mobile-drawer[open]::before {
   gap: 0.85rem 1rem;
   padding: 0.85rem var(--ql-space-1);
 }
+.ql-job-cover {
+  width: 2rem;
+  height: 2rem;
+  flex: none;
+  align-self: center;
+  border-radius: 0.3rem;
+  object-fit: cover;
+}
+.ql-job-cover--page {
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 0.4375rem;
+}
 .ql-job-tile {
   display: flex;
-  width: 1.75rem;
+  width: 2rem;
   height: 1.75rem;
   flex: none;
   align-items: center;
@@ -2840,6 +2853,10 @@ details.ql-mobile-drawer[open]::before {
     padding: 0.75rem 0.9rem;
   }
   .ql-activity-row--queue .ql-job-tile {
+    width: 34px;
+    height: 34px;
+  }
+  .ql-activity-row .ql-job-cover {
     width: 34px;
     height: 34px;
   }
@@ -3708,7 +3725,10 @@ details.ql-mobile-drawer[open]::before {
   margin-bottom: 0;
 }
 .ql-job-heading {
+  display: flex;
   min-width: 0;
+  align-items: center;
+  gap: 0.85rem;
 }
 .ql-job-title {
   overflow-wrap: anywhere;
