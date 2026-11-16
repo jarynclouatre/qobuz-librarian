@@ -268,10 +268,9 @@ def _make_download_run(
                     else:
                         j.attention = "recovery"
                         j.error = (
-                            "This download couldn't be cleared safely, so "
-                            "downloads and scans are paused and its files were "
-                            "left as they are. Qobuz Librarian tries again "
-                            "when it restarts."
+                            "This download couldn't be cleared, so "
+                            "downloads and scans are paused. Qobuz Librarian "
+                            "tries again when it restarts."
                         )
                     if r.get("disk_full"):
                         j.error = f"{MusicDiskFull.MESSAGE}. {j.error}"

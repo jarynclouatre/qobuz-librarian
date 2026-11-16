@@ -512,9 +512,7 @@ class Job:
         with self._lock:
             # An execute loop can pin the counts to an overall scope (e.g. 3 of
             # 16 albums finished) so inner per-album phases don't reset the
-            # card to 1/1. The count is work completed, never work begun:
-            # counting the album being written left the card reading "2 / 2"
-            # for the whole of the second album.
+            # card to 1/1. The count is work completed, never work begun.
             fraction = None
             scope = self._progress_scope
             if scope is not None:
@@ -1143,7 +1141,7 @@ def staging_holder() -> Optional[str]:
         return _staging_holder
 
 
-def qobuz_action_error_message(exc, *, unchanged=False) -> str:
+def qobuz_action_error_message(exc) -> str:
     """Short action-gate copy shared by scans and review approvals."""
     if isinstance(exc, NoCredsError):
         message = "Connect Qobuz in Settings."
@@ -1164,8 +1162,6 @@ def qobuz_action_error_message(exc, *, unchanged=False) -> str:
         message = str(exc)
     else:
         message = "Qobuz could not be reached. Try again."
-    if unchanged:
-        message += " Nothing changed."
     return message
 
 
@@ -1464,8 +1460,8 @@ def _worker_loop(work_queue: "queue.Queue"):
         # Settings changes deferred while we were busy are applied BEFORE the
         # next job so "apply now" takes effect for it, but NOT while the
         # OTHER lane is mid-execution.
-        # Sole worker thread. Catching BaseException ensures one
-        # crashed job can't take down the whole queue.
+        # Catching BaseException ensures one crashed job can't take down the
+        # whole queue.
         try:
             if (work_queue is _download_queue
                     and job.status is JobStatus.PENDING
@@ -1526,9 +1522,8 @@ def _worker_loop(work_queue: "queue.Queue"):
 
 
 def _release_memory():
-    """Hand back what a finished job freed. A library scan's peak otherwise
-    stayed resident: the allocator keeps freed memory for reuse, which on a
-    big library left the container near its memory limit while idle."""
+    """Hand back what a finished job freed. The allocator keeps freed memory
+    for reuse, so a library scan's peak would otherwise stay resident."""
     gc.collect()
     try:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
@@ -1768,8 +1763,8 @@ def submit_scan(job: Job, scan_fn, execute_fn):
         j.phase = "scan"
         # Record SCANNING on disk so a restart mid-crawl restores through the
         # neutral "interrupted, resumes where it left off" path rather than the
-        # harsher running-job "submit again" one (the worker only ever persisted
-        # the preceding RUNNING).
+        # harsher running-job "submit again" one (the worker persists only the
+        # preceding RUNNING).
         job_persistence.persist(j)
         scan_fn(j)
         if j.status != JobStatus.RUNNING and j.status != JobStatus.SCANNING:
@@ -2025,10 +2020,9 @@ def approve(
                 raise TypeError("split_review must return a Job or None")
         job.status = JobStatus.PENDING
         job.finished_at = None
-        # Renamed here rather than by the worker: the worker gets there
-        # milliseconds after the redirect has already rendered, so the tab
-        # that pressed the button kept the scan's heading for the whole run
-        # while every other tab, and a reload, showed the right one.
+        # Renamed here rather than by the worker: the worker gets there after
+        # the redirect has rendered, and the tab that pressed the button
+        # would keep the scan's heading for the whole run.
         run_title = RUN_TITLES.get(getattr(job, "execute_kind", ""))
         if run_title:
             # Saved with the run so a cancel or a restart that puts the picks
@@ -2046,10 +2040,8 @@ def approve(
         # start and folds in however long the results sat awaiting review, making
         # "Downloading · 1:17" read as download time when it was mostly browsing.
         job.started_at = time.time()
-        # Drop the scan's last progress snapshot for the same reason. Left in
-        # place it stood in for the execute phase until its first push, so a
-        # page opened on a running downsample described the scan that ended
-        # ("Scanning for hi-res files, 32 / 32 artists") instead of the run.
+        # Drop the scan's last progress snapshot for the same reason: it
+        # would stand in for the execute phase until its first push.
         job.progress_phase = ""
         job.progress_current = 0
         job.progress_total = 0
@@ -2091,14 +2083,14 @@ def approve(
         with j._lock:
             chosen = j.selected_candidates()
         if not chosen:
-            j.push_line("No candidates selected. Nothing to do.")
+            j.push_line("No candidates selected.")
             j.status = JobStatus.DONE
             return
         try:
             j._execute_fn(j, chosen)
         except (Exception, SystemExit) as e:
             # Qobuz went away before ANYTHING landed: put the review back
-            # exactly as it was instead of burying the picks in a failed job.
+            # exactly as it was instead of burying the picks in a failed job;
             # a months-old review's ticks would otherwise be gone for good.
             if (j._imported_any or j.cancel_requested or j.recoveries
                     or not isinstance(e, (AuthLost, QobuzUnavailable,
@@ -2116,7 +2108,6 @@ def approve(
                 str(e)
                 if isinstance(e, (CandidateStale, beets.StagingNotEmpty))
                 else qobuz_action_error_message(e)
-                     + " Your review and picks are untouched."
             )
             j.push_line(message)
             j.notify_review_changed()
@@ -2146,7 +2137,7 @@ def cancel_review(job: Job) -> Optional[bool]:
             canceled_at = time.time()
             job.status = JobStatus.CANCELED
             job.finished_at = canceled_at
-            job.summary = "Review discarded. No files were changed."
+            job.summary = "Review discarded."
         if not job_persistence.persist(job):
             with job._lock:
                 if (
@@ -2584,8 +2575,8 @@ def restore_jobs(
                     "be read. Start it again from its original page."
                 )
             elif job.id in unsettled:
-                job.error = (restart + "Its download couldn't be cleared "
-                             "safely, so downloads and scans are paused. "
+                job.error = (restart + "Its download couldn't be cleared, "
+                             "so downloads and scans are paused. "
                              "Qobuz Librarian tries again when it restarts.")
                 job.attention = "recovery"
             elif job.album_id:
@@ -2864,8 +2855,8 @@ def request_cancel(job: Job) -> bool:
       stopped without restarting the container)
     - pending          → canceled or returned to review
 
-    Returns False if the job is finished, is already putting an album into the
-    library.
+    Returns False if the job is finished or is already putting an album into
+    the library.
     """
     if job.status == JobStatus.AWAITING_REVIEW:
         review_canceled = cancel_review(job)
@@ -2891,9 +2882,9 @@ def request_cancel(job: Job) -> bool:
         canceled_pending = job.status == JobStatus.PENDING
         if canceled_pending:
             # Publish the terminal row while the same lock excludes the worker
-            # claim.  Mutating first and saving after releasing this lock let
-            # a failed write race the worker into consuming the queue entry,
-            # leaving neither a durable cancel nor runnable work.
+            # claim. Mutating first and saving after releasing this lock would
+            # let a failed write race the worker into consuming the queue
+            # entry, leaving neither a durable cancel nor runnable work.
             previous_finished_at = job.finished_at
             previous_cancel_requested = job.cancel_requested
             previous_summary = job.summary

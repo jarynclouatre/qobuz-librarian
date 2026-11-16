@@ -118,8 +118,8 @@ def flush_pending() -> None:
     Called automatically when the buffer hits ``_PENDING_LIMIT``, by
     ``scanner.clear_scan_caches`` at scan-end, and at process exit via
     ``atexit``. A crash mid-scan loses at most ``_PENDING_LIMIT`` entries -
-    the next scan re-parses them (no data loss, just rework). Idempotent;
-    a no-op when the buffer is empty.
+    the next scan re-parses them. Idempotent; a no-op when the buffer is
+    empty.
     """
     with _PENDING_LOCK:
         if not _PENDING_ROWS:

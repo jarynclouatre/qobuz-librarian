@@ -17,8 +17,7 @@ def _durable_recovery_response(request, message: str):
             status_code=200,
         )
     # can_retry: these messages end in "restart Qobuz Librarian", and after a
-    # restart a reload is exactly the next step; without it the page offered
-    # no way forward at all.
+    # restart a reload is exactly the next step.
     return rendering._tr(request, "lock_busy.html", {"msg": message, "can_retry": True},
                status_code=503)
 
@@ -61,7 +60,7 @@ def _lock_busy_response(request, *, downloads: bool = False):
                {"msg": notice["msg"], "reason": notice["reason"],
                 "action": notice["action"],
                 # "Try again" only helps where retrying can succeed; the rest
-                # need something fixed first and the button was false comfort.
+                # need something fixed first.
                 "can_retry": (runtime._LOCK_BUSY_PID is not None
                               or bool(unwritable_now)
                               or not storage._data_dir_available()

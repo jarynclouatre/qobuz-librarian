@@ -136,7 +136,7 @@ def redownload_with_staged_fallback(staged_dirs, *, run_retry,
         return collect_staged_dirs(), True
     parked = park_trees(originals, "quality-retry", kind="quality")
     if parked is None:
-        raise OSError("couldn't safely park the first staged rip for retry")
+        raise OSError("couldn't park the first staged rip for retry")
 
     def restore_first(fresh):
         if fresh and not discard_retry():
@@ -146,7 +146,7 @@ def redownload_with_staged_fallback(staged_dirs, *, run_retry,
         restored = restore_group(parked)
         if restored is None:
             raise OSError(
-                "couldn't safely restore the first staged rip; both staged "
+                "couldn't restore the first staged rip; both staged "
                 "states were kept for manual recovery")
         return restored
 

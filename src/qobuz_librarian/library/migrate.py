@@ -569,7 +569,7 @@ def _descriptor_mount_id(descriptor) -> int:
     value = _statx_probe(
         descriptor, b"", _AT_EMPTY_PATH | _AT_SYMLINK_NOFOLLOW, _STATX_MNT_ID)
     if not value.mask & _STATX_MNT_ID or value.mnt_id <= 0:
-        raise OSError("filesystem cannot prove mount identity safely")
+        raise OSError("filesystem cannot prove mount identity")
     return int(value.mnt_id)
 
 
@@ -1492,7 +1492,7 @@ def _probe_destination_name_semantics(dest_root: Path) -> dict:
         binding.close()
         if cleanup_error is not None:
             raise OSError(
-                "destination name semantics could not be measured safely"
+                "destination name semantics could not be measured"
             ) from cleanup_error
 
 
@@ -1643,7 +1643,7 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
             if source_root_receipt is not None and source_receipt is None:
                 entries.append(PlanEntry(
                     source=source, status=UNPLACEABLE, source_of_truth=sot,
-                    reason="source could not be read safely", meta=meta))
+                    reason="source could not be read", meta=meta))
                 continue
             placeable.append((source, meta, sot, source_receipt))
     finally:
@@ -1783,7 +1783,7 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
             entries.append(PlanEntry(
                 source=source, status=COLLISION, dest_rel=rel,
                 source_of_truth=sot,
-                reason="destination folder could not be read safely", meta=meta,
+                reason="destination folder could not be read", meta=meta,
                 source_receipt=source_receipt))
             continue
         exists, destination_receipt, destination_path_receipt, reason = (

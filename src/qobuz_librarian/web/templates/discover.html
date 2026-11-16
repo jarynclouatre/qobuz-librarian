@@ -50,7 +50,7 @@
     <div class="ql-work-status">
       {% if feed.phase == 'waiting' %}
       <span class="ql-status-chip is-neutral">Waiting</span>
-      <span>Other Discover requests are still finishing. This one will start automatically.</span>
+      <span>Waiting for other Discover requests to finish.</span>
       {% elif feed.phase == 'building' %}
       <span class="ql-status-chip is-info">Building</span>
       {# The counter only means something once the worker knows the total, so

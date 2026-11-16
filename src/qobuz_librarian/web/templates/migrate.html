@@ -47,7 +47,7 @@
           <span>
             <span class="ql-option-title">Move instead of copy</span>
             <span class="ql-option-help ql-option-help-warning">
-              Relocates originals and removes emptied folders. Copying is the safe default.
+              Relocates originals and removes emptied folders.
             </span>
           </span>
         </label>
@@ -55,9 +55,6 @@
       <button type="submit" id="migrate-preview"
               class="ql-btn ql-btn-primary w-full sm:w-auto"
               {% if writes_paused %}disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Preview migration</button>
-      <p class="ql-form-note">
-        Preview shows the plan. Copy or move happens after review.
-      </p>
     </form>
   </div>
 </section>

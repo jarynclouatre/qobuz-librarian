@@ -480,10 +480,9 @@ def _iter_staging_files():
     """Yield every staging file, skipping the retry-park tree entirely.
 
     .beets_retry/ holds re-import-queued album dirs that accumulate over a
-    long-running session; walking them on every snapshot was the dominant
-    per-album cost on big queue flushes, when nothing about those files
-    matters here. Skipping the tree (rather than rglob-then-filter) keeps
-    the walk proportional to real staging activity, not the parked backlog.
+    long-running session, and nothing about those files matters here.
+    Skipping the tree (rather than rglob-then-filter) keeps the walk
+    proportional to real staging activity, not the parked backlog.
     """
     if not cfg.STAGING_DIR.exists():
         return
@@ -589,7 +588,7 @@ def cleanup_lossy(new_files, *, owner=None, on_intent=None, keep_broken=False):
             vlog(f"set aside {what} {f.name} so it isn't imported")
         else:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  Couldn't safely set aside {what} {f.name}; it changed "
+                f"  ⚠  Couldn't set aside {what} {f.name}; it changed "
                 "after the download and was left untouched."))
     return kept, lossy, broken
 

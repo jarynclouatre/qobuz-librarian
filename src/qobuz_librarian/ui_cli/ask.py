@@ -3,8 +3,7 @@ from qobuz_librarian.ui_cli.colors import C, block, fmt, text_width
 from qobuz_librarian.ui_cli.logging import log
 
 NO_ANSWER = (
-    "  No answer is available, so nothing was started. Run this again from a "
-    "terminal to choose."
+    "  No answer is available. Run this again from a terminal to choose."
 )
 
 
@@ -23,11 +22,11 @@ def ask(prompt, *, colour=C.CYAN, lower=True, quiet=False):
     """Read one answer from the terminal, or None when nobody is there to give
     one.
 
-    A closed input is not an answer. Reading it as one let a prompt whose
-    default is yes start a download in a run nobody was watching, so every
-    prompt reads through here and every caller treats None as a cancel. The
-    notice is what makes the stop visible in a log nobody was watching either;
-    ``quiet`` is for the few prompts that print their own.
+    A closed input is not an answer: read as one, a prompt whose default is
+    yes would start a download in a run nobody is watching. Every prompt reads
+    through here and every caller treats None as a cancel. The notice makes
+    the stop visible in the log; ``quiet`` is for the few prompts that print
+    their own.
     """
     try:
         answer = input(fmt(colour, _fit(prompt)))

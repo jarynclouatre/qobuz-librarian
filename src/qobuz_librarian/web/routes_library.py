@@ -451,9 +451,8 @@ async def library_scan(
     if mode_norm == "new_releases":
         # A new-release check compares the catalog against the baseline a completed
         # library scan builds; with no baseline there's nothing to compare against,
-        # so it would crawl every artist, surface nothing, and (the old bug) flip
-        # the baseline "done", stranding an interrupted library scan's resume.
-        # Refuse and point at a library scan instead of running that empty crawl.
+        # so it would crawl every artist and surface nothing. Refuse and point
+        # at a library scan instead of running that empty crawl.
         if not new_releases.is_baseline_complete():
             msg = "Run a full library scan first."
             if rendering._is_htmx(request):
@@ -473,7 +472,7 @@ async def library_scan(
                 QobuzAccess.CATALOGUE_ACTION
             )
         except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
-            msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
+            msg = job_mgr.qobuz_action_error_message(exc)
             if rendering._is_htmx(request):
                 return HTMLResponse(
                     rendering._ql_notice_html("error", html.escape(msg)),
@@ -522,7 +521,7 @@ async def library_scan(
             QobuzAccess.CATALOGUE_ACTION
         )
     except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
-        msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
+        msg = job_mgr.qobuz_action_error_message(exc)
         if rendering._is_htmx(request):
             return HTMLResponse(
                 rendering._ql_notice_html("error", html.escape(msg)),

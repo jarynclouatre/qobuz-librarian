@@ -157,8 +157,7 @@
 {%- endmacro %}
 
 {# A new-release check downloads what the user ticks, so its kind alone does
-   not say what it is doing; testing it before the status made the chip read
-   "Checking" while the page underneath said "Downloading album". #}
+   not say what it is doing: it is "Checking" only while it scans. #}
 {% macro job_activity(job) -%}
   {%- if job.execute_kind == 'new_releases' and job.status.value == 'scanning' -%}
     Checking
@@ -201,7 +200,7 @@
 {%- endmacro %}
 
 {# Stopping a library or repair scan clears its checkpoint so the next one
-   does not auto-resume, which the generic wording never said. #}
+   does not auto-resume. #}
 {% macro cancel_confirm(job) -%}
   {%- if (job.status.value == 'scanning' or (job.status.value == 'pending' and job.kind == 'scan' and job.phase != 'execute')) and job.execute_kind in ('library', 'repair') -%}
     Stop this scan? Its progress through the artists it has checked is discarded, and the next scan starts from the beginning.

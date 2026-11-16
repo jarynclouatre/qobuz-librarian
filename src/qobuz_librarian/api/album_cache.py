@@ -31,12 +31,12 @@ _db = CacheDB(
         "(key TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at REAL)",
         # When a row was last used or confirmed unchanged. Kept apart from
         # the payloads: SQLite rewrites a whole row to change one column, and
-        # a new-release check confirming 2,000 catalogs rewrote them all.
+        # a new-release check confirms thousands of catalogs at a time.
         "CREATE TABLE IF NOT EXISTS stamps "
         "(kind TEXT NOT NULL, key TEXT NOT NULL, at REAL NOT NULL, "
         "PRIMARY KEY (kind, key)) WITHOUT ROWID",
         # fetched_at sits after the payload, so finding old rows without
-        # these read every payload in the table: 350 MB for a big library.
+        # these would read every payload in the table.
         "CREATE INDEX IF NOT EXISTS albums_fetched ON albums (fetched_at, id)",
         "CREATE INDEX IF NOT EXISTS catalogs_fetched ON catalogs (fetched_at, key)",
     ),

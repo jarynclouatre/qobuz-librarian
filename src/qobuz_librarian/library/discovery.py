@@ -2,7 +2,7 @@
 
 Both faces call this: the CLI artist mode wraps it in terminal prompts, the web
 scans turn its result into review candidates. Neither computes matching logic of
-its own any more, so a fix lands once and the two can't drift.
+its own.
 
 The answer is built in two passes, because the right question differs for albums
 you own versus albums you don't:
@@ -85,9 +85,7 @@ from qobuz_librarian.ui_cli.logging import log, vlog
 # Folder name → matched Qobuz artist, cached to disk. Picks made without
 # looking at the folders are listed as unchecked and confirmed against the
 # folders the next time the artist is scanned; a file without that list
-# predates it, so all its picks load as unchecked. The file stays at version
-# 1, which older versions still read, ignoring the list. Version 2 files hold
-# the same list.
+# predates it, so all its picks load as unchecked.
 _RESOLVE_CACHE_VERSION = 1
 _resolve_cache = None
 _resolve_unchecked = set()
@@ -392,8 +390,7 @@ def resolve_artist_dir(artist_query, candidates=None):
     Pass ``candidates`` (a list_library_artists() result) to match many artists
     against one directory listing. The search-ownership annotation resolves the
     artist of every result; left to itself this re-walks MUSIC_ROOT once per
-    result, turning an O(library) listing into O(results × library) - slow
-    enough on a large library to trip the caller's timeout and drop every mark."""
+    result."""
     if not artist_query:
         return None
     if candidates is None:
@@ -457,7 +454,7 @@ def _is_live_release(title: str) -> bool:
     """True if the album title looks like a live/tour/session/acoustic release.
     Conservative by design: only a clearly tagged or delimited marker counts, so
     a studio album that merely has one of these words in its real name is kept.
-    Used only when cfg.EXCLUDE_LIVE_ALBUMS is on; default behaviour is unchanged."""
+    Used only when cfg.EXCLUDE_LIVE_ALBUMS is on."""
     if not title:
         return False
     return any(p.search(title) for p in _LIVE_RELEASE_PATTERNS)
@@ -1013,9 +1010,9 @@ def _catalog_fetch_incomplete(catalog, total, limit) -> bool:
     legitimate cap. A capped result fills the page (len == limit); a short page
     (a partial 200 mid-pagination) has fewer than BOTH the limit and Qobuz's own
     reported total. A fully-empty 200 (total None, no albums key) is incomplete
-    too. Recording a baseline from an incomplete fetch is the bug this guards:
-    the dropped albums later re-surface as 'new releases' (flagged for
-    review) or as missing gaps. Mirrors get_artist_albums' own `complete` test.
+    too. A baseline recorded from an incomplete fetch would have the dropped
+    albums come back later as 'new releases' (flagged for review) or as
+    missing gaps. Mirrors get_artist_albums' own `complete` test.
     """
     if not catalog and total is None:
         return True

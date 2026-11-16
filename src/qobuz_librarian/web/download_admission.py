@@ -38,8 +38,7 @@ def _find_job_touching_album(album_id: str, skip_single_track: bool = False):
             return j
         if j.status == job_mgr.JobStatus.SCANNING:
             # Still collecting proposals. They are no more queued than a
-            # parked review's, and saying "already queued" over one told the
-            # user their download had happened when nothing was queued.
+            # parked review's.
             continue
         # Snapshot: an approved job appends to candidates from the worker
         # thread, and iterating it live can raise "list changed size".

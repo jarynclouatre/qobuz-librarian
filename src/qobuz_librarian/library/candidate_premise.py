@@ -284,8 +284,7 @@ def _validate_absent(saved) -> dict:
     if not music_root_matches(identity):
         raise CandidateStale(
             "The music folder is not the one this review was built against. "
-            "Check that your library is mounted, then build the review again; "
-            "nothing was changed."
+            "Check that your library is mounted, then build the review again."
         )
     return {
         "version": PREMISE_VERSION,
@@ -396,7 +395,7 @@ def validate_premise(value) -> dict:
     if not _durable_premises_match(premise, current):
         raise CandidateStale(
             "The local files changed after this action was approved. Refresh "
-            "or rescan; nothing was changed."
+            "or rescan."
         )
     # Bind immediate file-changing work to the fresh namespace receipt.  The
     # persisted seal remains the durable reviewed evidence, while backup and
@@ -443,8 +442,8 @@ def _refuse_unsealed(candidate, premise, links=None):
     if link:
         raise CandidateStale(
             f"{link} in {Path(path).name} is a symbolic link, which can't be "
-            "checked or backed up safely. Replace it with a copy of its file, "
-            "then refresh; nothing was changed.",
+            "checked or backed up. Replace it with a copy of its file, "
+            "then refresh.",
             cause="link",
         )
     if premise is None:
@@ -473,14 +472,13 @@ def validate(candidate: dict, *, missing_premises=None, links=None) -> dict:
         current = capture(premise["kind"], premise["path"])
     if current is None and os.path.lexists(premise["path"]):
         raise CandidateStale(
-            "The local files could not be read. Refresh the review; nothing "
-            "was changed.",
+            "The local files could not be read. Refresh the review.",
             cause="unreadable",
         )
     if not _durable_premises_match(premise, current):
         raise CandidateStale(
             "The local files changed after this review was built. Refresh the "
-            "review; nothing was changed."
+            "review."
         )
     return current
 
@@ -706,7 +704,7 @@ def validate_container(candidate: dict) -> dict:
     except OSError as exc:
         raise CandidateStale(
             "The local artist folder could not be verified. Refresh the "
-            "review; nothing was changed.",
+            "review.",
             cause="unreadable",
         ) from exc
     if (
@@ -717,7 +715,7 @@ def validate_container(candidate: dict) -> dict:
     ):
         raise CandidateStale(
             "The local artist folder changed after this review was built. "
-            "Refresh the review; nothing was changed."
+            "Refresh the review."
         )
     return premise
 

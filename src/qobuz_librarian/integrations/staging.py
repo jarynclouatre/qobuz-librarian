@@ -388,9 +388,8 @@ class RetryGroupInspection:
     current_trees: tuple[TreeReceipt | None, ...] = ()
     file_group: FileGroup | None = None
     # What the manifest says this group holds, kept even when the group is
-    # blocked or incomplete. Tree groups always carried their plan; single
-    # files dropped theirs, which left every stuck row on the diagnostics
-    # list unable to say which track it was holding.
+    # blocked or incomplete, so a stuck row on the diagnostics list can say
+    # which track it holds.
     planned_file: FileGroup | None = None
     reason: str = ""
 

@@ -33,10 +33,9 @@ def _repair_current_job():
     hidden behind a "Start scan" button that would silently discard it."""
     states = (job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
               job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.RUNNING,
-              # A run that failed or was cancelled is part of the phase set too.
-              # Dropping it sent the page back to its idle launcher on the next
-              # reload, where the freshness line, which counts only clean
-              # passes, then reported a scan from weeks earlier.
+              # A run that failed or was cancelled is part of the phase set
+              # too, or the page would go back to its idle launcher on the next
+              # reload.
               job_mgr.JobStatus.FAILED, job_mgr.JobStatus.CANCELED)
     cur = None
     for j in job_mgr.registry.all():
@@ -115,7 +114,7 @@ async def repair_scan(request: Request):
             QobuzAccess.CATALOGUE_ACTION
         )
     except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
-        msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
+        msg = job_mgr.qobuz_action_error_message(exc)
         return RedirectResponse(
             url="/repair?error=" + rendering._notice_key(msg), status_code=303)
     job = job_mgr.Job(title="Repair scan")

@@ -140,10 +140,9 @@ def set_quiet(quiet: bool):
     """Mute info-level output on the console; warnings and errors still print.
 
     Raises the level on the stdout handler rather than on the logger, so the
-    file log keeps recording at its own level - a quiet cron run still leaves
-    a full trail to diagnose from. Non-quiet resets to INFO (not NOTSET) so the
-    console stays at INFO even when LOG_LEVEL=DEBUG lowered the logger for the
-    file handler."""
+    file log keeps recording at its own level. Non-quiet resets to INFO (not
+    NOTSET) so the console stays at INFO even when LOG_LEVEL=DEBUG lowered the
+    logger for the file handler."""
     _sh.setLevel(logging.WARNING if quiet else logging.INFO)
 
 

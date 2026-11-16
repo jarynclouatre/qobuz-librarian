@@ -95,9 +95,9 @@ def _music_write_target_message(state: str, recorded_albums: int = 0, *,
                                 diagnostic: bool = False) -> str:
     root = Path(cfg.MUSIC_ROOT)
     hint = _music_root_hint()
-    ending = "" if diagnostic else (
+    ending = (
         "The download stopped before writing any files."
-        if job_started else "Nothing was queued."
+        if job_started and not diagnostic else ""
     )
 
     def finish(message):
@@ -112,7 +112,7 @@ def _music_write_target_message(state: str, recorded_albums: int = 0, *,
     if state == "backup_unreadable":
         return finish(
             f"No artist folders were found in {root}, and the last collection "
-            "backup could not be read safely. Check that the music folder is "
+            "backup could not be read. Check that the music folder is "
             "mounted and that the collection-backup folder is readable."
         )
     if state == "recorded_empty":

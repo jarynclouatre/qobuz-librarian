@@ -79,9 +79,7 @@
     <div class="ql-notice-copy">
       <strong>{% if kept.on_disk %}Recovery files still held{% else %}Original files are no longer kept{% endif %}</strong>
       {# Say why this backup exists. The record carries an exact per-stage
-         reason, and collapsing every stage into one "kept while Repair
-         stopped" told people nothing had changed even where the replacement
-         had already landed in the album. #}
+         reason. #}
       {% for recovery in job.recoveries %}
       <div>
         {{ recovery.backed_up }} of {{ recovery.requested }} original file{% if recovery.requested != 1 %}s{% endif %} {% if kept.on_disk %}kept{% else %}{{ 'was' if recovery.backed_up == 1 else 'were' }} kept at the time{% endif %}.{% if recovery.reason %} {{ recovery.reason }}{% endif %}
@@ -103,8 +101,7 @@
     </div>
     {% endif %}
     {# The scan's own summary carries its caveats, an artist it couldn't check,
-       a result cap it hit. Gating it on candidate_cap_hit meant a review whose
-       sweep was incomplete presented its count as the whole answer. #}
+       a result cap it hit. #}
     {% if review_summary_line is defined %}
     {% set _job_summary = review_summary_line %}
     {% else %}
@@ -154,10 +151,10 @@
             data-empty-label="{{ labels.review_empty_label(job) }}"
             {% if not _bar_selected or _review_paused or _review_qobuz_blocked %} disabled{% endif %}{% if _review_paused %} title="{{ _review_paused_reason }}" aria-disabled="true"{% elif _review_qobuz_blocked %} title="Connect Qobuz before continuing." aria-disabled="true"{% endif %}
             {%- if job.execute_kind == 'downsample' %}{% if downsample_originals_choice in ('keep', 'delete') %} data-confirm="{% if downsample_originals_choice == 'keep' %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings → Diagnostics.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"{% endif %}
-            {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected folders ({count})? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library? Your original files stay where they are.{% endif %}"
+            {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected folders ({count})? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library?{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Damaged files are set aside while their replacements download, and an album too damaged to patch is downloaded again in full. Your originals are removed once the replacement is proven good, so a repair cannot be undone. If a replacement cannot be verified, it stays in the album and your originals are kept, restorable from Settings."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
-            {%- else %}{% set _missing_confirm = "Download {count} selected album{s}? Downloads queue now and import into your library." %}{% set _gaps_confirm = "Download the missing tracks of {count} selected album{s}? Downloads queue now and import into your library." %} data-confirm="{{ _gaps_confirm if review_tab == 'gaps' else _missing_confirm }}"
+            {%- else %}{% set _missing_confirm = "Download {count} selected album{s}?" %}{% set _gaps_confirm = "Download the missing tracks of {count} selected album{s}?" %} data-confirm="{{ _gaps_confirm if review_tab == 'gaps' else _missing_confirm }}"
             {%- if review_tab %} data-confirm-missing="{{ _missing_confirm }}" data-confirm-gaps="{{ _gaps_confirm }}"{% endif %}
             {%- endif %}
             {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if downsample_originals_choice in ('keep', 'delete') %}Downsample{% else %}Continue{% endif %}"{% if downsample_originals_choice == 'delete' %} data-irreversible{% endif %}
@@ -219,9 +216,9 @@
       {% endif %}
     </div>
 
-    {# Render the card from the snapshot the server already holds. Waiting for
-       the first live event meant a page opened part-way through a long album
-       showed a running job with no album and no count. #}
+    {# Render the card from the snapshot the server already holds, so a page
+       opened part-way through a long album shows the album and the count
+       before the first live event. #}
     {% set _pc = job.progress_current %}
     {% set _pt = job.progress_total %}
     <div id="progress-card"{% if not job.progress_phase and not _pt %} class="hidden"{% endif %}>
@@ -257,7 +254,7 @@
     <p class="ql-job-finished">{{ 'Finished' if job.status.value == 'done' else 'Ended' }} <span title="{{ _when_exact }}">{{ _when }}</span>{% if job.started_at %} · took {{ fmt_elapsed((_swept or job.finished_at) - job.started_at) }}{% endif %}</p>
     {% endif %}
     {# A partial run sets both: the summary is what it managed, the error is
-       what went wrong. Showing only the error threw away the outcome. #}
+       what went wrong. #}
     {% set _summary = without_old_advice(job.execute_kind, job.summary) %}
     {% if _summary and job.summary != job.error %}
     {% set _put_back = _summary.split('Settings → Diagnostics', 1) if job.execute_kind == 'downsample' else [_summary] %}

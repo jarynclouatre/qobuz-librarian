@@ -280,8 +280,7 @@ def read_album_dir(album_dir: Path, walk_errors=None):
             continue
         if tags is None:
             stem = f.stem
-            # Strip a leading track-number token in any common form - "NN - ",
-            # "NN.
+            # Strip a leading track-number token: "NN - ", "NN. ", "NN ".
             m = re.match(r"^(\d+)[\s.\-]+(.+)$", stem)
             # Derive the disc from a "Disc N" / "CD N" parent so two same-titled
             # tracks on different discs don't collapse to one (disc, title) key.
@@ -301,9 +300,9 @@ def read_album_dir(album_dir: Path, walk_errors=None):
                 "path":        str(f),
             }
         tags["normalized"] = normalize(tags["title"])
-        # read_audio_meta now carries size from the file signature; only the
-        # filename-fallback path (above) and pre-existing cache entries that
-        # predate the "size" key fall through to a stat here.
+        # read_audio_meta carries size from the file signature; only the
+        # filename-fallback path (above) and cache entries older than the
+        # "size" key fall through to a stat here.
         if "size" not in tags:
             try:
                 tags["size"] = f.stat().st_size
@@ -469,9 +468,9 @@ def list_library_artists(walk_errors=None, *, on_artist_error=None):
                 log.info(f"  ⚠  Couldn't read artist folder {d}: {e}.")
             # Keep it anyway. This check stops at the first track it finds, so
             # whether it met the unreadable part before or after that track is
-            # directory order, and dropping the artist on it made the same
-            # library scan differently on different disks. The album listing
-            # reads what it can and reports the rest.
+            # directory order, and dropping the artist on it would make the
+            # same library scan differently on different disks. The album
+            # listing reads what it can and reports the rest.
             artists.append(d)
     if empties:
         names = ", ".join(sorted(empties)[:5])
@@ -547,8 +546,8 @@ def _list_artist_subdirs_cached(artist_dir: Path):
         # A folder's mtime moves whenever an entry in it is added, removed or
         # renamed, so a listing taken before the user deleted an album outside
         # the app is not used after it. Search keeps this cache between
-        # requests, and a removed folder still listed here was taken for
-        # another version of the album.
+        # requests, and a removed folder still listed here would be taken
+        # for another version of the album.
         stamp = artist_dir.stat().st_mtime_ns
         # Atomic get (see _has_audio_anywhere): an `in`/`[]` pair could
         # KeyError if a concurrent clear_scan_caches() empties the dict
@@ -570,10 +569,9 @@ def cache_album_tags(album_dirs):
     """Read the tags of albums that have just landed in the library.
 
     The quality census aggregates this cache, and only a library scan fills
-    it. The app is meant to keep track of what it downloads without asking for
-    another scan, so an album that imports and is never read here leaves
-    "What's on disk" short by its own tracks for good. This is the same parse a
-    scan would do, minus the walk.
+    it, so an album that imports and is never read here would leave "What's on
+    disk" short by its own tracks. This is the same parse a scan would do,
+    minus the walk.
 
     Only directories inside the library count: the census ignores everything
     else, and a staging copy must never be cached as a library track.
@@ -600,12 +598,11 @@ def cache_album_tags(album_dirs):
 
 def clear_scan_caches():
     """Drop per-scan caches. Pure-function lru_caches (normalize / etc.)
-    are left alone - deterministic and worth keeping warm.
+    are left alone.
 
-    Also drains the flac_cache write buffer so anything parsed mid-scan is
-    on disk before the next pass starts (the scan-end commit point - put()
-    buffers rather than committing per-file to keep a cold 200k-track scan
-    out of per-file disk-sync territory)."""
+    Also drains the flac_cache write buffer, which put() fills rather than
+    committing per file, so anything parsed mid-scan is on disk before the
+    next pass starts."""
     global _scan_caches_cleared
     _ARTIST_SUBDIRS_CACHE.clear()
     _HAS_AUDIO_CACHE.clear()
@@ -620,13 +617,9 @@ def scan_caches_cleared() -> int:
 
 
 def drop_artist_subdirs_cache(artist_dir):
-    """Invalidate the cached subdir listing for one artist, not the whole map.
-
-    Use this when only one artist's library folder has changed on disk (a
-    beets rename of just-imported album, an in-place upgrade landing) - a
-    bulk-upgrade pass touches one artist at a time, so the full-cache wipe
-    `clear_scan_caches()` does would cold-rebuild every OTHER artist's
-    listing on the next item too. Quiet on a missing key."""
+    """Invalidate the cached subdir listing for one artist, not the whole map:
+    `clear_scan_caches()` would cold-rebuild every other artist's listing too.
+    Quiet on a missing key."""
     if artist_dir is None:
         return
     _ARTIST_SUBDIRS_CACHE.pop(str(artist_dir), None)

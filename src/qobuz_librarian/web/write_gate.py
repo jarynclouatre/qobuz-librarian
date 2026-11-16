@@ -42,9 +42,9 @@ def _read_only_library_notice():
         return None
     return {
         "reason": "Your music folder is mounted read-only.",
-        "msg": ("Downloads are off: your music folder is mounted read-only, "
-                "so nothing can be added to it. Library scans still run, and "
-                "the tools skip files they can't change."),
+        "msg": ("Downloads are off: your music folder is mounted read-only. "
+                "Library scans still run, and the tools skip files they "
+                "can't change."),
         "action": None,
     }
 
@@ -119,8 +119,7 @@ def _writes_paused_notice(*, log_details: bool = False,
         reason = "Qobuz Librarian can't write to its data folder."
         action = {"href": "/settings#diagnostics", "label": "Open Diagnostics"}
         msg = ("Qobuz Librarian can't write to its data folder, so downloads "
-               "and scans are paused and nothing new can be saved. Check that "
-               "the folder "
+               "and scans are paused. Check that the folder "
                "still exists and that Qobuz Librarian can write to it; the "
                "app picks it up again on its own.")
     elif queue_recovery._STARTUP_RECOVERY_REFRESHING:
@@ -128,7 +127,7 @@ def _writes_paused_notice(*, log_details: bool = False,
         msg = ("Qobuz Librarian is checking for interrupted downloads, so "
                "downloads and scans wait until it finishes.")
     elif queue_recovery._STARTUP_RECOVERY_UNKNOWN:
-        reason = "Interrupted work could not be checked safely."
+        reason = "Interrupted work could not be checked."
         msg = (
             "Qobuz Librarian could not read its saved recovery state, so "
             "downloads and scans are paused. It tries again on its own; if "
@@ -144,7 +143,7 @@ def _writes_paused_notice(*, log_details: bool = False,
             reason = "The Queue and History file is damaged."
             msg = (
                 f"Qobuz Librarian can't read {jobs_db}, so downloads and scans "
-                "are paused before any work starts. Nothing new was queued. "
+                "are paused before any work starts. "
                 f"Move it, and any {jobs_db.name}-wal and {jobs_db.name}-shm "
                 "beside it, out of the data folder and restart Qobuz "
                 "Librarian; History and any review waiting in it will be lost."
@@ -155,8 +154,8 @@ def _writes_paused_notice(*, log_details: bool = False,
                       "label": "Open Diagnostics"}
             msg = (
                 f"Qobuz Librarian can't open or write {jobs_db}, so downloads "
-                "and scans are paused before any work starts. Nothing new was "
-                "queued. Check the permissions of that file and the data "
+                "and scans are paused before any work starts. "
+                "Check the permissions of that file and the data "
                 "folder, and free space, then restart Qobuz Librarian."
             )
     elif not runtime._JOBS_RESTORED:
@@ -191,27 +190,26 @@ def _writes_paused_notice(*, log_details: bool = False,
             files = "; ".join(str(path) for path in queue_recovery._unreadable_queue_paths())
             reason = "The saved download queue can't be read."
             msg = (
-                "Downloads and scans are paused and nothing was changed. "
+                "Downloads and scans are paused. "
                 + (f"The file involved: {files}. " if files else "")
                 + "Fix its permissions, or if it is damaged, move it out of "
                 "the data folder (the downloads it listed will need queuing "
                 "again), then restart Qobuz Librarian."
             )
         else:
-            reason = "An interrupted download couldn't be cleared safely."
+            reason = "An interrupted download couldn't be cleared."
             named = queue_recovery._startup_recovery_album_label()
             of_album = f" of “{named}”" if named else ""
             if getattr(queue_recovery._STARTUP_RECOVERY_RESULT, "reason",
                        None) == "startup-recovery-unsettled":
-                msg = ("Interrupted work could not be checked safely, so "
+                msg = ("Interrupted work could not be checked, so "
                        "downloads and scans are paused. Qobuz Librarian "
                        "checks again on its own; the “"
                        + startup_recovery.BLOCKED_DOWNLOAD_LOG_ENTRY
                        + "” entry in the application log says why.")
             else:
                 msg = (f"An interrupted download{of_album} could not be "
-                       "cleared safely. Downloads and scans are paused, and "
-                       "its files were left as they were. "
+                       "cleared. Downloads and scans are paused. "
                        "Qobuz Librarian tries again when it restarts; the "
                        "application log says why it stopped.")
     elif queue_recovery._terminal_queue_waiting():

@@ -72,7 +72,7 @@ async def collection_snapshot_download(request: Request):
     if state == "unreadable":
         return RedirectResponse(
             url="/settings?error=" + rendering._notice_key(
-                "The current collection backup couldn't be read safely, so it "
+                "The current collection backup couldn't be read, so it "
                 "was not downloaded. Check the backup folder in Settings."),
             status_code=303)
     path = collection_snapshot.latest_path()
@@ -199,7 +199,7 @@ async def collection_restore_upload(request: Request,
         if backup_state == "unreadable" and empty_replacement != "1":
             return (
                 "No music was found in the library folder, and the last "
-                "collection backup could not be read safely. Check both "
+                "collection backup could not be read. Check both "
                 "folders before continuing. If this is an intentionally empty "
                 "replacement folder, select that option and upload again.",
                 None,
@@ -228,7 +228,7 @@ async def collection_restore_upload(request: Request,
             QobuzAccess.CATALOGUE_ACTION)
     except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
         return _restore_response(
-            request, job_mgr.qobuz_action_error_message(exc, unchanged=True))
+            request, job_mgr.qobuz_action_error_message(exc))
     job = job_mgr.Job(title="Restore from backup")
     job.execute_kind = "collection_restore"
 
@@ -678,8 +678,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
             else:
                 body = ("Couldn't verify that the album still holds every "
                         "file this backup does, so the backup was left "
-                        "untouched. Restore is the safe way to bring its "
-                        "files home.")
+                        "untouched.")
             note = _diagnostics_result_notice("error", body)
     return note + diagnostics._diagnostics_fragment(request)
 

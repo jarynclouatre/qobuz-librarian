@@ -8,7 +8,7 @@ from qobuz_librarian.ui_cli.sentinels import Mode
 
 # (key, name, mode, what it does). Held as data rather than pre-wrapped lines
 # so the descriptions can be laid out to the terminal actually in front of the
-# user; hand-wrapped at ~110 columns, they shredded on a phone.
+# user.
 _CHOICES = [
     ("1", "Search", Mode.ALBUM,
      "find and download one album (name or Qobuz URL)"),

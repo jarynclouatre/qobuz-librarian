@@ -32,10 +32,8 @@ def _active_new_release_check():
 
 def _pending_new_release_review(job):
     """The new-release review still parked after a partial download, for the
-    finished job page to point at. New releases have no home surface of their
-    own, so a review split off the batch the user approved was reachable only
-    from the dashboard notice or History: the page they were standing on gave
-    them no way back to the rest of their own results."""
+    finished job page to point at. New releases have no page of their own,
+    and the dashboard notice and History are the only other ways to it."""
     if job.execute_kind != "new_releases":
         return None
     if job.status not in job_mgr.TERMINAL:

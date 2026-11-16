@@ -792,7 +792,7 @@ def write_post_import_sidecars(
                             C.YELLOW,
                             f"  ⚠  lyrics: {action} "
                             f"{fp.with_suffix('.lrc').name}, but couldn't "
-                            f"safely remove embedded lyrics from "
+                            "remove embedded lyrics from "
                             f"{fp.name}: {e}.",
                         )
                     )

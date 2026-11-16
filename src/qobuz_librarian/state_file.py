@@ -127,10 +127,10 @@ KEPT_CORRUPT_DIR = "unreadable-copies"
 def preserved_corrupt_stores():
     """The names of the `….corrupt` copies preserve_corrupt kept in DATA_DIR.
 
-    Preserving the file and warning satisfies half this module's promise; the
-    warning goes to the log, which a web user never reads, so the store silently
-    reverts to defaults instead. Listing the kept copies lets the UI say so,
-    and deleting them clears it, since the list is the whole state.
+    preserve_corrupt's warning goes to the log, which a web user does not
+    read; to them the store just reverts to defaults. Listing the kept copies
+    lets the UI say so, and deleting them clears it, since the list is the
+    whole state.
     """
     try:
         return sorted(

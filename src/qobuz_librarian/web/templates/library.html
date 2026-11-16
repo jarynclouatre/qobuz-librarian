@@ -49,7 +49,7 @@
     </svg>
     <p class="ql-scan-hero-title">Scan your library</p>
     <p class="ql-scan-hero-text">Finds missing albums, missing tracks, and quality upgrades.</p>
-    <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan{% if library_resume and library_resume.kind == 'missing' %} &middot; {{ library_resume.done }} already checked, continues from there{% endif %}</p>
+    <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan{% if library_resume and library_resume.kind == 'missing' %} &middot; {{ library_resume.done }} already checked{% endif %}</p>
     <form action="/library" method="post" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="mode" value="missing_albums">
@@ -80,7 +80,7 @@
             d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
     </svg>
     <span class="min-w-0 flex-1 text-sm">
-      <strong>A library scan was interrupted.</strong> {{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked. Resume to finish it.
+      <strong>A library scan was interrupted.</strong> {{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked.
     </span>
     <form action="/library" method="post" class="ml-auto shrink-0" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -123,7 +123,7 @@
   {% if library_resume %}
   <div class="ql-tool-note ql-tool-note-info">
     <p class="ql-tool-note-title">Scan can resume</p>
-    <p>{{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked. The scan continues from there.</p>
+    <p>{{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked.</p>
     <form action="/library" method="post" class="ml-auto shrink-0" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="mode" value="{{ 'partial_fill' if library_resume.kind == 'partial' else 'missing_albums' }}">

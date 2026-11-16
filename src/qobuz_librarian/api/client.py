@@ -107,7 +107,7 @@ def _attempt_timeout() -> float | None:
     """Per-request timeout, shrunk to whatever the deadline still allows. None
     means the deadline has already passed - don't even start a request. The
     timeout is NOT floored, so a near-spent deadline yields a sub-second timeout
-    (the request fails fast) rather than the old 1.0s floor overrunning it."""
+    (the request fails fast) rather than overrunning it."""
     remaining = _remaining_budget()
     if remaining is None:
         return _REQUEST_TIMEOUT

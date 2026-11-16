@@ -1,4 +1,4 @@
-// Applies the saved theme to the offline page, the same way base.html does
+// Applies the saved theme to the offline page, the same way _app_head.html does
 // for the app. Lives as its own cached file because the CSP only allows
 // inline scripts with a per-request nonce, which a static page served by the
 // service worker can't have.
@@ -28,8 +28,8 @@
   document.addEventListener('visibilitychange', probe);
   setInterval(probe, 5000);
 
-  // Retry answers, win or lose. Without this the tap only re-rendered the same
-  // page from the cache and read as though nothing had happened at all.
+  // Retry answers, win or lose: a tap that only re-rendered the same page
+  // from the cache would read as though nothing had happened.
   // This file runs in the head, before the body it is reaching into exists.
   var retrying = false;
   function wireRetry() {
@@ -58,8 +58,8 @@
             retry.textContent = label;
             retrying = false;
             if (status) {
-              status.textContent = 'Still no answer. This page comes back on'
-                + ' its own as soon as the server does.';
+              status.textContent = 'No answer yet. This page reloads when'
+                + ' the server is back.';
             }
           }, Math.max(0, 400 - (Date.now() - started)));
         });

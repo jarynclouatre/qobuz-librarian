@@ -3816,7 +3816,7 @@ def _copy_album_to_backup(public, bp, snapshot, source_receipt, why, *,
     except BaseException:
         log.info(fmt(
             C.YELLOW,
-            f"     The album is safe in the backup at {bp}. The next run "
+            f"     The album is in the backup at {bp}. The next run "
             "puts back what was removed unless the folder has changed "
             "since, and then the backup is kept."))
         raise
@@ -4051,7 +4051,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
         log.info(fmt(
             C.YELLOW,
             f"\n  ⚠  {(what + 'backup').capitalize()} interrupted. The tracks are "
-            f"safe in the backup at {bp}; Restore in Diagnostics puts back "
+            f"in the backup at {bp}; Restore in Diagnostics puts back "
             "any the album is missing."))
         raise
     if refused is None:
@@ -4303,7 +4303,7 @@ def stash_downsample_originals(files, album_dir):
             ):
                 log.info(fmt(
                     C.YELLOW,
-                    f"  ⚠  Couldn't safely bind {source_path.name}; it "
+                    f"  ⚠  Couldn't bind {source_path.name}; it "
                     "will be left untouched."))
                 continue
             source = rooted[0]
@@ -4461,8 +4461,8 @@ def restore_gap_fill_backup(backup, album_dir: Path,
             source, backup_snapshot, _hidden_name(source.name)):
         log.info(fmt(
             C.YELLOW,
-            "  ⚠  Restored files are safe, but their exact backup "
-            f"remains at {source}."))
+            "  ⚠  The files were restored, but their backup remains at "
+            f"{source}."))
     return len(found)
 
 
@@ -4953,7 +4953,7 @@ def _restore_upgrade_backup(
     note = None
     try:
         if backup_snapshot is None:
-            raise OSError("backup tree could not be read safely")
+            raise OSError("backup tree could not be read")
         if os.path.lexists(origin):
             if not replace_partial:
                 log.info(fmt(C.YELLOW,
@@ -4964,7 +4964,7 @@ def _restore_upgrade_backup(
             if partial is None or any(
                     os.path.basename(relative) in _SIDECARS
                     for relative in partial):
-                raise OSError("partial album tree could not be read safely")
+                raise OSError("partial album tree could not be read")
             partial_files = [value[3] for value in partial.values()
                              if stat.S_ISREG(value[2])]
             if backup_bytes <= sum(partial_files):
@@ -5033,8 +5033,8 @@ def _restore_upgrade_backup(
     replaced = partial if partial is not None else earlier
     if replaced is not None and delete_tree_verified(aside, replaced):
         log.info(fmt(C.YELLOW,
-            f"  ⚠  The restored album is safe, but the old partial "
-            f"is retained in {aside}."))
+            "  ⚠  The album was restored, but the old partial is retained "
+            f"in {aside}."))
     if renamed:
         if _remove_put_back_sidecars(origin) and note is not None:
             _drop_put_back_note(note)
@@ -5042,7 +5042,7 @@ def _restore_upgrade_backup(
             source, backup_snapshot, _hidden_name(source.name)):
         log.info(fmt(
             C.YELLOW,
-            "  ⚠  The restored album is safe, but the backup could not be "
+            "  ⚠  The album was restored, but the backup could not be "
             f"deleted; it remains at {source}."))
     # Beets is deliberately not mutated by restored public paths: those
     # paths may already name replacement rows and external remove hooks are
@@ -6650,13 +6650,12 @@ def discard_backup_unchecked(path, *, album_gone=False) -> bool:
 
     Every automatic route can refuse: an unreadable recovery record, files
     that are not byte-identical at the origin, an album folder that now holds
-    more than the backup does. Each refusal is right, and together they left
-    the row a permanent dead end with a standing alarm beside it. This is the
-    deliberate override behind an explicit warning, not a shortcut anything
-    else may take. A backup holding files the album doesn't have is their
-    only copy, so it is never deleted this way, unless with ``album_gone``
-    the user was told its album folder is gone and that it may be the only
-    copy, and no saved recovery operation owns it.
+    more than the backup does. Each refusal is right, and together they can
+    leave the row with no way out. This is the override behind an explicit
+    warning, not a shortcut anything else may take. A backup holding files
+    the album doesn't have is their only copy, so it is never deleted this
+    way, unless with ``album_gone`` the user was told its album folder is gone
+    and that it may be the only copy, and no saved recovery operation owns it.
     """
     target = Path(path)
     if album_gone:
@@ -6842,12 +6841,11 @@ def cleanup_old_upgrade_backups(retention_days: int | None = None,
     container that never restarts still expires them. Returns count of
     dirs removed.
 
-    Parses the timestamp prefix encoded in each backup dir's
-    name (YYYYMMDD_HHMMSS_safe) instead of stat().st_mtime. shutil.move
-    preserves the source's mtime, so a fresh backup of an old folder
-    inherited that old mtime - and was being auto-deleted on the very
-    next run despite being just minutes old. Skips (does not delete)
-    backups whose names don't parse (legacy / hand-named / hand-restored).
+    Age comes from the timestamp in each backup dir's name
+    (YYYYMMDD_HHMMSS_safe), not stat().st_mtime: shutil.move preserves the
+    source's mtime, so a fresh backup of an old folder carries an old one.
+    Skips (does not delete) backups whose names don't parse (legacy /
+    hand-named / hand-restored).
 
     Stamps DATA_DIR/.last_backup_sweep and skips a re-sweep within 24h
     unless ``force=True`` - a CLI session that opens and closes ten times

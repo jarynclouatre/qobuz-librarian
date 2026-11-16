@@ -129,13 +129,13 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
         # copyable if every character survives to the screen; reflow would
         # collapse doubled spaces and wrap long ones at inner spaces.
         intro = (
-            "\n✗  An interrupted library-folder move could not be verified safely.\n"
+            "\n✗  An interrupted library-folder move could not be verified.\n"
             f"   Recovery reason: {relocation.reason or 'reason not reported'}\n"
             "   Paths needing attention:"
             + ("" if relocation.paths else " none reported")
         )
         outro = (
-            "   Library changes are paused so the files remain unchanged. See "
+            "   Library changes are paused. See "
             f"the “{POST_IMPORT_RELOCATION_LOG_ENTRY}” entry in the application "
             "log for the same details. Resolve the reported recovery problem, "
             "then restart Qobuz Librarian.\n"
@@ -149,7 +149,7 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
         paths = getattr(result, "paths", ())
         print(fmt(C.RED, block(
             "\n✗  The saved download queue can't be read.\n"
-            "   Nothing was changed and no work was started. The file "
+            "   No work was started. The file "
             "involved:" + ("" if paths else " not reported")
         )), file=sys.stderr)
         for path in paths:
@@ -197,9 +197,8 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
              any(entry.holds_backup for entry in blocked)),
         ) if holds) or shown_path(cfg.STAGING_DIR)
         message = (
-            "\n✗  An interrupted download could not be cleared safely.\n"
-            "   Its files were left as they were, and no other work was "
-            "started.\n"
+            "\n✗  An interrupted download could not be cleared.\n"
+            "   No other work was started.\n"
             f"   What is still outstanding is under {outstanding}. The "
             f"“{BLOCKED_DOWNLOAD_LOG_ENTRY}” entry in the application "
             "log has the technical detail.\n"
@@ -261,7 +260,7 @@ def acquire_run_lock():
             vlog(f"startup recovery check failed: {exc}")
             die(fmt(
                 C.RED,
-                "\n✗  The saved recovery state could not be checked safely.\n"
+                "\n✗  The saved recovery state could not be checked.\n"
                 "   The run lock was released and no library work was "
                 "started. Check the data-folder permissions, then try "
                 "again.\n",
@@ -284,7 +283,7 @@ def acquire_run_lock():
         C.RED,
         "\n✗  The run lock could not be taken.\n"
         f"   Lock file: {cfg.LOCK_FILE}\n\n"
-        "   Nothing was changed. Check the data-volume permissions and "
+        "   Check the data-volume permissions and "
         "filesystem locking support, then try again.\n",
     ), EXIT_GENERAL)
 
@@ -384,7 +383,7 @@ def require_music_root():
     elif state == "backup_unreadable":
         problem = (
             "\n✗  The music folder has no artist folders, and the last "
-            "collection backup could not be read safely.\n"
+            "collection backup could not be read.\n"
         )
         fix = (
             "   Check that the music folder is mounted and that the collection-"
@@ -594,9 +593,8 @@ def parse_args():
         description=_help_description(),
         formatter_class=_HelpFormatter,
         epilog=_help_epilog())
-    # Grouped so --help reads as sections instead of one wall. Grouping only:
-    # every flag is still spelled and parsed exactly as before, so nothing
-    # already written down stops working.
+    # Grouped so --help reads as sections instead of one wall. Grouping
+    # changes how no flag is spelled or parsed.
     modes = p.add_argument_group(
         "What to run", "Pick one. With none of these, the interactive menu opens.")
     offers = p.add_argument_group(
@@ -728,7 +726,7 @@ def parse_args():
                         "first to keep one folder of each group of siblings")
     getting.add_argument("--migrate-multi-artist", dest="migrate_multi_artist",
                    action=argparse.BooleanOptionalAction,
-                   help="after import, safely re-file 'Primary, Other' and "
+                   help="after import, re-file 'Primary, Other' and "
                         "'Other, Primary' albums under 'Primary'")
 
     lyrics.add_argument("--lyrics-rescan", action="store_true",
@@ -743,7 +741,7 @@ def parse_args():
                         "(overrides MIGRATE_DEST)")
     migration.add_argument("--in-place", dest="in_place", action="store_true",
                    help="MOVE files into place instead of copying "
-                        "(default copies, leaving originals untouched)")
+                        "(default copies)")
     migration.add_argument("--acoustid", dest="acoustid", action="store_true",
                    help="fingerprint files whose tags can't place them "
                         "(slower, needs network; no key required)")
@@ -1105,9 +1103,8 @@ def main():
         except Exception as exc:
             die(fmt(
                 C.RED,
-                "\n✗  The interrupted queue could not be resumed safely.\n"
-                f"   {exc}\n"
-                "   Its saved recovery state was left unchanged.\n",
+                "\n✗  The interrupted queue could not be resumed.\n"
+                f"   {exc}\n",
             ), EXIT_GENERAL)
         if choice == "blocked":
             _report_settled_downloads(
@@ -1570,16 +1567,16 @@ def _entry():
             die(fmt(C.RED,
                 "\n✗  Your Qobuz token works, but downloads also need your "
                 "Qobuz user ID. Add it on the Settings page in the web UI or "
-                "set QOBUZ_USER_ID. Nothing changed.\n"),
+                "set QOBUZ_USER_ID.\n"),
                 EXIT_CONFIG)
         except CredentialChanged:
             die(fmt(C.YELLOW,
                 "\n⚠  Qobuz credentials changed while the action was starting. "
-                "Nothing changed; run it again.\n"), EXIT_TRANSIENT)
+                "Run it again.\n"), EXIT_TRANSIENT)
         except QobuzEntitlementError:
             die(fmt(C.RED,
                 "\n✗  Qobuz accepted the token, but this account cannot perform "
-                "the requested action. Nothing changed.\n"), EXIT_AUTH)
+                "the requested action.\n"), EXIT_AUTH)
         except PermissionError as e:
             if not e.filename:
                 raise
@@ -1589,8 +1586,7 @@ def _entry():
                 "(PUID and PGID in Docker), then try again.\n"), EXIT_GENERAL)
     finally:
         # Persist any artist resolutions this run discovered (no-op when none),
-        # so the next CLI walk skips the search calls; only the web flows
-        # flushed before, leaving every CLI walk to re-resolve from cold.
+        # so the next CLI walk skips the search calls.
         from qobuz_librarian.library.discovery import flush_resolve_cache
         flush_resolve_cache()
         _check_staging_occupied()

@@ -315,12 +315,10 @@ _STREAMRIP_CONFIG_LOCK = threading.Lock()
 def write_streamrip_creds(user_id, auth_token) -> bool:
     """Write Qobuz creds into the streamrip config at STREAMRIP_CONFIG.
 
-    Returns False if the config dir/file isn't writable (NAS perms) so
-    callers can surface a clear message instead of crashing. Parses with
-    tomlkit so the seeded default's inline docs/ordering survive the
-    round-trip. Atomic (tmp + os.replace) so a kill mid-write can't leave
-    a half-written config that breaks auth on next start. Only a
-    credentials save on Settings writes it; downloads use a copy.
+    Returns False if the config dir/file isn't writable (NAS perms). Parses
+    with tomlkit so the seeded default's inline docs/ordering survive the
+    round-trip, and replaces the file atomically. Only a credentials save on
+    Settings writes it; downloads use a copy.
     """
     with _STREAMRIP_CONFIG_LOCK:
         return _write_streamrip_creds(user_id, auth_token)

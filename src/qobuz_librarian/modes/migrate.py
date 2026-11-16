@@ -35,7 +35,7 @@ def _resolve_paths(args):
             + (" (a folder mounted into the container, e.g. /migrate-source)"
                if mounted else "") + ": ")
     if not src:
-        log.warning(fmt(C.RED, "\n  ✗  No source was given. Nothing changed."))
+        log.warning(fmt(C.RED, "\n  ✗  No source was given."))
         return None, None
     if not Path(src).is_dir():
         log.warning(fmt(C.RED, f"  ✗  Source isn't a readable directory: {src}"))
@@ -47,7 +47,7 @@ def _resolve_paths(args):
                if mounted else "") + ": ")
     if not dest:
         log.warning(fmt(C.RED,
-            "\n  ✗  No destination was given. Nothing changed."))
+            "\n  ✗  No destination was given."))
         return None, None
 
     src, dest = Path(src), Path(dest)
@@ -60,8 +60,7 @@ def _resolve_paths(args):
 
 
 def _progress_printer():
-    """Heartbeat progress: a per-file line on a 47k-file library would bury
-    everything else, so log each phase once and then every 500 files."""
+    """Heartbeat progress: log each phase once and then every 500 files."""
     seen = set()
 
     def report(phase, current, total, item):
@@ -180,8 +179,8 @@ def run_migrate_mode(args):
             src, use_acoustid=use_acoustid, progress=progress)
     except OSError as e:
         log.warning(fmt(C.RED,
-            f"  ✗  Couldn't read the source library ({e}). Nothing was "
-            "changed; fix this and run it again."))
+            f"  ✗  Couldn't read the source library ({e}). Fix this and "
+            "run it again."))
         return EXIT_GENERAL
     skipped = engine.skipped_folders_note(items)
     if skipped:
@@ -241,7 +240,7 @@ def run_migrate_mode(args):
             f"only {format_size(free)} free); {risk}."))
         ack = ask("  Type 'yes' to migrate anyway: ", colour=C.RED) or ""
         if ack != "yes":
-            log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
+            log.info(fmt(C.GRAY, "  Cancelled."))
             return 0
     elif resume_entries:
         action = (f"{verb} {plural(len(plan.placed), 'new file')} and finish "
@@ -250,12 +249,12 @@ def run_migrate_mode(args):
                   f"Finish {plural(len(resume_entries), 'verified existing file')}")
         if not confirm(f"  {action} in {dest}?", default_yes=False,
                        auto_yes=bool(getattr(args, "yes", False))):
-            log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
+            log.info(fmt(C.GRAY, "  Cancelled."))
             return 0
     elif not confirm(f"  {verb} {plural(len(plan.placed), 'file')} into {dest}?",
                      default_yes=False,
                      auto_yes=bool(getattr(args, "yes", False))):
-        log.info(fmt(C.GRAY, "  Cancelled. Nothing changed."))
+        log.info(fmt(C.GRAY, "  Cancelled."))
         return 0
 
     # A preview, refusal, or decline stays read-only; an approved migration
@@ -265,7 +264,7 @@ def run_migrate_mode(args):
         log.info(fmt(C.GRAY, f"  Full plan written to {manifest}"))
     except (KeyError, OSError, TypeError, UnicodeError, ValueError) as e:
         log.warning(fmt(C.RED,
-            "  ✗  Couldn't record the approved migration safely, so nothing "
+            "  ✗  Couldn't record the approved migration, so nothing "
             f"was copied ({e})."))
         return EXIT_GENERAL
 

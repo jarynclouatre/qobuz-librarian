@@ -78,7 +78,7 @@ async def login_submit(request: Request, username: str = Form(""),
     cookie = web_auth.session_token(request)
     has_session = bool(cookie) and web_auth.verify_session(cookie)
     # A submission that could never succeed shouldn't cost a strike: an empty
-    # field is a slip, not an attempt, and five of them locked the owner out.
+    # field is a slip, not an attempt.
     if not username.strip() or not password:
         return _login_again(request, "Enter your username and password.",
                             username.strip(), next_path)
@@ -147,8 +147,8 @@ async def logout(request: Request):
             request,
             503,
             "Couldn't log out",
-            "The session store couldn't be saved, so nothing changed. Check "
-            "that the data volume is writable, then try logging out again.",
+            "The session store couldn't be saved. Check that the data volume "
+            "is writable, then try logging out again.",
         )
     resp = RedirectResponse(url="/login", status_code=303)
     resp.headers["Cache-Control"] = "no-store"

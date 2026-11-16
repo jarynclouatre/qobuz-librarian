@@ -310,7 +310,7 @@ def _snapshot_tree(root_fd) -> dict:
     def walk(directory_fd, prefix, depth):
         nonlocal counter
         if depth > _MAX_TREE_DEPTH:
-            raise OSError("album folder is nested too deeply to move safely")
+            raise OSError("album folder is nested too deeply to move")
         before = _stat_record(os.fstat(directory_fd))
         names = sorted(os.listdir(directory_fd))
         for name in names:
@@ -318,7 +318,7 @@ def _snapshot_tree(root_fd) -> dict:
                 raise OSError("album folder contains an invalid entry name")
             counter += 1
             if counter > _MAX_TREE_ENTRIES:
-                raise OSError("album folder has too many entries to journal safely")
+                raise OSError("album folder has too many entries to journal")
             relative = prefix + (name,)
             key = PurePosixPath(*relative).as_posix()
             value = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -1546,7 +1546,7 @@ def _remove_workspace(root_fd, workspace_fd, payload) -> None:
             elif stat.S_ISREG(value.st_mode):
                 os.unlink(name, dir_fd=workspace_fd)
             else:
-                raise OSError("unfinished relocation copy cannot be reclaimed safely")
+                raise OSError("unfinished relocation copy cannot be reclaimed")
             os.fsync(workspace_fd)
             continue
         _remove_unit(workspace_fd, unit)

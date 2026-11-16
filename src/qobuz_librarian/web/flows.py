@@ -501,9 +501,8 @@ def library_review_summary(candidates):
 def split_review_summary(execute_kind, candidates):
     """The one-line count for a review split off a partial download, recounted
     for the candidates left behind. The split copies the parked review but not
-    its summary, so its History card had nothing where the count belongs.
-    Shapes match what each scan writes when it parks, so a review screen
-    treats it exactly as it treats the original's.
+    its summary. Shapes match what each scan writes when it parks, so a review
+    screen treats it exactly as it treats the original's.
 
     Repair is left out on purpose: its summary is caveat-driven, and a bare
     count would drop what the scan could not check."""
@@ -532,12 +531,7 @@ def _album_label(candidate):
 
 
 def named_albums(candidates, limit=3):
-    """Up to ``limit`` album names, with a count standing in for the rest.
-
-    A message about particular albums has to say which ones. A bare number
-    leaves the user reading a review of hundreds looking for the one that
-    moved.
-    """
+    """Up to ``limit`` album names, with a count standing in for the rest."""
     names = [_album_label(c) for c in candidates]
     if not names:
         return ""
@@ -902,7 +896,7 @@ def refold_restored_missing(artists, fingerprints):
 
     Dismissing drops rows from the parked job for good, so clearing the
     hidden entries alone leaves Restore looking like a no-op until some
-    future scan re-carries them, and most users never scan again. Rebuild
+    future scan re-carries them. Rebuild
     the restored artists'/albums' candidate specs from the saved scan state
     and fold them back in, unselected. Returns how many rejoined the review,
     or None when no library review is parked (they return on the next scan)."""
@@ -1680,8 +1674,8 @@ def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
     Selection is server-backed (saved as the user ticks), so "hide the rest"
     means: of these artists' candidates, hide the ones whose saved `selected`
     flag is off and keep the ticked ones. Other artists' candidates and their
-    selections are never touched, critical now that pagination means most of
-    them aren't even on the page that triggered the hide.
+    selections are never touched; most of them aren't on the page that
+    triggered the hide.
 
     ``tab`` narrows the hide to what one tab of a library review lists
     (review_tab_filter): its Gap Fill rows, or the missing albums of the
@@ -2741,9 +2735,9 @@ def _scan_library_impl(
     if caveats:
         job.summary += " " + " ".join(caveats)
     # The crawl is stamped complete before its saved views are written, so a
-    # view that never landed left the attempt reading "complete" and the page
-    # showing a clean review. Correct the record with what is missing, which is
-    # what puts the warning on Library at all.
+    # view that never lands would leave the attempt reading "complete" and the
+    # page showing a clean review. Correct the record with what is missing,
+    # which is what puts the warning on Library.
     unsaved = list(stale_tabs)
     if baseline_save_failed:
         unsaved.append("New releases")
@@ -3437,8 +3431,7 @@ def execute_albums(job, chosen, token):
                     if found is not None and present:
                         raise CandidateStale(
                             "This missing album appeared locally after the "
-                            "review was built. Refresh the review; nothing "
-                            "was changed."
+                            "review was built. Refresh the review."
                         )
                 else:
                     premise = candidate_premise.validate(cand)
@@ -4576,8 +4569,7 @@ def _repair_album_outcome(album_dir, name, token):
     for entry in scan.get("isrc_mismatch", []):
         if entry.get("diagnostic"):
             # Damaged as well as unmatched, so it is picked up below as a
-            # re-download candidate and reported there. Saying it here too
-            # printed the same file twice in slightly different words.
+            # re-download candidate and reported there.
             continue
         out["warns"].append(
             f"    ~ {album_dir.name} - {entry.get('local_title') or '?'}: "
@@ -4613,10 +4605,8 @@ def _repair_album_outcome(album_dir, name, token):
                 "kind": "redownload", "title": album_dir.name, "artist": name,
                 "detail": detail,
                 "payload": payload})
-            # The sweep promises every problem reaches the log. A re-download
-            # candidate is a problem, and without this it produced a review
-            # card and no line at all, so hours of scanning read as idle and
-            # then a review appeared from nowhere.
+            # The sweep promises every problem reaches the log, and a
+            # re-download candidate is one.
             out["warns"].append(f"  {name} - {album_dir.name}: {detail}")
         else:
             for e in suspicious:
@@ -4658,7 +4648,7 @@ def _scan_repair_artist(artist_dir, token, job, beat=None):
         if link:
             raise _RepairLink(
                 f"{link} is a symbolic link, which Repair can't check or back "
-                "up safely; replace it with a copy of its file")
+                "up; replace it with a copy of its file")
         raise OSError("artist files could not be recorded before Repair checked them")
     agg = {"verified_ok": 0, "unverified": 0, "unmatched": 0, "failed": 0,
            "checked": 0, "specs": []}
@@ -5012,7 +5002,7 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
     catalogue_snapshot = beets_mod.capture_beets_album_entries(album_dir) \
         if album_dir.exists() else None
     if album_dir.exists() and catalogue_snapshot is None:
-        log.info("  Couldn't safely identify this album's Beets entries; "
+        log.info("  Couldn't identify this album's Beets entries; "
                  "leaving Repair alone.")
         return {"imported": False, "n_ok": 0,
                 "result": "catalogue_snapshot_failed"}
@@ -5170,14 +5160,14 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
                         result["repair_unverified"] = True
                         pin_repair_recovery(
                             "repair backup kept; the replaced Beets entries "
-                            "could not be retired safely")
+                            "could not be retired")
                         log.info("  Re-download verified, but its replaced "
-                                 "Beets entries couldn't be reconciled safely; "
+                                 "Beets entries couldn't be reconciled; "
                                  f"keeping the backup at {backup}.")
                         checkpoint_recovery(
                             "verification",
                             "The re-download verified, but the replaced Beets "
-                            "entries could not be reconciled safely.",
+                            "entries could not be reconciled.",
                         )
                     elif left:
                         result["companions_kept"] = left
@@ -5222,12 +5212,12 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
                     pin_repair_recovery(
                         "repair backup kept, replacement not durable")
                     log.info("  Re-download landed, but the rebuilt album or its "
-                             "companions couldn't be flushed safely; keeping your "
+                             "companions couldn't be flushed; keeping your "
                              f"backup at {backup}.")
                     checkpoint_recovery(
                         "verification",
                         "The replacement landed, but its album or companion files "
-                        "could not be flushed safely.",
+                        "could not be flushed.",
                     )
             elif imported_ok:
                 # Imported, but a decode pass alone doesn't prove the re-rip kept
@@ -5480,8 +5470,8 @@ def execute_repairs(job, chosen, token):
             # Its own outcome, neither repaired nor failed: the replacement
             # landed and the originals are held as a recovery backup, so
             # "repaired" would vouch for files nothing has proven complete,
-            # and "couldn't be repaired" claimed the album was untouched when
-            # it had just been replaced.
+            # and "couldn't be repaired" would say the album was untouched when
+            # it has just been replaced.
             unverified += 1
             job._imported_any = True
             cd_quality_tracks.extend(result.get("cd_quality_tracks") or [])
@@ -5841,8 +5831,8 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
             progress=job.push_progress)
     except OSError as exc:
         job.error = (
-            f"Couldn't read the source library ({exc}). Nothing was changed; "
-            "fix this and scan again.")
+            f"Couldn't read the source library ({exc}). "
+            "Fix this and scan again.")
         job.summary = job.error
         _mark_job_failed(job)
         return
@@ -5861,15 +5851,15 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
         return
     if not items:
         # An empty source is nearly always the wrong folder or a share that
-        # did not mount. Reporting it as a finished scan with a manifest of
-        # nothing sent people away believing their library had been read.
+        # did not mount, so it is an error, not a finished scan with an
+        # empty manifest.
         job.error = (
             "The only music files left in the source folder could not be "
             "read; they are listed in the activity log. Nothing was copied "
             "and no plan was written." if unreadable else
             "No music files were found in the source folder. Check that it is "
             "the folder you meant and that its drive or share is attached, "
-            "then scan again. Nothing was copied and no plan was written.")
+            "then scan again.")
         job.summary = job.error
         _mark_job_failed(job)
         return
@@ -6037,7 +6027,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         ):
             job.error = (
                 "The selected albums came from different migration previews. "
-                "Nothing was changed; scan again and select albums from one "
+                "Scan again and select albums from one "
                 "preview.")
             job.summary = job.error
             _mark_job_failed(job)
@@ -6053,8 +6043,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
                 )
             ):
                 job.error = (
-                    "The saved migration preview is malformed. Nothing was "
-                    "changed; scan again.")
+                    "The saved migration preview is malformed. Scan again.")
                 job.summary = job.error
                 _mark_job_failed(job)
                 return
@@ -6065,8 +6054,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         for raw in payload.get("entries", []):
             if not isinstance(raw, (list, tuple)) or len(raw) != 4:
                 job.error = (
-                    "The saved migration preview is incomplete. Nothing was "
-                    "changed; scan again.")
+                    "The saved migration preview is incomplete. Scan again.")
                 job.summary = job.error
                 _mark_job_failed(job)
                 return
@@ -6078,8 +6066,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         for raw in payload.get("resume_entries", []):
             if not isinstance(raw, (list, tuple)) or len(raw) != 4:
                 job.error = (
-                    "The saved migration preview is incomplete. Nothing was "
-                    "changed; scan again.")
+                    "The saved migration preview is incomplete. Scan again.")
                 job.summary = job.error
                 _mark_job_failed(job)
                 return
@@ -6095,8 +6082,7 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
             "acoustid" if str(entry.source) in fingerprinted else "tags")
     if not entries:
         job.error = (
-            "The selected migration review contains no saved files. Nothing "
-            "was changed; scan again."
+            "The selected migration review contains no saved files. Scan again."
         )
         job.summary = job.error
         _mark_job_failed(job)

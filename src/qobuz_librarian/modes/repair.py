@@ -372,8 +372,8 @@ def _refills_intact(album_dir, wanted_counts, token, baseline_counts):
         return False
     # Require POSITIVE re-verification: every wanted ISRC must have re-matched
     # a Qobuz recording AND passed the truncation gate. Checking only "not
-    # flagged truncated" was unsafe, a wanted ISRC whose post-repair lookup
-    # transiently returned nothing (4xx, index lag, strict-equality miss)
+    # flagged truncated" is not enough: a wanted ISRC whose post-repair lookup
+    # transiently returns nothing (4xx, index lag, strict-equality miss)
     # lands in isrc_no_match, NOT verified_truncated, so it would read as
     # intact and the only good-enough original's backup would be deleted while
     # the refill is still short.
@@ -546,8 +546,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 verified_truncated, album_dir)
         except OSError as exc:
             log.info(fmt(C.RED,
-                f"  ✗  Repair needs a fresh exact scan ({exc}); "
-                "nothing was changed."))
+                f"  ✗  Repair needs a fresh exact scan ({exc})."))
             return {
                 "n_ok": 0,
                 "n_fail": len(verified_truncated),
@@ -608,8 +607,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         album_identity = _album_identity(album_dir)
         if album_identity is None:
             log.info(fmt(C.RED,
-                "  ✗  The selected album could not be held safely; "
-                "nothing was changed."))
+                "  ✗  The selected album could not be held."))
             return {
                 "n_ok": 0,
                 "n_fail": len(verified_truncated),
@@ -625,8 +623,8 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         if link:
             log.info(fmt(C.RED,
                 f"  ✗  {link} is a symbolic link, which Repair can't check or "
-                "back up safely. Replace it with a copy of its file, then "
-                "try again; nothing was changed."))
+                "back up. Replace it with a copy of its file, then "
+                "try again."))
             return {"n_ok": 0, "n_fail": len(verified_truncated), "backup": None}
         broken_paths = [b["path"] for b in verified_truncated]
         replaced_entries = beets_entry_ids(broken_paths)
@@ -1316,7 +1314,7 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     if getattr(args, "dry_run", False):
         log.info(fmt(C.YELLOW,
             f"\n  --dry-run: would re-download "
-            f"{plural(len(verified_truncated), 'track')}. Nothing changed."))
+            f"{plural(len(verified_truncated), 'track')}."))
         return "attention" if unverified else "would_repair"
 
     read_only = next((

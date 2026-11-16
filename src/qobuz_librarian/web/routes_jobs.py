@@ -324,8 +324,7 @@ async def _approve(request: Request, job_id: str):
                   else "copy")
         return RedirectResponse(
             url=dest + "?error=" + rendering._notice_key(
-                f"Confirm the low-space risk before approving this {action}. "
-                "Your review is untouched."
+                f"Confirm the low-space risk before approving this {action}."
             ),
             status_code=303,
         )
@@ -437,7 +436,7 @@ async def _approve(request: Request, job_id: str):
                 QobuzAccess.DOWNLOAD_ACTION
             )
         except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
-            message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
+            message = job_mgr.qobuz_action_error_message(exc)
             return RedirectResponse(
                 url=dest + "?error=" + rendering._notice_key(message),
                 status_code=303,
@@ -457,7 +456,7 @@ async def _approve(request: Request, job_id: str):
     skipped = len(stale_owned_candidate_ids)
     _skip_q = f"&skipped={skipped}" if skipped else ""
     # Selection is saved server-side as the user ticks (the paginated review
-    # no longer carries every checkbox in the form), so approve runs against
+    # does not carry every checkbox in the form), so approve runs against
     # the saved flags; passing None keeps them as-is rather than reading the
     # form.
     def _split_and_approve():
@@ -690,8 +689,8 @@ async def _approve(request: Request, job_id: str):
     if approved == "review_changed":
         return RedirectResponse(
             url=dest + "?error=" + rendering._notice_key(
-                "That review changed while it was being approved. Nothing "
-                "was started; check the selections and try again."
+                "That review changed while it was being approved. Check "
+                "the selections and try again."
             ),
             status_code=303,
         )
@@ -704,10 +703,7 @@ async def _approve(request: Request, job_id: str):
             status_code=303,
         )
     if approved == "credential_changed":
-        message = job_mgr.qobuz_action_error_message(
-            CredentialChanged(),
-            unchanged=True,
-        )
+        message = job_mgr.qobuz_action_error_message(CredentialChanged())
         return RedirectResponse(
             url=dest + "?error=" + rendering._notice_key(message),
             status_code=303,
@@ -715,8 +711,8 @@ async def _approve(request: Request, job_id: str):
     if approved == "sync_failed":
         return RedirectResponse(
             url=dest + "?error=" + rendering._notice_key(
-                "The refreshed review could not be saved. Your existing "
-                "choices are untouched; check the data folder and try again."
+                "The refreshed review could not be saved. Check the data "
+                "folder and try again."
             ),
             status_code=303,
         )
@@ -764,10 +760,10 @@ async def _approve(request: Request, job_id: str):
             f"{'it was' if local_stale == 1 else 'they were'} skipped and "
             "left ticked."
         )
-        # One answer, not two: the green "Queued" banner said the same thing
-        # this sentence opens with, stacked above it. Only when this click is
-        # the one that started the work; if another click got there first, that
-        # is what the page has to say instead.
+        # One answer, not two: the green "Queued" banner would say what this
+        # sentence opens with. Only when this click is the one that started
+        # the work; if another click got there first, that is what the page
+        # has to say instead.
         flag = ""
     return RedirectResponse(
         url=f"{dest}?{flag}{_skip_q}{local_stale_q or running_q}".replace(
@@ -826,7 +822,7 @@ def _all_candidates_stale_message(execute_kind, counts, candidates=()):
     if counts.get("unsupported", 0):
         refusal = disk_support.refusal("picks")
         if refusal:
-            return f"{refusal} Nothing was started."
+            return refusal
     causes = []
     changed = counts.get("changed", 0)
     folders = (_changed_artist_folders(candidates)
@@ -859,10 +855,9 @@ def _all_candidates_stale_message(execute_kind, counts, candidates=()):
                 named += f" and {len(links) - 3} more"
             causes.append(
                 f"{named} {'is a symbolic link' if one else 'are symbolic links'}, "
-                "which can't be checked or backed up safely; replace "
+                "which can't be checked or backed up; replace "
                 f"{'it' if one else 'them'} with a copy of the file")
-    return (", ".join(causes) + ". Nothing was started. "
-            + _rebuild_results_hint(execute_kind))
+    return ", ".join(causes) + ". " + _rebuild_results_hint(execute_kind)
 
 
 def _all_stale_message_for(job, counts, candidates=()):
@@ -878,9 +873,9 @@ def _all_stale_message_for(job, counts, candidates=()):
         stored = (job.execute_args
                   if isinstance(job.execute_args, dict) else {}).get("music_root")
         if stored is not None and not candidate_premise.music_root_matches(stored):
-            return ("Nothing was started. The music folder is not the one "
-                    "this review was built against. Check that your library "
-                    "is mounted, then try again; the review is still here.")
+            return ("The music folder is not the one this review was built "
+                    "against. Check that your library is mounted, then try "
+                    "again.")
     return _all_candidates_stale_message(job.execute_kind, counts, candidates)
 
 
@@ -1170,7 +1165,7 @@ async def job_hide(request: Request, job_id: str):
             if n is None or n is False:
                 return n, None, [], {}
             # Dismissing the last album completes the review, so drop
-            # AWAITING_REVIEW the dashboard "new releases" banner clears and
+            # AWAITING_REVIEW: the dashboard "new releases" banner clears and
             # this page stops showing an empty "awaiting review".
             finalized = job_mgr.finalize_review_if_empty(job)
             if finalized is not False:
@@ -1198,7 +1193,7 @@ async def job_hide(request: Request, job_id: str):
         if n is False:
             return HTMLResponse(
                 "The dismissal could not be saved to the Library review. "
-                "Nothing was dismissed. Check the data folder and try again.",
+                "Check the data folder and try again.",
                 status_code=503,
             )
         if n is None:
@@ -1393,16 +1388,15 @@ async def job_retry(request: Request, job_id: str):
             QobuzAccess.DOWNLOAD_ACTION
         )
     except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
-        message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
+        message = job_mgr.qobuz_action_error_message(exc)
         return _land(error=message)
 
     completion_acknowledged = queue_recovery._durable_completion_status(job)
     if completion_acknowledged is None:
         return refusals._durable_recovery_response(
             request,
-            "The saved completion record could not be checked safely. No "
-            "download was started. Check the data-folder permissions, then "
-            "restart Qobuz Librarian.",
+            "The saved completion record could not be checked. Check the "
+            "data-folder permissions, then restart Qobuz Librarian.",
         )
     busy = refusals._lock_busy_response(request, downloads=True)
     if busy is not None:
@@ -1438,10 +1432,7 @@ async def job_retry(request: Request, job_id: str):
         # Re-check under the submit lock.
         with download_admission._DOWNLOAD_SUBMIT_LOCK, qobuz_access._CREDENTIAL_LOCK:
             if not qobuz_access._credential_generation_is_active(credentials.generation):
-                message = job_mgr.qobuz_action_error_message(
-                    CredentialChanged(),
-                    unchanged=True,
-                )
+                message = job_mgr.qobuz_action_error_message(CredentialChanged())
                 return _land(error=message)
             duplicate = download_admission._duplicate_download_job(
                 album_id, retry_track_id, retry_as_new,
@@ -1501,11 +1492,9 @@ async def job_retry(request: Request, job_id: str):
             )
             if track is not None:
                 # Seed the same two keys /download does at submit and let
-                # the run fill in the rest. Copying the whole dict carried
-                # the old job's Undo record onto a job that may download
-                # nothing (the "you already have this" early return never
-                # touches j.single), so two jobs offered Undo of one file
-                # and one of them claimed it downloaded nothing.
+                # the run fill in the rest. The old job's Undo record is
+                # not copied: this job may download nothing (the "you already
+                # have this" early return never touches j.single).
                 new_job.single = {
                     "album_id": album_id,
                     "track_id": str(single.get("track_id")),
@@ -1534,7 +1523,7 @@ async def job_retry(request: Request, job_id: str):
                         job.attention = ""
         return _land(started=new_job.id)
     except NoCredsError as exc:
-        message = job_mgr.qobuz_action_error_message(exc, unchanged=True)
+        message = job_mgr.qobuz_action_error_message(exc)
         return _land(error=message)
     except Exception as exc:
         _log.warning("couldn't prepare retry for job %s", job.id, exc_info=True)
@@ -1868,24 +1857,24 @@ async def job_undo(request: Request, job_id: str):
             else:
                 if undo_outcome.get("files_complete"):
                     job.summary = (
-                        f"Removed “{info.get('title')}”, but couldn't safely "
+                        f"Removed “{info.get('title')}”, but couldn't "
                         "finish cleaning up its folders. Try Undo again.")
                 elif undo_outcome.get("removed_files"):
                     job.summary = (
-                        "Part of Undo completed, but couldn't safely finish "
+                        "Part of Undo completed, but couldn't finish "
                         f"removing “{info.get('title')}”. Try Undo again.")
                 elif undo_outcome.get("held_files"):
                     job.summary = (
-                        "Undo safely set the downloaded copy of "
+                        "Undo set the downloaded copy of "
                         f"“{info.get('title')}” aside, but couldn't finish "
                         "removing it. Try Undo again.")
                 elif undo_outcome.get("undo_started"):
                     job.summary = (
-                        "Undo started but couldn't safely finish removing "
+                        "Undo started but couldn't finish removing "
                         f"“{info.get('title')}”. Try Undo again.")
                 else:
                     job.summary = (
-                        "Couldn't safely verify the downloaded copy of "
+                        "Couldn't verify the downloaded copy of "
                         f"“{info.get('title')}”. Nothing was removed; delete "
                         "it manually if needed.")
         # Persist while the direct-operation registration still holds the web

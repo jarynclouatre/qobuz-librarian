@@ -57,8 +57,7 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "incomplete": "Qobuz couldn't deliver the whole album. Nothing was imported.",
     "upgrade_aborted_backup_failed": "Upgrade aborted: couldn't back up the original.",
     "folder_read_only": (
-        "Left as it is: the app can't write to the album's folder. Nothing "
-        "was downloaded."
+        "The app can't write to the album's folder. Nothing was downloaded."
     ),
     "stale_candidate": (
         "Left as it is: the album's files changed after it was queued, or "
@@ -67,7 +66,7 @@ _DOWNLOAD_SUMMARY_LABELS = {
     ),
     "replacement_aborted_catalogue_failed": (
         "The album's Beets entries could not be read, so the replacement "
-        "was not made. Your files are unchanged."
+        "was not made."
     ),
     "not_imported": "Downloaded, but the import didn't land. Library unchanged.",
 }
@@ -255,8 +254,8 @@ def download_error(result, *, job_controls=True):
     if kind == "backup":
         if result.get("catalogue_unverified"):
             return (
-                "The album's Beets catalogue entries could not be reconciled "
-                "safely. A backup was retained. Review it under Settings > "
+                "The album's Beets catalogue entries could not be "
+                "reconciled. A backup was retained. Review it under Settings > "
                 "Diagnostics before downloading this album again."
             )
         if result.get("recovery_unverified"):

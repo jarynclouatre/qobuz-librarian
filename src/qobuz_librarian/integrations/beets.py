@@ -633,7 +633,7 @@ def _prepare_staging_tags(
                     if not dest.durable:
                         uncertain_quarantines += 1
                 else:
-                    vlog(f"couldn't safely quarantine {f.name}: it changed")
+                    vlog(f"couldn't quarantine {f.name}: it changed")
             except OSError as e:
                 vlog(f"couldn't quarantine {f.name}: {e}")
             continue
@@ -2677,7 +2677,7 @@ def _retire_managed_carrier(
             )
         return ManagedCarrierRetirementResult(ManagedCarrierRetirementOutcome.RETIRED)
     except (OSError, TypeError, ValueError):
-        return refused("managed carrier retirement could not be opened safely")
+        return refused("managed carrier retirement could not be opened")
     finally:
         for carrier in opened:
             carrier.close()
@@ -5855,10 +5855,8 @@ def _beets_direct_guarded(
     failure_out=None,
 ):
     """Call ``beet import`` as a direct subprocess (bundled mode), scoped to
-    the given paths. Returns
-    ``(ok: bool, kind: str)`` where kind is ``"ok"`` / ``"timeout"`` /
-    ``"error"`` so the caller can distinguish a retry-worthy idle-timeout
-    from a permanent failure."""
+    the given paths. Returns ``(ok: bool, kind: str)`` where kind is
+    ``"ok"`` / ``"timeout"`` / ``"disk_full"`` / ``"error"``."""
     audio_before = _count_audio_under(paths, include_retry=True)
     if intended_audio is not None:
         intended_audio = tuple(intended_audio)
@@ -6158,11 +6156,10 @@ def _beets_direct_guarded(
         else None
     )
 
-    # beets moves audio out of staging into the library, so the honest success
-    # signal is whether the staged tracks actually left, not a phrase in beets'
-    # output. beets prints "Skipping." per item (a duplicate, an unreadable
-    # file), so matching that text flagged a whole album failed when a single
-    # track was skipped; an exit-0 run that moved nothing is the real silent skip.
+    # beets moves audio out of staging into the library, so success is whether
+    # the staged tracks left, not a phrase in its output: it prints "Skipping."
+    # for one item (a duplicate, an unreadable file) of an album that imports,
+    # and an exit-0 run can move nothing.
     audio_after = _count_audio_under(paths, include_retry=True)
     moved_any = audio_before > 0 and audio_after < audio_before
     # An explicit album import that finds zero audio (every track quarantined as
@@ -6307,10 +6304,7 @@ def _permission_denied_folder(stopped):
 
 def _report_staging_remnants():
     """List the top-level album folders still in staging after a beets
-    failure so the user knows exactly what didn't import. A bare
-    "files remain in staging" line leaves them guessing across batches
-    of 100+ albums. A download's own run folder is left out; the queue
-    settles it."""
+    failure. A download's own run folder is left out; the queue settles it."""
     audio_exts = set(cfg.AUDIO_EXTS)
 
     def tracks_in(folder):
@@ -7026,7 +7020,7 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't safely retire the replaced Beets entries ({exc}); "
+                f"  ⚠  Couldn't retire the replaced Beets entries ({exc}); "
                 "leaving the captured entries unchanged.",
             )
         )
@@ -7343,7 +7337,7 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't safely retire the backup's Beets entries ({exc}); "
+                f"  ⚠  Couldn't retire the backup's Beets entries ({exc}); "
                 "leaving the catalogue unchanged.",
             )
         )
@@ -7738,7 +7732,7 @@ def _consolidate_duplicate_albums(protected_paths=None, folders=None,
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't safely fold duplicate beets entries ({exc}); "
+                f"  ⚠  Couldn't fold duplicate beets entries ({exc}); "
                 "leaving them unchanged.",
             )
         )

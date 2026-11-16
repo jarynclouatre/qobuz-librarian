@@ -427,7 +427,7 @@
             <p class="ql-result-title">{{ a.name }}</p>
             {# Search's albums_count takes in every album the artist appears
                on, compilations included, while the album page lists the
-               artist's own releases (2,800 against 614 for one artist). #}
+               artist's own releases. #}
             <p class="ql-result-meta">Artist{% if a.albums_count %} · appears on {% if a.albums_count >= 10 %}about {% endif %}{{ "{:,}".format(a.albums_count) }} album{{ 's' if a.albums_count != 1 else '' }}<span class="ql-result-meta-source"> on Qobuz</span>{% endif %}</p>
           </div>
         </div>
@@ -558,11 +558,6 @@
     {% elif kind == 'artist' %}No artists found for “{{ q }}”.
     {% else %}No results for “{{ q }}”.{% endif %}
   </p>
-  <span>
-    {% if kind == 'artist' %}Try a different artist name.
-    {% elif kind == 'track' %}Try a different track title.
-    {% else %}Try a different album title.{% endif %}
-  </span>
   {% endif %}
 </div>
 {% elif not q and not error %}

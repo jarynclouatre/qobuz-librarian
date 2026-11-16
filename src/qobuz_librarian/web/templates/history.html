@@ -87,7 +87,7 @@
     </svg>
   </div>
   <p class="font-medium text-base-content/70">{% if history_unavailable %}History is unavailable or incomplete{% elif attention_only %}Nothing needs attention{% else %}No finished jobs yet{% endif %}.</p>
-  {% if history_unavailable %}<p class="text-sm mt-1 text-base-content/50">Saved activity could not be read reliably. Nothing was deleted; check the data folder and restart Qobuz Librarian.</p>{% endif %}
+  {% if history_unavailable %}<p class="text-sm mt-1 text-base-content/50">Saved activity could not be read. Check the data folder and restart Qobuz Librarian.</p>{% endif %}
   <div class="ql-empty-actions">
     <a href="{% if attention_only %}/queue/history{% else %}/queue{% endif %}" class="ql-btn ql-btn-secondary w-full sm:w-auto">{% if attention_only %}Show all history{% else %}Back to Queue{% endif %}</a>
   </div>

@@ -440,7 +440,7 @@ def current() -> dict:
     than the still-unchanged cfg.* values. The cfg.* read happens inside
     _pending_lock so a concurrent drain_pending (which holds the lock
     across its _apply) can't slip cfg.* updates in between the cfg read
-    and the overlay read - that gap silently dropped the pending change.
+    and the overlay read, which would drop the pending change.
     """
     with _pending_lock:
         out = _live()
@@ -709,11 +709,10 @@ def _atomic_write_settings(data: dict) -> bool:
 def save(values: dict):
     """Apply settings and persist them atomically. Returns (ok, warnings),
     where ok is True on success, False on persistence failure, and None when
-    the submitted settings are invalid. Only
-    real changes land in the settings file: a posted value that matches what's
-    already in effect - and was never saved before - stays out, so that field
-    keeps tracking its env var / default instead of being silently pinned
-    forever by an unrelated Settings save.
+    the submitted settings are invalid. Only real changes land in the
+    settings file: a posted value that matches what's already in effect, and
+    was never saved before, stays out, so that field keeps tracking its env
+    var / default.
     """
     # The CLI writes this store too (the downsample walk saves the
     # keep-originals choice while the web stays browsable in terminal mode),

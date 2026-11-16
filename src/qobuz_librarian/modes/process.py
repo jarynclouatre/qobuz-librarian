@@ -1323,7 +1323,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(C.GRAY,
                 "  · Couldn't read quality from existing tracks; using gap-fill."))
 
-        # cls == "all_equal": no message, today's behavior.
+        # cls == "all_equal": no message.
 
     # If caller asked for upgrade-only but the auto-upgrade branch above
     # didn't fire (quality classification didn't match upgrade criteria,
@@ -1368,7 +1368,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(
                 C.YELLOW,
                 "  ⚠  The local album could not be checked. Refresh or "
-                "rerun the command; nothing was changed.",
+                "rerun the command.",
             ))
             return {"result": "stale_candidate"}
         expected_album_receipt = source_premise["receipt"]
@@ -1420,8 +1420,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             folder := unwritable_folder(
                 album_dir, parent=auto_upgrade_active or use_force)):
         log.info(fmt(C.RED,
-            f"  ✗  The app can't write to {folder}, so this album was left "
-            "as it is. Nothing was downloaded."))
+            f"  ✗  The app can't write to {folder}. Nothing was downloaded."))
         return {"result": "folder_read_only", "folder_denied": str(folder)}
 
     # A dry run has already printed the plan above; stop before the download
@@ -1456,7 +1455,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(
                 C.YELLOW,
                 "  ⚠  The local files changed after this download was "
-                "approved. Refresh or rerun the command; nothing was changed.",
+                "approved. Refresh or rerun the command.",
             ))
             return {"result": "stale_candidate"}
     elif reviewed_album_absent:
@@ -1465,7 +1464,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             log.info(fmt(
                 C.YELLOW,
                 "  ⚠  This album appeared locally after the download was "
-                "approved. Refresh or rerun the command; nothing was changed.",
+                "approved. Refresh or rerun the command.",
             ))
             return {"result": "stale_candidate"}
 
@@ -1487,7 +1486,7 @@ def process_album(album, args, *, allow_force=True, label=None,
         if replaced_beets_entries is None:
             log.info(fmt(
                 C.RED,
-                "  ✗  Couldn't safely identify this album's Beets entries; "
+                "  ✗  Couldn't identify this album's Beets entries; "
                 "refusing to replace its folder.",
             ))
             return {"result": "replacement_aborted_catalogue_failed"}
@@ -1944,11 +1943,11 @@ def process_album(album, args, *, allow_force=True, label=None,
                         if not pin_unverified_upgrade_backup(
                                 upgrade_backup_path,
                                 "upgrade kept; the replaced Beets entries "
-                                "could not be retired safely"):
+                                "could not be retired"):
                             warn_pin_failed(upgrade_backup_path)
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Upgrade landed, but its Beets catalogue "
-                            "couldn't be reconciled safely."))
+                            "couldn't be reconciled."))
                         log.info(fmt(C.GRAY,
                             f"     Backup remains at {upgrade_backup_path} "
                             "until you reconcile it."))
@@ -1974,7 +1973,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                             warn_pin_failed(upgrade_backup_path)
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Upgrade succeeded but the exact backup "
-                            "couldn't be safely removed."))
+                            "couldn't be removed."))
                         log.info(fmt(C.GRAY,
                             f"     Backup remains at {upgrade_backup_path} "
                             "until you reconcile it."))
@@ -1984,7 +1983,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         warn_pin_failed(upgrade_backup_path)
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Upgrade landed, but the rebuilt album or its "
-                        "companions couldn't be flushed safely; keeping the "
+                        "companions couldn't be flushed; keeping the "
                         "backup."))
                     log.info(fmt(C.GRAY,
                         f"     Backup remains at {upgrade_backup_path}; keep it "
@@ -2035,8 +2034,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             else:
                 # --force routes through the same backup-restore branch (the
                 # forced re-download backed the original up the same way an
-                # auto-upgrade would), so name what actually ran instead of
-                # always saying "Upgrade".
+                # auto-upgrade would), so name what ran.
                 if upgrade_succeeded:
                     imported = False
                     upgrade_unverified = True
@@ -2125,11 +2123,11 @@ def process_album(album, args, *, allow_force=True, label=None,
                         if not pin_unverified_upgrade_backup(
                                 gap_fill_backup_path,
                                 "gap-fill backup kept; the replaced Beets "
-                                "entries could not be retired safely"):
+                                "entries could not be retired"):
                             warn_pin_failed(gap_fill_backup_path)
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Gap-fill landed, but its Beets catalogue "
-                            "couldn't be reconciled safely; keeping the exact "
+                            "couldn't be reconciled; keeping the exact "
                             "backup."))
                     elif not dispose_backup(
                         gap_fill_backup_path,
@@ -2152,7 +2150,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                             warn_pin_failed(gap_fill_backup_path)
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Gap-fill complete but the exact backup "
-                            "couldn't be safely removed."))
+                            "couldn't be removed."))
                 elif _filled_ok:
                     _gap_fill_not_located = True
                     recovery_unverified = True
@@ -2162,7 +2160,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         warn_pin_failed(gap_fill_backup_path)
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Gap-fill landed, but the filled album couldn't "
-                        "be flushed safely; keeping the backed-up tracks."))
+                        "be flushed; keeping the backed-up tracks."))
                     log.info(fmt(C.GRAY,
                         f"     Backup remains at {gap_fill_backup_path}."))
                 else:

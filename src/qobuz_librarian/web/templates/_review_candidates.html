@@ -10,8 +10,7 @@
      data-review-gap-selected="{{ review_tab_counts.gaps_selected }}"{% endif %}
      data-review-item-plural="{{ labels.review_item_plural(job) }}"
      data-review-dismiss-singular="{% if review_tab == 'gaps' %}album to fill{% elif review_tab == 'missing' %}missing album{% else %}album{% endif %}"
-     data-review-dismiss-plural="{% if review_tab == 'gaps' %}albums to fill{% elif review_tab == 'missing' %}missing albums{% else %}albums{% endif %}"
-     data-review-other-tab="{% if review_tab == 'gaps' %}Your missing albums are untouched.{% elif review_tab == 'missing' %}Your Gap Fill list is untouched.{% endif %}">
+     data-review-dismiss-plural="{% if review_tab == 'gaps' %}albums to fill{% elif review_tab == 'missing' %}missing albums{% else %}albums{% endif %}">
   {% set triage = job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
   {% set _hidden_url = '/upgrade/hidden' if job.execute_kind == 'upgrade'
                        else '/downsample/hidden' if job.execute_kind == 'downsample'
@@ -127,23 +126,18 @@
   {% if job.execute_kind == 'downsample' %}
   {% if downsample_originals_choice == 'keep' %}
   <div class="ql-notice ql-notice-info ql-review-warning">
-    <span><strong>Undoable for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}.</strong>
-      Downsampling rewrites each file in place, and a copy of every hi-res
-      original is kept so the rewrite can be restored from Settings &rarr;
-      Diagnostics. Each file is verified to decode cleanly before it replaces
-      the original.</span>
+    <span><strong>Undoable for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}</strong>
+      from Settings &rarr; Diagnostics.</span>
   </div>
   {% elif downsample_originals_choice == 'delete' %}
   <div class="ql-notice ql-notice-warning ql-review-warning">
-    <span><strong>This cannot be undone.</strong> Downsampling rewrites each file in
-      place and hi-res originals are not kept. Each file is verified to decode
-      cleanly before it replaces the original.</span>
+    <span><strong>This cannot be undone.</strong> Hi-res originals are not kept.</span>
   </div>
   {% endif %}
   {% endif %}
 
-  {# Upgrade is the one destructive tool with no undo at all, and it was the
-     only one whose review said nothing about what it does. #}
+  {# Upgrade is the one destructive tool with no undo at all, so its review
+     says what it does. #}
   {% if job.execute_kind == 'upgrade' %}
   <div class="ql-notice ql-notice-warning ql-review-warning">
     <span>Your current copy is removed once the replacement verifies.

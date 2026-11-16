@@ -11,9 +11,8 @@
   {% include "_writes_paused_notice.html" %}
 
   {# Same reason as the Downsample page: this describes a job it does not
-     watch, so it kept saying a scan was running after the scan had ended.
-     Poll while there is one, and the replacement stops polling once there
-     isn't. #}
+     watch. Poll while there is one, and the replacement stops polling once
+     there isn't. #}
   <div id="lyrics-body" class="ql-tool-body"{% if lyrics_running %} hx-get="/lyrics"
        hx-trigger="every 3s" hx-target="#lyrics-body"
        hx-select="#lyrics-body" hx-swap="outerHTML"{% endif %}>
@@ -77,9 +76,9 @@
         <p class="ql-work-card-text">Missing lyrics are written to {{ lyrics_format|lower }}, and plain lyrics are replaced when synced ones are found.</p>
       </div>
       <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
-              data-confirm="Start a library-wide lyrics scan? Missing lyrics will be written to {{ lyrics_format|lower }} as the scan runs. This can take a while on a large library."
+              data-confirm="Start a library-wide lyrics scan? Missing lyrics will be written to {{ lyrics_format|lower }} as the scan runs."
               data-confirm-checked="cb-rescan"
-              data-confirm-checked-text="Re-check every track in the library, including ones checked in the last 30 days? Missing lyrics will be written to {{ lyrics_format|lower }}. This can take a while on a large library."
+              data-confirm-checked-text="Re-check every track in the library, including ones checked in the last 30 days? Missing lyrics will be written to {{ lyrics_format|lower }}."
               data-confirm-action="Start scan">Start lyrics scan</button>
     </section>
   </form>

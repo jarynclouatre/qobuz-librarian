@@ -608,9 +608,8 @@ def signed_out_target(request) -> str:
     the app shell, or "" when the shell is theirs to see.
 
     Mirrors AuthMiddleware's own decision. It has to live outside the
-    middleware because the CSRF refusal is raised before the gate runs: a
-    tokenless POST to the sign-in form was answering with the whole nav, a
-    Settings link and a Log out button, and no route back to signing in.
+    middleware because the CSRF refusal is raised before the gate runs, and
+    a tokenless POST to the sign-in form must not be answered with the nav.
     """
     if auth_disabled():
         return ""
@@ -823,9 +822,9 @@ def _reservation_victim(failures, pending, key, maximum):
 def begin_login_attempt(ip: str, username: str = "") -> bool:
     """Atomically reserve a password check for this address.
 
-    Completed failures and checks already running both consume the limit. This
-    closes the gap where a burst of requests could all pass a read-only check
-    before any of their slow password hashes finished and recorded a failure.
+    Completed failures and checks already running both consume the limit, so
+    a burst of requests cannot all pass before any of their slow password
+    hashes finishes and records a failure.
     Every successful reservation must be finished or cancelled.
     """
     now = time.monotonic()

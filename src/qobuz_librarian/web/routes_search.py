@@ -220,9 +220,8 @@ def _maybe_resume_library_scan():
     """Resume an interrupted library scan when the app is idle, driving it to
     completion across restarts.
 
-    A FRESH first scan is NOT auto-started; the dashboard offers it as a choice
-    (see ``offer_baseline``) so a brand-new user isn't hit with a long,
-    network-heavy job unprompted. Once they start one and it gets interrupted, it
+    A fresh first scan is not auto-started; the dashboard offers it as a choice
+    (see ``offer_baseline``). Once one is started and gets interrupted, it
     leaves a checkpoint and resumes from here. Off entirely via AUTO_LIBRARY_SCAN.
     """
     resume_due = _library_scan_resume_due()
@@ -1368,9 +1367,8 @@ async def queue_download(request: Request, album_id: str = Form(""),
             return RedirectResponse(
                 url="/queue?error=" + rendering._notice_key(msg), status_code=303)
         if not download_as_new_edition and track_id:
-            # A single track was excluded from the guard entirely, so nothing
-            # checked whether that track was already on disk before fetching it
-            # again. Ask about the one track, not the whole album.
+            # A single track is not covered by the guard above. Ask about the
+            # one track, not the whole album.
             def _track_already_there():
                 try:
                     _existing, _folder, _missing, present = catalog.find_edition_tracks(
@@ -1482,7 +1480,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
         # Land on the new job's page so the user sees their download starting.
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
     except (NoCredsError, DownloaderNotReady) as exc:
-        msg = job_mgr.qobuz_action_error_message(exc, unchanged=True)
+        msg = job_mgr.qobuz_action_error_message(exc)
         if rendering._is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")
         return RedirectResponse(url="/settings#qobuz", status_code=303)

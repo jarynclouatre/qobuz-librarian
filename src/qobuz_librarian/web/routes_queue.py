@@ -206,8 +206,8 @@ async def queue_clear(request: Request):
         )
     if refused == "unsaved":
         message = (
-            "History couldn't be cleared from the data folder. Nothing "
-            "was removed; check the data volume and try again."
+            "History couldn't be cleared from the data folder. Check the "
+            "data volume and try again."
         )
         return RedirectResponse(
             url="/queue/history?error=" + rendering._notice_key(message),
@@ -233,7 +233,7 @@ async def queue_cancel_pending():
             else:
                 unsaved += 1
     if finishing or unsaved:
-        parts = ["Queue cleared where safe."]
+        parts = ["Queue cleared."]
         if finishing:
             noun = "job is" if finishing == 1 else "jobs are"
             parts.append(

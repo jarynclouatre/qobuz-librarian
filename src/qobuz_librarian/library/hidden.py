@@ -1,10 +1,8 @@
 """Albums the user dismissed from the bulk library/upgrade walks.
 
-The walks resurface every gap on every run. With a large library triaged over
-weeks, that means re-reviewing the same albums you've already decided you don't
-want, forever. This module is the memory that stops it: a dismissed album is
-recorded by a loose artist+title fingerprint and filtered out of the bulk walks
-until the user restores it.
+The walks resurface every gap on every run, so a dismissed album is recorded
+by a loose artist+title fingerprint and filtered out of the bulk walks until
+the user restores it.
 
 Keyed on a fingerprint, not the Qobuz album id: dedup can resolve to a
 different edition (a new id) of the same album on a later scan, and an id key
@@ -101,9 +99,9 @@ def _split_stored_year(title, year):
 def album_fingerprint(artist, title):
     """Unicode-safe loose key tying every edition of one album together."""
     a = _fingerprint_text(artist)
-    # The strict strip: the loose one collapsed distinct albums into one key
-    # ('Alone' with 'Alone (Again)'), so dismissing one buried the other and
-    # a kept album could vanish under a dismissed sibling's fingerprint.
+    # The strict strip: the loose one would collapse distinct albums into one
+    # key ('Alone' with 'Alone (Again)'), and dismissing one would bury the
+    # other.
     t = _fingerprint_text(strip_album_decorations_strict(_stored_text(title)))
     if not a or not t:
         return None

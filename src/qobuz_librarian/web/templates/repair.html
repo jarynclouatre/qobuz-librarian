@@ -33,7 +33,7 @@
 {% endif %}
 {% if not repair_job or repair_job.status.value in ('failed', 'canceled') %}
 {# A failed or cancelled run stays on the page, but with the launcher under
-   it, or the surface owned by a dead job had no way to start another scan. #}
+   it, so another scan can be started. #}
 {% if repair_job %}
 {% if repair_job.status.value == 'failed' and repair_resume and not repair_job.candidates %}
 <div class="ql-work-status" role="alert">

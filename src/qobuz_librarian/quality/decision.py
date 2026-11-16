@@ -37,9 +37,7 @@ from qobuz_librarian.ui_cli.logging import vlog
 def _quality_number(value) -> float:
     """A catalogue quality field as a number, or 0 when it is not one.
 
-    These come straight from the API. A string or a negative in either
-    field used to raise out of a quality comparison; unknown is the honest
-    reading and every caller already treats 0 as unknown.
+    These come straight from the API, and every caller treats 0 as unknown.
     """
     try:
         number = float(value or 0)
@@ -128,17 +126,21 @@ def quality_relation(left, right):
 def compare_album_quality(existing_tracks, qobuz_album):
     """Classify per-track quality of existing tracks vs what Qobuz offers for
     each (track_targets), at the rate Downsample keeps while it is on;
-    ``qobuz_quality`` is the best of those. Returns
-    dict with classification (str) and counts. Classifications: 'no_existing'
-    : existing list is empty 'unknown' : couldn't read quality from any
-    existing track 'all_lower' : every readable track is below Qobuz quality
-    'mixed_below' : some below, some at; none above 'all_equal' : every
-    readable track matches Qobuz quality 'all_higher' : every readable track
-    is above Qobuz quality 'mixed_above' : some above, some at; none below
-    'mixed_both' : some below AND some above (rare; treat conservatively)
-    'incomparable': at least one track trades bit depth for sample rate A
-    result containing unknown or incomparable quality is never classified as
-    an automatic upgrade candidate.
+    ``qobuz_quality`` is the best of those. Returns dict with classification
+    (str) and counts. Classifications:
+
+      'no_existing'   existing list is empty
+      'unknown'       couldn't read quality from any existing track
+      'all_lower'     every readable track is below Qobuz quality
+      'mixed_below'   some below, some at; none above
+      'all_equal'     every readable track matches Qobuz quality
+      'all_higher'    every readable track is above Qobuz quality
+      'mixed_above'   some above, some at; none below
+      'mixed_both'    some below and some above (rare; treat conservatively)
+      'incomparable'  at least one track trades bit depth for sample rate
+
+    A result containing unknown or incomparable quality is never classified
+    as an automatic upgrade candidate.
     """
     targets = track_targets(existing_tracks, qobuz_album)
     if downsampling():

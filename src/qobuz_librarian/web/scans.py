@@ -330,8 +330,7 @@ def _fold_into_parked_library_review(job):
         job.status = job_mgr.JobStatus.FAILED
         job.error = (
             "The refreshed Library review couldn't be saved to the data "
-            "folder. Its existing picks are untouched. Check the data "
-            "volume, then refresh again."
+            "folder. Check the data volume, then refresh again."
         )
         job.summary = "Library refresh stopped because its results could not be saved."
         job.push_line(job.error)

@@ -144,10 +144,9 @@ def _flac_decode_ok(path, *, descriptor=None):
 
 # How alike two titles must read before an ISRC match is trusted to be the same
 # recording. Deliberately low: the job is to reject a tag pointing at an
-# unrelated song, not to referee edition wording. Measured against the real
-# library, a wrong match scored 0.21 while every genuine pair scored 0.87 or
-# better; the closest a real pair came to rejection was 0.56 ("Ace of Spades"
-# against its live version), which stays trusted.
+# unrelated song, not to referee edition wording. An unrelated song scores
+# around 0.2 and a genuine pair 0.87 or better; "Ace of Spades" against its
+# live version scores 0.56 and stays trusted.
 _SAME_RECORDING_SIM = 0.50
 
 _MISMATCHED_DAMAGE_DIAGNOSTIC = (

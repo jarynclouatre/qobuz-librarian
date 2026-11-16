@@ -140,11 +140,10 @@ templates.env.globals["without_old_advice"] = review_pages.summary_without_old_a
 def _retire_gone_recoveries(rows: list[dict]) -> list[dict]:
     """Drop the History recoveries whose kept folders are confirmed gone.
 
-    The job page checks the disk; History only read the record, so a backup
-    restored or cleaned up elsewhere stayed pinned to page one under a red
-    chip, pointing at a Diagnostics panel with nothing in it. Retiring the
-    record where History reads it settles both screens, and the nav's
-    attention count with them, without a press per stale scan."""
+    The job page checks the disk and History reads the record, so a backup
+    restored or cleaned up elsewhere would otherwise stay pinned to page one
+    under a red chip. Retiring the record where History reads it settles both
+    screens, and the nav's attention count with them."""
     kept = []
     for row in rows:
         if (
@@ -301,8 +300,8 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
         context.setdefault("pending_job_count", len(in_flight))
     context.setdefault("cli_mode", runtime._CLI_MODE)
     context.setdefault("lock_unenforceable", runtime._LOCK_UNENFORCEABLE)
-    # Every tool page offered its Start button while writes were paused and let
-    # the POST bounce the user onto a 503. Refuse at offer time, not submit time.
+    # Tool pages hide Start while writes are paused: refuse at offer time, not
+    # submit time.
     context.setdefault("writes_paused", write_gate._web_writes_paused())
     # Terminal mode is one of eight causes, so carry the true one rather than
     # letting each gated control name the same guess. The full notice travels

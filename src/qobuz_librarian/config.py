@@ -102,16 +102,11 @@ def _env_num_min(key, default, minimum, maximum=None):
     """A numeric env value floored at `minimum`, optionally ceilinged at
     `maximum`, warning when it has to clamp.
 
-    Two bad-override failure modes share the floor guard. A thread-pool size
-    of 0 or negative crashes the pool constructor at startup. A negative
-    delay/cooldown handed to time.sleep raises ValueError and takes down the
-    worker thread, and a negative subprocess timeout makes every download
-    time out instantly. Clamp loudly at the boundary so no consumer has to
-    defend against it.
-
-    The optional `maximum` guards against the dual case: `ARTIST_SCAN_WORKERS
-    =999999` would otherwise spawn thousands of threads at scan start. Clamp +
-    warn there too so a typo'd value doesn't take the box down.
+    A thread-pool size of 0 crashes the pool constructor, a negative delay
+    raises in time.sleep and a negative subprocess timeout makes every
+    download time out at once, so clamp here and no consumer has to defend
+    against it. `maximum` stops a typo such as `ARTIST_SCAN_WORKERS=999999`
+    spawning thousands of threads.
     """
     val = _env(key, default)
     if val < minimum:
@@ -169,9 +164,9 @@ def _resolve_secret(key: str) -> str:
     The file form lets Docker/Compose secrets supply the token
     without it showing up in `docker inspect` or a process listing.
 
-    The resolved value is deliberately NOT written back to os.environ: doing so
-    re-exported the secret into every subprocess the app spawns (rip, beet,
-    flac, and the operator's POST_JOB_HOOK shell), defeating the whole point of
+    The resolved value is deliberately NOT written back to os.environ: that
+    would re-export the secret into every subprocess the app spawns (rip, beet,
+    flac, and the operator's POST_JOB_HOOK shell), defeating the point of
     the *_FILE form. Callers must read the config global (e.g.
     cfg.QOBUZ_USER_AUTH_TOKEN), never os.environ[key]."""
     val = os.environ.get(key, "").strip()
@@ -360,8 +355,7 @@ SCAN_CHECKPOINT_FILE = DATA_DIR / ".qobuz_scan_checkpoint.json"
 ARTIST_RESOLVE_CACHE_FILE = DATA_DIR / ".artist_resolve_cache.json"
 # lyric_fetch's per-track state file. Its in-module default sits beside the
 # module file (under /app in the image), which isn't writable after a PUID/PGID
-# drop. The state couldn't be saved and "provider-unavailable" retries would
-# silently never resume. DATA_DIR is the persistent, writable volume, route here.
+# drop. DATA_DIR is the persistent, writable volume, so it goes here.
 LYRIC_FETCH_STATE_FILE = DATA_DIR / ".lyric_fetch_state.json"
 # Web UI login: username + password hash + session secret, written 0600
 # (it holds a credential). Lives in DATA_DIR with the rest of the state so
@@ -396,9 +390,9 @@ def _real_folder(name, value) -> tuple[str, str]:
                 return given, real
             part = parent
     except (OSError, TypeError, ValueError) as exc:
-        raise ValueError(f"{name} cannot be resolved safely: {exc}") from None
+        raise ValueError(f"{name} cannot be resolved: {exc}") from None
     raise ValueError(
-        f"{name} cannot be resolved safely: the link {part} never reaches "
+        f"{name} cannot be resolved: the link {part} never reaches "
         "a folder")
 
 
@@ -474,7 +468,7 @@ def validate_storage_roots() -> None:
         try:
             path = Path(os.path.abspath(os.fspath(value))).resolve(strict=False)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise ValueError(f"{name} cannot be resolved safely: {exc}") from None
+            raise ValueError(f"{name} cannot be resolved: {exc}") from None
         resolved.append((name, path))
 
     for index, (name, path) in enumerate(resolved):
@@ -488,7 +482,7 @@ def validate_storage_roots() -> None:
     if conflict == "control":
         raise ValueError("COLLECTION_BACKUP_DIR contains a control character")
     if conflict == "unresolvable":
-        raise ValueError("COLLECTION_BACKUP_DIR cannot be resolved safely")
+        raise ValueError("COLLECTION_BACKUP_DIR cannot be resolved")
     if conflict:
         raise ValueError(f"COLLECTION_BACKUP_DIR must be outside {conflict}")
 
@@ -611,16 +605,15 @@ del _unknown_providers
 LYRICS_PROVIDER_TIMEOUT = _env_num_min("LYRICS_PROVIDER_TIMEOUT", 30.0, 1.0)
 
 # ── Timeouts / delays ─────────────────────────────────────────────────────────
-# Results shown on the user-facing Search page. 8 was too few for a major
-# artist (a "Paul McCartney" search surfaced almost nothing); 25 shows a useful
-# page. Search, on the web page and in the terminal, asks Qobuz for
-# SEARCH_FETCH_LIMIT and lists SEARCH_LIMIT at a time.
+# Results shown on the user-facing Search page. Search, on the web page and
+# in the terminal, asks Qobuz for SEARCH_FETCH_LIMIT and lists SEARCH_LIMIT at
+# a time.
 SEARCH_LIMIT       = 25
 SEARCH_FETCH_LIMIT = 100
 # Per-context search depth for internal matchers. ARTIST_LOOKUP_LIMIT scores
-# this many artist-search hits when resolving a name to an id; 5 was too few for
-# common names (the right artist could rank 6th+ and silently resolve to
-# nothing), so 15. CATALOG_SEARCH_LIMIT is the per-album edition-match depth.
+# this many artist-search hits when resolving a name to an id; for a common
+# name the right artist can rank well down the list. CATALOG_SEARCH_LIMIT is
+# the per-album edition-match depth.
 # SEARCH_LIMIT above is the user-facing Search-page depth and is unaffected.
 # Higher = more matches at the cost of more Qobuz API calls.
 ARTIST_LOOKUP_LIMIT  = 15
@@ -712,7 +705,7 @@ NEW_RELEASE_CHECK_INTERVAL = _env("NEW_RELEASE_CHECK_INTERVAL", 86400)
 # only just listed gets flagged "new". That is a back-catalogue gap, not a new
 # release. Only surface albums whose ORIGINAL release date is within this many
 # days. The baseline still records suppressed albums, so they never resurface
-# here. 0 disables the window (any catalog newcomer counts, the old behaviour).
+# here. 0 disables the window (any catalog newcomer counts).
 # Gap-fill (Library / Artist "missing albums") is unaffected. It deliberately
 # surfaces old albums you don't own; this only narrows the new-release check.
 NEW_RELEASE_MAX_AGE_DAYS = _env("NEW_RELEASE_MAX_AGE_DAYS", 365)
@@ -763,9 +756,9 @@ AUTO_SAFE_TITLE_SIM_THRESH = 0.85
 # ── Catalog / walk ────────────────────────────────────────────────────────────
 EDITION_SEARCH_API_BUDGET = 3
 
-# Max albums fetched per artist when scanning. 500 truncated prolific artists
-# (the Beatles list ~900 on Qobuz), so a gap scan missed albums; 1000 covers
-# realistic discographies. Truncation past this is logged by the scanner.
+# Max albums fetched per artist when scanning. Prolific artists run long (the
+# Beatles list ~900 on Qobuz); 1000 covers realistic discographies.
+# Truncation past this is logged by the scanner.
 ARTIST_CATALOG_LIMIT   = 1000
 ARTIST_CATALOG_PAGE    = 100
 # How many starred albums Discover reads back from Qobuz.

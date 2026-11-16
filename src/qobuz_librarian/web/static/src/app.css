@@ -90,7 +90,7 @@
 
 /* The component rules below are unlayered, so they outrank Tailwind's layered
    utilities, including `hidden`, which badge and button rules that set their
-   own `display` were silently defeating (the empty Queue badge dot). Scoped to
+   own `display` would otherwise defeat (the empty Queue badge dot). Scoped to
    those cases only: a global important `hidden` would also beat the
    `hidden lg:flex` reveal pattern and take the desktop sidebar with it. */
 .ql-count.hidden,
@@ -256,8 +256,7 @@ h1, h2, h3 {
   fill: currentColor;
 }
 /* By name, not by container: the class means "line icon" wherever it sits,
-   and scoping it to the desktop nav left the phone tab bar rendering raw
-   black fills. */
+   the phone tab bar included. */
 svg.ql-nav-icon-stroke {
   fill: none;
   stroke: currentColor;
@@ -1632,8 +1631,7 @@ details.ql-mobile-drawer[open]::before {
 }
 /* The button-driven switch, whose knob is a real element. Distinct from
    .ql-toggle in tokens.css, which is a checkbox that paints its knob as a
-   background layer -- when both answered to one name, this rule's
-   background-color could not clear that layer and the switch drew two knobs. */
+   background layer that this rule's background-color could not clear. */
 .ql-toggle-switch {
   position: relative;
   width: 2.125rem;
@@ -2846,7 +2844,7 @@ details.ql-mobile-drawer[open]::before {
     min-width: 5.25rem;
   }
   /* Queue rows keep the desktop shape: tile, text, one small action on the
-     right. The stacked-card fallback made two jobs fill a phone screen. */
+     right. */
   .ql-activity-row--queue {
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 0.6rem 0.75rem;
@@ -3441,13 +3439,12 @@ details.ql-mobile-drawer[open]::before {
 }
 @media (max-width: 1023.98px) {
   .ql-review-sticky {
-    /* The real header height, measured by app.js. A hard-coded guess here
-       left a see-through band that sliced album rows on every scroll. */
+    /* The real header height, measured by app.js. */
     top: var(--ql-mobilebar-h, 4rem);
   }
 }
-/* On a phone the whole tool block took a third of the screen. The tools
-   scroll away instead, and each artist name stays above its own albums. */
+/* On a phone the tools scroll away, and each artist name stays above its
+   own albums. */
 @media (max-width: 639.98px) {
   .ql-review-sticky {
     position: static;
@@ -4598,8 +4595,8 @@ details.ql-mobile-drawer[open]::before {
   gap: var(--ql-space-4);
   padding: var(--ql-space-1) var(--ql-space-1) var(--ql-space-6);
 }
-/* A folder path quoted in help text has no spaces to wrap at; without this
-   it widened the whole section past a phone's edge. */
+/* A folder path quoted in help text has no spaces to wrap at, and would
+   widen the whole section past a phone's edge. */
 .ql-settings-section-body > *,
 .ql-settings-form > * {
   min-width: 0;
@@ -5048,8 +5045,8 @@ details.ql-mobile-drawer[open]::before {
   overflow-wrap: anywhere;
 }
 /* The row's own path-and-count line ("/ql-test/music: 32 entries"), not the
-   sentence explaining what the row means. Small monospace fits that data;
-   it read as a system log when the whole card was set in it. */
+   sentence explaining what the row means. Small monospace fits that data
+   and not the whole card. */
 .ql-diagnostic-detail-mono {
   color: var(--ql-text-3);
   font-family: var(--ql-font-mono);
@@ -5183,9 +5180,8 @@ details[open] > .ql-disclosure-summary::after {
 }
 /* The drawn box stays 16px; the target does not. This checkbox sits inside a
    <summary>, and a <summary> toggles on any click that isn't consumed, so a
-   near-miss collapsed the group the user was working in instead of selecting
-   it. The label gives it a 44px target and the negative margin keeps the row's
-   layout exactly as it was. */
+   near-miss would collapse the group instead of selecting it. The label
+   gives it a 44px target and the negative margin keeps the row's layout. */
 .ql-review-artist-hit {
   display: inline-flex;
   flex: none;
@@ -6239,8 +6235,8 @@ details[data-artist].htmx-swapping {
   }
   .ql-search-results:has(.ql-bulk-bar:not(.hidden)) {
     /* Must clear the bar even after it wraps to two rows (≤760px stacks
-       the Download button full-width): the one-row height left the last
-       result permanently behind it. */
+       the Download button full-width), or the last result stays behind
+       it. */
     padding-bottom: 6rem;
   }
 }

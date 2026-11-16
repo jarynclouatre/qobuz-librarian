@@ -448,7 +448,7 @@ def finish_library_backup_settlement(
             backup,
             owner_data,
             "queue backup kept; the replaced Beets entries could not be "
-            "retired safely",
+            "retired",
             authority_check,
         )
         return _attention(journal, "library-backup-catalogue-unsettled")

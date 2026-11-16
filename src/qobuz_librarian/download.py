@@ -78,10 +78,9 @@ def match_key_from_stem(p):
 
     Accepts a Path or a bare stem string. A Path's ``.stem`` would mis-split a
     title like "01. ★" (pathlib reads ". ★" as a suffix), so an already-extracted
-    string is taken verbatim. Strips a leading
-    "<disc>-<track>"/"<track>" number and any "Artist - " prefix streamrip
-    writes, then runs the result through the same normalize/strip_edition_suffix
-    a Qobuz title goes through, so the two sides compare on equal terms."""
+    string is taken verbatim. Strips a leading "<disc>-<track>"/"<track>"
+    number and any "Artist - " prefix streamrip writes, then runs the result
+    through the same normalize/strip_edition_suffix a Qobuz title goes through."""
     s = p.stem if hasattr(p, "stem") else str(p)
     m = re.match(r"^(?:\d+[-.])?\d+[\s\-–.]+(.+)$", s)
     t = m.group(1) if m else s
@@ -1343,7 +1342,7 @@ def run_album_download(
                     })
                 if backup_result is None:
                     raise OSError(
-                        "Present tracks could not be backed up safely; "
+                        "Present tracks could not be backed up; "
                         "the download was not started."
                     )
             elif required_backup_kind == "gap-fill":
@@ -1730,7 +1729,7 @@ def run_album_download(
             log.info(fmt(C.GRAY, f"     and {len(broken) - 5} more"))
 
     # Paths are retained only inside this download phase. The queue, activity
-    # log, and CLI have always exposed short display strings.
+    # log, and CLI get short display strings.
     lossy_track_labels = [_reject_label(path) for path in lossy_tracks]
     broken_track_labels = [_reject_label(path) for path in broken]
 

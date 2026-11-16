@@ -377,8 +377,8 @@ _SEEKPOINT_SECONDS = 10
 
 # The reason a source that fails its own decode test is left alone. Callers
 # match on it to report the file as damaged rather than as a failed rewrite.
-SOURCE_DAMAGED = ("it doesn't decode cleanly, so it may be damaged; left it "
-                  "untouched. Repair can re-download it")
+SOURCE_DAMAGED = ("it doesn't decode cleanly, so it may be damaged. Repair can "
+                  "re-download it")
 
 
 def _write_seektable(target_fd: int) -> bool:
@@ -534,8 +534,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             and not _receipt_matches_source(binding, expected_source_receipt)
         ):
             return (rel, sr, rate, None,
-                    "source no longer matches its kept original; "
-                    "left it untouched")
+                    "source no longer matches its kept original")
 
         st = os.fstat(binding.track_fd)
         in_size = st.st_size
@@ -546,8 +545,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         held_sr = read_sample_rate(source_path, pass_fds=source_fds)
         if held_sr != sr or target_rate(held_sr) != rate:
             return (rel, sr, rate, None,
-                    "source sample rate changed after the scan; "
-                    "left the original untouched")
+                    "source sample rate changed after the scan")
         # ffmpeg decodes past a damaged frame, so a corrupt master would come
         # back as a clean, slightly shorter file that no later check can tell
         # from a good one.
@@ -562,7 +560,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         # un-shrunk file is far cheaper than a silently altered master.
         if not bps:
             return (rel, sr, rate, None,
-                    "couldn't read the source bit depth; left the original untouched")
+                    "couldn't read the source bit depth")
         af, sample_fmt, depth_args = _encode_opts_for_bps(bps, af_filter)
         # Keep the resample from clipping a hot master: soxr can overshoot
         # full scale on loud/brickwalled sources, which the integer encode
@@ -575,13 +573,12 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             source_path, af_filter, rate, pass_fds=source_fds)
         if _peak is None:
             return (rel, sr, rate, None,
-                    "couldn't verify the resampled peak; left the original untouched")
+                    "couldn't verify the resampled peak")
         if _peak is not None and _peak > 0.0:
             enc_af = f"volume={_TARGET_PEAK_DBFS - _peak:.3f}dB,{af}"
         if not binding.exact_track_is_named():
             return (rel, sr, rate, None,
-                    "source changed while it was being checked; "
-                    "left the current file untouched")
+                    "source changed while it was being checked")
 
         temp_name, temp_fd = _make_encode_temp(binding.parent_fd)
         temp_path = _descriptor_path(temp_fd)
@@ -619,8 +616,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         if carry_error is not None:
             return (rel, sr, rate, None,
                     "couldn't carry the source tags and artwork onto the "
-                    f"resampled file ({carry_error}); left the original "
-                    "untouched")
+                    f"resampled file ({carry_error})")
         _write_seektable(temp_fd)
         out_size = os.fstat(temp_fd).st_size
         # Verify the encode decodes before it overwrites the source. A
@@ -635,8 +631,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         out_bps = read_local_bit_depth(temp_path, pass_fds=(temp_fd,))
         if out_bps != bps:
             return (rel, sr, rate, None,
-                    f"resampled to {out_bps}-bit, expected {bps}-bit; "
-                    "left the original untouched")
+                    f"resampled to {out_bps}-bit, expected {bps}-bit")
         # Verify the resample kept the whole stream. ffmpeg exits 0 on a
         # truncated or mid-file-corrupt source, emitting only the decodable
         # prefix, and flac -t then passes on that short output, so a damaged
@@ -653,7 +648,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             # with no recovery path.
             return (rel, sr, rate, None,
                     "couldn't verify resampled length (source/output STREAMINFO "
-                    "reports unknown sample count); left the original untouched")
+                    "reports unknown sample count)")
         expected = in_samples * rate / sr
         # soxr and swresample both land within one sample of the exact count.
         # A lost frame costs hundreds of output samples or more, which a limit
@@ -662,15 +657,13 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         if abs(gap) > max(2.0, expected / 1_000_000):
             return (rel, sr, rate, None,
                     f"resampled file came out {abs(gap) * 1000 / rate:.0f} ms "
-                    f"{'short' if gap < 0 else 'long'}; left the original "
-                    "untouched (the source may be damaged)")
+                    f"{'short' if gap < 0 else 'long'} (the source may be damaged)")
         # With art copied bit-for-bit a real downsample always shrinks the file;
         # if it somehow didn't, replacing the source only churns it (and a
         # larger output would drive saved_bytes negative), so keep the original.
         if out_size >= in_size:
             return (rel, sr, rate, None,
-                    "resampled output not smaller than source; "
-                    "left the original untouched")
+                    "resampled output not smaller than source")
         # The exclusive temp starts at 0o600 in the app's group; carry the
         # source's group and mode across the swap so a downsample doesn't
         # quietly tighten a 0o644 library file to owner-only, or take it from
@@ -686,12 +679,10 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             os.fsync(temp_fd)
         except OSError:
             return (rel, sr, rate, None,
-                    "resampled copy couldn't be flushed to disk; "
-                    "left the original untouched")
+                    "resampled copy couldn't be flushed to disk")
         if not binding.exact_track_is_named():
             return (rel, sr, rate, None,
-                    "source or resampled output changed before replacement; "
-                    "left the current file untouched")
+                    "source or resampled output changed before replacement")
         _exchange_existing(
             binding.parent_fd,
             temp_name,
@@ -713,7 +704,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         return (rel, sr, rate, in_size - out_size, None)
     except subprocess.TimeoutExpired:
         return (rel, sr, rate, None,
-                "ffmpeg timed out (slow storage?); left the original untouched")
+                "ffmpeg timed out (slow storage?)")
     except subprocess.CalledProcessError as e:
         err = (e.stderr.decode(errors="replace")[:200] if e.stderr else "").strip()
         return (rel, sr, rate, None, err)
@@ -902,9 +893,7 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     errors = 0
     resampled = 0
     flush_warnings = 0
-    # Which files went wrong, not just how many. The caller reports the run,
-    # and "1 file couldn't be downsampled, see the log" names nothing the
-    # person can act on.
+    # Which files went wrong, not just how many, for the caller's report.
     failed_files = []
     flushed_files = []
 
@@ -1024,7 +1013,7 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             _discard_unused_stash(kept_dir, log)
 
     if resampled:
-        # The rewritten files are a different bit depth and size, so the tag
+        # The rewritten files are a different sample rate and size, so the tag
         # cache the census reads still describes the hi-res originals. Re-read
         # them here or "What's on disk" keeps reporting space that was freed.
         scanner.cache_album_tags([directory])

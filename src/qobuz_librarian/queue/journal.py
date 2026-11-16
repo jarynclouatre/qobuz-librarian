@@ -399,8 +399,8 @@ def _deserialize_queue_item(data):
 
 
 # Digests of the exact JSON text of planned inputs that passed the full check.
-# Every save checks the whole queue again; re-checking thousands of unchanged
-# albums on each one made a long library walk slower the more it queued.
+# Every save checks the whole queue again, and a long library walk queues
+# thousands of albums that have not changed since the last one.
 _VALIDATED_PLANNED: OrderedDict[bytes, None] = OrderedDict()
 _VALIDATED_PLANNED_LIMIT = 50_000
 _VALIDATED_PLANNED_LOCK = threading.Lock()
@@ -2234,10 +2234,9 @@ def _append_staging_reference(
     if kind == _STAGING_GROUP_REFERENCE_KIND:
         # Parking a group is also how an authorised recovery throws away a
         # blocked item's leftovers, and reconcile_staging_references already
-        # treats BLOCKED as recovery-bearing work. Refusing it here left the
-        # settle path bouncing the item through ACTIVE, which the resolved-state
-        # rule above rightly refuses once a library mutation has landed - so an
-        # item that imported and then stranded a file could never be settled.
+        # treats BLOCKED as recovery-bearing work. The settle path cannot go
+        # through ACTIVE instead: the resolved-state rule above refuses that
+        # once a library mutation has landed.
         allowed_phases |= {QueuePhase.RESOLVING, QueuePhase.BLOCKED}
     if target.phase not in allowed_phases:
         raise QueueJournalBlocked(

@@ -96,8 +96,7 @@ CHECKPOINT_WRITE_SPACING = 20
 CHECKPOINT_BYTES_PER_SECOND = 1_000_000
 
 # Per-file outcome codes are internal vocabulary; the lyrics pass shows its log
-# to the user, so map them to plain phrases (a raw "write-error" or a
-# "{'cached-synced': 4}" dict in the activity log reads like debug output).
+# to the user, so map them to plain phrases.
 _OUTCOME_LABELS = {
     "wrote-synced": "added synced lyrics", "wrote-plain": "added lyrics",
     "dry:wrote-synced": "would add synced lyrics",
@@ -191,9 +190,8 @@ LRCLIB_RETRY_WAIT = 1.0
 _lrclib_busy_until = 0.0
 _lrclib_busy_lock = threading.Lock()
 
-# Provider circuit breaker. With ≥8 workers transient errors compound quickly,
-# so the threshold is bumped from 3 to give providers more rope before being
-# disabled.
+# Provider circuit breaker. With 8 or more workers transient errors compound
+# quickly, so the threshold allows for a few.
 PROVIDER_FAIL_THRESHOLD = 5
 PROVIDER_COOLDOWN_SECONDS = 600  # 10 min before a disabled provider gets retried
 # NetEase counts the searches it is sent, one a lookup, and refuses one
@@ -570,9 +568,8 @@ def _state_file_lock(path: Path):
 
 
 def _write_state_unlocked(state: dict[str, TrackState], path: Path) -> None:
-    # Unique temp + atomic replace: a shared ".tmp" name let two concurrent
-    # checkpoints (a web lyrics pass alongside a CLI import hook) clobber each
-    # other's write, and a failed write left the temp orphaned beside the state.
+    # Unique temp + atomic replace: two concurrent checkpoints (a web lyrics
+    # pass alongside a CLI import hook) must not share a temp name.
     state_file.write_json(
         path, {k: v.__dict__ for k, v in state.items()},
         indent=0, separators=(",", ":"),
@@ -1481,8 +1478,8 @@ _TITLE_NOISE_KEYWORDS = (
     "anniversary", "expanded edition", "anniversary edition",
 )
 # A suffix can carry both at once: "(Live Remastered 2009)" names a different
-# performance and a different master, and stripping it for the master lost the
-# performance with it.
+# performance and a different master, and stripping it for the master would
+# lose the performance with it.
 _PERFORMANCE_KEYWORDS = (
     "live", "acoustic", "unplugged", "demo", "demos", "session", "sessions",
     "instrumental", "alternate take", "alternate version", "re-recorded",
@@ -2571,8 +2568,8 @@ def _process_bound_file(
         elif failed_hard or not tried:
             # A provider did not answer for this file, whether disabled by
             # the circuit breaker or failing on the connection, and may have
-            # had its lyrics, or none is set. That is no verdict about the track: "not found"
-            # here would suppress it for RECHECK_AFTER_DAYS.
+            # had its lyrics, or none is set. That is no verdict about the
+            # track: "not found" here would suppress it for RECHECK_AFTER_DAYS.
             st.status = "transient"
             commit(state, key, st)
             return "providers-unavailable"
@@ -2786,11 +2783,8 @@ def fetch_for_paths(
     `track_detail` logs each track by its file name as a detail line, which
     the terminal shows only with --verbose.
 
-    `workers` controls per-file concurrency. Each file's work is dominated
-    by network I/O (multi-provider HTTP), which releases the GIL - so
-    threading is the right tool here. Default 8 is a reasonable balance
-    against provider rate limits; raise it if your library is huge and
-    your providers tolerate more parallelism, lower it (or set 1) to debug.
+    `workers` is per-file concurrency. Each file's work is mostly network
+    I/O (multi-provider HTTP), which releases the GIL.
     """
     if log is None:
         log = logging.getLogger("lyric_fetch")
@@ -2930,14 +2924,11 @@ def index_existing(
     """
     Fast scan-only pass - open each FLAC, classify the existing lyrics tag,
     and write state entries for files that already have synced or plain
-    lyrics. No provider calls, so workers can be cranked far higher than the
-    network path tolerates. Use this to seed the state file after a
-    fresh import so a subsequent normal run skips already-synced files
-    instead of re-checking them.
+    lyrics. No provider calls, so workers can go far higher than the
+    network path tolerates.
 
     Files for which `state` already records a matching mtime+size are
-    skipped without opening the FLAC, so re-running --index after adding
-    new files is cheap.
+    skipped without opening the FLAC.
     """
     if log is None:
         log = logging.getLogger("lyric_fetch")

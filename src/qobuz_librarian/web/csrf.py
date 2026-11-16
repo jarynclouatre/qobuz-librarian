@@ -110,8 +110,8 @@ def request_is_https(request) -> bool:
     return request.url.scheme == "https"
 
 
-_STALE_MESSAGE = ("The form's security token did not match, so nothing was "
-                  "changed. Open the page again, then try once more.")
+_STALE_MESSAGE = ("The form's security token did not match. Open the page "
+                  "again, then try once more.")
 
 
 def _referring_page(request) -> str:
@@ -221,17 +221,15 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             if cross_origin(request):
                 return rendering.render_error_page(
                     request, 403, "Request refused",
-                    "That request came from another site, so nothing was "
-                    "changed.")
+                    "That request came from another site.")
             if _csrf_cookie_count(request) > 1:
                 # Only a cookie set for a parent domain or another path can
                 # sit beside this app's own, and the server would otherwise
                 # pick whichever came last.
                 return rendering.render_error_page(
                     request, 403, "Request refused",
-                    "This browser sent two Qobuz Librarian security cookies, "
-                    "so nothing was changed. Clear this site's cookies, then "
-                    "try again.")
+                    "This browser sent two Qobuz Librarian security cookies. "
+                    "Clear this site's cookies, then try again.")
             try:
                 content_length = int(request.headers.get("content-length") or 0)
             except ValueError:
@@ -261,12 +259,9 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 str(cookie_token).encode("utf-8"), str(submitted).encode("utf-8")
             ):
                 # Ordinary causes: a tab left open past the cookie's 30 days, a
-                # browser that clears cookies, a privacy extension. The old
-                # reply was a bare white page reading "CSRF token missing or
-                # invalid" with no nav and no way back - and because it was
-                # text/plain, the minting below skipped it too, so retrying
-                # failed exactly the same way. Say what happened in English and
-                # always hand back a usable token.
+                # browser that clears cookies, a privacy extension. Say what
+                # happened and always hand back a usable token, or retrying
+                # fails the same way.
                 return _stale_page_response(request, token)
 
         response = await call_next(request)

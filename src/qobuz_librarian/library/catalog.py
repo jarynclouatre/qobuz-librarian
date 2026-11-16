@@ -14,8 +14,8 @@ Behaviour you should not change without understanding the consequence:
   re-downloads of already-owned tracks. compute_missing and
   find_extras_in_existing share one matcher so the two never drift.
 - album_year(): prefers release_date_original; falls back to released_at
-  parsed in UTC. Local-timezone parsing flipped years for late-night-UTC
-  releases.
+  parsed in UTC. Local-timezone parsing would flip the year of a
+  late-night-UTC release.
 - predicted_album_paths uses a list, not a set, to preserve deterministic
   candidate order across runs (set hash iteration is non-deterministic).
 """
@@ -568,10 +568,7 @@ def find_existing_tracks(qobuz_album, *, album_dir=None):
     track_list is empty when no album dir is found - surfaces as
     '0 of N present' so the user can spot a folder-naming mismatch.
 
-    Pass ``album_dir`` when the caller already resolved it - the artist
-    walk and the single-album download path both resolve once via
-    ``find_album_dir_filesystem`` for a guardrail and would otherwise
-    re-resolve here, doubling the cached-subdir-listing work per album.
+    Pass ``album_dir`` when the caller already resolved it.
     """
     if album_dir is None:
         album_dir = find_album_dir_filesystem(qobuz_album)
@@ -1487,7 +1484,7 @@ def album_released_within(album, max_age_days):
     enough on its own - a 2020 album it only just listed is a back-catalogue gap,
     not a new release. An album with no parseable date is treated as recent (don't
     suppress a possibly-new release over a missing date). max_age_days <= 0
-    disables the window (any catalog newcomer counts, the original behaviour).
+    disables the window (any catalog newcomer counts).
     """
     if max_age_days <= 0:
         return True
@@ -1920,7 +1917,6 @@ def multi_artist_migration_destination(album, source_dir):
     if not primary or normalize(current.parent.name) == normalize(primary):
         return None
 
-    # Keep the historical comma-only guard.
     if not (_is_migration_candidate(current.parent.name, qartist_raw)
             or _is_credits_folder(current.parent.name, album, qartist_raw)):
         return None
@@ -1989,7 +1985,7 @@ def prompt_and_migrate_multi_artist_folder(
     except (PostImportRelocationUnavailable, OSError, ValueError) as exc:
         log.info(fmt(
             C.YELLOW,
-            "  ⚠  Multi-artist folder move was skipped safely; "
+            "  ⚠  Multi-artist folder move was skipped; "
             f"the imported files remain at {current}."
         ))
         vlog(f"multi-artist folder move refused: {exc}")

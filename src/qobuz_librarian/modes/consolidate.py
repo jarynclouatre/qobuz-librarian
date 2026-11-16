@@ -949,7 +949,7 @@ def _reviewed_sibling_albums(album, primary):
         except OSError as exc:
             log.info(fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't safely inspect {name} ({exc}); left it untouched.",
+                f"  ⚠  Couldn't inspect {name} ({exc}); left it untouched.",
             ))
             continue
         candidates.append((sibling, score))
@@ -1169,7 +1169,7 @@ def consolidate_albums(album, args):
         except OSError as exc:
             log.info(fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't safely inspect the primary album ({exc}).",
+                f"  ⚠  Couldn't inspect the primary album ({exc}).",
             ))
             log.info(fmt(C.GRAY, "     Skipping consolidation."))
             return 0, 0
@@ -1230,7 +1230,7 @@ def consolidate_albums(album, args):
                 log.info(fmt(
                     C.YELLOW,
                     f"  ⚠  {sibling_dir.name} was left untouched because its "
-                    "review state could not be held safely.",
+                    "review state could not be held.",
                 ))
                 continue
 

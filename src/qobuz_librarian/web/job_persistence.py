@@ -1,12 +1,5 @@
-"""Write-through SQLite persistence for the job registry.
-
-Without this, the registry + work queues in ``jobs.py`` are in-memory only:
-a container restart (compose update, OOM, host reboot) silently drops every
-queued/running download (orphaning staging) and throws away a completed
-scan's AWAITING_REVIEW candidates, losing minutes of API work, and the user
-re-scans from artist #1.
-
-With this module:
+"""Write-through SQLite persistence for the job registry, whose work queues
+in ``jobs.py`` are otherwise in memory only.
 
 * Job state is mirrored into ``DATA_DIR/jobs.db`` on every meaningful
   transition (add, RUNNING start, AWAITING_REVIEW, approve, terminal).
@@ -187,8 +180,8 @@ def _shared_premises(rows):
     """Keep one copy of an artist's receipt instead of one on every row.
 
     A row's receipt seals its whole artist folder, and every missing album
-    under one artist carries the same one. Repeating it per row put a large
-    saved review beyond what the container can read back.
+    under one artist carries the same one. Repeating it per row would put a
+    large saved review beyond what the container can read back.
     """
     premises = {}
     for row in rows:
@@ -371,7 +364,7 @@ def _get_conn() -> Optional[sqlite3.Connection]:
         _conn = sqlite3.connect(str(_path()), timeout=5.0,
                                 check_same_thread=False)
         _conn.execute("PRAGMA journal_mode=WAL")
-        # A big review's save left a WAL that size on disk for good.
+        # Without a limit a big review's save leaves a WAL that size on disk.
         _conn.execute("PRAGMA journal_size_limit=4194304")
         return _conn
     except (OSError, sqlite3.Error) as e:
@@ -477,9 +470,7 @@ _SCHEMA_VERSION = 8
 
 def scrub_stored_secrets() -> int | None:
     """Mask account secrets in rows written before the masking existed, and
-    report how many rows changed. A provider error carrying the signed-in URL
-    reached job.error, job.summary and the stored activity log, so an upgrade
-    that only fixed new writes would leave every existing archive readable."""
+    report how many rows changed."""
     columns = ("summary", "error", "log_lines", "phase", "candidates",
                "execute_args", "single", "recoveries")
     changed = 0
@@ -605,7 +596,7 @@ def init() -> None:
             # propagate out of restore_jobs() into the caller's broad
             # "couldn't restore prior jobs; starting fresh" handler, masking
             # a recoverable condition and then leaving every later persist()
-            # silently non- durable.
+            # silently non-durable.
             _log.warning("job persistence schema/migration failed; running "
                          "without crash durability until the volume recovers "
                          "and the app restarts: %s", e)
@@ -762,9 +753,8 @@ _TICKS = (None, False, True)
 
 class _RowTable:
     """Each saved row's digest, place and tick by cid, read like a dict of
-    those tuples. Kept in a few flat buffers: three small objects a row,
-    made again by every save after a scan, held on to memory the scan had
-    freed."""
+    those tuples. Kept in a few flat buffers rather than three small objects
+    a row, which every save after a scan would make again."""
 
     __slots__ = ("_cids", "_digests", "_places", "_ticks")
 
@@ -1144,8 +1134,7 @@ def record_terminal_download(
     its id.
 
     History reads this table, and the table is only ever written from live Job
-    objects, which a terminal run does not have. Downloads made in the terminal
-    were therefore missing from the record entirely. The row carries what a
+    objects, which a terminal run does not have. The row carries what a
     History entry shows and nothing that would offer a retry the row cannot
     service.
     """

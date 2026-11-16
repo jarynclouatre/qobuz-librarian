@@ -34,7 +34,7 @@ CHECKPOINT_INTERVAL_SECONDS = 5.0
 # A slow write waits this many times its own length before the next, and a
 # large checkpoint ten seconds for every megabyte it holds, so on a large
 # library writing the checkpoint stays a small part of the scan and of the
-# disk's time (1,900 artists: about 13 MB, saved every two minutes or so).
+# disk's time.
 CHECKPOINT_WRITE_SPACING = 20
 CHECKPOINT_BYTES_PER_SECOND = 100_000
 
@@ -256,7 +256,7 @@ class Writer(AbstractContextManager):
         saved = save(self.kind, scanned, seen, artists,
                      meta=meta or self.meta, passes=self.passes)
         # Timed from the end of the write: from its start, a write as long as
-        # the interval was followed by the next one straight away.
+        # the interval would be followed by the next one straight away.
         self._last_write = time.monotonic()
         identity = state_file.file_identity(cfg.SCAN_CHECKPOINT_FILE)
         self._interval = max(

@@ -313,8 +313,7 @@ async def save_settings(
     if not auth_token.strip() and not user_id.strip() and cfg.QOBUZ_USER_AUTH_TOKEN:
         # Blank submit with the credential coming from the environment: there
         # is nothing this page can write, so check the token actually in use
-        # and report that. Reporting a save here told someone with a dead
-        # environment token that everything was fine.
+        # and report that.
         verdict = await _classify_token_async(loop, cfg.QOBUZ_USER_AUTH_TOKEN)
         if verdict == AuthOutcome.REJECTED:
             return RedirectResponse(url="/settings?error=envrejected#qobuz",
@@ -365,10 +364,9 @@ async def save_settings(
             and new_token != existing.get("auth_token", "")):
         # Couldn't check it, and the token already saved is one that has
         # authenticated. Overwriting a known-good credential with an unproven
-        # one, and then reporting "Connected", is how a working install
-        # became a broken one during a network blip. A save that keeps the
-        # same token (blank field, or a user-id-only edit) overwrites
-        # nothing and passes.
+        # one during a network blip could break a working install. A save
+        # that keeps the same token (blank field, or a user-id-only edit)
+        # overwrites nothing and passes.
         return _settings_response(request, error="unreachable",
                                   user_id=user_id.strip(),
                                   auth_token_prefill=auth_token.strip(),

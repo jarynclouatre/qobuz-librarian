@@ -16,9 +16,8 @@
   })();
 </script>
 <script nonce="{{ request.state.csp_nonce }}">
-  // Registered from the shared head rather than the app shell. Sign-in and
-  // setup are standalone pages, and registering only in the shell left anyone
-  // who had not signed in yet with no cached offline page to fall back on.
+  // Registered from the shared head rather than the app shell, so the
+  // standalone sign-in and setup pages cache the offline page too.
   if ('serviceWorker' in navigator) {
     // The content hash invalidates the service-worker cache.
     navigator.serviceWorker.register('/sw.js?v={{ asset_version }}');

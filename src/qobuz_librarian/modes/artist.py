@@ -531,8 +531,8 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                 log.info(fmt(C.GREEN, f"    ✓  {_all_present(n_total)}"))
             results.append({"dir": ad, "result": "already_complete", "n_total": n_total})
             # Don't delete the picked album's siblings here: the sibling-group
-            # prompt promised deletion "on successful fill", but this branch
-            # did NO download (the folder was already complete).
+            # prompt offers deletion "on successful fill", and this branch
+            # downloads nothing (the folder is already complete).
             continue
 
         bonus = bonus_versions(missing, present)

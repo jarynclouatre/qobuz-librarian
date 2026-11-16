@@ -176,7 +176,7 @@ def _journaled_web_job_ids() -> frozenset | None:
 def _await_recovery_refresh(timeout: float = 1.0) -> None:
     """Let a refresh running in another thread finish before its outcome is
     read. One follows every download and is quick; a page drawn in the middle
-    of it reported a failed read. One that reads again after a failed read
+    of it would report a failed read. One that reads again after a failed read
     can settle as much as a start does, and is not waited for."""
     if (_STARTUP_RECOVERY_REFRESHING and not _STARTUP_RECOVERY_REREADING
             and _STARTUP_RECOVERY_LOCK.acquire(timeout=timeout)):

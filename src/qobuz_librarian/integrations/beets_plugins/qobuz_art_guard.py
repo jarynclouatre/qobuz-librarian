@@ -952,7 +952,7 @@ class QobuzArtGuardPlugin(BeetsPlugin):
             if not isinstance(exc, OSError):
                 raise
             self._log.warning(
-                "qobuz_art_guard: could not safely publish art for "
+                "qobuz_art_guard: could not publish art for "
                 "{0.albumartist} - {0.album}: {1}",
                 task.album,
                 exc,

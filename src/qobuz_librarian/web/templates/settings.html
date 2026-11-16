@@ -41,13 +41,13 @@
 {% if error == "invalidsettings" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
   <span>{% if warnings %}{% for w in warnings %}{{ w }}{% if not loop.last %}<br>{% endif %}{% endfor %}
-  Nothing was changed.{% else %}Nothing changed because one or more submitted settings were invalid.
+  Not saved.{% else %}One or more settings were invalid, so none were saved.
   Reload this page and try again.{% endif %}</span>
 </div>
 {% elif error == "persist" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
-  <span>Nothing changed because the settings could not be saved. Give the data
-  folder write access, then try again.</span>
+  <span>The settings could not be saved. Give the data folder write access,
+  then try again.</span>
 </div>
 {% elif error == "settingschanged" %}
 <div class="ql-notice ql-notice-warning mb-6" data-flash>
@@ -81,8 +81,7 @@
   <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
   </svg>
-  <span>Qobuz accepted your token. It comes from your environment, so there was
-    nothing to save here.
+  <span>Qobuz accepted the token from your environment.
     <a href="/" class="ql-link font-semibold">Go to Search</a></span>
 </div>
 {% endif %}
@@ -95,8 +94,7 @@
 {% elif error == "envcreds" %}
 <div class="ql-notice ql-notice-warning" data-flash>
   <span>Your Qobuz credential is supplied by environment, so it was not changed.
-  Remove the environment or secret-file setting first if you want to manage it
-  from this page.</span>
+  Remove the environment or secret-file setting to manage it from this page.</span>
 </div>
 {% elif error == "rejected" %}
 <div class="ql-notice ql-notice-error" data-flash>
@@ -110,9 +108,8 @@
 </div>
 {% elif error == "unreachable" %}
 <div class="ql-notice ql-notice-warning" data-flash>
-  <span>Qobuz couldn't be reached to check this token, so it was not saved
-  and the one you already have is still in use. Try again when you're back
-  online.</span>
+  <span>Qobuz couldn't be reached to check this token, so it was not saved.
+  Try again later.</span>
 </div>
 {% elif error == "envrejected" %}
 <div class="ql-notice ql-notice-error" data-flash>
@@ -123,8 +120,7 @@
 {% elif error == "envunreachable" %}
 <div class="ql-notice ql-notice-warning" data-flash>
   <span>Qobuz couldn't be reached, so your token could not be checked.
-  Nothing was changed; it comes from your environment. Try again when
-  you're back online.</span>
+  Try again later.</span>
 </div>
 {% elif error == "empty" %}
 <div class="ql-notice ql-notice-warning" data-flash>
@@ -596,9 +592,8 @@
     {% if collection_backup.unreadable %}
     <div class="ql-notice ql-notice-error mb-6 flex items-start flex-wrap gap-3">
       <span class="flex-1">
-        The current collection backup could not be read safely. It was not
-        treated as an empty backup. Check that <code>{{ collection_backup.folder }}</code>
-        is readable and recover the preserved copy if needed. Replace it only
+        The current collection backup could not be read. Check that
+        <code>{{ collection_backup.folder }}</code> is readable and recover the preserved copy if needed. Replace it only
         after confirming the music folder is mounted and complete.
       </span>
       <form action="/collection/snapshot" method="post" class="w-full sm:w-auto" data-busy-submit>
@@ -624,8 +619,7 @@
     {% if collection_backup.held_back_unreadable %}
     <div class="ql-notice ql-notice-error mb-6">
       <span>
-        The held-back collection check could not be read safely. It was not used
-        to replace or describe the current backup. Check that
+        The held-back collection check could not be read. Check that
         <code>{{ collection_backup.folder }}</code> is readable before replacing
         anything.
       </span>
@@ -660,7 +654,7 @@
 
     <p class="ql-storage-meta">
       {% if collection_backup.unreadable %}
-      Current backup unavailable. Nothing was treated as empty or replaced.
+      Current backup unavailable.
       {% elif collection_backup.counts %}
       Last backup {{ collection_backup.age }}:
       {{ "{:,}".format(collection_backup.counts.albums) }} album{{ 's' if collection_backup.counts.albums != 1 }},

@@ -673,7 +673,7 @@ def _bind_queue_item_premise(item, premise):
     ):
         raise CandidateStale(
             "The queued album path no longer matches its local receipt. "
-            "Refresh or rescan; nothing was changed."
+            "Refresh or rescan."
         )
     item["_validated_source_receipt"] = premise["receipt"]
     item["_validated_gap_fill_receipts"] = item.get("_gap_fill_receipts")
@@ -689,7 +689,7 @@ def _validate_queue_item_premise(item):
         if other is not None and not names_other_version(item["album"], other):
             raise CandidateStale(
                 "This album appeared locally after the download was queued. "
-                "Refresh or rescan; nothing was changed."
+                "Refresh or rescan."
             )
         item["_validated_source_receipt"] = None
         item["_validated_gap_fill_receipts"] = None
@@ -892,7 +892,7 @@ def _move_to_beets_retry(album_dirs, label, *, expected=None):
         receipt = expected_by_path.get(directory)
         if expected_provided and receipt is None:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  couldn't safely park {directory.name}; no exact "
+                f"  ⚠  couldn't park {directory.name}; no exact "
                 "pre-import receipt was available, so it was left in staging."))
             continue
         group = park_trees(
@@ -906,7 +906,7 @@ def _move_to_beets_retry(album_dirs, label, *, expected=None):
             moved += 1
         else:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  couldn't safely park {directory.name}; it changed "
+                f"  ⚠  couldn't park {directory.name}; it changed "
                 "during the import attempt and was left in staging."))
     if moved:
         log.info(fmt(C.YELLOW,
@@ -925,8 +925,7 @@ def _reimport_parked_albums():
     of the next flush clears the backlog without re-fetching anything. Groups
     that still fail stay parked for the run after. Returns (anything_imported,
     landed_library_dirs): the flag drives the duplicate-album fold, and the
-    resolved dirs feed the post-import lyric finaliser. A parked reimport
-    that skipped it kept its embedded lyrics and never got its .lrc sidecar.
+    resolved dirs feed the post-import lyric finaliser.
 
     A full disk stops the re-imports there: the OSError(ENOSPC) is raised
     with that pair for the albums before it as ``parked_results``."""
@@ -1193,7 +1192,7 @@ def _resolve_queue_item(
                         log.info(fmt(
                             C.YELLOW,
                             f"  ⚠  Kept sibling {name}; its exact tree "
-                            "changed or couldn't be moved safely.",
+                            "changed or couldn't be moved.",
                         ))
                         continue
                     if sibling_backup.complete is not True:
@@ -1242,13 +1241,13 @@ def _resolve_queue_item(
                         if not pin_unverified_upgrade_backup(
                                 sibling_backup,
                                 "sibling backup kept; the replaced Beets "
-                                "entries could not be retired safely"):
+                                "entries could not be retired"):
                             warn_pin_failed(sibling_backup)
                         log.info(fmt(
                             C.YELLOW,
                             f"  ⚠  Kept sibling recovery for {name} at "
                             f"{sibling_backup.path}; its Beets catalogue "
-                            "couldn't be reconciled safely.",
+                            "couldn't be reconciled.",
                         ))
                         break
                     retired = dispose_backup(
@@ -1283,7 +1282,7 @@ def _resolve_queue_item(
                         pass
                     log.info(fmt(
                         C.GREEN,
-                        f"  ✓  Safely consolidated sibling {name}.",
+                        f"  ✓  Consolidated sibling {name}.",
                     ))
         elif _sibs and _sibs_clean:
             log.info(fmt(C.YELLOW,
@@ -1355,10 +1354,10 @@ def _resolve_queue_item(
                         if not pin_unverified_upgrade_backup(
                                 bp,
                                 "upgrade kept; the replaced Beets entries "
-                                "could not be retired safely"):
+                                "could not be retired"):
                             warn_pin_failed(bp)
                         log.info(fmt(C.YELLOW,
-                            f"  ⚠  Couldn't safely reconcile the Beets "
+                            f"  ⚠  Couldn't reconcile the Beets "
                             f"catalogue for {truncate(album_dir.name, 40)}; "
                             "keeping the exact backup."))
                     elif left:
@@ -1378,7 +1377,7 @@ def _resolve_queue_item(
                                 "proof did not hold"):
                             warn_pin_failed(bp)
                         log.info(fmt(C.YELLOW,
-                            f"  ⚠  Couldn't safely remove the exact backup "
+                            f"  ⚠  Couldn't remove the exact backup "
                             f"for {truncate(album_dir.name, 40)}."))
                 else:
                     item["upgrade_unverified"] = True
@@ -1387,7 +1386,7 @@ def _resolve_queue_item(
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  {truncate(album_dir.name, 40)}: upgraded, but "
                         "the rebuilt album or its companions couldn't be "
-                        "flushed safely; keeping the backup."))
+                        "flushed; keeping the backup."))
                     log.info(fmt(C.GRAY,
                         f"     Backup at {bp}; keep it until you've confirmed "
                         "the rebuilt album is safe."))
@@ -1515,11 +1514,11 @@ def _resolve_queue_item(
                 if not pin_unverified_upgrade_backup(
                         gfb,
                         "gap-fill backup kept; the replaced Beets entries "
-                        "could not be retired safely"):
+                        "could not be retired"):
                     warn_pin_failed(gfb)
                 log.info(fmt(C.YELLOW,
                     "  ⚠  Gap-fill complete but its Beets catalogue "
-                    "couldn't be reconciled safely; keeping the exact backup."))
+                    "couldn't be reconciled; keeping the exact backup."))
             elif not dispose_backup(
                 gfb,
                 replacement_path=post_dir,
@@ -1543,7 +1542,7 @@ def _resolve_queue_item(
                     warn_pin_failed(gfb)
                 log.info(fmt(C.YELLOW,
                     "  ⚠  Gap-fill complete but the exact backup couldn't "
-                    "be safely removed."))
+                    "be removed."))
         elif _item_strict_success and _filled_whole:
             item["recovery_unverified"] = True
             if not pin_unverified_upgrade_backup(
@@ -1551,7 +1550,7 @@ def _resolve_queue_item(
                 warn_pin_failed(gfb)
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {truncate(album_dir.name, 40)}: filled, but the new "
-                "folder couldn't be flushed safely; keeping the backed-up "
+                "folder couldn't be flushed; keeping the backed-up "
                 "tracks."))
             log.info(fmt(C.GRAY, f"     Backup at {gfb}."))
         elif _item_strict_success:
@@ -1592,7 +1591,7 @@ def _resolve_queue_item(
                     # --no-import skips beets, so the success gate is always
                     # False here even when the download landed fine. Restoring
                     # the moved-aside present tracks is right, but it's not a
-                    # failure. Say so instead of "gap-fill did not succeed".
+                    # failure.
                     log.info(fmt(C.GRAY,
                         f"  · {truncate(_restore_target.name, 40)}: --no-import "
                         f"set; restoring the backed-up tracks to the library."))
@@ -1692,10 +1691,9 @@ def _record_terminal_downloads(changes, *, no_import=False):
     the activity record, and report each to POST_JOB_HOOK. With ``no_import``
     a download that landed whole is done, kept in staging.
 
-    Queue and History read the job archive, which only the web writes, so
-    terminal downloads left no trace on the record at all. Bookkeeping never
-    changes an already-completed download, so a failure to write is logged for
-    --verbose and nothing else.
+    Queue and History read the job archive, which otherwise only the web
+    writes. Bookkeeping never changes an already-completed download, so a
+    failure to write is logged for --verbose and nothing else.
     """
     from qobuz_librarian.web import download_outcomes, job_persistence
 
@@ -2031,7 +2029,7 @@ def _exact_resume_owner(recovery, item, *, execution_mode):
 
     if len(candidates) != 1:
         raise DurableAlbumUnavailable(
-            "the exact saved queue item cannot safely resume"
+            "the exact saved queue item cannot resume"
         )
     recovered = candidates[0]
     return (
@@ -2352,11 +2350,10 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         loss / disk full): mark it, run backup resolution so any upgrade backup
         gets restored, and keep it queued for a later retry. Skipping
         resolution would orphan the original tracks under their backup path."""
-        # NB: _build_queue_item always seeds these keys with None, so setdefault()
-        # is a no-op here (the key is present). It would leave result=None and
-        # _resolve_queue_item would then mislabel the stop as "nothing_landed"
-        # instead of the true reason. Assign explicitly, overriding None while
-        # preserving a real result a prior run's flush already recorded.
+        # _build_queue_item seeds these keys with None, so setdefault() would
+        # leave them None and _resolve_queue_item would label the stop
+        # "nothing_landed". Assign over None, keeping a real result a prior
+        # run's flush recorded.
         if item.get("snapshot_before") is None:
             item["snapshot_before"] = set()
         if not item.get("result"):
@@ -2635,10 +2632,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         if resume_owner is not None and plan is None:
             # Every walk saves its queue before flushing it, so during an
             # ordinary flush each item resolves an owner for its own pending
-            # entry. Treating that as unrecoverable refused the whole flush and
-            # left the saved queue failing the same way on every launch. A
-            # pending entry is a persisted decision, not recovery state, so give
-            # it back and let the legacy lane run the album.
+            # entry. A pending entry is a persisted decision, not recovery
+            # state, so give it back and let the legacy lane run the album.
             if _release_unplannable_claim(
                 resume_owner,
                 resume_action,
@@ -2750,8 +2745,8 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                 folder := unwritable_folder(
                     album_dir, parent=bool(item["auto_upgrade"]))):
             log.info(fmt(C.RED,
-                f"    ✗  The app can't write to {folder}, so this album was "
-                "left as it is. Nothing was downloaded."))
+                f"    ✗  The app can't write to {folder}. Nothing was "
+                "downloaded."))
             item["result"] = "folder_read_only"
             item["folder_denied"] = str(folder)
             results.append(_resolve_queue_item(
@@ -3425,8 +3420,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
     # A durable stop leaves the journal holding blocked or retired work on
     # purpose, and rewriting it as pending is what the journal refuses. Every
     # album that finished already persisted through _drop, so the saved state is
-    # current without this, and the refusal surfaces as a traceback in the walk
-    # at the exact moment an album has been correctly parked.
+    # current without this.
     if not recovery_persist_blocked and not durable_stopped:
         _persist()
     # Only the CLI batch callers (walk / artist / album / queue resume) refresh
@@ -3442,7 +3436,7 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
         )
     if auth_lost_exc is not None:
         raise auth_lost_exc
-    # Re-raising KeyboardInterrupt is what stops _flush_queue in modes 4/5
+    # Re-raising KeyboardInterrupt is what stops the caller's _flush_queue
     # from reaching its clear-on-drain branch and discarding the items that
     # were short-circuited (and so still need a retry).
     if interrupted:

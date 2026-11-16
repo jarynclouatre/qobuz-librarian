@@ -1030,7 +1030,7 @@ def _settled_result(action):
         )
     return BlockedItemSettlementResult(
         BlockedItemSettlementStatus.DISCARDED,
-        "The blocked item was discarded safely.",
+        "The blocked item was discarded.",
     )
 
 
@@ -1076,7 +1076,7 @@ def _continue_prelaunch_settlement(
         ManagedCarrierRetirementOutcome.ALREADY_ABSENT,
     }:
         return _blocked_settlement(
-            "The record of this Beets import could not be retired safely. The "
+            "The record of this Beets import could not be retired. The "
             "item remains blocked."
         )
     try:
@@ -1299,7 +1299,7 @@ def discard_unstarted_item(
         _require_authority(authority)
         journal = loaded.journal
         if loaded.status is not queue_state.QueueLoadStatus.READY or journal is None:
-            return _blocked_settlement("The saved queue operation could not be loaded safely.")
+            return _blocked_settlement("The saved queue operation could not be loaded.")
         item = next(
             (value for value in journal.items if value.item_id == item_id),
             None,
@@ -1729,7 +1729,7 @@ def settle_blocked_item(
         _require_authority(authority)
         journal = loaded.journal
         if loaded.status is not queue_state.QueueLoadStatus.READY or journal is None:
-            return _blocked_settlement("The saved queue operation could not be loaded safely.")
+            return _blocked_settlement("The saved queue operation could not be loaded.")
         item = next(
             (value for value in journal.items if value.item_id == item_id),
             None,
@@ -1960,9 +1960,8 @@ def _settle_choice(journal, item, tried):
     changed after it was recorded as finished, or whose album's own files
     could not be carried into it, is kept at once, as checking it again
     meets the same files. Anything else never reached the library, so its
-    partial download goes:
-    a terminal queue keeps the album to resume, and a web job's entry is
-    dropped so the job can be queued again with a fresh plan.
+    partial download goes: a terminal queue keeps the album to resume, and a
+    web job's entry is dropped so the job can be queued again with a fresh plan.
     """
     launched = _launched_import(journal.operation_id, item)
     if launched is not None and launched[0] == _IMPORT_PARTIAL:

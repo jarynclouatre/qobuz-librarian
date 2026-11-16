@@ -106,7 +106,7 @@ def _nothing_saved(answer):
     if answer == _QUIT:
         log.info(fmt(C.GRAY, "\n  Nothing saved."))
         return 0
-    log.info(fmt(C.GRAY, "\n  No answer was given. Nothing saved."))
+    log.info(fmt(C.GRAY, "\n  No answer was given."))
     return 1
 
 

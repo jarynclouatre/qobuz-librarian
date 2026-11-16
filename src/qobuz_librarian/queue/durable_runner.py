@@ -197,7 +197,7 @@ def _claim_pending_item(
                 )
             )
         ):
-            raise DurableAlbumUnavailable("the exact durable queue item cannot safely resume")
+            raise DurableAlbumUnavailable("the exact durable queue item cannot resume")
         return target_journal, target
     if any(journal.items for journal in journals):
         raise DurableAlbumUnavailable(
@@ -598,7 +598,7 @@ def execute_durable_new_album(
             or journal_item.completion_input != initial.to_record()
         ):
             raise DurableAlbumUnavailable(
-                "the matching durable queue item cannot safely resume its download"
+                "the matching durable queue item cannot resume its download"
             )
     _require_authority(authority)
     if isolated_staging_run_names():

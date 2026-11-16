@@ -618,8 +618,7 @@
         var queued = new Set(data.queued || []);
         var scanning = new Set(data.scanning || []);
         // A download that has finished putting the whole album on disk owns it
-        // now; without this the row would fall back to offering that same
-        // download again the moment its job left the queue. Only a row this
+        // now, so the row does not offer that download again. Only a row this
         // page showed queued takes it: one drawn after the download finished
         // already says what is on disk, and the files may have gone since.
         var owned = new Set(data.owned || []);
@@ -736,9 +735,7 @@
   });
 
   // Requests the page makes on its own, on a timer. They report nothing to the
-  // user when they fail: the status line they feed simply stops moving, where a
-  // red toast every few seconds would blame the user for something they never
-  // did and bury the flash that matters.
+  // user when they fail: the status line they feed simply stops moving.
   function fromBackgroundPoll(evt) {
     var elt = evt.detail && evt.detail.elt;
     var trigger = elt && elt.getAttribute && elt.getAttribute("hx-trigger");
@@ -796,7 +793,7 @@
 
   // Animate a fully hidden artist group before htmx removes it. Dismissals
   // target the group's positioning SHELL (the dismiss button lives beside the
-  // <details>, not inside it), so match the shell as well as a bare details;
+  // <details>, not inside it), so match the shell as well as a bare details.
   document.addEventListener("htmx:beforeSwap", function (evt) {
     var t = evt.detail && evt.detail.target;
     if (!t || !t.matches) return;
@@ -969,7 +966,7 @@
       if (!evt.data || evt.data.type !== "ql-post-failed") return;
       restoreBusySubmitButtons();
       showToast(
-        "Couldn't reach the server. Nothing was changed. Check your connection and try again.",
+        "Couldn't reach the server. Check your connection and try again.",
         "error"
       );
     });
@@ -1472,7 +1469,7 @@
     document.documentElement.setAttribute("data-theme", next);
     try { localStorage.setItem("ql-theme", next); } catch (e) { /* private mode */ }
     var m = document.querySelector('meta[name="theme-color"]');
-    // Matches --ql-bg in tokens.css and the boot script in base.html.
+    // Matches --ql-bg in tokens.css and the boot script in _app_head.html.
     if (m) m.setAttribute("content", next === "winter" ? "#f3ecdf" : "#0f0b07");
   });
 
@@ -1517,8 +1514,9 @@
     dd.removeAttribute("open");
     var b = dd.querySelector("[aria-expanded]");
     if (b) b.setAttribute("aria-expanded", "false");
-    // Hand focus back to the control that opened it. Blurring instead left it
-    // on <body>, which costs a dead Tab and then restarts at "Skip to content".
+    // Hand focus back to the control that opened it. Blurring instead would
+    // leave it on <body>, which costs a dead Tab and then restarts at "Skip to
+    // content".
     if (hadFocus) {
       var summary = dd.querySelector("summary");
       var target = summary && summary.getClientRects().length ? summary : document.getElementById("main-content");
@@ -1680,8 +1678,7 @@
   // What a job's own progress replaces: "Queued", "Saved", and the like.
   // A warning is not replaced by a job starting. "Started the valid choices,
   // 1 selected album changed since this review" is the only place the user is
-  // told something was left out, and the first progress tick used to wipe it
-  // a second after it appeared.
+  // told something was left out.
   window.qlDismissSupersededFlashes = function () {
     document.querySelectorAll(
       "[data-flash].ql-notice-success, [data-flash].ql-notice-info,"
@@ -1691,8 +1688,7 @@
 
   // Programmatic toast for async failures and review actions.
   // `message` is a string (rendered as text, never markup) or a prebuilt
-  // node. The node form is what lets a receipt carry a real link, which a
-  // textContent-only toast structurally couldn't.
+  // node. The node form is what lets a receipt carry a real link.
   function showToast(message, kind, persistentKey) {
     var host = document.getElementById("download-toast");
     if (!host && document.body) {
@@ -1938,12 +1934,11 @@
       if (root.dataset.searchWired === "1") return;
       root.dataset.searchWired = "1";
       // Ticks and scroll offset survive a reload or a trip to the Queue, keyed
-      // by the search that produced them. Picking twenty albums out of five
-      // hundred is twenty minutes of scrolling; losing it to a pull-to-refresh
-      // was the worst thing this screen did.
+      // by the search that produced them, so a pull-to-refresh does not lose
+      // twenty minutes of picking.
       // Keyed by the search itself, not the URL: results arrive by htmx swap,
       // so the URL reads "/" for every query and one search's picks would
-      // haunt the next (ghost "3 selected" bars, phantom scroll jumps).
+      // carry into the next.
       var state = root.dataset.searchState || location.pathname + location.search;
       function loadSelection() {
         return readSearchRecord(state) || {};
@@ -2020,10 +2015,9 @@
         return item && item.offsetParent !== null;
       }
       // "Select all" means every album listed, one per record. An alternate
-      // pressing is a deliberate individual tick: sweeping an open versions
-      // fold in selected a record and two more pressings of that same record,
-      // and the duplicate guard keys on album id, so all three were accepted as
-      // separate downloads into one folder.
+      // pressing is a deliberate individual tick: the duplicate guard keys on
+      // album id, so sweeping an open versions fold in would queue several
+      // pressings of one record into one folder.
       function bulkSelectable(box) {
         return visibleItem(box.closest("[data-search-item]"))
           && !box.closest("[data-version-panel]")
@@ -2993,13 +2987,6 @@
       }
       return cont.dataset.reviewDismissPlural || "albums";
     }
-    function otherTabNote() {
-      if (reviewKind !== "library" || !curTab()) {
-        return cont.dataset.reviewOtherTab || "";
-      }
-      return curTab() === "gaps" ? "Your missing albums are untouched."
-                                 : "Your Gap Fill list is untouched.";
-    }
 
     var countFormatter = new Intl.NumberFormat();
     function formatCount(n) { return countFormatter.format(n); }
@@ -3014,11 +3001,10 @@
     }
     function dismissConfirm(rest) {
       if (isDownsampleReview) {
-        return "Keep " + countLabel(rest, "unselected album", "unselected albums") + " hi-res? You can downsample later.";
+        return "Keep " + countLabel(rest, "unselected album", "unselected albums") + " hi-res?";
       }
-      var other = otherTabNote();
-      return "Dismiss " + countLabel(rest, "unselected " + dismissItemSingular(), "unselected " + dismissItemPlural()) + "?"
-        + (other ? " " + other : "") + " You can bring " + (rest === 1 ? "it" : "them") + " back from Dismissed.";
+      return "Dismiss " + countLabel(rest, "unselected " + dismissItemSingular(), "unselected " + dismissItemPlural())
+        + "? You can bring " + (rest === 1 ? "it" : "them") + " back from Dismissed.";
     }
     function dismissBusyLabel() { return isDownsampleReview ? "Keeping…" : "Dismissing…"; }
     function dismissToast(count) {
@@ -4540,9 +4526,7 @@
     if (!req || String(req.verb).toLowerCase() !== "get") return;
     var status = document.getElementById("diagnostics-status");
     if (status) status.textContent = "Diagnostics refreshed.";
-    // The status line above is sr-only; a sighted user pressing Recheck on a
-    // long diagnostics list saw the button change nothing and nothing else
-    // say the check ran.
+    // The status line above is sr-only, so a sighted user gets a toast.
     showToast("Diagnostics refreshed.", "info");
   }
 
@@ -4624,8 +4608,8 @@
   document.addEventListener("htmx:afterSwap", announceDiagnosticsSwap);
   document.addEventListener("htmx:historyRestore", restoreSearchHistory);
   // Drop restored result IDs once the replay is over, whether or not it
-  // worked. Kept after a failure, the id rode along with the next search the
-  // user typed and opened the album they had just navigated away from.
+  // worked. Kept after a failure, the id would ride along with the next
+  // search the user typed and open the album they had just left.
   document.addEventListener("htmx:afterRequest", function (e) {
     var form = e.target && e.target.closest && e.target.closest(".ql-search-form");
     if (!form) return;
@@ -4643,9 +4627,8 @@
   cleanFlashUrl();
   // The sticky chrome (review summary row, review footer, toasts, search bar)
   // offsets itself by the header and tab-bar heights. Those vary with the
-  // safe-area insets and the font, so hard-coded rem guesses left see-through
-  // bands that sliced rows. Measure the real elements and let the CSS read
-  // the result; the stylesheet keeps the old guesses as fallbacks for the
+  // safe-area insets and the font, so measure the real elements and let the
+  // CSS read the result; the stylesheet's rem values are fallbacks for the
   // moment before this runs.
   (function () {
     function apply() {

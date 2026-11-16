@@ -125,9 +125,8 @@ def _album_scope_parts(item, destination_parts):
         except (TypeError, UnicodeError, ValueError):
             return None
         # Beets types $disc as PaddedInt(2), so the bundled template files this
-        # disc as "Disc 01" - comparing against an unpadded "disc 1" matched
-        # nothing and bound the scope to the disc folder on every stock
-        # multi-disc import. Still strip only THIS item's disc.
+        # disc as "Disc 01", which an unpadded "disc 1" would not match. Still
+        # strip only THIS item's disc.
         for prefix in ("disc", "cd"):
             if not leaf.startswith(prefix):
                 continue

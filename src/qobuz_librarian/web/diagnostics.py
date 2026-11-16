@@ -236,9 +236,8 @@ def _kept_at(group):
 def _staging_leftovers():
     """Every group the app is holding in staging, as user-facing rows.
 
-    Downloads warn that files are being kept, and until this there was
-    nowhere to see what they are or get rid of them, so they accumulated
-    unseen. Read-only: removing one is always a deliberate click.
+    Downloads warn that files are being kept, and this is where to see what
+    they are. Read-only: removing one is always a deliberate click.
     """
     leftovers = []
     saved_operations = startup_recovery.saved_queue_operation_ids()
@@ -363,8 +362,8 @@ def _diagnostics():
                    dirs_only=False, note=""):
         # The Library paths section above already resolves the same folders to
         # the host path Docker exposes them at; naming this one by its
-        # container path made the two sections disagree about what to call
-        # the same folder.
+        # container path would make the two sections disagree about what to
+        # call the same folder.
         p = Path(path)
         display, _is_host = storage._resolve_host_path(str(p))
         if not p.exists():
@@ -406,8 +405,7 @@ def _diagnostics():
                        "detail": f"{display}: {plural(n, *unit)}{size}{note}"})
 
     # The panel exists to say what stops a scan or a download before one is
-    # started, and a pause is the most direct reason there is. It was the one
-    # thing missing: every row could read OK while nothing could run at all.
+    # started, and a pause is the most direct reason there is.
     paused = write_gate._writes_paused_notice()
     held = write_gate._downloads_held_notice()
     if paused is not None:
@@ -455,10 +453,8 @@ def _diagnostics():
         idle = set()
     kept_shown = ", ".join(kept[:3]) + (
         f" and {len(kept) - 3} more" if len(kept) > 3 else "")
-    # The app's own recovery folder is not a staging entry; counting it made a
-    # pile of kept files read as one healthy item. It gets its own check below,
-    # so this row says what it counted rather than "0 entries", which read as
-    # an empty staging folder next to a warning about the files kept in it.
+    # The app's own recovery folder is not a staging entry and gets its own
+    # check below, so this row says what it counted rather than "0 entries".
     _dir_check("Staging area", cfg.STAGING_DIR, want_writable=True,
                skip_names={cfg.BEETS_RETRY_DIR, *idle}, show_size=True,
                unit=("album waiting to import", "albums waiting to import"),
@@ -666,8 +662,8 @@ def _diagnostics():
                        "detail": "none"})
 
     # Counted separately from the backups above, which are a fault. These are
-    # the undo copies a downsample was asked to keep, and leaving them out of
-    # every count made the restore rows below look like unexplained extras.
+    # the undo copies a downsample was asked to keep, and the restore rows
+    # below are theirs.
     try:
         inventory["undo"] = backup_mod.list_undo_copies()
     except Exception as exc:

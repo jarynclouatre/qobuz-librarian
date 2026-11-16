@@ -202,7 +202,7 @@ def run_upgrade_walk_mode(args, token):
                 default_yes=False, auto_yes=False, on_eof=None, quiet=True)
             if answer is None:
                 log.warning(fmt(C.YELLOW,
-                    "\n  No answer was given. Nothing changed."))
+                    "\n  No answer was given."))
                 return EXIT_GENERAL
             if answer:
                 auto_accept_all = True
@@ -266,7 +266,7 @@ def run_upgrade_walk_mode(args, token):
                 _flush_stdin()
                 # on_eof=None so a closed stdin is distinguishable from a No:
                 # the walk would otherwise skip every artist and call that a
-                # success, the same lie the downsample walk told.
+                # success.
                 answer = confirm(f"  Upgrade {plural(n_albums, 'album')}?",
                                  default_yes=False,
                                  auto_yes=args.yes or auto_accept_all,
@@ -404,7 +404,7 @@ def run_upgrade_walk_mode(args, token):
 
     log.info("")
     if no_answer and not n_attempted and not interrupted:
-        log.warning(fmt(C.YELLOW, "  No answer was given. Nothing changed."))
+        log.warning(fmt(C.YELLOW, "  No answer was given."))
         return EXIT_GENERAL
     if dry_run:
         log.info(fmt(C.GRAY,

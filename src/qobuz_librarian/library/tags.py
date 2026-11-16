@@ -84,18 +84,12 @@ def clean_qobuz_string(s):
 
     Qobuz titles and artist names occasionally arrive with trailing spaces
     (e.g. ``"Hunky Dory "``), which otherwise produce folder names like
-    ``Hunky Dory  (1971)/`` after beets sanitizes them. Normalising at the API
-    response boundary means downstream consumers (process, queue, web, beets)
-    all get the clean form for free.
+    ``Hunky Dory  (1971)/`` after beets sanitizes them.
 
-    Outer quotes are deliberately NOT stripped: Qobuz returns genuinely
-    quoted titles as-is - David Bowie's ``"Heroes"`` comes back as ``'"Heroes"'``
-    with the quotes part of the title - so removing them would corrupt the name
-    on exactly the releases where the quotes are intentional. Qobuz's rare stray
-    wrapping quote is the lesser evil to leave in place.
+    Outer quotes are not stripped: David Bowie's ``"Heroes"`` comes back as
+    ``'"Heroes"'`` with the quotes part of the title.
 
-    Returns the empty string for None or non-string input so callers can rely
-    on a usable str.
+    Returns the empty string for None or non-string input.
     """
     if not isinstance(s, str):
         return ""
@@ -417,17 +411,16 @@ def differs_by_album_variant(shorter, longer):
 @lru_cache(maxsize=2048)
 def strip_album_decorations(name):
     """Strip trailing edition decorations iteratively from an album name.
-    Parenthesized decorations: 'Revolver (2009 Remaster)' → 'Revolver' 'Album
-    (Deluxe) (2018)' → 'Album' Colon / dash suffixes: 'Cassadaga: Deluxe
-    Edition' → 'Cassadaga' 'Revolver - 2022 Remaster' → 'Revolver' 'Album:
-    50th Anniversary Edition' → 'Album' Deliberately NOT stripped (these are
-    distinct releases), in either the parenthesized or colon/dash form:
-    'Cassadaga: A Companion' (companion EP - different recordings) 'Album:
-    Live in Tokyo' / 'Album (Live)' (live album) 'Album: B-Sides' / 'Greatest
-    Hits (Acoustic)' (rarities / acoustic set) Square brackets strip only
-    edition words or a year: 'Album [Remastered]' → 'Album'. Iterates up to 8
-    times so combined decorations like 'Foo: Deluxe Edition (2023)' fully
-    strip in a single call.
+
+    Parenthesized: 'Revolver (2009 Remaster)' → 'Revolver',
+    'Album (Deluxe) (2018)' → 'Album'.
+    Colon or dash suffixes: 'Cassadaga: Deluxe Edition' → 'Cassadaga',
+    'Revolver - 2022 Remaster' → 'Revolver'.
+    Square brackets strip only edition words or a year:
+    'Album [Remastered]' → 'Album'.
+    Not stripped in either form, as these are distinct releases:
+    'Cassadaga: A Companion', 'Album: Live in Tokyo', 'Album (Live)',
+    'Album: B-Sides', 'Greatest Hits (Acoustic)'.
     """
     return _strip_decorations(name)
 
@@ -502,7 +495,7 @@ def strip_album_decorations_strict(name):
 
     The loose variant's catch-all is right for fuzzy owned-matching, which
     backs it with similarity scores and confirmations - but as a store key it
-    collapsed distinct albums: 'Alone' with 'Alone (Again)', 'Rancid' with
+    would collapse distinct albums: 'Alone' with 'Alone (Again)', 'Rancid' with
     'Rancid (5)', 'The Asylum Albums (1972-1975)' with '(1976-1980)'. Those
     keep their parentheses here; 'Revolver (2009 Remaster)' still folds."""
     s = name

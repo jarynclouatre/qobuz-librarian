@@ -70,7 +70,7 @@
   {% elif job.cancel_requested %}
   <div class="ql-activity-actions">
     <span class="ql-status-chip is-neutral"
-          title="It stops as soon as it safely can.">Stopping</span>
+          title="It stops as soon as it can.">Stopping</span>
   </div>
   {% else %}
   <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-activity-actions">
@@ -126,7 +126,7 @@
 <form action="/queue/cancel-pending" method="post" class="ql-activity-section-action">
   <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
   <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
-          data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %} Completed work and parked reviews are untouched."
+          data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %}"
           data-confirm-action="Clear queue" data-irreversible>Clear queue</button>
 </form>
 {% endif %}
