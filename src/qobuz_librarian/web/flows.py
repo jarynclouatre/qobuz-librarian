@@ -159,9 +159,12 @@ def _set_empty_library_summary(job):
     log.info(f"  {fix}")
 
 
-def _mark_job_failed(job):
-    """Set an explicit terminal outcome for a handled execution failure."""
+def _mark_job_failed(job, *, partly=False):
+    """Set an explicit terminal outcome for a handled execution failure.
+    ``partly`` records that some of the work landed all the same."""
     job.status = job_mgr.JobStatus.FAILED
+    if partly:
+        job.execute_args = {**job.execute_args, "partly_done": True}
 
 
 def _close_completed_job(job):
@@ -2847,9 +2850,7 @@ def _append_to_parked_new_release_review(job, found=0, retire=()):
         job_persistence.persist_review_mutation(
             parked, lambda: setattr(parked, "summary", restated))
     if added:
-        job.summary += (
-            f" {added:,} added to the New releases review already waiting, "
-            f"now {plural(waiting, 'new release')}.")
+        job.summary += f" {waiting:,} now waiting to review."
         job_mgr._start_post_job_hook_for_job(parked)
     elif found:
         job.summary += " All were already in the New releases review."
@@ -3108,7 +3109,7 @@ def scan_new_releases(job, token):
         job.summary = ("No new releases found, but this check couldn't be "
                        "saved. Check again.")
     else:
-        job.summary = "No new releases since the last Library scan or check."
+        job.summary = "No new releases."
     retire = {fold_key(c) for album_id, c in recheck.items()
               if album_id not in refound
               and ((c.get("payload") or {}).get("_artist_dir") in reached
@@ -3589,7 +3590,7 @@ def execute_albums(job, chosen, token):
         log.info(job.summary)
         return
     if ok:
-        parts = [f"{named_albums(downloaded)} downloaded and imported"]
+        parts = [f"{named_albums(downloaded)} downloaded"]
     elif partial:
         parts = []
     elif sum(attention_counts.values()):
@@ -3597,10 +3598,7 @@ def execute_albums(job, chosen, token):
     else:
         parts = ["No albums downloaded or imported"]
     if partial:
-        parts.append(
-            f"{named_albums(partial_cands)} only partly downloaded "
-            "(some tracks are missing)"
-        )
+        parts.append(f"{named_albums(partial_cands)} partly downloaded")
     if skipped and (ok or partial):
         parts.append(f"{named_albums(skipped_cands)} skipped")
     if attention_counts["backup"]:
@@ -3625,7 +3623,7 @@ def execute_albums(job, chosen, token):
             "unfinished work"
         )
     has_issues = bool(partial or failed or sum(attention_counts.values()))
-    job.summary = ("" if has_issues else "Finished. ") + ", ".join(parts) + "."
+    job.summary = ", ".join(parts) + "."
     log.info(job.summary)
     if partial:
         log.info(f"  {plural(partial, 'album')} downloaded only partly "
@@ -3651,7 +3649,7 @@ def execute_albums(job, chosen, token):
         job.error = " ".join(messages)
     _apply_non_track_attention()
     if has_issues:
-        job.status = job_mgr.JobStatus.FAILED
+        _mark_job_failed(job, partly=bool(ok or partial))
     failed_cands = _resealed_past_own_imports(job, failed_cands)
     # A whole-review download (every candidate ticked, nothing re-parked at
     # approval) consumed the entire living review.
@@ -3982,9 +3980,6 @@ def execute_upgrades(job, chosen, token):
         return
     msg = (f"Upgraded {named_albums(upgraded)}." if upgraded
            else "No albums were upgraded.")
-    if not any((failed, kept, catalogue_failed, quality_attention,
-                processing_attention, changed)):
-        msg = "Finished. " + msg
     if kept:
         msg += (f" {plural(kept, 'replacement')} kept a safety backup because "
                 "the replacement or recovery couldn't be verified; review it "
@@ -4060,7 +4055,7 @@ def execute_upgrades(job, chosen, token):
         elif failed_cands:
             job.error += (
                 f" {plural(len(failed_cands), 'album')} selected for retry.")
-        _mark_job_failed(job)
+        _mark_job_failed(job, partly=bool(upgraded))
     else:
         _close_completed_job(job)
 
@@ -4362,14 +4357,9 @@ def execute_downsamples(
     # "Reclaimed" is a claim about free space. When the originals are kept, a
     # full copy of every one of them is written to the backup folder, so the
     # run costs MORE disk than it saves until that retention expires.
-    #
-    # A run that hit an error ends on the red Failed chip, so opening the
-    # summary with "Finished" put a contradiction on one line. Lead with what
-    # the run actually managed instead.
     went_wrong = bool(total_errors or total_flush_warns)
     if shrunk:
-        summary = (f"{'Partly done' if went_wrong else 'Finished'}. "
-                   f"Downsampled {plural(shrunk, 'album')}, "
+        summary = (f"Downsampled {plural(shrunk, 'album')}, "
                    f"{format_size(total_saved)} smaller."
                    + _kept_originals_note(resampled_files, keep_originals))
     else:
@@ -4422,7 +4412,7 @@ def execute_downsamples(
         )
         job.error = f"{job.error} {note}" if job.error else note
     if went_wrong:
-        _mark_job_failed(job)
+        _mark_job_failed(job, partly=bool(shrunk))
     else:
         _close_completed_job(job)
 
@@ -4513,9 +4503,8 @@ def _kept_originals_note(resampled_files, keep_originals):
     if not resampled_files or not keep_originals:
         return ""
     days = cfg.UPGRADE_BACKUP_RETENTION_DAYS
-    return (f" Your hi-res originals are kept for {plural(days, 'day')}, so "
-            "nothing is freed until they expire. Until then you can put them "
-            "back from Settings → Diagnostics.")
+    return (f" The originals are kept for {plural(days, 'day')} and can be "
+            "put back from Settings → Diagnostics.")
 
 
 def _repair_damage_detail(truncated):
@@ -5603,7 +5592,6 @@ def execute_repairs(job, chosen, token):
         if partly else ""
     )
     job.summary = (
-        f"{'Finished. ' if not (failed or unverified or changed or partly) else ''}"
         f"Repaired {fixed + len(partly)}/{plural(len(chosen), 'album')}."
         f"{part}{kept}{unproven}{rescan}")
     if cd_quality_tracks:
@@ -5627,7 +5615,7 @@ def execute_repairs(job, chosen, token):
                 if retry_saved is not False
                 else " Retry choices could not be saved; run a fresh scan."
             )
-        _mark_job_failed(job)
+        _mark_job_failed(job, partly=bool(fixed or partly))
     else:
         _close_completed_job(job)
 

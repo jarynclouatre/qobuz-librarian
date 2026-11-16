@@ -187,6 +187,7 @@
   {%- if job.interrupted_by_restart -%}Interrupted
   {%- elif job.tracks_missing -%}Imported, {{ job.tracks_missing }} track{{ 's' if job.tracks_missing != 1 }} missing
   {%- elif job.status.value in ('running', 'scanning') -%}{{ job_activity(job) }}
+  {%- elif job.status.value == 'failed' and job.execute_args.get('partly_done') -%}{{ 'Imported' if job.album_id else 'Partly done' }}
   {%- else -%}{{ {'done': 'Done', 'failed': 'Failed', 'canceled': 'Cancelled', 'awaiting_review': 'Needs review', 'pending': 'Queued'}.get(job.status.value, job.status.value.replace('_', ' ')) }}{%- endif -%}
 {%- endmacro %}
 

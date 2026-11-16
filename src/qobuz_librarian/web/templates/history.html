@@ -29,9 +29,9 @@
 
 {% include "_writes_paused_notice.html" %}
 
-{% if attention_only and (bulk_jobs or jobs) %}
+{% if attention_only and jobs %}
 {% set held = namespace(recovery=false, catalog=false) %}
-{% for job in bulk_jobs + jobs %}
+{% for job in jobs %}
   {% if job.recoveries or job.recovery_unreadable or job.attention == 'recovery' %}{% set held.recovery = true %}{% endif %}
   {% if job.attention == 'catalog' %}{% set held.catalog = true %}{% endif %}
 {% endfor %}
@@ -40,7 +40,7 @@
 </div>
 {% endif %}
 
-{% if bulk_jobs or jobs %}
+{% if jobs %}
 {% if not attention_only %}
 <div class="ql-activity-toolbar">
   <form action="/queue/clear" method="post">
@@ -50,61 +50,28 @@
             data-confirm-action="Clear history" data-irreversible>Clear history</button>
   </form>
 </div>
+{% elif total > jobs|length %}
+<p class="ql-section-meta">Showing {{ jobs|length }} of {{ total }}; open again for the rest.</p>
 {% endif %}
 
-{% if bulk_jobs %}
-<section class="ql-activity-section" aria-labelledby="history-jobs-heading">
-  <header class="ql-activity-section-header">
-    <h2 id="history-jobs-heading">Jobs</h2>
-    <p class="ql-section-meta">{{ bulk_total }}{% if attention_only and bulk_total > bulk_shown %} · showing {{ bulk_shown }}; open again for the rest{% elif bulk_pages > 1 and not attention_only %} · page {{ bulk_page }} of {{ bulk_pages }}{% endif %}{% if jobs %} · <a href="#history-downloads" class="ql-inline-link">Skip to downloads</a>{% endif %}</p>
-  </header>
-  <div class="ql-activity-list">
-    {% for job in bulk_jobs %}
-    {{ rows.row(job, _return_to) }}
-    {% endfor %}
-  </div>
-  {% if bulk_pages > 1 and not attention_only %}
-  <nav class="ql-activity-pagination" aria-label="Job pages">
-    {% if bulk_page > 1 %}
-    <a href="/queue/history?jp={{ bulk_page - 1 }}&amp;p={{ cur_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
-    {% else %}
-    <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Newer</span>
-    {% endif %}
-    <span class="ql-activity-page-count tabular-nums">Page {{ bulk_page }} of {{ bulk_pages }}</span>
-    {% if bulk_page < bulk_pages %}
-    <a href="/queue/history?jp={{ bulk_page + 1 }}&amp;p={{ cur_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
-    {% else %}
-    <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Older</span>
-    {% endif %}
-  </nav>
-  {% endif %}
-</section>
-{% endif %}
-
-{% if jobs %}
-<section class="ql-activity-section ql-anchor-target" id="history-downloads" aria-labelledby="history-downloads-heading">
-  <header class="ql-activity-section-header">
-    <h2 id="history-downloads-heading">Downloads</h2>
-    <p class="ql-section-meta">{{ total }}{% if attention_only and total > jobs|length %} · showing {{ jobs|length }}; open again for the rest{% elif pages > 1 and not attention_only %} · page {{ cur_page }} of {{ pages }}{% endif %}</p>
-  </header>
+<section class="ql-activity-section" aria-label="Finished jobs">
   <div class="ql-activity-list">
     {% for job in jobs %}
     {{ rows.row(job, _return_to) }}
     {% endfor %}
   </div>
 </section>
-{% endif %}
 
-{% if pages > 1 and not attention_only %}
-<nav class="ql-activity-pagination" aria-label="Download pages">
+{% if pages > 1 %}
+<nav class="ql-activity-pagination" aria-label="History pages">
   {% if cur_page > 1 %}
-  <a href="/queue/history?p={{ cur_page - 1 }}&amp;jp={{ bulk_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
+  <a href="/queue/history?p={{ cur_page - 1 }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
   {% else %}
   <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Newer</span>
   {% endif %}
   <span class="ql-activity-page-count tabular-nums">Page {{ cur_page }} of {{ pages }}</span>
   {% if cur_page < pages %}
-  <a href="/queue/history?p={{ cur_page + 1 }}&amp;jp={{ bulk_page }}{% if attention_only %}&amp;attention=1{% endif %}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
+  <a href="/queue/history?p={{ cur_page + 1 }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Older</a>
   {% else %}
   <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Older</span>
   {% endif %}

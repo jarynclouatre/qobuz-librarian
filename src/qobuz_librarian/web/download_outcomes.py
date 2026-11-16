@@ -92,6 +92,12 @@ def _summarize_download_result(r):
     return summary
 
 
+def _copies_left(folders):
+    if len(folders) == 1:
+        return "another copy of the album was left in place"
+    return f"{len(folders)} other copies of the album were left in place"
+
+
 def _consolidation_note(r):
     moved = r.get("consolidated_tracks_removed") or 0
     left = r.get("consolidation_failed") or 0
@@ -164,7 +170,7 @@ def _download_summary(r):
                 parts.append("duplicate cleanup stopped early")
             retryable, lossy_only = download_result.incomplete_track_counts(r)
             if r.get("siblings_preserved") and not (retryable or lossy_only):
-                parts.append("sibling cleanup needs review")
+                parts.append(_copies_left(r["siblings_preserved"]))
         return ", ".join(parts) + "."
     if kind == "already_complete" and r.get("unavailable_tracks"):
         n = len(r["unavailable_tracks"])
@@ -293,7 +299,7 @@ def download_error(result, *, job_controls=True):
                 "could not be moved to the backup folder"
             )
         if result.get("siblings_preserved"):
-            messages.append("sibling cleanup needs review")
+            messages.append(_copies_left(result["siblings_preserved"]))
         detail = "; ".join(messages) or "post-download work did not finish"
         return (
             f"The album imported, but {detail}."
@@ -384,6 +390,8 @@ def _mark_download_attention(job, result):
     job.status = job_mgr.JobStatus(status)
     job.tracks_missing = download_result.tracks_missing(result)
     job.error = download_error(result)
+    if status == "failed" and result.get("imported"):
+        job.execute_args["partly_done"] = True
     if kind == "backup":
         job.attention = "backup"
         if not isinstance(job.execute_args, dict):

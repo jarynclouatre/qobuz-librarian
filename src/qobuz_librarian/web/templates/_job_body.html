@@ -29,6 +29,7 @@
       {%- elif job.tracks_missing %} is-warning
       {%- elif job.status.value == 'done' %} is-success
       {%- elif job.interrupted_by_restart %} is-neutral
+      {%- elif job.status.value == 'failed' and job.execute_args.get('partly_done') %} is-warning
       {%- elif job.status.value == 'failed' %} is-error
       {%- elif job.status.value == 'canceled' %} is-neutral
       {%- elif job.status.value == 'awaiting_review' %} is-info
@@ -251,7 +252,8 @@
     {# A review that ended unapproved took as long as its sweep, not the time
        it then sat waiting. #}
     {% set _swept = (job.execute_args or {}).get('_scan_finished_at') if job.phase == 'scan' else none %}
-    <p class="ql-job-finished">{{ 'Finished' if job.status.value == 'done' else 'Ended' }} {{ fmt_clock(job.finished_at) }}{% if job.started_at %} · took {{ fmt_elapsed((_swept or job.finished_at) - job.started_at) }}{% endif %}</p>
+    {% set _when, _when_exact = when_label(job.finished_at) %}
+    <p class="ql-job-finished">{{ 'Finished' if job.status.value == 'done' else 'Ended' }} <span title="{{ _when_exact }}">{{ _when }}</span>{% if job.started_at %} · took {{ fmt_elapsed((_swept or job.finished_at) - job.started_at) }}{% endif %}</p>
     {% endif %}
     {# A partial run sets both: the summary is what it managed, the error is
        what went wrong. Showing only the error threw away the outcome. #}
@@ -308,7 +310,7 @@
     </div>
     {% endif %}
     {% if job.error %}
-    <div class="ql-notice {{ 'ql-notice-warning' if job.tracks_missing or job.interrupted_by_restart else 'ql-notice-error' }} ql-job-error">
+    <div class="ql-notice {{ 'ql-notice-warning' if job.tracks_missing or job.interrupted_by_restart or job.execute_args.get('partly_done') else 'ql-notice-error' }} ql-job-error">
       <span>{{ job.error | strip_log_pointer(job.log_lines) }}</span>
       {% if job.execute_args.get('retry_disabled') == 'backup' %}
       <a href="/settings#diagnostics" class="ql-btn ql-btn-secondary ql-btn-sm">Open Diagnostics</a>

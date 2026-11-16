@@ -28,7 +28,7 @@ def die(msg: str, code: int = EXIT_GENERAL):
 def plural(n: int, singular: str, plural_form: str | None = None) -> str:
     """Format `n singular` / `n plural` with auto pluralization."""
     word = singular if n == 1 else (plural_form or singular + "s")
-    return f"{n} {word}"
+    return f"{n:,} {word}"
 
 
 def shown_path(path) -> str:

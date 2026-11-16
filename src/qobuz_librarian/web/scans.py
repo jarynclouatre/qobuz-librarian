@@ -362,21 +362,19 @@ def _fold_into_parked_library_review(job):
     bits = []
     under = missing_types.named(held_back) if held else ""
     if listed and held:
-        bits.append(f"Added {plural(listed, 'new find')} to the open Library "
-                    f"review, and {held} more under {under}.")
+        bits.append(f"Added {plural(listed, 'new find')} to Library, and "
+                    f"{held:,} more under {under}.")
     elif listed:
-        bits.append(f"Added {plural(listed, 'new find')} to the open "
-                    "Library review.")
+        bits.append(f"Added {plural(listed, 'new find')} to Library.")
     elif held:
-        bits.append(f"Added {plural(held, 'new find')} to the open Library "
-                    f"review under {under}.")
+        bits.append(f"Added {plural(held, 'new find')} to Library under "
+                    f"{under}.")
     if not parked.candidates:
         bits.append("Nothing left to review.")
     elif updated or removed:
         changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
             ("updated", updated), ("removed", removed)) if n]
-        bits.append(f"{' and '.join(changes).capitalize()} in the open "
-                    "Library review.")
+        bits.append(f"{' and '.join(changes).capitalize()}.")
     if switched_off:
         bits.append(f"Moved {plural(sum(switched_off.values()), 'album')} "
                     f"under {missing_types.named(switched_off)}.")
@@ -384,12 +382,8 @@ def _fold_into_parked_library_review(job):
     upgrades = getattr(job, "upgrade_finds", 0)
     caveats = list(getattr(job, "scan_caveats", ()))
     if not bits and not upgrades:
-        if unchecked:
-            bits.append("No new finds from the artists that could be checked.")
-        elif caveats:
-            bits.append("No new finds.")
-        else:
-            bits.append("No new finds. The open Library review is up to date.")
+        bits.append("No new finds from the artists that could be checked."
+                    if unchecked else "No new finds.")
     if upgrades:
         bits.append(flows.upgrade_finds_note(upgrades))
     status = []

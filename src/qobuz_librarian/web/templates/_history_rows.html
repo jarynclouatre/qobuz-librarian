@@ -16,6 +16,8 @@
         <span class="ql-status-chip is-info">Queued</span>
       {% elif job.status in ['running', 'scanning'] %}
         <span class="ql-status-chip is-info">In progress</span>
+      {% elif job.execute_args.get('partly_done') %}
+        <span class="ql-status-chip is-warning">{{ 'Imported' if job.album_id else 'Partly done' }}</span>
       {% else %}
         <span class="ql-status-chip is-error">Failed</span>
       {% endif %}
@@ -82,7 +84,7 @@
   </div>
   {{ job_side(job, return_to) }}
   {% if job.summary and job.summary != job.error %}<p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>{% endif %}
-  {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta {{ 'ql-row-meta--warning' if job.interrupted_by_restart else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>{% endif %}
+  {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta {{ 'ql-row-meta--warning' if job.interrupted_by_restart or job.execute_args.get('partly_done') else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>{% endif %}
 </article>
 {% else %}
 <article class="ql-activity-row ql-history-row ql-history-row--compact">
@@ -99,7 +101,7 @@
   {{ job_side(job, return_to) }}
   {% if job.error %}
   {% set reason = job.error | strip_log_pointer(none) %}
-  <p class="ql-row-meta {{ 'ql-row-meta--warning' if job.tracks_missing or job.interrupted_by_restart else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>
+  <p class="ql-row-meta {{ 'ql-row-meta--warning' if job.tracks_missing or job.interrupted_by_restart or job.execute_args.get('partly_done') else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>
   {% elif job.status == 'canceled' and job.summary %}
   <p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>
   {% elif job.download_notes %}

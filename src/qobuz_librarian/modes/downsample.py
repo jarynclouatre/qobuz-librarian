@@ -329,9 +329,8 @@ def run_downsample_walk_mode(args):
         if keep_originals and n_albums_done:
             log.info(block(fmt(C.GRAY,
                 "     The hi-res originals are kept for "
-                f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}, so "
-                "nothing is freed until they expire. Until then they can be "
-                "put back from Settings → Diagnostics in the web app.")))
+                f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')} and can "
+                "be put back from Settings → Diagnostics in the web app.")))
     if total_read_only:
         log.info(fmt(C.GRAY, f"     {read_only_note(total_read_only)}."))
     if total_errors:

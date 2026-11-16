@@ -215,6 +215,8 @@ TERMINAL = (JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELED)
 ACTIVE = (JobStatus.PENDING, JobStatus.SCANNING,
           JobStatus.AWAITING_REVIEW, JobStatus.RUNNING)
 
+CANCELLED_UNSTARTED = "Cancelled before it started."
+
 JOB_ADMISSION_ERROR = (
     "This job couldn't be saved to the data folder, so no work was started. "
     "Check the data volume, then restart Qobuz Librarian."
@@ -2899,7 +2901,7 @@ def request_cancel(job: Job) -> bool:
             job.cancel_requested = True
             job.status = JobStatus.CANCELED
             job.finished_at = canceled_at
-            job.summary = job.summary or "Cancelled before it started."
+            job.summary = job.summary or CANCELLED_UNSTARTED
             if (
                 not job_persistence._persist_locked(job)
                 and job._durability_required

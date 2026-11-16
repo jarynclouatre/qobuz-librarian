@@ -6,7 +6,6 @@ import re
 import secrets
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
@@ -16,7 +15,6 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import download as download_mod
 from qobuz_librarian.library import generation_state
 from qobuz_librarian.library.tags import known_year
-from qobuz_librarian.ui_cli import colors
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import (
     job_labels,
@@ -164,13 +162,6 @@ def _retire_gone_recoveries(rows: list[dict]) -> list[dict]:
     return kept
 
 
-def _fmt_clock(ts):
-    if not ts:
-        return ""
-    return (datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-            + colors.clock_zone())
-
-
 def _fmt_elapsed(seconds):
     seconds = int(seconds or 0)
     if seconds < 60:
@@ -241,7 +232,7 @@ def _strip_log_pointer(message, log_lines):
     return _LOG_POINTER_RE.sub("", message or "").strip() or message
 
 
-templates.env.globals["fmt_clock"] = _fmt_clock
+templates.env.globals["when_label"] = job_labels._when_label
 templates.env.globals["fmt_elapsed"] = _fmt_elapsed
 templates.env.globals["quality_shortfall_view"] = _quality_shortfall_view
 templates.env.filters["strip_log_pointer"] = _strip_log_pointer
