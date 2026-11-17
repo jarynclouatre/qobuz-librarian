@@ -60,7 +60,7 @@
   </div>
 
   {% if job.importing %}
-  {# Beets runs to its own end, so a Cancel here would be a dead control. Say
+  {# Beets runs to its own end, so a Stop here would be a dead control. Say
      what is happening instead of greying a button whose reason only lives in
      hover text a phone can't show. #}
   <div class="ql-activity-actions">
@@ -76,12 +76,12 @@
   <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-activity-actions">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="return_to" value="/queue">
-    {% set _act = 'Cancel' if live else 'Remove' %}
+    {% set _act = 'Stop' if live else 'Remove' %}
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
             title="{{ _act }} {{ 'job' if live else 'from queue' }}"
             aria-label="{{ _act }} {{ 'job' if live else 'from queue' }}"
             data-confirm="{% if live %}{{ labels.cancel_confirm(job) }}{% else %}Remove this waiting job from the queue?{% endif %}"
-            data-confirm-action="{% if live %}Stop job{% else %}Remove{% endif %}"{% if live %} data-confirm-dismiss="Keep running" data-irreversible{% endif %}>{{ _act }}</button>
+            data-confirm-action="{{ _act }}"{% if live %} data-confirm-dismiss="Keep running" data-irreversible{% endif %}>{{ _act }}</button>
   </form>
   {% endif %}
 </article>
@@ -170,12 +170,13 @@
   </div>
   <p class="font-medium text-base-content/70">{{ _idle }}</p>
   <div class="ql-empty-actions">
-    {# Nothing can start, so a Search button here only leads back to a greyed
-       download; the notice above carries the one thing that lifts the pause. #}
-    {% if not writes_paused %}
+    {# Nothing can start while downloads are paused or Qobuz is not connected,
+       so a Search button would only lead to a greyed download. #}
+    {% set _can_search = qobuz_ready and not writes_paused %}
+    {% if _can_search %}
     <a href="/" class="ql-btn ql-btn-primary w-full sm:w-auto">Search Qobuz</a>
     {% endif %}
-    <a href="/queue/history" class="ql-btn ql-btn-{% if writes_paused %}primary{% else %}secondary{% endif %} w-full sm:w-auto">View history</a>
+    <a href="/queue/history" class="ql-btn ql-btn-{% if _can_search %}secondary{% else %}primary{% endif %} w-full sm:w-auto">View history</a>
   </div>
 </div>
 {% endif %}

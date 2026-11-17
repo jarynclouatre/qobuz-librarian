@@ -2616,22 +2616,18 @@ details.ql-mobile-drawer[open]::before {
   display: grid;
   gap: 0.55rem;
 }
-.ql-activity-section-header,
-.ql-activity-toolbar {
+.ql-activity-section-header {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--ql-space-3);
-}
-.ql-activity-section-header {
   justify-content: flex-start;
   align-items: center;
   gap: var(--ql-space-2);
   padding-inline: 0.15rem;
 }
 .ql-activity-toolbar {
-  justify-content: flex-end;
+  display: flex;
+  justify-content: center;
+  margin-top: var(--ql-space-4);
 }
 .ql-activity-section-header h2 {
   margin: 0;
@@ -2640,8 +2636,7 @@ details.ql-mobile-drawer[open]::before {
   font-weight: 500;
   line-height: 1.25;
 }
-.ql-activity-section-header p,
-.ql-activity-toolbar p {
+.ql-activity-section-header p {
   margin: 0.2rem 0 0;
   color: var(--ql-text-3);
   font-size: 0.84rem;
@@ -3219,27 +3214,25 @@ details.ql-mobile-drawer[open]::before {
 .ql-review-filter-row.hidden,
 .ql-review-empty.hidden,
 .ql-review-tool-group.hidden,
+.ql-review-include-toggle.hidden,
 .ql-review-footer.hidden,
 .ql-review-footer-secondary.hidden {
   display: none !important;
 }
-/* Two sets of tools: the selection tools, then Dismiss unselected, the
-   Dismissed link and Discard, which act on the review rather than its rows.
-   Each set keeps together; where the row cannot hold both, the second moves
-   under the first. On a phone the second folds into a menu at the end of
-   the first's row. */
+/* The selection tools stay in the row. Select page, Dismiss unselected, the
+   Dismissed link and Discard open from the menu at the row's end. */
 .ql-review-summary-actions {
   display: flex;
   min-width: 0;
   flex: 0 1 auto;
-  flex-wrap: wrap;
   align-items: center;
   gap: 0 var(--ql-space-3);
 }
 .ql-review-tool-group {
   display: flex;
+  min-width: 0;
   max-width: 100%;
-  flex: none;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   align-items: center;
   gap: 0 var(--ql-space-3);
@@ -3249,83 +3242,47 @@ details.ql-mobile-drawer[open]::before {
   flex: none;
   white-space: nowrap;
 }
+.ql-review-more {
+  position: relative;
+  margin-left: auto;
+  flex: none;
+}
 .ql-review-tool.ql-review-more-toggle {
-  display: none;
+  min-width: 2.75rem;
+  justify-content: center;
 }
 .ql-review-more-toggle svg {
   width: 1.25rem;
   height: 1.25rem;
 }
 .ql-review-more-menu {
-  display: contents;
-}
-.ql-review-more-menu > .ql-review-discard {
-  position: relative;
-  margin-left: var(--ql-space-2);
-  padding-left: calc(var(--ql-space-3) + 1px);
-}
-.ql-review-discard::before {
-  content: "";
   position: absolute;
-  left: 0;
-  top: 50%;
-  width: 1px;
-  height: 1.25rem;
-  transform: translateY(-50%);
-  background-color: var(--ql-line);
+  top: 100%;
+  right: 0;
+  z-index: 30;
+  display: none;
+  min-width: 14rem;
+  flex-direction: column;
+  align-items: stretch;
+  border: 1px solid var(--ql-line);
+  border-radius: var(--ql-radius-xl);
+  background-color: var(--ql-surface);
+  box-shadow: var(--ql-shadow);
+  padding: var(--ql-space-1) 0;
 }
-@media (max-width: 639.98px) {
-  .ql-review-summary-actions {
-    flex-wrap: nowrap;
-  }
-  .ql-review-tool-group {
-    flex: 0 1 auto;
-    min-width: 0;
-  }
-  .ql-review-more {
-    position: relative;
-    margin-left: auto;
-    flex: none;
-  }
-  .ql-review-tool.ql-review-more-toggle {
-    display: inline-flex;
-    min-width: 2.75rem;
-    justify-content: center;
-  }
-  .ql-review-more-menu {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    z-index: 30;
-    display: none;
-    min-width: 14rem;
-    flex-direction: column;
-    align-items: stretch;
-    border: 1px solid var(--ql-line);
-    border-radius: var(--ql-radius-xl);
-    background-color: var(--ql-surface);
-    box-shadow: var(--ql-shadow);
-    padding: var(--ql-space-1) 0;
-  }
-  .ql-review-more[data-open] .ql-review-more-menu {
-    display: flex;
-  }
-  .ql-review-more .ql-review-more-menu > :not(.hidden) {
-    display: flex;
-    min-height: 2.75rem;
-    align-items: center;
-    padding: 0 var(--ql-space-4);
-    font-size: 0.875rem;
-    text-align: left;
-  }
-  .ql-review-more .ql-review-more-menu > .ql-review-discard {
-    margin-left: 0;
-    padding-left: var(--ql-space-4);
-    border-top: 1px solid var(--ql-line-soft);
-  }
-  .ql-review-more-menu > .ql-review-discard::before {
-    content: none;
-  }
+.ql-review-more[data-open] .ql-review-more-menu {
+  display: flex;
+}
+.ql-review-more .ql-review-more-menu > :not(.hidden) {
+  display: flex;
+  min-height: 2.75rem;
+  align-items: center;
+  padding: 0 var(--ql-space-4);
+  font-size: 0.875rem;
+  text-align: left;
+}
+.ql-review-more .ql-review-more-menu > .ql-review-discard {
+  border-top: 1px solid var(--ql-line-soft);
 }
 .ql-review-tool {
   display: inline-flex;
@@ -3372,6 +3329,9 @@ details.ql-mobile-drawer[open]::before {
   flex-wrap: wrap;
   align-items: center;
   gap: 0 var(--ql-space-4);
+}
+.ql-review-include-toggle {
+  display: none;
 }
 /* The one count pill: the sidebar's Queue count, a tab strip's counts and
    the Queue section headings. */
@@ -3447,7 +3407,39 @@ details.ql-mobile-drawer[open]::before {
    own albums. */
 @media (max-width: 639.98px) {
   .ql-review-sticky {
-    position: static;
+    position: relative;
+    top: auto;
+  }
+  /* The release-type switches open from Include, under the tools row. */
+  .ql-review-include-toggle {
+    display: inline-flex;
+    margin-left: auto;
+  }
+  .ql-review-include-toggle:not(.hidden) + .ql-review-more {
+    margin-left: 0;
+  }
+  .ql-review-switches {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 30;
+    display: none;
+    min-width: 14rem;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    border: 1px solid var(--ql-line);
+    border-radius: var(--ql-radius-xl);
+    background-color: var(--ql-surface);
+    box-shadow: var(--ql-shadow);
+    padding: var(--ql-space-1) var(--ql-space-4);
+  }
+  .ql-review-sticky[data-include-open] .ql-review-switches {
+    display: flex;
+  }
+  .ql-review-switches .ql-review-switch {
+    justify-content: space-between;
+    font-size: 0.875rem;
   }
   .ql-review-group {
     overflow: clip;
@@ -4547,7 +4539,8 @@ details.ql-mobile-drawer[open]::before {
     grid-template-areas:
       "dot name name"
       ". tracks size";
-    row-gap: 0.1rem;
+    align-items: center;
+    gap: 0.1rem 0.625rem;
   }
   .ql-census-dot { grid-area: dot; }
   .ql-census-name { grid-area: name; min-width: 0; }
@@ -5388,7 +5381,7 @@ details[open] > summary .ql-review-chevron {
   margin-top: var(--ql-space-4);
   padding: var(--ql-space-2) 0;
   padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
-  background-color: var(--ql-surface);
+  background-color: var(--ql-bg);
 }
 @media (min-width: 640px) {
   .ql-job-shell[data-job-view="review"] {
@@ -5432,22 +5425,6 @@ details[open] > summary .ql-review-chevron {
 .ql-review-footer-primary,
 .ql-review-footer-secondary {
   width: 100%;
-}
-.ql-section-divider {
-  display: flex;
-  align-items: center;
-  gap: var(--ql-space-3);
-  margin: var(--ql-space-4) 0;
-  color: var(--ql-text-3);
-  font-size: 0.75rem;
-  font-weight: 650;
-}
-.ql-section-divider::before,
-.ql-section-divider::after {
-  content: "";
-  height: 1px;
-  flex: 1 1 auto;
-  background-color: var(--ql-line-soft);
 }
 .ql-inline-status {
   margin-left: var(--ql-space-2);
@@ -5931,9 +5908,6 @@ details[open] > summary .ql-review-chevron {
   overscroll-behavior: contain;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-.log-console--review {
-  max-height: min(40vh, 600px);
 }
 .log-console--job {
   margin-top: var(--ql-space-2);

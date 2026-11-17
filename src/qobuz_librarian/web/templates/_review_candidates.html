@@ -8,7 +8,6 @@
      data-review-missing-selected="{{ review_tab_counts.missing_selected }}"
      data-review-gap-total="{{ review_tab_counts.gaps }}"
      data-review-gap-selected="{{ review_tab_counts.gaps_selected }}"{% endif %}
-     data-review-item-plural="{{ labels.review_item_plural(job) }}"
      data-review-dismiss-singular="{% if review_tab == 'gaps' %}album to fill{% elif review_tab == 'missing' %}missing album{% else %}album{% endif %}"
      data-review-dismiss-plural="{% if review_tab == 'gaps' %}albums to fill{% elif review_tab == 'missing' %}missing albums{% else %}albums{% endif %}">
   {% set triage = job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
@@ -83,15 +82,12 @@
                  aria-label="Select or deselect every {{ labels.review_item_singular(job) }} shown{% if review_tab %} on this tab{% endif %}">
           <span>Select all</span>
         </label>
-        <button type="button" class="ql-review-tool hidden" aria-hidden="true" tabindex="-1"
-                data-select-all="1">Select all</button>
-        <button type="button" class="ql-review-tool hidden" aria-hidden="true" tabindex="-1"
-                data-select-all="0">Deselect</button>
-        <button type="button" class="ql-review-tool{% if review_pages <= 1 %} hidden{% endif %}" aria-label="Select everything on this page only"
-                data-select-page="1">Select page</button>
         <button type="button" class="ql-review-tool" data-expand-all="1">Expand all</button>
       </div>
-      {# On a phone these share the selection tools' row behind one button. #}
+      {% if review_tab %}
+      <button type="button" data-review-include aria-expanded="false"
+              class="ql-review-tool ql-review-include-toggle{% if not (review_tab_counts.bonus if review_tab == 'gaps' else review_tab_counts.typed) %} hidden{% endif %}">Include</button>
+      {% endif %}
       <div class="ql-review-tool-group ql-review-more" data-review-more>
         <button type="button" class="ql-review-tool ql-review-more-toggle"
                 aria-expanded="false" aria-controls="review-more-menu"
@@ -99,6 +95,8 @@
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
         </button>
         <div id="review-more-menu" class="ql-review-more-menu">
+          <button type="button" class="ql-review-tool{% if review_pages <= 1 %} hidden{% endif %}" aria-label="Select everything on this page only"
+                  data-select-page="1">Select page</button>
           {% if job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
           {# Lives up here with the other whole-list tools: the sticky footer keeps
              a single job: the download button. The count is what the button

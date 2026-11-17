@@ -107,7 +107,7 @@
     {% else %}
     {% set _job_summary = job.summary %}
     {% endif %}
-    {% set _upgrades = library_upgrade_count() if job.execute_kind == 'library' else 0 %}
+    {% set _upgrades = library_upgrade_count() if job.execute_kind == 'library' and not census else 0 %}
     {% if _job_summary or _upgrades %}
     <div class="ql-job-summary ql-job-summary--review"><span>{{ _job_summary }}{% if _upgrades %}{{ ' ' if _job_summary }}{{ _upgrades }} album{{ 's' if _upgrades != 1 }} can be upgraded. <a href="/upgrade" class="ql-inline-link">Open Upgrade</a>{% endif %}</span></div>
     {% endif %}
@@ -144,15 +144,14 @@
       {% endif %}
       {% include "_review_candidates.html" %}
       {% with writes_paused=_review_paused, writes_paused_reason=_review_paused_reason %}{% include "_writes_paused_reason.html" %}{% endwith %}
-      <div id="review-footer" class="ql-review-footer{% if review_counts.total and not _bar_total %} hidden{% endif %}">
+      <div id="review-footer" class="ql-review-footer{% if review_counts.total and not _bar_selected %} hidden{% endif %}">
         <div class="ql-review-footer-actions">
           <button type="submit" id="review-submit" class="ql-btn ql-btn-primary ql-review-footer-primary{% if not review_counts.total %} hidden{% endif %}"
             data-review-verb="{{ job.review_verb }}"
-            data-empty-label="{{ labels.review_empty_label(job) }}"
             {% if not _bar_selected or _review_paused or _review_qobuz_blocked %} disabled{% endif %}{% if _review_paused %} title="{{ _review_paused_reason }}" aria-disabled="true"{% elif _review_qobuz_blocked %} title="Connect Qobuz before continuing." aria-disabled="true"{% endif %}
             {%- if job.execute_kind == 'downsample' %}{% if downsample_originals_choice in ('keep', 'delete') %} data-confirm="{% if downsample_originals_choice == 'keep' %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings → Diagnostics.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected folders ({count})? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library?{% endif %}"
-            {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Damaged files are set aside while their replacements download, and an album too damaged to patch is downloaded again in full. Your originals are removed once the replacement is proven good, so a repair cannot be undone. If a replacement cannot be verified, it stays in the album and your originals are kept, restorable from Settings."
+            {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Your originals are removed once the replacement is verified, so a repair cannot be undone. If a replacement cannot be verified, your originals are kept and can be restored from Settings → Diagnostics."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement is verified. This cannot be undone."
             {%- else %}{% set _missing_confirm = "Download {count} selected album{s}?" %}{% set _gaps_confirm = "Download the missing tracks of {count} selected album{s}?" %} data-confirm="{{ _gaps_confirm if review_tab == 'gaps' else _missing_confirm }}"
             {%- if review_tab %} data-confirm-missing="{{ _missing_confirm }}" data-confirm-gaps="{{ _gaps_confirm }}"{% endif %}
@@ -162,7 +161,7 @@
             {%- elif job.execute_kind == 'repair' %} data-confirm-action="Repair"
             {%- elif job.execute_kind == 'upgrade' %} data-confirm-action="Replace" data-irreversible
             {%- else %} data-confirm-action="Download"
-            {%- endif %}>{% if _bar_selected %}{{ job.review_verb }} {{ labels.format_count(_bar_selected) }} selected{% else %}{{ labels.review_empty_label(job) }}{% endif %}</button>
+            {%- endif %}>{{ job.review_verb }} {{ labels.format_count(_bar_selected) }} selected</button>
           <span data-review-offscreen class="ql-review-reclaimable" aria-live="polite"></span>
           {% if job.execute_kind == 'downsample' %}<span data-downsample-total class="ql-review-reclaimable">{% if review_reclaimable_label %}~{{ review_reclaimable_label }} smaller{% endif %}</span>{% endif %}
           {# A spent review has nothing to download, so the way out takes the
@@ -176,11 +175,13 @@
 
     {% set _review_log = review_log_lines if review_log_lines is defined else job.log_lines %}
     {% if _review_log %}
-    <div class="ql-section-divider">Activity log</div>
-    <div class="log-console log-console--review">
-      {%- for line in _review_log %}{{ line }}
+    <details class="ql-job-log-details">
+      <summary class="ql-disclosure-summary">Activity log</summary>
+      <div class="log-console">
+        {%- for line in _review_log %}{{ line }}
 {% endfor -%}
-    </div>
+      </div>
+    </details>
     {% endif %}
 
   {% elif s in ('pending', 'scanning', 'running') %}
@@ -206,9 +207,9 @@
         <button type="submit" class="ql-btn ql-btn-sm"
                 data-cancel-button
                 data-confirm="{{ labels.cancel_confirm(job) }}"
-                data-confirm-action="Stop job" data-confirm-dismiss="Keep running" data-irreversible>Cancel</button>
+                data-confirm-action="Stop" data-confirm-dismiss="Keep running" data-irreversible>Stop</button>
       </form>
-      {# Beets runs to its own end, so Cancel would be a dead control here. Say
+      {# Beets runs to its own end, so Stop would be a dead control here. Say
          what is happening, the way the Queue rows do, instead of greying a
          button whose reason only lives in hover text a phone cannot show. #}
       <span class="ql-status-chip ql-job-import-chip{% if not job.importing %} hidden{% endif %}" data-import-chip

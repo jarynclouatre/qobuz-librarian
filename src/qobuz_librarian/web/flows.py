@@ -4517,7 +4517,7 @@ def _repair_damage_detail(truncated):
                     - float(t.get("file_length") or 0) for t in short)
         lead = "up to " if len(short) > 1 else ""
         parts.append(f"{plural(len(short), 'track')} {lead}"
-                     f"{int(round(worst))}s shorter than the catalogue version")
+                     f"{int(round(worst))}s shorter than the Qobuz recording")
     return ", ".join(parts) or plural(len(truncated), "damaged track")
 
 
@@ -4939,7 +4939,7 @@ def _scan_repairs_impl(job, token, checkpoint):
         save_checkpoint(force=True)
     else:
         clear_failed = checkpoint.clear() is False
-    # Honest summary: report what was actually decode-verified, and never
+    # Honest summary: report what was actually checked, and never
     # claim completeness the scan didn't earn.
     caveats = _repair_scan_caveats(
         n_unverified, n_failed_albums,
@@ -4952,11 +4952,11 @@ def _scan_repairs_impl(job, token, checkpoint):
         if n_unmatched else "")
     if total:
         job.summary = (f"{plural(total, 'album')} flagged with damaged files. "
-                       f"{plural(n_verified, 'track')} decode-verified clean."
+                       f"{plural(n_verified, 'track')} checked and complete."
                        + unmatched + caveats)
     else:
         job.summary = (f"No damaged files found. "
-                       f"{plural(n_verified, 'track')} decode-verified intact."
+                       f"{plural(n_verified, 'track')} checked and complete."
                        + unmatched + caveats)
     if clear_failed:
         job.summary += (

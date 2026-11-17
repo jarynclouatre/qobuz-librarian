@@ -12,7 +12,7 @@
 
 {% if entries %}
 <p class="ql-repair-history-summary">
-  {% if entries | length == 1 %}1 repair. It replaced its damaged file in place.{% else %}{{ entries | length }} most recent repairs, newest first. Each replaced its damaged file in place.{% endif %}
+  {% if entries | length == 1 %}1 repair.{% else %}{{ entries | length }} most recent repairs, newest first.{% endif %}
 </p>
 <ul class="ql-repair-history-list">
   {% for e in entries %}
@@ -37,7 +37,6 @@
     </svg>
   </span>
   <p class="ql-empty-title">Nothing repaired yet.</p>
-  <p class="ql-empty-text">When Repair refills a damaged track, it appears here.</p>
 </div>
 {% endif %}
 

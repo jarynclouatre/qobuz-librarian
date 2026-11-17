@@ -52,14 +52,12 @@ LYRICS_PROVIDER_CHOICES = list(cfg.LYRICS_PROVIDER_NAMES)
 # (key, label, help, kind, choices, placeholder).
 TEXT_FIELDS = [
     ("STREAMRIP_QUALITY", "Download quality",
-     "Maximum quality to request from Qobuz.",
+     "",
      "enum", ["4", "3", "2"], ""),
     ("LYRICS_FORMAT", "Lyrics format",
-     "How lyrics are written when fetched.",
+     "",
      "enum", ["embed", "sidecar", "both"], ""),
     ("ARTWORK", "Album art",
-     "Where the cover of a download goes: a cover file in the album folder "
-     "and none in the tracks, in each track with no cover file, or both. "
      "Tracks already in the library keep theirs.",
      "enum", ["sidecar", "embed", "both"], ""),
     ("LYRICS_PROVIDERS", "Lyrics providers",
@@ -91,13 +89,11 @@ TEXT_FIELDS = [
      "fetched discography.",
      "enum", ["86400", "259200", "604800", "2592000"], ""),
     ("NEW_RELEASE_CHECK_INTERVAL", "Auto-check for new releases",
-     "How often to check Qobuz for new releases. Runs after the first full "
-     "Library scan, when nothing else is running; results appear as a New "
-     "releases review.",
+     "Runs after the first full Library scan, when nothing else is running; "
+     "results appear as a New releases review.",
      "enum", ["0", "21600", "43200", "86400", "604800"], ""),
     ("DOWNSAMPLE_KEEP_ORIGINALS", "Keep originals when downsampling",
-     "Whether the Downsample page keeps a restorable copy of each hi-res "
-     "original before rewriting it, or deletes it to save space.",
+     "Applies to the Downsample page.",
      "enum", ["keep", "delete"], ""),
 ]
 TEXT_KEYS = [k for k, *_ in TEXT_FIELDS]

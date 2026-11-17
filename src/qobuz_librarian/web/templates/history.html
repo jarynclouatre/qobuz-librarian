@@ -36,16 +36,7 @@
 {% endif %}
 
 {% if jobs %}
-{% if not attention_only %}
-<div class="ql-activity-toolbar">
-  <form action="/queue/clear" method="post">
-    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-    <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
-            data-confirm="Clear finished jobs from history? Downloaded tracks lose their Undo. Saved reviews and unresolved items stay."
-            data-confirm-action="Clear history" data-irreversible>Clear history</button>
-  </form>
-</div>
-{% elif total > jobs|length %}
+{% if attention_only and total > jobs|length %}
 <p class="ql-section-meta">Showing {{ jobs|length }} of {{ total }}; open again for the rest.</p>
 {% endif %}
 
@@ -71,6 +62,17 @@
   <span class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action is-disabled" aria-disabled="true">Older</span>
   {% endif %}
 </nav>
+{% endif %}
+
+{% if not attention_only %}
+<div class="ql-activity-toolbar">
+  <form action="/queue/clear" method="post">
+    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
+            data-confirm="Clear finished jobs from history? Downloaded tracks lose their Undo. Saved reviews and unresolved items stay."
+            data-confirm-action="Clear history" data-irreversible>Clear history</button>
+  </form>
+</div>
 {% endif %}
 
 {% else %}

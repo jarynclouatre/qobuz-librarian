@@ -290,7 +290,7 @@ def report(display=str) -> list[tuple[str, bool, str]]:
                     for name in names]
         if not lacks:
             rows.append((f"{title} disk", True,
-                         "Everything the app does here works"))
+                         "Fully supported"))
             continue
         rows.append((f"{title} disk", False,
                      f"{display(path)} {_joined(_LACKS[need] for need in lacks)}, "

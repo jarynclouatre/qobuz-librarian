@@ -20,6 +20,10 @@
     {% for a in census.top %}<span><b>{{ a.name }}</b> {{ a.size }}</span>{% endfor %}
   </div>
   {% endif %}
+  {% set _upgrades = library_upgrade_count() %}
+  {% if _upgrades %}
+  <p class="ql-census-foot">{{ '{:,}'.format(_upgrades) }} album{{ 's' if _upgrades != 1 }} can be upgraded. <a href="/upgrade" class="ql-inline-link">Open Upgrade</a></p>
+  {% endif %}
   {% if census.reclaim %}
   <p class="ql-census-foot">Downsampling the files above 48 kHz would make them about <b>{{ census.reclaim }}</b> smaller. <a href="/downsample" class="ql-inline-link">Review albums</a></p>
   {% endif %}

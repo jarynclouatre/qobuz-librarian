@@ -1322,7 +1322,7 @@
     panel.classList.toggle("hidden", !nextOpen);
   });
 
-  // The phone menu of review actions. Any press outside the toggle closes
+  // The menu of review actions. Any press outside the toggle closes
   // it, a press on one of its actions included.
   function setReviewMore(menu, open) {
     var toggle = menu.querySelector(".ql-review-more-toggle");
@@ -1338,6 +1338,23 @@
     var menu = toggle.closest("[data-review-more]");
     if (menu) setReviewMore(menu, !menu.hasAttribute("data-open"));
   });
+  // On a phone the release-type switches open from Include. A press on a
+  // switch leaves them open, so several can be set in one go.
+  function setReviewInclude(host, open) {
+    var toggle = host.querySelector("[data-review-include]");
+    host.toggleAttribute("data-include-open", open);
+    if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  document.addEventListener("click", function (evt) {
+    if (!evt.target.closest) return;
+    var toggle = evt.target.closest("[data-review-include]");
+    var openHost = document.querySelector(".ql-review-sticky[data-include-open]");
+    if (toggle) {
+      setReviewInclude(toggle.closest(".ql-review-sticky"), !openHost);
+    } else if (openHost && !evt.target.closest(".ql-review-switches")) {
+      setReviewInclude(openHost, false);
+    }
+  });
   document.addEventListener("keydown", function (evt) {
     if (evt.key !== "Escape") return;
     document.querySelectorAll("[data-review-more][data-open]").forEach(function (menu) {
@@ -1345,6 +1362,8 @@
       var toggle = menu.querySelector(".ql-review-more-toggle");
       if (toggle && menu.contains(document.activeElement)) toggle.focus();
     });
+    var openHost = document.querySelector(".ql-review-sticky[data-include-open]");
+    if (openHost) setReviewInclude(openHost, false);
   });
 
   // Discover artist rows open their albums under the row. Once the list is
@@ -2971,7 +2990,6 @@
     var reviewKind = form.getAttribute("data-review-kind") || "";
     var reviewBlocked = form.getAttribute("data-review-blocked") === "1";
     var isDownsampleReview = reviewKind === "downsample";
-    var reviewItemPlural = cont.dataset.reviewItemPlural || "albums";
     // Live, not baked: on a library review the dismiss vocabulary follows
     // whichever tab is active now. The data attributes only know the tab the
     // page was first rendered with.
@@ -3188,17 +3206,16 @@
       var tc = tabCounts(c);
       if (submit) {
         submit.disabled = reviewBlocked || actionsBlocked() || tc.selected === 0;
-        submit.textContent = tc.selected
-          ? (submit.dataset.reviewVerb || "Download") + " " + formatCount(tc.selected) + " selected"
-          : (submit.dataset.emptyLabel || "Select " + reviewItemPlural);
+        submit.textContent = (submit.dataset.reviewVerb || "Download") + " " +
+          formatCount(tc.selected) + " selected";
       }
       if (summaryRow) summaryRow.classList.toggle("hidden", c.total === 0);
       if (emptyBox) emptyBox.classList.toggle("hidden", c.total > 0);
       if (submit) submit.classList.toggle("hidden", c.total === 0);
       if (footerDiscard) footerDiscard.classList.toggle("hidden", c.total > 0);
-      // An empty tab of a review that still has rows on the other tab has
-      // nothing to select or download.
-      if (footer) footer.classList.toggle("hidden", c.total > 0 && tc.total === 0);
+      // The bar shows once something on the active tab is ticked. A spent
+      // review keeps it for Discard.
+      if (footer) footer.classList.toggle("hidden", c.total > 0 && tc.selected === 0);
       if (selectTools) selectTools.classList.toggle("hidden", tc.total === 0 || shownTotal() === 0);
       var tabsNav = cont.querySelector("[data-review-tabs]");
       if (tabsNav) tabsNav.classList.toggle("hidden", c.total === 0);
@@ -3233,6 +3250,7 @@
           b.setAttribute("aria-pressed", on ? "true" : "false");
         });
       }
+      syncInclude();
       // Only hide/dismiss responses carry hidden_total; a plain tick doesn't
       // change it, so its absence means "leave the link alone".
       if (c.hidden_total !== undefined) {
@@ -3292,6 +3310,17 @@
       var rest = restCount();
       dismissRest.classList.toggle("hidden", rest <= 0);
       dismissRest.textContent = dismissRestLabel(rest);
+    }
+
+    // Include names how many of the active tab's switches are on, and goes
+    // away on a tab that has none.
+    function syncInclude() {
+      var toggle = cont.querySelector("[data-review-include]");
+      if (!toggle) return;
+      var group = cont.querySelector("[data-review-switches]:not(.hidden)");
+      var on = group ? group.querySelectorAll('[aria-pressed="true"]').length : 0;
+      toggle.classList.toggle("hidden", !group);
+      toggle.textContent = on ? "Include (" + on + ")" : "Include";
     }
 
     function syncMaster() {
@@ -3462,6 +3491,7 @@
       if (actionsBlocked()) return;
       var on = btn.getAttribute("aria-pressed") !== "true";
       btn.setAttribute("aria-pressed", on ? "true" : "false");
+      syncInclude();
       var body = "type=" + encodeURIComponent(btn.getAttribute("data-review-switch")) +
                  "&on=" + (on ? "1" : "0");
       queueChoice("/jobs/" + id + "/missing-types", body, function (c) {
@@ -3469,6 +3499,7 @@
         applyCounts(c);
       }).catch(function () {
         btn.setAttribute("aria-pressed", on ? "false" : "true");
+        syncInclude();
       });
     }
 
@@ -3862,6 +3893,7 @@
               cont.querySelectorAll("[data-review-switches]").forEach(function (s) {
                 s.classList.toggle("hidden", s.getAttribute("data-review-switches") !== requestedTab);
               });
+              syncInclude();
             }
             syncUrl(requestedTab, requestedQuery, mode);
             loadedQuery = requestedQuery;
@@ -3946,8 +3978,6 @@
         e.stopPropagation();
         return;
       }
-      var allBtn = t.closest("[data-select-all]");
-      if (allBtn) { bulkSelect(allBtn.getAttribute("data-select-all") === "1", "all"); return; }
       var pageBtn = t.closest("[data-select-page]");
       if (pageBtn) { bulkSelect(pageBtn.getAttribute("data-select-page") === "1", "page"); return; }
       var more = t.closest("[data-load-more]");
@@ -3979,9 +4009,7 @@
     });
     cont.addEventListener("change", function (evt) {
       var master = evt.target.closest && evt.target.closest("[data-select-master]");
-      if (!master) return;
-      var btn = cont.querySelector('[data-select-all="' + (master.checked ? "1" : "0") + '"]');
-      if (btn) btn.click();
+      if (master) bulkSelect(master.checked, "all");
     });
     if (dismissRest) {
       dismissRest.addEventListener("click", function () {
@@ -4229,6 +4257,7 @@
     updateHideLabels();
     updateArtistChecks();
     syncMaster();
+    syncInclude();
     updateDismissRest();
 
     // Keep review pages in sync across tabs.

@@ -13,7 +13,7 @@
       <button type="submit" class="ql-header-refresh"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
               title="{% if writes_paused %}{{ writes_paused_reason }}{% elif qobuz_ready %}Start a new repair scan{% else %}Connect Qobuz before scanning{% endif %}"
               aria-label="Start a new repair scan"
-              data-confirm="Scan the whole library for damaged files again? The new results replace this review, and anything ticked here starts unticked." data-confirm-action="Scan">
+              data-confirm="Scan the whole library for damaged files again? The new results replace this review and clear its ticks." data-confirm-action="Scan">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
       </button>
     </form>
@@ -64,7 +64,7 @@
     <p class="ql-work-card-text">{{ repair_resume.saved }}{% if repair_resume.total %} of {{ repair_resume.total }}{% endif %} artist{{ 's' if _checked != 1 }} checked{% if repair_resume.found %}, {{ repair_resume.found }} repair option{{ 's' if repair_resume.found != 1 }} found{% endif %}.</p>
     {% else %}
     <p class="ql-work-card-title">Scan for damaged files</p>
-    <p class="ql-work-card-text">Scans FLAC files for damage. Damaged tracks are listed for review.</p>
+    <p class="ql-work-card-text">Damaged tracks are listed for review.</p>
     {% endif %}
   </div>
   <form action="/repair" method="post" data-busy-submit>

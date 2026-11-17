@@ -192,7 +192,7 @@
            placeholder="{{ placeholder }}"
            class="ql-input ql-mono sm:max-w-lg">
     {% endif %}
-    <p class="ql-field-help">{{ help }}</p>
+    {% if help %}<p class="ql-field-help">{{ help }}</p>{% endif %}
   </div>
 </div>
 {% endmacro %}
@@ -387,7 +387,6 @@
             <option value="{{ c }}" {% if behavior[key] == c %}selected{% endif %}>{{ (option_labels|default({})).get(key, {}).get(c, c) }}</option>
             {% endfor %}
           </select>
-          <p class="ql-field-help">{{ help }}</p>
         </div>
       </div>
       {% endfor %}

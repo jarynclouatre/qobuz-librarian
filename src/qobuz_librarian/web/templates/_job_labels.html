@@ -64,20 +64,6 @@
   {{ format_count(n) }} {{ review_item_singular(job) if n == 1 else review_item_plural(job) }}
 {%- endmacro %}
 
-{% macro review_empty_label(job) -%}
-  {%- if job.execute_kind == 'upgrade' -%}
-    Select albums to upgrade
-  {%- elif job.execute_kind == 'repair' -%}
-    Select repairs to run
-  {%- elif job.execute_kind == 'migration' -%}
-    Select folders to {{ job.review_verb|lower }}
-  {%- elif job.execute_kind == 'downsample' -%}
-    Select albums to downsample
-  {%- else -%}
-    Select albums to {{ job.review_verb|lower }}
-  {%- endif -%}
-{%- endmacro %}
-
 {% macro progress_item_singular(job) -%}
   {%- if job.execute_kind == 'upgrade' -%}
     album to upgrade
@@ -205,7 +191,7 @@
   {%- if (job.status.value == 'scanning' or (job.status.value == 'pending' and job.kind == 'scan' and job.phase != 'execute')) and job.execute_kind in ('library', 'repair') -%}
     Stop this scan? Its progress through the artists it has checked is discarded, and the next scan starts from the beginning.
   {%- else -%}
-    Cancel this job? It stops at the next step.
+    Stop this job at its next step?
   {%- endif -%}
 {%- endmacro %}
 
