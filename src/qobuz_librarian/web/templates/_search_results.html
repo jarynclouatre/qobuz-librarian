@@ -304,7 +304,7 @@
         {% endif %}
         <div class="ql-grid-version-copy">
           <p>{{ release_title(e.title, e.version) }}</p>
-          <span>{{ e.year }} · {{ e.tracks }} track{{ 's' if e.tracks != 1 else '' }} · {{ e.quality }}{% if e.explicit %} · Explicit{% endif %}</span>
+          <span>{{ e.year }} · {{ e.tracks }} track{{ 's' if e.tracks != 1 else '' }}{% if e.lossy %} · Lossy{% elif e.quality %} · {{ e.quality }}{% endif %}{% if e.explicit %} · Explicit{% endif %}</span>
           <div class="ql-row-chips ql-sub-chips">
             {{ tracks_toggle(e.id, e.title, 'search-grid-tracks-' ~ g.id ~ '-' ~ e.id) }}
           </div>

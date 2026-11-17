@@ -2354,7 +2354,7 @@
         if (forms.some(function (form) { return form.dataset.searchDownloadWarning === "unknown"; })) {
           warning = " Could not check existing tracks for every selected album. Downloading may replace existing tracks.";
         }
-        window.qlConfirm("Download " + what + "?" + (warning || " Downloads queue now and import into your library."), { action: "Download" }).then(function (ok) {
+        window.qlConfirm("Download " + what + "?" + warning, { action: "Download" }).then(function (ok) {
           if (ok) runBulkDownload(forms);
         });
       }

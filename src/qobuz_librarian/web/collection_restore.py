@@ -21,7 +21,7 @@ ISRC_SHARED_ENOUGH = 3
 # giving up and searching by name.
 ISRC_LOOKUP_TRIES = 3
 
-NO_QOBUZ_ALBUM = "no longer on Qobuz"
+NO_QOBUZ_ALBUM = "not available on Qobuz"
 NO_ISRC_MATCH = "no track matched by ISRC"
 NO_SEARCH_MATCH = "no album matched by name"
 NO_QOBUZ_TRACKS = "its missing tracks are not on Qobuz"

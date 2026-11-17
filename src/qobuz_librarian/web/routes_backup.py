@@ -794,7 +794,7 @@ def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
     if not target.is_dir():
         return (_diagnostics_result_notice("error", "Those files aren't there anymore.")
                 + diagnostics._diagnostics_fragment(request))
-    with _library_held(request, "Staging cleanup", "this") as refusal:
+    with _library_held(request, "Staging cleanup", "Delete") as refusal:
         if refusal:
             return refusal
         location, _is_host = storage._resolve_host_path(str(target))

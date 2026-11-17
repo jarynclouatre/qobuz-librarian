@@ -314,10 +314,9 @@ def run_migrate_mode(args):
     companion_failed = sum(
         status == engine.FAILED
         for _source, _destination, status, _reason in companion_outcomes)
-    has_problem = bool(result.failed or companion_failed)
 
     log.info("")
-    if has_problem or result.cancelled:
+    if result.cancelled:
         log.info(fmt(C.GRAY,
             f"     {plural(result.copied, 'file')} "
             f"{'moved' if in_place else 'copied'} before the run ended."))

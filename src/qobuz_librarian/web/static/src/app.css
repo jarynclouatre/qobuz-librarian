@@ -2334,7 +2334,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-search-select-all.hidden {
   display: none;
 }
-@media (max-width: 759.98px) {
+@media (max-width: 767.98px) {
   .ql-dashboard {
     gap: var(--ql-space-2);
   }
@@ -5775,7 +5775,7 @@ details[open] > summary .ql-review-chevron {
   display: grid;
   width: 3rem;
   place-items: center;
-  border-radius: 0 0.5rem 0.5rem 0;
+  border-radius: 0 calc(var(--ql-radius-sm) - 1px) calc(var(--ql-radius-sm) - 1px) 0;
   color: color-mix(in oklab, var(--color-base-content) 62%, transparent);
 }
 .ql-secret-toggle:hover {
@@ -5797,7 +5797,7 @@ details[open] > summary .ql-review-chevron {
 
 /* Monospace numeric readouts for counts, sizes, tiers, and progress phases. */
 .readout {
-  font-family: 'Cascadia Code','Fira Code','Consolas',ui-monospace,monospace;
+  font-family: var(--ql-font-mono);
   font-variant-numeric: tabular-nums; letter-spacing: 0;
 }
 
@@ -6208,7 +6208,7 @@ details[data-artist].htmx-swapping {
     z-index: 25;
   }
   .ql-search-results:has(.ql-bulk-bar:not(.hidden)) {
-    /* Must clear the bar even after it wraps to two rows (≤760px stacks
+    /* Must clear the bar even after it wraps to two rows (a phone stacks
        the Download button full-width), or the last result stays behind
        it. */
     padding-bottom: 6rem;

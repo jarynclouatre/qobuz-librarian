@@ -1207,7 +1207,8 @@ def note_upgrades_put_back(origins):
 
 
 _KEPT_ORIGINALS = re.compile(
-    r" Your hi-res originals are kept for [^.]*\. Until then you can put "
+    r" The originals are kept for [^.]*\."
+    r"| Your hi-res originals are kept for [^.]*\. Until then you can put "
     r"them back from Settings[^.]*\.")
 
 
@@ -6293,10 +6294,11 @@ def execute_migration(job, chosen, dest, *, in_place, src=None,
         parts.append("the destination may contain a partial migration")
     if results_error is not None:
         parts.append("the migration report could not be saved")
-        job.error = (
+        job.error = " ".join(filter(None, (
+            job.error,
             "Migration finished, but its results report could not be saved: "
             f"{results_error}. Check the migration details before running it "
-            "again.")
+            "again.")))
     else:
         report_display, _ = storage._resolve_host_path(str(results_manifest))
         parts.append(f"report saved at {report_display}")

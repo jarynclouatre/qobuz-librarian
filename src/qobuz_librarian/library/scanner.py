@@ -356,7 +356,8 @@ def _has_audio_anywhere(d: Path, walk_errors=None):
             try:
                 # Suffix first: an errors caller walks to the end, and
                 # stat'ing every entry would cost a syscall per file.
-                if f.suffix.lower() in exts and _is_type(f, stat.S_ISREG):
+                if (f.suffix.lower() in exts and not in_system_folder(f, d)
+                        and _is_type(f, stat.S_ISREG)):
                     found = True
                     if walk_errors is None:
                         _HAS_AUDIO_CACHE[key] = _AUDIO_FOUND_EARLY

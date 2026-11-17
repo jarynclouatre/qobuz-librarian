@@ -2376,8 +2376,9 @@ def _earlier_lyric_destinations(plan, source_root_binding,
                            newline="", encoding="utf-8") as handle:
                 for row in csv.DictReader(handle):
                     if row.get("status") == PLACE and row.get("destination"):
-                        earlier[row.get("source")] = row["destination"]
-        except (OSError, UnicodeError, csv.Error):
+                        earlier[_csv_cell_text(row.get("source"))] = (
+                            _csv_cell_text(row["destination"]))
+        except (OSError, ValueError, csv.Error):
             continue
     targets = {}
     for source, destination in earlier.items():
@@ -4241,6 +4242,14 @@ def _csv_safe_cell(value, *, path=False) -> str:
     ):
         return "text-base64:" + base64.b64encode(raw).decode("ascii")
     return text
+
+
+def _csv_cell_text(cell):
+    """The value _csv_safe_cell wrote a cell for."""
+    for prefix in ("text-base64:", "path-bytes-base64:", "text-bytes-base64:"):
+        if cell and cell.startswith(prefix):
+            return os.fsdecode(base64.b64decode(cell[len(prefix):], validate=True))
+    return cell
 
 
 def _audit_filename(prefix) -> str:

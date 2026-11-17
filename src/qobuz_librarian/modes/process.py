@@ -2038,7 +2038,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                 if upgrade_succeeded:
                     imported = False
                     upgrade_unverified = True
-                op_label = "Forced re-download" if args.force else "Upgrade"
+                op_label = "Forced re-download" if use_force else "Upgrade"
                 log.info(fmt(C.YELLOW,
                     f"\n  ⚠  {op_label} did not succeed (no successful import); "
                     "restoring backup …"))

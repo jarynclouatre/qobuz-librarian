@@ -2475,9 +2475,9 @@ def find_expanded_edition(album, album_dir, existing, token, _args=None):
     for cand in candidates:
         if api_calls >= config.EDITION_SEARCH_API_BUDGET:
             break
+        api_calls += 1
         try:
             full = get_album(cand["id"], token)
-            api_calls += 1
         except QobuzError:
             continue
         q_tracks = (full.get("tracks") or {}).get("items") or []

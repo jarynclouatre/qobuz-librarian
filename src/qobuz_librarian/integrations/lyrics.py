@@ -2,6 +2,7 @@
 
 import os
 import stat
+from collections import Counter
 from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
@@ -102,6 +103,7 @@ def _run_lyric_hook(album_dir):
         # track (beets moves only the audio).
         # A provider asking to be asked later is not waited for here, where
         # the download waits too; the next Lyrics run looks those tracks up.
+        skips = Counter()
         counts = lyric_fetch.fetch_for_paths(
             flacs,
             owned_root=cfg.STAGING_DIR,
@@ -113,6 +115,7 @@ def _run_lyric_hook(album_dir):
                 " · ".join(filter(None, ("Fetching lyrics", note))), c, t, name),
             busy_patience=0,
             track_detail=True,
+            skips=skips,
         )
     except Exception as e:
         log.info(fmt(C.YELLOW, f"  ⚠  Lyric hook failed: {e}."))
@@ -127,10 +130,11 @@ def _run_lyric_hook(album_dir):
             "kept-plain-lrc",
             "copied-synced", "copied-plain",
         )
-    )
+    ) + skips["lyrics"]
     unavailable = counts.get("providers-unavailable", 0)
 
-    outcomes = _fetch_outcome_summary(counts, expected=len(flacs))
+    outcomes = _fetch_outcome_summary(
+        counts, expected=len(flacs) - sum(skips.values()))
     failed = outcomes["failed"]
     msg = (
         f"lyrics: {synced} synced, {plain} plain, "
@@ -150,6 +154,8 @@ def _run_lyric_hook(album_dir):
     read_only = counts.get("skipped-read-only", 0)
     if read_only:
         msg += f"; {read_only} read-only, left alone"
+    if skips["checked"]:
+        msg += f"; {skips['checked']} checked before"
     if failed:
         msg += f"; {failed} failed"
     if failed or unavailable or read_only:

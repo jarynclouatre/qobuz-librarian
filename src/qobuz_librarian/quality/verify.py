@@ -66,7 +66,7 @@ def quality_below_line(verdict):
         parts.append(f"{plural(verdict['n_unknown'], 'track')} could not be measured")
     line = f"Quality check: {' and '.join(parts)}."
     if verdict["retried"]:
-        line += " The retry at the highest quality finished below target too."
+        line += " A retry at the highest quality did not fix it."
     return line
 
 

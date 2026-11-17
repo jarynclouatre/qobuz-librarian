@@ -218,8 +218,9 @@ def is_flac(path: Path, *, quiet=False) -> bool:
                 f"  ⚠  {path.name} suspiciously small and flac tool "
                 "unavailable; treating as broken."))
         return False
-    log.info(fmt(C.YELLOW,
-        f"  ⚠  flac tool unavailable for {path.name}; trusting .flac extension."))
+    if not quiet:
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  flac tool unavailable for {path.name}; trusting .flac extension."))
     return True
 
 
@@ -507,16 +508,10 @@ def snapshot_staging():
 
 def files_added_since(prior_snapshot):
     added = []
-    identities = getattr(prior_snapshot, "identities", {})
     for path in _iter_staging_files():
         if path in prior_snapshot:
-            # A pre-existing name whose identity changed is not output owned by
-            # this run. Leave it alone instead of adopting the replacement.
-            if identities:
-                receipt = capture_file(path)
-                if (receipt is not None
-                        and receipt.identity != identities.get(path)):
-                    continue
+            # A name that was already there is not this run's output, even
+            # when its file has been replaced since.
             continue
         receipt = capture_file(path)
         if receipt is not None:
