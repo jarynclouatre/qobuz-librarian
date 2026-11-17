@@ -486,20 +486,20 @@ async def _lifespan(_app: FastAPI):
         try:
             cred_status = web_auth.apply_env_credentials()
         except web_auth.CredentialSeedError as exc:
-            raise RuntimeError(str(exc)) from None
+            raise StartupRefused(str(exc)) from None
         except web_auth.PasswordRejected as exc:
-            raise RuntimeError(
+            raise StartupRefused(
                 f"WEB_AUTH_PASSWORD was rejected: {exc}") from None
         if (
             cred_status in {"partial", "failed"}
             and not web_auth.credentials_configured()
         ):
             if cred_status == "partial":
-                raise RuntimeError(
+                raise StartupRefused(
                     "Incomplete web login seed: set both WEB_AUTH_USER and "
                     "WEB_AUTH_PASSWORD (or WEB_AUTH_PASSWORD_FILE)."
                 )
-            raise RuntimeError(
+            raise StartupRefused(
                 "The seeded web login could not be saved to "
                 f"{cfg.WEB_AUTH_FILE}; refusing to start with an open "
                 "first-run setup screen."

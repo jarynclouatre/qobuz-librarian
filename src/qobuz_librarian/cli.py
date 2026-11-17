@@ -1065,14 +1065,6 @@ def main():
             prepare_download_stack()
         vlog(f"user_id: {user_id}  •  music root: {cfg.MUSIC_ROOT}")
         if args.verbose:
-            if _in_container():
-                log.info(fmt(C.GRAY,
-                    f"  compose:    {cfg.COMPOSE_FILE}  "
-                    "(host-side; not visible from container)"))
-            else:
-                log.info(fmt(C.GRAY,
-                    f"  compose:    {cfg.COMPOSE_FILE}  "
-                    f"({'present' if cfg.COMPOSE_FILE.exists() else 'MISSING'})"))
             log.info(fmt(C.GRAY, f"  staging:    {cfg.STAGING_DIR}"))
             log.info(fmt(C.GRAY, f"  lock:       {cfg.LOCK_FILE}"))
         return token

@@ -543,7 +543,6 @@ def _diagnostics():
         "detail": beets_detail,
     })
 
-    stranded = []
     copies = []
     left_in_backups = []
     restores = []
@@ -551,9 +550,7 @@ def _diagnostics():
     if cfg.UPGRADE_BACKUP_DIR.exists():
         try:
             for entry in cfg.UPGRADE_BACKUP_DIR.iterdir():
-                if entry.is_dir() and entry.name == ".restore_trash":
-                    stranded.append(entry)
-                elif entry.is_dir() and entry.name.startswith(
+                if entry.is_dir() and entry.name.startswith(
                         backup_mod._PARTIAL_COPY_PREFIX):
                     copies.append(entry)
             left_in_backups = backup_mod.albums_left_in_backups()
@@ -568,7 +565,7 @@ def _diagnostics():
             "ok": False,
             "detail": "Could not inspect this folder; its status is unknown.",
         })
-    elif stranded or copies or left_in_backups or restores:
+    elif copies or left_in_backups or restores:
         found = []
         if left_in_backups:
             n = len(left_in_backups)
@@ -576,9 +573,6 @@ def _diagnostics():
                 f"{plural(n, 'album')} {'is' if n == 1 else 'are'} in the "
                 "backup folder and missing from the library. Restore "
                 f"{'it' if n == 1 else 'them'} below")
-        if stranded:
-            found.append(f"{len(stranded)} found in "
-                         f"{cfg.UPGRADE_BACKUP_DIR}; manual cleanup needed")
         if copies:
             named = "; ".join(
                 f"{copy.name}, of "

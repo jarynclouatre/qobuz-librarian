@@ -71,12 +71,12 @@ async def login_submit(request: Request, username: str = Form(""),
     # through failed attempts and re-validated so the form can't smuggle in an
     # off-site redirect.
     next_path = web_auth.safe_next_path(next)
-    ip = web_auth.client_ip(request)
-    # A request already carrying a valid session is provably the logged-in user,
-    # not the brute-forcer the throttle exists to stop, so exempt it so a remote
-    # flood of failed logins for the admin username can't lock the real admin out.
+    # A signed-in browser has nothing to sign in to, and checking its guesses
+    # would let an open session try passwords outside the throttle.
     cookie = web_auth.session_token(request)
-    has_session = bool(cookie) and web_auth.verify_session(cookie)
+    if cookie and web_auth.verify_session(cookie):
+        return RedirectResponse(url=next_path or "/", status_code=303)
+    ip = web_auth.client_ip(request)
     # A submission that could never succeed shouldn't cost a strike: an empty
     # field is a slip, not an attempt.
     if not username.strip() or not password:
@@ -86,18 +86,15 @@ async def login_submit(request: Request, username: str = Form(""),
     # wait and a guess costs an attacker the wait rather than a KDF they can
     # keep spending. The counters live in memory, so a restart is the way back
     # in for whoever owns the box.
-    reserved_attempt = False
-    if not has_session:
-        reserved_attempt = web_auth.begin_login_attempt(ip, username)
-        if not reserved_attempt:
-            refusal = rendering._lockout_notice(ip, username) or (
-                "Sign-in checks are busy. Try again shortly."
-            )
-            return rendering.templates.TemplateResponse(
-                request=request, name="login.html",
-                context={"error": refusal, "username": username.strip(),
-                         "next_path": next_path},
-                status_code=429)
+    if not web_auth.begin_login_attempt(ip, username):
+        refusal = rendering._lockout_notice(ip, username) or (
+            "Sign-in checks are busy. Try again shortly."
+        )
+        return rendering.templates.TemplateResponse(
+            request=request, name="login.html",
+            context={"error": refusal, "username": username.strip(),
+                     "next_path": next_path},
+            status_code=429)
     # Offload the 600k-round PBKDF2 to a thread so one login attempt can't stall
     # the single-worker event loop (health, API and SSE all freeze during a KDF
     # that runs on the loop thread).
@@ -106,13 +103,11 @@ async def login_submit(request: Request, username: str = Form(""),
         generation = await loop.run_in_executor(
             None, web_auth.verify_login_generation, username.strip(), password)
     except BaseException:
-        if reserved_attempt:
-            web_auth.cancel_login_attempt(ip, username)
+        web_auth.cancel_login_attempt(ip, username)
         raise
     if not generation:
         _log.warning("Failed sign-in from %s.", getattr(request.client, "host", ip))
-    if reserved_attempt:
-        web_auth.finish_login_attempt(ip, username, success=bool(generation))
+    web_auth.finish_login_attempt(ip, username, success=bool(generation))
     if not generation:
         wait = rendering._lockout_notice(ip, username, after_failure=True)
         # Keep what they typed, as the setup screen already does.

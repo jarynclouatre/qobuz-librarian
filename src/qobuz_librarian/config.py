@@ -290,15 +290,6 @@ BEETS_PLUGINS = [p.strip() for p in
 #   both    = a cover file AND embedded art (default)
 ARTWORK = _env_choice("ARTWORK", "both", ("sidecar", "embed", "both"))
 
-# COMPOSE_FILE is only used by the legacy docker-exec beets fallback (when
-# `beet` isn't on PATH and a compose file exists. This is never the case in the
-# bundled image, where beets is called directly). Default is a CWD-relative
-# name so the fallback simply stays inactive unless a user opts in via env.
-COMPOSE_FILE = _env_path(
-    "COMPOSE_FILE",
-    Path("compose.yaml"),
-)
-
 # State and data files all live under DATA_DIR so one volume covers them.
 # Default to ~/.local/share/qobuz-librarian (XDG) outside Docker; the
 # container sets DATA_DIR=/data so this default is only used by CLI dev
