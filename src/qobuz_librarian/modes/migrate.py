@@ -17,8 +17,15 @@ from qobuz_librarian.ui_cli.logging import log
 from qobuz_librarian.ui_cli.prompts import confirm
 
 
+class _Cancelled(Exception):
+    pass
+
+
 def _prompt_path(msg: str) -> str:
-    return ask(msg, lower=False, quiet=True) or ""
+    answer = ask(msg, lower=False, quiet=True) or ""
+    if answer.lower() in ("q", "quit", "exit"):
+        raise _Cancelled
+    return answer
 
 
 def _resolve_paths(args):
@@ -155,7 +162,11 @@ def run_migrate_mode(args):
             "mutagen) or `pip install mutagen`."))
         return EXIT_CONFIG
 
-    src, dest = _resolve_paths(args)
+    try:
+        src, dest = _resolve_paths(args)
+    except _Cancelled:
+        log.info(fmt(C.GRAY, "  Cancelled."))
+        return 0
     if src is None:
         return EXIT_CONFIG
 

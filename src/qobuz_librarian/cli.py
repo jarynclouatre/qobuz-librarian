@@ -548,11 +548,9 @@ def _help_epilog():
     lines.extend(("", *textwrap.wrap(
         "Only in the web app: the Library scan and its reviews, New releases "
         "checks, Discover, downloading a single track, dismissing and "
-        "bringing back albums, restoring, removing or deleting kept backups "
-        "and hi-res originals (Settings → Diagnostics), restoring from a "
-        "collection backup, the Settings fields --settings leaves out, and "
-        "History entries and POST_JOB_HOOK reports for Lyrics and Library "
-        "migration runs.",
+        "bringing back albums, kept backups and hi-res originals (Settings → "
+        "Diagnostics), restoring from a collection backup, and the Settings "
+        "fields --settings leaves out.",
         width=width,
         break_long_words=False,
         break_on_hyphens=False,
@@ -687,22 +685,18 @@ def parse_args():
                         "(search order kept)")
 
     getting.add_argument("--dry-run",      action="store_true",
-                   help="show the plan and change nothing; a download a "
-                        "restart cut off is still cleaned up first, as at "
-                        "every start")
+                   help="show the plan and change nothing, except to clean "
+                        "up a download a restart cut off")
     getting.add_argument("--force",        action="store_true",
                    help="download every track of the album again (search or "
                         "album URL only)")
     getting.add_argument("--yes",          action="store_true",
-                   help="auto-confirm the confirmations; a gap fill, an "
-                        "upgrade, a downsample, a repair or an in-place "
-                        "migration can replace or move files you already have. "
-                        "Choices still ask (which artist to walk, which "
-                        "release to take, consolidating sibling folders, "
-                        "whether a first downsample keeps the originals), and "
-                        "so do the backup and collision questions of --force, "
-                        "discarding a saved queue, and migrating to a disk "
-                        "short on space")
+                   help="auto-confirm the confirmations, including ones "
+                        "that replace or move files you already have (gap "
+                        "fill, upgrade, downsample, repair, in-place "
+                        "migration). Choices still ask, and so do the --force "
+                        "backup and collision questions, discarding a saved "
+                        "queue, and migrating to a disk short on space")
     # Unattended upgrade-walk gate.
     getting.add_argument("--auto-safe",    action="store_true",
                    help="auto-confirm only the safe upgrades (requires --upgrade-walk).")
