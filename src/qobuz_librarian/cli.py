@@ -183,8 +183,8 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
         for entry in blocked:
             if not entry.explained:
                 log.error(
-                    "%s: “%s” stopped part way; the next start settles it "
-                    "or says why it can't.",
+                    "%s: “%s” stopped part way; the next start cleans it "
+                    "up or says why it can't.",
                     BLOCKED_DOWNLOAD_LOG_ENTRY, entry.label)
         if getattr(result, "reason", None) == "run-lock-authority-lost":
             log.error("%s: the run lock was lost while the saved queue was "
@@ -549,7 +549,7 @@ def _help_epilog():
         "Only in the web app: the Library scan and its reviews, New releases "
         "checks, Discover, downloading a single track, dismissing and "
         "bringing back albums, restoring, removing or deleting kept backups "
-        "and hi-res originals (Settings > Diagnostics), restoring from a "
+        "and hi-res originals (Settings → Diagnostics), restoring from a "
         "collection backup, the Settings fields --settings leaves out, and "
         "History entries and POST_JOB_HOOK reports for Lyrics and Library "
         "migration runs.",
@@ -688,8 +688,8 @@ def parse_args():
 
     getting.add_argument("--dry-run",      action="store_true",
                    help="show the plan and change nothing; a download a "
-                        "restart cut off is still settled first, as at every "
-                        "start")
+                        "restart cut off is still cleaned up first, as at "
+                        "every start")
     getting.add_argument("--force",        action="store_true",
                    help="download every track of the album again (search or "
                         "album URL only)")
@@ -955,8 +955,8 @@ def main():
         if parked and (uses_queue or other_work):
             return fmt(
                 C.YELLOW,
-                "\n⚠  An album is parked for recovery.\n"
-                "   Quit and run Qobuz Librarian again; it settles that album "
+                "\n⚠  An album is waiting to be recovered.\n"
+                "   Quit and run Qobuz Librarian again; it recovers that album "
                 "before other work.\n",
             )
         if queue_started and (uses_queue or other_work):
@@ -1194,7 +1194,7 @@ def main():
                     "folder and missing from the library: "
                     + "; ".join(shown_path(origin) for _path, origin in left)
                     + f". Restore {'it' if len(left) == 1 else 'them'} in "
-                    "Settings > Diagnostics in the web app.",
+                    "Settings → Diagnostics in the web app.",
                     indent="  ", hanging="  ")))
         except Exception as e:
             vlog(f"album put-back error: {e}")
@@ -1483,7 +1483,7 @@ def _note_held_staging():
         log.info(fmt(C.GRAY, wrap(
             f"{plural(held, 'kept download item')} "
             f"{'is' if held == 1 else 'are'} held in "
-            f"{shown_path(cfg.STAGING_DIR / cfg.BEETS_RETRY_DIR)}. Settings > "
+            f"{shown_path(cfg.STAGING_DIR / cfg.BEETS_RETRY_DIR)}. Settings → "
             f"Diagnostics in the web app lists {'it' if held == 1 else 'them'}.",
             indent="  ", hanging="  ")))
 

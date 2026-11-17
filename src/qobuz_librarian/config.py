@@ -442,9 +442,9 @@ def _refuse_linked_roots() -> None:
         lines.append(
             f"{' and '.join(kept)} "
             f"{'keeps its current folder' if len(kept) == 1 else 'keep their current folders'}"
-            ", so the app still finds what is parked there.")
+            ", so the app still finds what is kept there.")
     if "MUSIC_ROOT" in linked:
-        lines.append("Then, if you use the web app, run Settings > Force full "
+        lines.append("Then, if you use the web app, run Settings → Force full "
                      "rescan once; the terminal walks read the folders afresh.")
     raise ValueError("\n   ".join(lines))
 

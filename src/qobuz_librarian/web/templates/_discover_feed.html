@@ -26,8 +26,8 @@
           <input type="hidden" name="artist_id" value="{{ a.artist_id }}">
           <input type="hidden" name="name" value="{{ a.name }}">
           <input type="hidden" name="back" value="{% if discover_tab == 'search' %}/discover/search?q={{ query | urlencode }}{% else %}/discover{% endif %}">
-          <button type="submit" class="ql-group-dismiss ql-discover-hide" title="Not interested"
-                  aria-label="Not interested in {{ a.name }}"><svg class="ql-group-dismiss-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8.5 12h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+          <button type="submit" class="ql-group-dismiss ql-discover-hide" title="Dismiss"
+                  aria-label="Dismiss {{ a.name }}"><svg class="ql-group-dismiss-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8.5 12h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
         </form>
       </div>
     </div>

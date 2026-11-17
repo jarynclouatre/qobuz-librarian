@@ -1383,7 +1383,7 @@
     });
   });
 
-  // Not interested: the card leaves at once, and the notice offers it back.
+  // Dismiss: the card leaves at once, and the notice offers it back.
   // The albums opened under a card go with it.
   function discoverHiddenCount(n) {
     document.querySelectorAll("[data-discover-hidden-link]").forEach(function (link) {

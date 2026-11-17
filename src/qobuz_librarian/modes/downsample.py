@@ -346,7 +346,7 @@ def run_downsample_walk_mode(args):
     if total_flush_warns:
         log.warning(block(fmt(C.YELLOW,
             f"     ⚠  {plural(total_flush_warns, 'file')} resampled but couldn't be "
-            "flushed to disk. The swap may not survive a power loss; check "
+            "confirmed written to disk. The swap may not survive a power loss; check "
             "the drive.")))
     clause = None
     if unchecked:
@@ -354,7 +354,7 @@ def run_downsample_walk_mode(args):
     elif no_answer:
         clause = "no answer was given, so the walk stopped early"
     elif total_flush_warns:
-        clause = f"{plural(total_flush_warns, 'file')} could not be flushed to disk"
+        clause = f"{plural(total_flush_warns, 'file')} could not be confirmed written to disk"
     elif state_refresh_warnings:
         clause = "the saved Upgrade results need a Library refresh"
     if interrupted:
@@ -375,15 +375,15 @@ def run_downsample_walk_mode(args):
         if total_read_only:
             parts.append(read_only_note(total_read_only))
         if total_flush_warns:
-            parts.append(f"{plural(total_flush_warns, 'file')} not flushed "
-                         "to disk")
+            parts.append(f"{plural(total_flush_warns, 'file')} not confirmed "
+                         "written to disk")
         failed = total_errors or total_flush_warns
         error = None
         if total_errors:
             error = f"Finished with {plural(total_errors, 'error')}."
         elif total_flush_warns:
             error = (f"Needs attention: {plural(total_flush_warns, 'file')} "
-                     "could not be flushed to disk.")
+                     "could not be confirmed written to disk.")
         post_job_hook.report_terminal_run(
             kind="downsample", title="Downsample run",
             status="canceled" if interrupted else "failed" if failed else "done",

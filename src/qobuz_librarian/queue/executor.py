@@ -892,7 +892,7 @@ def _move_to_beets_retry(album_dirs, label, *, expected=None):
         receipt = expected_by_path.get(directory)
         if expected_provided and receipt is None:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  couldn't park {directory.name}; no exact "
+                f"  ⚠  couldn't set aside {directory.name}; no exact "
                 "pre-import receipt was available, so it was left in staging."))
             continue
         group = park_trees(
@@ -906,11 +906,11 @@ def _move_to_beets_retry(album_dirs, label, *, expected=None):
             moved += 1
         else:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  couldn't park {directory.name}; it changed "
+                f"  ⚠  couldn't set aside {directory.name}; it changed "
                 "during the import attempt and was left in staging."))
     if moved:
         log.info(fmt(C.YELLOW,
-            f"  ⏭  parked {plural(moved, 'album folder')} under "
+            f"  ⏭  set aside {plural(moved, 'album folder')} under "
             f"{cfg.BEETS_RETRY_DIR}/; "
             f"{'it' if moved == 1 else 'they'} will re-import on the next "
             "download run."))
@@ -935,7 +935,7 @@ def _reimport_parked_albums():
     for group in groups:
         album_dirs = [tree.path for tree in group.trees]
         log.info(fmt(C.GRAY,
-            f"  ↻  Re-importing parked album: "
+            f"  ↻  Re-importing the album set aside: "
             f"{truncate(group.path.name, 50)}"))
         # Tag signatures survive beets moving/renaming the files, so the
         # landed folder is findable after the import for the lyric finaliser.
@@ -963,7 +963,7 @@ def _reimport_parked_albums():
                     landed_dirs.append(landed)
         if outcome["reason"] == "tracks":
             log.info(fmt(C.YELLOW,
-                f"  ⏭  Parked album in {truncate(group.path.name, 50)} still "
+                f"  ⏭  Set aside album in {truncate(group.path.name, 50)} still "
                 "holds exact tracks; left for a later run."))
         elif outcome["reason"] in {"changed", "companions"}:
             log.info(fmt(C.YELLOW,
@@ -1240,8 +1240,8 @@ def _resolve_queue_item(
                     ):
                         if not pin_unverified_upgrade_backup(
                                 sibling_backup,
-                                "sibling backup kept; the replaced Beets "
-                                "entries could not be retired"):
+                                "sibling backup kept; the old Beets "
+                                "entries could not be removed"):
                             warn_pin_failed(sibling_backup)
                         log.info(fmt(
                             C.YELLOW,
@@ -1353,8 +1353,8 @@ def _resolve_queue_item(
                         item["catalogue_unverified"] = True
                         if not pin_unverified_upgrade_backup(
                                 bp,
-                                "upgrade kept; the replaced Beets entries "
-                                "could not be retired"):
+                                "upgrade kept; the old Beets entries "
+                                "could not be removed"):
                             warn_pin_failed(bp)
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  Couldn't reconcile the Beets "
@@ -1386,7 +1386,7 @@ def _resolve_queue_item(
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  {truncate(album_dir.name, 40)}: upgraded, but "
                         "the rebuilt album or its companions couldn't be "
-                        "flushed; keeping the backup."))
+                        "confirmed written to disk; keeping the backup."))
                     log.info(fmt(C.GRAY,
                         f"     Backup at {bp}; keep it until you've confirmed "
                         "the rebuilt album is safe."))
@@ -1513,8 +1513,8 @@ def _resolve_queue_item(
                 item["catalogue_unverified"] = True
                 if not pin_unverified_upgrade_backup(
                         gfb,
-                        "gap-fill backup kept; the replaced Beets entries "
-                        "could not be retired"):
+                        "gap-fill backup kept; the old Beets entries "
+                        "could not be removed"):
                     warn_pin_failed(gfb)
                 log.info(fmt(C.YELLOW,
                     "  ⚠  Gap-fill complete but its Beets catalogue "
@@ -1546,11 +1546,11 @@ def _resolve_queue_item(
         elif _item_strict_success and _filled_whole:
             item["recovery_unverified"] = True
             if not pin_unverified_upgrade_backup(
-                    gfb, "gap-fill backup kept; replacement not durable"):
+                    gfb, "gap-fill backup kept; replacement not confirmed written to disk"):
                 warn_pin_failed(gfb)
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {truncate(album_dir.name, 40)}: filled, but the new "
-                "folder couldn't be flushed; keeping the backed-up "
+                "folder couldn't be confirmed written to disk; keeping the backed-up "
                 "tracks."))
             log.info(fmt(C.GRAY, f"     Backup at {gfb}."))
         elif _item_strict_success:
@@ -2190,7 +2190,7 @@ def _durable_completion_line(result, elapsed):
         details.append(f"{errors} failed to downsample")
     flush_warnings = result.get("downsample_flush_warnings", 0)
     if flush_warnings:
-        details.append(plural(flush_warnings, "flush warning"))
+        details.append(plural(flush_warnings, "disk write warning"))
     if result.get("downsample_cancelled", False):
         details.append("downsample stopped")
     detail = " · ".join(details) or "needs attention"

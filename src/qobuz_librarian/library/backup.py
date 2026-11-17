@@ -4432,7 +4432,7 @@ def restore_gap_fill_backup(backup, album_dir: Path,
                               keep_larger_dst=keep_larger_dst,
                               replace_dst=replace_dst)
             elif not _fsync(target):
-                raise OSError("it could not be flushed to disk")
+                raise OSError("it could not be confirmed written to disk")
             fsync_dir(target.parent, strict=True)
             found[relative] = stat_identity(os.lstat(target))
         except OSError as exc:
@@ -4485,7 +4485,7 @@ def _restore_file(source: Path, target: Path, size, digest, *,
         if stat_identity(os.lstat(target)) != stat_identity(existing):
             raise OSError("the album's file changed while it was checked")
         if not _fsync(target):
-            raise OSError("the kept file could not be flushed to disk")
+            raise OSError("the kept file could not be confirmed written to disk")
         return
     temporary = target.parent / f".ql-copy-{secrets.token_hex(16)}"
     copy_file(source, temporary, sha256=digest)
@@ -4868,7 +4868,7 @@ def _copy_backup_into(source: Path, folder: Path, payload,
         _copy_folder_metadata(source / relative, folder / relative)
     _copy_folder_metadata(source, folder)
     if not fsync_tree(folder):
-        raise OSError("the copy could not be flushed to disk")
+        raise OSError("the copy could not be confirmed written to disk")
 
 
 def _copy_folder_metadata(source: Path, destination: Path) -> None:

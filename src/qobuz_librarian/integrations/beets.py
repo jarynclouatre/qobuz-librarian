@@ -7020,7 +7020,7 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't retire the replaced Beets entries ({exc}); "
+                f"  ⚠  Couldn't remove the old Beets entries ({exc}); "
                 "leaving the captured entries unchanged.",
             )
         )
@@ -7337,7 +7337,7 @@ def retire_backup_beets_entries(backup, replacement_dir, replacement_receipt,
         log.info(
             fmt(
                 C.YELLOW,
-                f"  ⚠  Couldn't retire the backup's Beets entries ({exc}); "
+                f"  ⚠  Couldn't remove the backup's Beets entries ({exc}); "
                 "leaving the catalogue unchanged.",
             )
         )

@@ -431,12 +431,11 @@ def run_upgrade_walk_mode(args, token):
     if n_catalogue_failed:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_catalogue_failed, 'replacement')} "
-            f"{'needs' if n_catalogue_failed == 1 else 'need'} "
-            "Beets catalogue attention (backup retained)."))
+            "couldn't be updated in Beets (backup kept)."))
     if n_unverified_albums:
         log.info(fmt(C.YELLOW,
-            f"     ⚠  {plural(n_unverified_albums, 'album')} kept a safety "
-            "backup because the replacement or recovery couldn't be verified."))
+            f"     ⚠  {plural(n_unverified_albums, 'album')} kept a backup "
+            "because the replacement or recovery couldn't be verified."))
     if n_attention_albums:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_attention_albums, 'album')} did not finish "
@@ -482,8 +481,8 @@ def run_upgrade_walk_mode(args, token):
         parts = [f"{plural(n_upgraded_albums, 'album')} upgraded"]
         for count, what in (
                 (n_failed_albums, "couldn't be upgraded"),
-                (n_unverified_albums, "kept a safety backup"),
-                (n_catalogue_failed, "need Beets catalogue attention"),
+                (n_unverified_albums, "kept a backup"),
+                (n_catalogue_failed, "couldn't be updated in Beets"),
                 (n_attention_albums, "did not finish cleanly"),
                 (n_below_target, "remained below the target quality"),
                 (n_gone_albums, "no longer in the library"),

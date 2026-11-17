@@ -125,7 +125,7 @@ def _download_summary(r):
         or r.get("recovery_unverified")
         or r.get("upgrade_unverified")
     ):
-        return "Cancelled. Nothing was imported. A safety backup was retained."
+        return "Cancelled. Nothing was imported. A backup was kept."
     if kind == "partial":
         landed = plural(r.get("n_ok", 0), "track")
         if not r.get("imported"):
@@ -138,15 +138,15 @@ def _download_summary(r):
                 or r.get("recovery_unverified")
                 or r.get("upgrade_unverified")
             ):
-                summary += " A safety backup was retained for review."
+                summary += " A backup was kept for review."
             return summary
         parts = [f"{landed} downloaded"]
         if r.get("catalogue_unverified"):
-            parts.append("Beets catalogue needs attention; backup retained")
+            parts.append("Beets could not be updated; backup kept")
         elif r.get("recovery_unverified"):
-            parts.append("recovery could not be verified; backup retained")
+            parts.append("recovery could not be verified; backup kept")
         elif r.get("upgrade_unverified"):
-            parts.append("upgrade could not be verified; original backup retained")
+            parts.append("upgrade could not be verified; original kept")
         else:
             verdict = r.get("quality_verdict") or {}
             if verdict.get("under") and not verdict.get("recovered"):
@@ -161,10 +161,10 @@ def _download_summary(r):
             if r.get("downsample_flush_warnings"):
                 parts.append(
                     f"{plural(r['downsample_flush_warnings'], 'rewritten file')} "
-                    "could not be confirmed flushed"
+                    "could not be confirmed written to disk"
                 )
             if r.get("downsample_cancelled"):
-                parts.append("post-download downsample stopped early")
+                parts.append("downsampling stopped early")
             if r.get("consolidation_interrupted"):
                 parts.append("duplicate cleanup stopped early")
             retryable, lossy_only = download_result.incomplete_track_counts(r)
@@ -192,11 +192,11 @@ def _download_summary(r):
     if n_fail:
         parts.append(f"{n_fail} failed")
     if n_lossy:
-        parts.append(f"{n_lossy} lossy-dropped")
+        parts.append(f"{n_lossy} skipped as lossy")
     if r.get("catalogue_unverified"):
-        parts.append("Beets catalogue needs attention; backup retained")
+        parts.append("Beets could not be updated; backup kept")
     elif r.get("recovery_unverified"):
-        parts.append("recovery backup retained for review")
+        parts.append("recovery backup kept for review")
     elif r.get("upgrade_unverified"):
         parts.append("upgrade couldn't be verified; original kept")
     elif r.get("auto_upgrade"):
@@ -254,20 +254,20 @@ def download_error(result, *, job_controls=True):
     if kind == "backup":
         if result.get("catalogue_unverified"):
             return (
-                "The album's Beets catalogue entries could not be "
-                "reconciled. A backup was retained. Review it under Settings > "
-                "Diagnostics before downloading this album again."
+                "Beets could not be updated for this album. A backup was "
+                "kept. Review it under Settings → Diagnostics before "
+                "downloading this album again."
             )
         if result.get("recovery_unverified"):
             return (
                 "The album recovery could not be verified complete. A backup "
-                "was retained. Review it under Settings > Diagnostics before "
+                "was kept. Review it under Settings → Diagnostics before "
                 "downloading this album again."
             )
         return (
             "The replacement could not be verified complete. Your "
-            "original was retained as a backup. Review it under Settings "
-            "> Diagnostics before downloading this album again."
+            "original was kept as a backup. Review it under Settings "
+            "→ Diagnostics before downloading this album again."
         )
     if kind == "quality":
         if (result.get("quality_verdict") or {}).get("retried"):
@@ -286,10 +286,10 @@ def download_error(result, *, job_controls=True):
         if result.get("downsample_flush_warnings"):
             messages.append(
                 f"{plural(result['downsample_flush_warnings'], 'rewritten file')} "
-                "could not be confirmed flushed to disk"
+                "could not be confirmed written to disk"
             )
         if result.get("downsample_cancelled"):
-            messages.append("post-download downsampling stopped early")
+            messages.append("downsampling stopped early")
         if result.get("consolidation_interrupted"):
             messages.append("duplicate cleanup stopped early")
         if result.get("consolidation_failed"):
@@ -299,7 +299,7 @@ def download_error(result, *, job_controls=True):
             )
         if result.get("siblings_preserved"):
             messages.append(_copies_left(result["siblings_preserved"]))
-        detail = "; ".join(messages) or "post-download work did not finish"
+        detail = "; ".join(messages) or "a step after the download did not finish"
         return (
             f"The album imported, but {detail}."
             + hint("Check the job log before retrying.")
@@ -339,10 +339,10 @@ def download_error(result, *, job_controls=True):
             return (
                 "The new copy is in your library, but files from the album "
                 "it replaced could not be carried into it. "
-                + ("That album is kept whole in a backup in Settings > "
+                + ("That album is kept whole in a backup in Settings → "
                    "Diagnostics." if result.get("companions_settled") else
                    "The next time the app starts, it keeps that album as a "
-                   "backup in Settings > Diagnostics.")
+                   "backup in Settings → Diagnostics.")
             )
         if result.get("result") == "incomplete":
             if result.get("upgrade_put_back"):

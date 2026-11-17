@@ -77,7 +77,7 @@
   {% for recovery in job.recoveries %}{% if recovery_on_disk(recovery) %}{% set kept.on_disk = true %}{% endif %}{% endfor %}
   <div class="ql-notice ql-notice-warning ql-job-error" role="alert">
     <div class="ql-notice-copy">
-      <strong>{% if kept.on_disk %}Recovery files still held{% else %}Original files are no longer kept{% endif %}</strong>
+      <strong>{% if kept.on_disk %}Original files kept{% else %}Original files are no longer kept{% endif %}</strong>
       {# Say why this backup exists. The record carries an exact per-stage
          reason. #}
       {% for recovery in job.recoveries %}
@@ -153,7 +153,7 @@
             {%- if job.execute_kind == 'downsample' %}{% if downsample_originals_choice in ('keep', 'delete') %} data-confirm="{% if downsample_originals_choice == 'keep' %}Downsample the selected albums now? Each file is rewritten in place at 44.1 / 48 kHz; the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }} and can be restored from Settings → Diagnostics.{% else %}Downsample the selected albums now? This cannot be undone. Each file is rewritten in place at 44.1 / 48 kHz and hi-res originals are not kept.{% endif %}"{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm="{% if job.review_verb == 'Move' %}Move the selected folders ({count})? This relocates your originals instead of copying them, and removes the folders it empties.{% else %}Copy selected folders ({count}) into the organised library?{% endif %}"
             {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Damaged files are set aside while their replacements download, and an album too damaged to patch is downloaded again in full. Your originals are removed once the replacement is proven good, so a repair cannot be undone. If a replacement cannot be verified, it stays in the album and your originals are kept, restorable from Settings."
-            {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement verifies. This cannot be undone."
+            {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement is verified. This cannot be undone."
             {%- else %}{% set _missing_confirm = "Download {count} selected album{s}?" %}{% set _gaps_confirm = "Download the missing tracks of {count} selected album{s}?" %} data-confirm="{{ _gaps_confirm if review_tab == 'gaps' else _missing_confirm }}"
             {%- if review_tab %} data-confirm-missing="{{ _missing_confirm }}" data-confirm-gaps="{{ _gaps_confirm }}"{% endif %}
             {%- endif %}
@@ -272,8 +272,8 @@
     {% if catalog_cleanup and catalog_cleanup.get('pending') %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="alert">
       <div class="ql-notice-copy">
-        <strong>Catalogue cleanup still needed</strong>
-        <div>The downloaded track is gone, but its stale Beets catalogue entry could not be cleared yet. Retry below; if it keeps failing, run <code>beet update</code>.</div>
+        <strong>Still listed in Beets</strong>
+        <div>The downloaded track is gone, but Beets still lists it. Retry below; if it keeps failing, run <code>beet update</code>.</div>
       </div>
     </div>
     {% endif %}
@@ -290,8 +290,8 @@
     {% if job._single_undo_unavailable %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
       <div class="ql-notice-copy">
-        <strong>Saved actions unavailable</strong>
-        <div>The saved recovery state for this single-track job could not be verified, so Retry and Undo are paused. Check the data folder, then restart Qobuz Librarian and reopen this job.</div>
+        <strong>Actions unavailable</strong>
+        <div>The saved details of this track could not be read or written, so Retry and Undo are off. Check the data folder, then restart Qobuz Librarian.</div>
       </div>
     </div>
     {% endif %}
@@ -341,7 +341,7 @@
       <form action="/jobs/{{ job.id }}/undo" method="post"
             hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Retry catalogue cleanup</button>
+        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Retry Beets cleanup</button>
         {% include "_writes_paused_reason.html" %}
       </form>
       {% elif s in ('done', 'failed') and job.single and job.single.get('owned_path') and not job.single.get('removed') and not job._preserve_persisted_single and not job._single_undo_unavailable %}

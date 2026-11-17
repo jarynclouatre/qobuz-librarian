@@ -176,7 +176,7 @@ def load():
     head, _raw = _read_head()
     data = state_file.load_json_object(
         cfg.LIBRARY_SCAN_STATE_FILE, "the saved library scan",
-        "your parked Library review (it would need a full rescan)")
+        "your saved Library review (it would need a full rescan)")
     if data is not None and head is not None and data.get("stamp") == head["stamp"]:
         data = _with_head(data, head)
     return _normalise(data)

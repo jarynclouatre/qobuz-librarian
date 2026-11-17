@@ -100,7 +100,7 @@ docker compose run --rm qobuz-librarian cli --help
 | Downloading without importing (`--no-import`) | New releases checks and Discover |
 | Merging sibling album folders (`--consolidate`) | Downloading a single track (Search's Track tab) |
 | Upgrading an album during an ordinary download (`AUTO_UPGRADE_ENABLED`) | Dismissing and bringing back albums |
-| | Restoring, removing or deleting kept backups and hi-res originals (Settings > Diagnostics), and restoring from a collection backup |
+| | Restoring, removing or deleting kept backups and hi-res originals (Settings → Diagnostics), and restoring from a collection backup |
 | | The Settings fields `--settings` leaves out |
 | | History entries and `POST_JOB_HOOK` reports for Lyrics and Library migration runs |
 
@@ -125,7 +125,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--[no-]include-live`, `--[no-]include-comps`, `--[no-]include-singles`, `--[no-]include-other` | List live releases, compilations, EPs and singles, or releases Qobuz files under other among missing albums (default: the Library review's switches) |
 | `--[no-]include-bonus` | Offer to fill albums whose only missing tracks are other versions of songs they have, in Artist mode, the Library walk and Gap Fill (default: the Library review's Bonus versions switch) |
 | `--[no-]prefer-hires` | List each album's highest-resolution edition first, keeping the search order (default: the Prefer hi-res setting) |
-| `--dry-run` | Show the plan and change nothing; a download a restart cut off is still settled first, as at every start |
+| `--dry-run` | Show the plan and change nothing; a download a restart cut off is still cleaned up first, as at every start |
 | `--force` | Download every track of the album again (search or album URL only) |
 | `--yes` | Answer yes to the confirmations; choices still ask |
 | `--auto-safe` | With `--upgrade-walk`, confirm only the upgrades it can classify as safe |

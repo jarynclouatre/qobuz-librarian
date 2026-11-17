@@ -1371,8 +1371,8 @@ async def job_retry(request: Request, job_id: str):
         )
     if (job.execute_args or {}).get("retry_disabled") == "backup":
         return _land(
-            error="This album has a retained safety backup. Review it under "
-                  "Settings > Diagnostics before starting the album again.",
+            error="This album has a kept backup. Review it under "
+                  "Settings → Diagnostics before starting the album again.",
         )
     if (
         getattr(job, "_preserve_persisted_single", False) is True
@@ -1802,8 +1802,8 @@ async def job_undo(request: Request, job_id: str):
             else:
                 job.attention = "catalog"
                 job.summary = (
-                    f"Removed “{info.get('title')}”, but couldn't clear its "
-                    "stale Beets catalogue entry. Retry catalogue cleanup."
+                    f"Removed “{info.get('title')}”, but Beets still lists it. "
+                    "Retry Beets cleanup."
                 )
         elif removed is not None:
             refresh_needed = True
@@ -1827,8 +1827,8 @@ async def job_undo(request: Request, job_id: str):
                 }
                 job.attention = "catalog"
                 job.summary = (
-                    f"Removed “{info.get('title')}”, but couldn't clear its "
-                    "stale Beets catalogue entry. Retry catalogue cleanup."
+                    f"Removed “{info.get('title')}”, but Beets still lists it. "
+                    "Retry Beets cleanup."
                 )
         else:
             # If the whole recorded directory is gone, clearing the single

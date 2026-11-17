@@ -75,7 +75,7 @@
   {% elif upgrade_state.complete %}
   <section class="ql-work-card ql-quality-entry-card">
     <div class="ql-work-card-copy">
-      <p class="ql-work-card-text">{% if upgrade_state.discarded %}The next Library scan lists the discarded upgrades again.{% else %}The latest Library scan checked the whole catalogue with your current quality settings.{% if hidden_count %} Every upgrade it found is dismissed.{% endif %}{% endif %}</p>
+      <p class="ql-work-card-text">{% if upgrade_state.discarded %}The next Library scan lists the discarded upgrades again.{% else %}The latest Library scan checked the whole library with your current quality settings.{% if hidden_count %} Every upgrade it found is dismissed.{% endif %}{% endif %}</p>
     </div>
     <div class="ql-work-card-actions">
       <a href="/library" class="ql-btn {{ _entry_btn }} w-full sm:w-auto">Open Library</a>

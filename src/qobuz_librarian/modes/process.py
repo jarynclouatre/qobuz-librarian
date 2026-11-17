@@ -1942,8 +1942,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                         catalogue_unverified = True
                         if not pin_unverified_upgrade_backup(
                                 upgrade_backup_path,
-                                "upgrade kept; the replaced Beets entries "
-                                "could not be retired"):
+                                "upgrade kept; the old Beets entries "
+                                "could not be removed"):
                             warn_pin_failed(upgrade_backup_path)
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Upgrade landed, but its Beets catalogue "
@@ -1983,7 +1983,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                         warn_pin_failed(upgrade_backup_path)
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Upgrade landed, but the rebuilt album or its "
-                        "companions couldn't be flushed; keeping the "
+                        "companions couldn't be confirmed written to disk; keeping the "
                         "backup."))
                     log.info(fmt(C.GRAY,
                         f"     Backup remains at {upgrade_backup_path}; keep it "
@@ -2122,8 +2122,8 @@ def process_album(album, args, *, allow_force=True, label=None,
                         catalogue_unverified = True
                         if not pin_unverified_upgrade_backup(
                                 gap_fill_backup_path,
-                                "gap-fill backup kept; the replaced Beets "
-                                "entries could not be retired"):
+                                "gap-fill backup kept; the old Beets "
+                                "entries could not be removed"):
                             warn_pin_failed(gap_fill_backup_path)
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Gap-fill landed, but its Beets catalogue "
@@ -2156,11 +2156,11 @@ def process_album(album, args, *, allow_force=True, label=None,
                     recovery_unverified = True
                     if not pin_unverified_upgrade_backup(
                             gap_fill_backup_path,
-                            "gap-fill backup kept; replacement not durable"):
+                            "gap-fill backup kept; replacement not confirmed written to disk"):
                         warn_pin_failed(gap_fill_backup_path)
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Gap-fill landed, but the filled album couldn't "
-                        "be flushed; keeping the backed-up tracks."))
+                        "be confirmed written to disk; keeping the backed-up tracks."))
                     log.info(fmt(C.GRAY,
                         f"     Backup remains at {gap_fill_backup_path}."))
                 else:
@@ -2346,7 +2346,7 @@ def process_album(album, args, *, allow_force=True, label=None,
             )
         if downsample_outcome["downsample_flush_warnings"]:
             log.info(
-                f"  {fmt(C.YELLOW, '⚠ flush warning:')}  "
+                f"  {fmt(C.YELLOW, '⚠ disk write warning:')}  "
                 f"{downsample_outcome['downsample_flush_warnings']}"
             )
         if downsample_outcome["downsample_cancelled"]:

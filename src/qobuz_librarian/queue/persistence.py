@@ -69,8 +69,8 @@ def queue_saver(mode, *, dry_run=False):
             if not told:
                 told.append(True)
                 log.info(fmt(C.YELLOW,
-                    "  ⚠  An album is parked for recovery, so the saved queue "
-                    "is being kept exactly as it stands until the next "
+                    "  ⚠  An album is waiting to be recovered, so the saved queue "
+                    "is kept as it is until the next "
                     "launch."))
             return False
         return True
@@ -93,7 +93,7 @@ def queue_parked():
 # What a run asks of the user after an upgrade whose album's own files could
 # not be carried into the new copy.
 OWN_FILES_LEFT = "copy your own files from the backups the next start keeps"
-OWN_FILES_KEPT = "copy your own files from the backups in Settings > Diagnostics"
+OWN_FILES_KEPT = "copy your own files from the backups in Settings → Diagnostics"
 
 
 def own_files_clause():
@@ -115,8 +115,8 @@ def parked_queue_note():
     """What a run says when an album stopped for recovery holds the saved
     queue."""
     return fmt(C.YELLOW, wrap(
-        "An album is parked for recovery. Run Qobuz Librarian again with no "
-        "mode or search argument: it settles that album first, then offers "
+        "An album is waiting to be recovered. Run Qobuz Librarian again with no "
+        "mode or search argument: it recovers that album first, then offers "
         "the saved queue.", indent="  ⚠  ", hanging="     "))
 
 
@@ -378,8 +378,8 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                             "downloaded - saved queue kept for next launch."))
                     else:
                         log.info(fmt(C.YELLOW,
-                            "  ⚠  The saved queue is not fully settled; its "
-                            "durable recovery was kept for next launch."))
+                            "  ⚠  The saved queue is not finished; its recovery "
+                            "record was kept for the next launch."))
             except KeyboardInterrupt:
                 log.info(fmt(C.YELLOW,
                     "\n  ⚠  Resume interrupted; saved queue kept for next launch."))

@@ -29,8 +29,8 @@
     <input type="hidden" name="tab" value="">
     <input type="hidden" name="q" value="">
     <button type="submit" class="ql-header-refresh"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
-            title="{% if writes_paused %}{{ writes_paused_reason }}{% elif qobuz_ready %}Scan for music added outside the app{% else %}Connect Qobuz before refreshing{% endif %}"
-            aria-label="Scan for music added outside the app">
+            title="{% if writes_paused %}{{ writes_paused_reason }}{% elif qobuz_ready %}Refresh: find music added outside the app{% else %}Connect Qobuz before refreshing{% endif %}"
+            aria-label="Refresh: find music added outside the app">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
     </button>
   </form>

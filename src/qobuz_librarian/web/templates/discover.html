@@ -62,15 +62,15 @@
         {%- elif discover_tab == 'genres' and tag -%}Asking Last.fm what is tagged {{ tag | lower }}.
         {%- else -%}Reading your library.{%- endif -%}
         {%- elif discover_tab == 'search' -%}
-        Found {{ feed.checked }} of {{ feed.total }} artist{{ 's' if feed.total != 1 }} like {{ searched }} in the Qobuz catalogue{% if feed.looked_up %}, {{ feed.looked_up }} looked up{% endif %}.
+        Found {{ feed.checked }} of {{ feed.total }} artist{{ 's' if feed.total != 1 }} like {{ searched }} on Qobuz{% if feed.looked_up %}, {{ feed.looked_up }} looked up{% endif %}.
         {%- elif discover_tab == 'genres' and not tag -%}
         Read the tags on {{ feed.checked }} of {{ feed.total }} of your artists.
         {%- elif discover_tab == 'genres' -%}
-        Found {{ feed.checked }} of {{ feed.total }} album{{ 's' if feed.total != 1 }} tagged {{ tag | lower }} in the Qobuz catalogue{% if feed.looked_up %}, {{ feed.looked_up }} looked up{% endif %}.
+        Found {{ feed.checked }} of {{ feed.total }} album{{ 's' if feed.total != 1 }} tagged {{ tag | lower }} on Qobuz{% if feed.looked_up %}, {{ feed.looked_up }} looked up{% endif %}.
         {%- elif discover_tab == 'favourites' -%}
         Checked {{ feed.checked }} of {{ feed.total }} saved album{{ 's' if feed.total != 1 }}.
         {%- elif feed.stage == 'catalogue' -%}
-        Found {{ feed.checked }} of {{ feed.total }} suggested artist{{ 's' if feed.total != 1 }} in the Qobuz catalogue.
+        Found {{ feed.checked }} of {{ feed.total }} suggested artist{{ 's' if feed.total != 1 }} on Qobuz.
         {%- else -%}
         Checked {{ feed.checked }} of {{ feed.total }} artist{{ 's' if feed.total != 1 }} in your library.
         {%- endif -%}

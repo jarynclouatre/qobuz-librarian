@@ -22,29 +22,29 @@
         <span class="ql-status-chip is-error">Failed</span>
       {% endif %}
       {% if job.recovery_unreadable %}
-        <span class="ql-status-chip is-warning" title="The saved Repair recovery details could not be read.">Recovery unreadable</span>
+        <span class="ql-status-chip is-warning" title="The saved details of this repair could not be read.">Details unreadable</span>
       {% elif job.recoveries %}
-        <span class="ql-status-chip is-warning"{% if job.execute_kind != 'migration' %} title="Original files remain in a Repair recovery folder."{% endif %}>Recovery needed</span>
+        <span class="ql-status-chip is-warning"{% if job.execute_kind != 'migration' %} title="Repair kept the original files."{% endif %}>Originals kept</span>
       {% elif job.execute_args_unreadable %}
         <span class="ql-status-chip is-warning" title="The saved details needed to retry this job could not be read.">Retry unavailable</span>
       {% elif job.single_unreadable %}
-        <span class="ql-status-chip is-warning" title="The saved single-track recovery details could not be read.">Actions unavailable</span>
+        <span class="ql-status-chip is-warning" title="The saved details of this track could not be read.">Actions unavailable</span>
       {% elif job.attention == 'recovery' %}
-        <span class="ql-status-chip is-warning" title="The saved download recovery must be settled before retrying.">Recovery attention</span>
+        <span class="ql-status-chip is-warning" title="The interrupted download has not been cleared yet.">Cleanup pending</span>
       {% elif job.attention == 'partial' and not job.tracks_missing %}
         <span class="ql-status-chip is-warning" title="This album is missing tracks; open it for details.">Incomplete</span>
       {% elif job.attention == 'lossy' and not job.tracks_missing %}
         <span class="ql-status-chip is-warning" title="Qobuz does not have every track in lossless quality.">Lossless unavailable</span>
       {% elif job.attention == 'backup' %}
-        <span class="ql-status-chip is-warning" title="A retained safety backup needs review under Settings and Diagnostics.">Backup retained</span>
+        <span class="ql-status-chip is-warning" title="A kept backup needs review under Settings → Diagnostics.">Backup kept</span>
       {% elif job.attention == 'processing' %}
-        <span class="ql-status-chip is-warning" title="Post-download work did not finish cleanly; open it for details.">Post-download attention</span>
+        <span class="ql-status-chip is-warning" title="A step after the download did not finish; open it for details.">Needs a look</span>
       {% elif job.attention == 'unchecked' %}
         <span class="ql-status-chip is-warning" title="Some artists or tracks could not be read; open it for details.">Scan incomplete</span>
       {% elif job.attention == 'cancel_late' %}
         <span class="ql-status-chip is-warning" title="It finished before the stop could take effect.">Cancelled too late</span>
       {% elif job.attention == 'catalog' %}
-        <span class="ql-status-chip is-warning" title="The deleted track still has a stale Beets catalogue entry.">Catalogue cleanup</span>
+        <span class="ql-status-chip is-warning" title="Beets still lists the deleted track.">Still in Beets</span>
       {% elif job.attention == 'quality' %}
         <span class="ql-status-chip is-warning" title="Finished below your target quality; open it for details.">Below target quality</span>
       {% endif %}
@@ -77,9 +77,9 @@
       {% if job.recovery_unreadable %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}{% else %}<a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>{% endif %}
     </p>
     {% if job.recovery_unreadable %}
-    <p class="ql-row-meta ql-row-meta--error">Saved recovery details could not be read. Inspect the backups under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+    <p class="ql-row-meta ql-row-meta--error">The saved details of this repair could not be read. Check the backups under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
     {% elif job.recoveries and job.execute_kind != 'migration' %}
-    <p class="ql-row-meta ql-row-meta--error">Recovery files are still held. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+    <p class="ql-row-meta ql-row-meta--error">Original files are kept. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
     {% endif %}
   </div>
   {{ job_side(job, return_to) }}

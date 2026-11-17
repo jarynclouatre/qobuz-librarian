@@ -2478,7 +2478,7 @@ def _scan_library_impl(
         if not checkpoint.clear():
             job.push_line(
                 "The stopped scan checkpoint could not be cleared. It will be "
-                "ignored unless its artist proofs still match."
+                "ignored unless its artists still match."
             )
         if not partial_only:
             generation_state.finish_attempt(attempt_id, "cancelled")
@@ -3320,10 +3320,10 @@ def execute_albums(job, chosen, token):
             one = attention_counts["backup"] == 1
             messages.append(
                 f"{plural(attention_counts['backup'], 'album')} "
-                "retained a safety backup because "
+                "kept a backup because "
                 f"{'its' if one else 'their'} replacement or recovery "
                 f"could not be verified. Review {'it' if one else 'them'} "
-                "under Settings > Diagnostics before downloading "
+                "under Settings → Diagnostics before downloading "
                 f"{'that album' if one else 'those albums'} again."
             )
             job.attention = "backup"
@@ -3338,7 +3338,7 @@ def execute_albums(job, chosen, token):
             messages.append(
                 f"{plural(attention_counts['processing'], 'imported album')} "
                 f"{'has' if attention_counts['processing'] == 1 else 'have'} "
-                "post-download work that did not finish cleanly; see the "
+                "a step after the download that did not finish; see the "
                 "job log."
             )
             if not job.attention:
@@ -3596,8 +3596,8 @@ def execute_albums(job, chosen, token):
         parts.append(f"{named_albums(skipped_cands)} skipped")
     if attention_counts["backup"]:
         parts.append(
-            f"{plural(attention_counts['backup'], 'album')} retained "
-            "a safety backup for review"
+            f"{plural(attention_counts['backup'], 'album')} kept "
+            "a backup for review"
         )
     if attention_counts["quality"]:
         parts.append(
@@ -3607,8 +3607,8 @@ def execute_albums(job, chosen, token):
     if attention_counts["processing"]:
         parts.append(
             f"{plural(attention_counts['processing'], 'imported album')} "
-            f"{'needs' if attention_counts['processing'] == 1 else 'need'} "
-            "post-download attention"
+            f"{'has' if attention_counts['processing'] == 1 else 'have'} "
+            "a step after the download that did not finish"
         )
     if attention_counts["partial"]:
         parts.append(
@@ -3924,15 +3924,14 @@ def execute_upgrades(job, chosen, token):
             job.summary += f" {cd_quality_note(cd_quality_tracks)}"
         if kept:
             job.summary += (
-                f" {plural(kept, 'replacement')} retained a safety backup."
+                f" {plural(kept, 'replacement')} kept a backup."
             )
         job.summary += _kept_companions_note(companion_notes)
         job.summary += _put_back_note(put_back_notes)
         if catalogue_failed:
             job.summary += (
                 f" {plural(catalogue_failed, 'replacement')} "
-                f"{'needs' if catalogue_failed == 1 else 'need'} catalogue "
-                "attention; backup retained."
+                "couldn't be updated in Beets; backup kept."
             )
         if quality_attention:
             job.summary += (
@@ -3942,13 +3941,13 @@ def execute_upgrades(job, chosen, token):
         if processing_attention:
             job.summary += (
                 f" {plural(processing_attention, 'album')} "
-                f"{'needs' if processing_attention == 1 else 'need'} "
-                "post-download attention."
+                f"{'has' if processing_attention == 1 else 'have'} "
+                "a step after the download that did not finish."
             )
         if kept or catalogue_failed:
             job.attention = "backup"
             job.error = (
-                "A retained safety backup needs review under Settings > "
+                "A kept backup needs review under Settings → "
                 "Diagnostics before that album is upgraded again."
             )
         elif quality_attention:
@@ -3956,7 +3955,7 @@ def execute_upgrades(job, chosen, token):
             job.error = "An album remained below the target quality."
         elif processing_attention:
             job.attention = "processing"
-            job.error = "Post-download work needs attention; see the job log."
+            job.error = "A step after the download did not finish; see the job log."
         elif failed:
             job.error = (f"{plural(failed, 'album')} couldn't be upgraded"
                          f"{_folders_denied_note(failed, denied)}.")
@@ -3974,9 +3973,9 @@ def execute_upgrades(job, chosen, token):
     msg = (f"Upgraded {named_albums(upgraded)}." if upgraded
            else "No albums were upgraded.")
     if kept:
-        msg += (f" {plural(kept, 'replacement')} kept a safety backup because "
+        msg += (f" {plural(kept, 'replacement')} kept a backup because "
                 "the replacement or recovery couldn't be verified; review it "
-                "under Settings > Diagnostics.")
+                "under Settings → Diagnostics.")
     if changed:
         msg += f" {_changed_since_review(changed)}."
     msg += _kept_companions_note(companion_notes)
@@ -3985,8 +3984,7 @@ def execute_upgrades(job, chosen, token):
         msg += f" {cd_quality_note(cd_quality_tracks)}"
     if catalogue_failed:
         msg += (f" {plural(catalogue_failed, 'replacement')} "
-                f"{'needs' if catalogue_failed == 1 else 'need'} catalogue "
-                "attention; backup retained.")
+                "couldn't be updated in Beets; backup kept.")
     if quality_attention:
         msg += (
             f" {plural(quality_attention, 'album')} finished below target "
@@ -3995,8 +3993,8 @@ def execute_upgrades(job, chosen, token):
     if processing_attention:
         msg += (
             f" {plural(processing_attention, 'album')} "
-            f"{'needs' if processing_attention == 1 else 'need'} post-download "
-            "attention."
+            f"{'has' if processing_attention == 1 else 'have'} a step after "
+            "the download that did not finish."
         )
     job.summary = msg
     log.info(msg)
@@ -4007,12 +4005,12 @@ def execute_upgrades(job, chosen, token):
         problems = []
         if kept:
             problems.append(
-                f"{plural(kept, 'replacement')} retained a safety backup"
+                f"{plural(kept, 'replacement')} kept a backup"
             )
         if catalogue_failed:
             problems.append(
                 f"{plural(catalogue_failed, 'replacement')} couldn't be "
-                "reconciled with the Beets catalogue"
+                "updated in Beets"
             )
         if failed:
             problems.append(
@@ -4029,11 +4027,11 @@ def execute_upgrades(job, chosen, token):
         if processing_attention:
             problems.append(
                 f"{plural(processing_attention, 'album')} "
-                f"{'has' if processing_attention == 1 else 'have'} post-download "
-                "work needing attention"
+                f"{'has' if processing_attention == 1 else 'have'} a step "
+                "after the download that did not finish"
             )
         if kept or catalogue_failed:
-            problems.append("review retained backups under Settings > Diagnostics")
+            problems.append("review kept backups under Settings → Diagnostics")
             job.attention = "backup"
         elif quality_attention:
             job.attention = "quality"
@@ -4398,8 +4396,9 @@ def execute_downsamples(
         detail = _named_files(flushed_files, total_flush_warns)
         reason = _lone_reason(flushed_files, total_flush_warns)
         note = (
-            f"Resampled {detail} but couldn't flush "
-            f"{'it' if total_flush_warns == 1 else 'them'} to disk, so the "
+            f"Resampled {detail} but couldn't confirm "
+            f"{'it was' if total_flush_warns == 1 else 'they were'} written "
+            "to disk, so the "
             "change may not survive a power cut. Check the drive."
             + (f" ({reason})" if reason else "")
         )
@@ -4433,10 +4432,10 @@ def _kept_companions_note(notes):
         one = len(names) == 1
         return (f" {label}: the original {', '.join(names)} "
                 f"{'differs' if one else 'differ'} from the new album's and "
-                f"{'is' if one else 'are'} kept in a backup under Settings > "
+                f"{'is' if one else 'are'} kept in a backup under Settings → "
                 "Diagnostics.")
     return (f" {plural(len(notes), 'album')} had original files that differ "
-            "from the new album's; they are kept in backups under Settings > "
+            "from the new album's; they are kept in backups under Settings → "
             "Diagnostics.")
 
 
@@ -4448,7 +4447,7 @@ def _put_back_note(notes):
     if not notes:
         return ""
     aside = any(where for _label, where in notes)
-    tail = (" and the new download set aside under Settings > Diagnostics"
+    tail = (" and the new download set aside under Settings → Diagnostics"
             if aside else "")
     if len(notes) == 1:
         return (f" {notes[0][0]}: the new download couldn't be verified as "
@@ -5159,15 +5158,15 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
                     ):
                         result["repair_unverified"] = True
                         pin_repair_recovery(
-                            "repair backup kept; the replaced Beets entries "
-                            "could not be retired")
-                        log.info("  Re-download verified, but its replaced "
-                                 "Beets entries couldn't be reconciled; "
+                            "repair backup kept; the old Beets entries "
+                            "could not be removed")
+                        log.info("  Re-download verified, but the old "
+                                 "Beets entries couldn't be removed; "
                                  f"keeping the backup at {backup}.")
                         checkpoint_recovery(
                             "verification",
-                            "The re-download verified, but the replaced Beets "
-                            "entries could not be reconciled.",
+                            "The re-download verified, but the old Beets "
+                            "entries could not be removed.",
                         )
                     elif left:
                         result["companions_kept"] = left
@@ -5210,14 +5209,14 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
                 else:
                     result["repair_unverified"] = True
                     pin_repair_recovery(
-                        "repair backup kept, replacement not durable")
+                        "repair backup kept, replacement not confirmed written to disk")
                     log.info("  Re-download landed, but the rebuilt album or its "
-                             "companions couldn't be flushed; keeping your "
+                             "companions couldn't be confirmed written to disk; keeping your "
                              f"backup at {backup}.")
                     checkpoint_recovery(
                         "verification",
                         "The replacement landed, but its album or companion files "
-                        "could not be flushed.",
+                        "could not be confirmed written to disk.",
                     )
             elif imported_ok:
                 # Imported, but a decode pass alone doesn't prove the re-rip kept

@@ -1099,7 +1099,7 @@ def _gap_fill_exit_code(counts, *, stopped=False):
         retry = _ATTENTION_BUCKETS - {"own_files_left"}
         if queue_parked():
             clauses.append(
-                "run the CLI menu again to settle the stopped album")
+                "run the CLI menu again to recover the stopped album")
             retry -= {"stopped"}
         if any(counts[bucket] for bucket in retry):
             clauses.append("retry the unfinished albums above")

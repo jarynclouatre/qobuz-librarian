@@ -644,7 +644,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     "  ✗  The backup stopped part way and not every damaged "
                     "file could be put back. No replacement was downloaded; "
                     "the missing files are in the backup listed under "
-                    "Settings, Diagnostics."))
+                    "Settings → Diagnostics."))
             return {"n_ok": 0, "n_fail": len(verified_truncated), "backup": None}
         _initial_recovery, recovery_saved = checkpoint_recovery(
             backup_path,
@@ -846,7 +846,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {stopped} Damaged originals are kept at:\n"
                 f"     {backup_path}\n"
-                f"     Settings, Diagnostics lists them and can put them "
+                f"     Settings → Diagnostics lists them and can put them "
                 f"back."))
             interrupt_with_recovery(exc, "refill", stopped)
 
@@ -994,7 +994,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     f"it may be short of its listed length too, or Qobuz "
                     f"couldn't confirm its recording. The album now holds "
                     f"that download and your original is kept in the backup "
-                    f"below; restore it from Settings, Diagnostics to put it "
+                    f"below; restore it from Settings → Diagnostics to put it "
                     f"back. Backup:\n     {backup_path}"))
                 checkpoint_recovery(
                     backup_path,
@@ -1353,7 +1353,7 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         if isinstance(result.get("backup"), BackupResult):
             log.info(fmt(C.YELLOW,
                 "  ⚠  The repair verified, and its backup is kept for review "
-                f"in Settings, Diagnostics:\n     {result['backup'].path}"))
+                f"in Settings → Diagnostics:\n     {result['backup'].path}"))
         _refresh_review_state_after_downloads(
             [{**result, "album": None, "dir": album_dir, "in_place": True}],
             token,

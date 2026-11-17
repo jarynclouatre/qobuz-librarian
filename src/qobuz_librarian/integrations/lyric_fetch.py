@@ -997,7 +997,7 @@ def _fsync_temp(temp_fd: int, name: str) -> None:
     try:
         os.fsync(temp_fd)
     except OSError as exc:
-        raise OSError(f"{name}: replacement couldn't be flushed to disk; "
+        raise OSError(f"{name}: replacement couldn't be confirmed written to disk; "
                       "original left untouched") from exc
 
 
@@ -1210,7 +1210,7 @@ def save_flac_tags(
         if not fsync_dir(f"/proc/self/fd/{owned_parent_fd}"):
             raise OSError(
                 f"{path.name}: replacement completed, but the folder couldn't "
-                "be flushed to disk; the change may not survive a power loss")
+                "be confirmed written to disk; the change may not survive a power loss")
     finally:
         if temp_name is not None:
             _unlink_held_name(owned_parent_fd, temp_name, temp_fd)
@@ -1361,7 +1361,7 @@ def write_sidecar(
         if not fsync_dir(f"/proc/self/fd/{owned_parent_fd}"):
             raise OSError(
                 f"{target.name}: replacement completed, but the folder couldn't "
-                "be flushed to disk; the change may not survive a power loss")
+                "be confirmed written to disk; the change may not survive a power loss")
         if (
             not still_allowed()
             or _named_identity(owned_parent_fd, target.name) != published

@@ -131,7 +131,7 @@
 {% elif error == "needuser" %}
 <div class="ql-notice ql-notice-warning" data-flash>
   <span>Add your Qobuz account email or user ID to enable downloads. Your token
-  can still be used for Search and catalogue scans.</span>
+  can still be used for Search and Library scans.</span>
 </div>
 {% elif error == "credsbusy" %}
 <div class="ql-notice ql-notice-warning" data-flash>
@@ -149,8 +149,8 @@
   <span>{% if cli_mode %}The Qobuz account was not changed because terminal
   mode is on. Press Resume web app under Mode, save the token, then switch
   back to terminal mode.{% else %}The Qobuz account was not changed because
-  the web app does not hold the run lock. Finish the other Qobuz Librarian
-  run or resume the web app, then try again.{% endif %}</span>
+  another Qobuz Librarian run is using the library. Finish that run or
+  resume the web app, then try again.{% endif %}</span>
 </div>
 {% endif %}
 {% endmacro %}
@@ -497,7 +497,7 @@
         <input type="hidden" name="mode" value="missing_albums">
         <input type="hidden" name="return_to" value="/settings">
         <button type="submit" name="force_full" value="1" class="ql-btn ql-btn-sm ql-btn-secondary"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
-                data-confirm="Re-scan every artist folder from scratch? This takes as long as a first scan and opens the Library page."
+                data-confirm="Rescan every artist folder from scratch? This takes as long as a first scan and opens the Library page."
                 data-confirm-action="Rescan">Force full rescan</button>
       </form>
     </div>
@@ -619,7 +619,7 @@
     {% if collection_backup.held_back_unreadable %}
     <div class="ql-notice ql-notice-error mb-6">
       <span>
-        The held-back collection check could not be read. Check that
+        The record of the skipped backup could not be read. Check that
         <code>{{ collection_backup.folder }}</code> is readable before replacing
         anything.
       </span>
@@ -630,11 +630,11 @@
     <div class="ql-notice ql-notice-warning mb-6 flex items-start flex-wrap gap-3">
       <span class="flex-1">
         {% if not collection_backup.held_back.albums %}
-        Backup held back: no music was found in your library folder.
+        Backup skipped: no music was found in your music folder.
         {% if collection_backup.counts %}The last backup was kept.{% else %}No backup was created because there was nothing to record.{% endif %}
         Check that your music folder is mounted before {% if collection_backup.counts %}replacing it{% else %}recording the library as empty{% endif %}.
         {% else %}
-        Backup held back:
+        Backup skipped:
         {{ "{:,}".format(collection_backup.counts.albums) if collection_backup.counts else "more" }}
         albums last time,
         {{ "{:,}".format(collection_backup.held_back.albums) }} now. The last
@@ -881,7 +881,7 @@
       <div class="min-w-0">
         {% if health_lock_busy %}
         <p class="ql-mode-state">Another run is using the library</p>
-        <p class="ql-mode-help">Web scans and downloads are paused. The web app takes the library back within about 30 seconds of that run ending; switch to terminal mode to keep it for the terminal.</p>
+        <p class="ql-mode-help">Web scans and downloads are paused. They resume within about 30 seconds of that run ending; switch to terminal mode to keep them paused.</p>
         {% else %}
         <p class="ql-mode-state">Web app active</p>
         <p class="ql-mode-help">Switch to terminal mode to run the CLI command above. Web scans and downloads pause until you resume.</p>

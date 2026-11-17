@@ -679,7 +679,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             os.fsync(temp_fd)
         except OSError:
             return (rel, sr, rate, None,
-                    "resampled copy couldn't be flushed to disk")
+                    "resampled copy couldn't be confirmed written to disk")
         if not binding.exact_track_is_named():
             return (rel, sr, rate, None,
                     "source or resampled output changed before replacement")
@@ -699,7 +699,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         # it done. Nothing here can be undone; say so instead of staying quiet.
         if not fsync_dir(_descriptor_path(binding.parent_fd)):
             return (rel, sr, rate, in_size - out_size,
-                    "resampled, but the folder couldn't be flushed to disk; "
+                    "resampled, but the folder couldn't be confirmed written to disk; "
                     "the swap may not survive a power loss; check the drive")
         return (rel, sr, rate, in_size - out_size, None)
     except subprocess.TimeoutExpired:
@@ -987,7 +987,7 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             if errors_total:
                 caveats.append(f"{errors_total} failed")
             if flush_warnings:
-                caveats.append(f"{flush_warnings} flush warning")
+                caveats.append(f"{flush_warnings} disk write warning")
             if cancelled:
                 caveats.append("stopped early")
             log(

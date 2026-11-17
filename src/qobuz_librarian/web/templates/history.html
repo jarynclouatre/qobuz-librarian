@@ -30,13 +30,8 @@
 {% include "_writes_paused_notice.html" %}
 
 {% if attention_only and jobs %}
-{% set held = namespace(recovery=false, catalog=false) %}
-{% for job in jobs %}
-  {% if job.recoveries or job.recovery_unreadable or job.attention == 'recovery' %}{% set held.recovery = true %}{% endif %}
-  {% if job.attention == 'catalog' %}{% set held.catalog = true %}{% endif %}
-{% endfor %}
 <div class="ql-notice ql-notice-warning">
-  <span>Showing unresolved History items.{% if held.recovery and held.catalog %} Recovery and Catalogue cleanup stay until resolved.{% elif held.recovery %} Recovery stays until resolved.{% elif held.catalog %} Catalogue cleanup stays until resolved.{% endif %} <a href="/queue/history">Show all history</a>.</span>
+  <span>Showing unresolved History items. <a href="/queue/history">Show all history</a>.</span>
 </div>
 {% endif %}
 
@@ -46,7 +41,7 @@
   <form action="/queue/clear" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
-            data-confirm="Clear finished jobs from history? Downloaded tracks lose their Undo. Parked reviews and recovery records stay until resolved."
+            data-confirm="Clear finished jobs from history? Downloaded tracks lose their Undo. Saved reviews and unresolved items stay."
             data-confirm-action="Clear history" data-irreversible>Clear history</button>
   </form>
 </div>

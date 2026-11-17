@@ -1478,7 +1478,7 @@ def _retire_cleared_download(authority, journal, item, reference, manifest_hash,
 
 def _backup_sentence(backup):
     return (
-        " The tracks it replaced are kept in a backup listed in Settings > "
+        " The tracks it replaced are kept in a backup listed in Settings → "
         "Diagnostics, where Restore puts them back in "
         f"{backup.receipt['origin']}."
     )
@@ -1491,7 +1491,7 @@ def _upgrade_backup_kept(only=None):
     does not send anyone to it."""
     held = f", which holds the only copy of {only}" if only else ""
     return (
-        f"kept whole in a backup listed in Settings > Diagnostics{held}. Copy "
+        f"kept whole in a backup listed in Settings → Diagnostics{held}. Copy "
         "what you want from it, then remove its folder yourself."
     )
 
@@ -1687,7 +1687,7 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
         "The download was cleared. Beets had not filed any of its tracks."
     )
     listed = (
-        "listed in Settings > Diagnostics as “Files from a stopped download”, "
+        "listed in Settings → Diagnostics as “Files from a stopped download”, "
         "where you can remove"
     )
     if set_aside and staged:

@@ -96,7 +96,7 @@ TEXT_FIELDS = [
      "releases review.",
      "enum", ["0", "21600", "43200", "86400", "604800"], ""),
     ("DOWNSAMPLE_KEEP_ORIGINALS", "Keep originals when downsampling",
-     "Whether the Downsample page parks a restorable copy of each hi-res "
+     "Whether the Downsample page keeps a restorable copy of each hi-res "
      "original before rewriting it, or deletes it to save space.",
      "enum", ["keep", "delete"], ""),
 ]
