@@ -205,6 +205,14 @@ def fsync_dirs(*descriptors) -> None:
         synced.add(identity)
 
 
+def close_descriptors(descriptors) -> None:
+    for descriptor in reversed(descriptors):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
 @contextmanager
 def exclusive_lock(path, *, dir_fd=None):
     """Hold an exclusive flock on the lock file `path`, creating it.

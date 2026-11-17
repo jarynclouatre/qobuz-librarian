@@ -112,12 +112,6 @@ def last_run() -> float | None:
     return load().get("last_run")
 
 
-def baseline_limit() -> int | None:
-    """The ARTIST_CATALOG_LIMIT the baseline was captured under, or None if a
-    pre-tracking baseline. The check re-baselines when the live limit exceeds it."""
-    return load().get("baseline_limit")
-
-
 def mark_run(seen, when=None, complete=False, baseline_limit=None,
              capped_recent=None, started_from=None) -> bool:
     """Persist the updated per-artist catalog snapshot and the run time, keeping

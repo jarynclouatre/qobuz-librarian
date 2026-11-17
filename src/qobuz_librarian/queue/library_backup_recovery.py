@@ -70,10 +70,7 @@ class LibraryBackupResolution:
 def _owner_record(owner: RecoveryOwner) -> dict[str, str]:
     if type(owner) is not RecoveryOwner:
         raise ValueError("an exact recovery owner is required")
-    return {
-        "operation_id": owner.operation_id,
-        "item_id": owner.item_id,
-    }
+    return owner.to_record()
 
 
 def _item(journal, item_id):

@@ -57,6 +57,10 @@ def decode_recovery_json(
     return value
 
 
+def is_hex64(value) -> bool:
+    return isinstance(value, str) and _HEX_ID.fullmatch(value) is not None
+
+
 def normalise_recovery_owner(value):
     """Return an isolated strict owner record, or raise for malformed input."""
     if value is None:
@@ -64,8 +68,7 @@ def normalise_recovery_owner(value):
     if type(value) is not dict or set(value) != _OWNER_FIELDS:
         raise ValueError("recovery owner must contain operation_id and item_id")
     if any(
-        type(value[field]) is not str
-        or _HEX_ID.fullmatch(value[field]) is None
+        type(value[field]) is not str or not is_hex64(value[field])
         for field in _OWNER_FIELDS
     ):
         raise ValueError("recovery owner IDs must be 64 lowercase hex characters")

@@ -64,10 +64,8 @@
   --font-mono: var(--ql-font-mono);
   --color-base-100: var(--ql-bg);
   --color-base-200: var(--ql-surface);
-  --color-base-300: var(--ql-line);
   --color-base-content: var(--ql-text);
   --color-primary: var(--ql-gold);
-  --color-primary-content: var(--ql-action-ink);
   --color-success: var(--ql-owned);
   --color-warning: var(--ql-warning);
   --color-error: var(--ql-danger);
@@ -104,10 +102,6 @@
   display: none !important;
 }
 
-/* App surfaces use warm record-shelf depth without decorative blobs. */
-[data-theme="night"] body {
-  background-color: var(--color-base-100);
-}
 .ql-search-restoring .ql-main {
   visibility: hidden;
 }
@@ -674,9 +668,6 @@ details.ql-mobile-drawer[open]::before {
   overflow: hidden;
   padding: 0;
 }
-[data-theme="night"] .ql-search-panel:not([data-qobuz-setup-card]) {
-  background: transparent;
-}
 .ql-locked-search {
   display: grid;
   gap: 0;
@@ -862,8 +853,6 @@ details.ql-mobile-drawer[open]::before {
   box-shadow: none;
   font-size: 1rem;
   font-weight: 480;
-  color: var(--ql-text);
-  outline: none;
 }
 .ql-search-input::placeholder {
   color: color-mix(in oklab, var(--ql-text-2) 52%, transparent);
@@ -892,11 +881,6 @@ details.ql-mobile-drawer[open]::before {
 .ql-search-submit:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 70%, transparent);
   outline-offset: 2px;
-}
-.ql-search-submit .ql-spinner {
-  width: 0.875rem;
-  height: 0.875rem;
-  border-width: 1.75px;
 }
 .ql-search-submit-icon {
   display: none;
@@ -1028,7 +1012,8 @@ details.ql-mobile-drawer[open]::before {
   border-radius: 999px;
   animation: ql-spin 0.7s linear infinite;
 }
-.ql-spinner-xs {
+.ql-spinner-xs,
+.ql-search-submit .ql-spinner {
   width: 0.875rem;
   height: 0.875rem;
   border-width: 1.75px;
@@ -1348,10 +1333,6 @@ details.ql-mobile-drawer[open]::before {
 .ql-vchip[aria-expanded="true"] {
   color: var(--ql-text);
 }
-.ql-vchip:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
-  outline-offset: 2px;
-}
 .ql-row-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1577,10 +1558,6 @@ details.ql-mobile-drawer[open]::before {
 .ql-search-back:hover {
   color: var(--ql-text);
 }
-.ql-search-back:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
-  outline-offset: 2px;
-}
 .ql-search-context-title {
   margin: 0;
   min-width: 0;
@@ -1661,11 +1638,6 @@ details.ql-mobile-drawer[open]::before {
 .ql-review-switch[aria-pressed="true"] .ql-toggle-switch i {
   transform: translateX(0.9375rem);
   background-color: var(--ql-bg);
-}
-.ql-search-filter:focus-visible,
-.ql-review-switch:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
-  outline-offset: 2px;
 }
 .ql-search-view-toggle {
   display: inline-flex;
@@ -1845,7 +1817,8 @@ details.ql-mobile-drawer[open]::before {
 /* The drawn tick stays 1.5rem; the target does not. Sized by min-width/
    min-height rather than padding, since the native checkbox inside has no
    fixed size of its own for padding math to add onto reliably. */
-.ql-table-check {
+.ql-table-check,
+.ql-grid-version-check {
   display: inline-flex;
   min-width: 2.75rem;
   min-height: 2.75rem;
@@ -1853,7 +1826,8 @@ details.ql-mobile-drawer[open]::before {
   justify-content: center;
   margin: -0.625rem;
 }
-.ql-table-check:has(.ql-checkbox) {
+.ql-table-check:has(.ql-checkbox),
+.ql-grid-version-check:has(.ql-checkbox) {
   cursor: pointer;
 }
 .ql-table-title-cell {
@@ -2258,18 +2232,6 @@ details.ql-mobile-drawer[open]::before {
 .ql-grid-version-row:has(.ql-checkbox:checked) {
   background-color: color-mix(in oklab, var(--ql-text) 5%, transparent);
 }
-/* Same 44px hit-area trick as .ql-table-check. */
-.ql-grid-version-check {
-  display: inline-flex;
-  min-width: 2.75rem;
-  min-height: 2.75rem;
-  align-items: center;
-  justify-content: center;
-  margin: -0.625rem;
-}
-.ql-grid-version-check:has(.ql-checkbox) {
-  cursor: pointer;
-}
 .ql-grid-version-copy {
   min-width: 0;
 }
@@ -2419,7 +2381,6 @@ details.ql-mobile-drawer[open]::before {
     grid-column: 2;
   }
   .ql-table-title-cell {
-    grid-column: 2;
     align-items: flex-start;
     gap: 0.68rem;
     padding-right: 0;
@@ -3308,8 +3269,6 @@ details.ql-mobile-drawer[open]::before {
   color: color-mix(in oklab, var(--ql-danger) 92%, var(--ql-text));
 }
 .ql-review-tool:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
-  outline-offset: 2px;
   border-radius: 0.25rem;
 }
 .ql-review-tabs {
@@ -3617,10 +3576,6 @@ details.ql-mobile-drawer[open]::before {
   cursor: not-allowed;
   opacity: 0.52;
 }
-.ql-header-refresh:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
-  outline-offset: 2px;
-}
 .ql-refresh-note {
   color: var(--ql-text-3);
   font-size: 0.8rem;
@@ -3722,8 +3677,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-job-title {
   overflow-wrap: anywhere;
 }
-.ql-job-finished,
-.ql-job-muted {
+.ql-job-finished {
   color: var(--ql-text-3);
   font-size: 0.8125rem;
   line-height: 1.4;
@@ -3758,7 +3712,6 @@ details.ql-mobile-drawer[open]::before {
   font-size: 0.68rem;
 }
 .ql-repair-phase-number.is-done {
-  border-color: var(--ql-line);
   color: var(--ql-text-2);
 }
 .ql-repair-phase-number.is-current {
@@ -3771,9 +3724,7 @@ details.ql-mobile-drawer[open]::before {
   background-color: color-mix(in oklab, var(--ql-danger) 12%, transparent);
   color: color-mix(in oklab, var(--ql-danger) 88%, var(--ql-text));
 }
-.ql-repair-phase-label.is-done {
-  color: var(--ql-text);
-}
+.ql-repair-phase-label.is-done,
 .ql-repair-phase-label.is-current {
   color: var(--ql-text);
 }
@@ -3944,7 +3895,8 @@ details.ql-mobile-drawer[open]::before {
   background-color: color-mix(in oklab, var(--ql-surface) 90%, var(--ql-bg));
   padding: var(--ql-pad-card);
 }
-[data-theme="night"] .ql-system-card {
+[data-theme="night"] .ql-system-card,
+[data-theme="night"] .ql-repair-history-row {
   border-color: var(--ql-line);
   background-color: color-mix(in oklab, var(--ql-surface) 86%, #000);
 }
@@ -4015,7 +3967,6 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-page-tabs a:focus-visible,
 .ql-page-tabs button:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
   outline-offset: -2px;
 }
 /* The idle Library page shows the two result tabs as labels only. */
@@ -4048,8 +3999,6 @@ details.ql-mobile-drawer[open]::before {
   .ql-tool-panel-body {
     gap: 1.125rem;
   }
-}
-@media (min-width: 640px) {
   .ql-tool-panel form .ql-btn-primary {
     min-width: 13rem;
   }
@@ -4187,12 +4136,6 @@ details.ql-mobile-drawer[open]::before {
 .ql-work-card > form .ql-btn {
   min-height: 2.75rem;
 }
-.ql-quality-entry-card {
-  position: relative;
-}
-.ql-quality-entry-card::before {
-  content: none;
-}
 .ql-repair-history-summary {
   margin: -0.15rem 0 0;
   color: var(--ql-text-3);
@@ -4212,10 +4155,6 @@ details.ql-mobile-drawer[open]::before {
   border-radius: var(--ql-radius);
   background-color: color-mix(in oklab, var(--ql-surface) 90%, var(--ql-bg));
   padding: 0.85rem 0.95rem;
-}
-[data-theme="night"] .ql-repair-history-row {
-  border-color: var(--ql-line);
-  background-color: color-mix(in oklab, var(--ql-surface) 86%, #000);
 }
 .ql-repair-entry {
   display: flex;
@@ -5225,10 +5164,6 @@ details[open] > .ql-disclosure-summary::after {
   color: var(--ql-text);
   background-color: color-mix(in oklab, var(--ql-text) 6%, transparent);
 }
-.ql-group-dismiss:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
-  outline-offset: 2px;
-}
 .ql-group-dismiss.hidden {
   display: none !important;
 }
@@ -5918,7 +5853,6 @@ details[open] > summary .ql-review-chevron {
   color: var(--ql-text);
   border: 1px solid var(--ql-line);
 }
-[data-theme="winter"] .log-console:empty::before { color: var(--ql-text-3); }
 
 /* Quality: Hi-Res is the only gold one; CD stays neutral so the gold budget
    holds. Lossy keeps a muted warning colour. */
@@ -6067,10 +6001,6 @@ details[data-artist].htmx-swapping {
   border-color: color-mix(in oklab, var(--ql-text) 40%, transparent);
   background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
   color: var(--ql-text);
-}
-.ql-dchip:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--ql-gold) 60%, transparent);
-  outline-offset: 2px;
 }
 .ql-discover-album {
   display: flex;

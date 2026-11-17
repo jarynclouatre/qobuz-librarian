@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations import lyric_fetch
-from qobuz_librarian.web import flows, job_labels, qobuz_access, refusals, rendering, scans
+from qobuz_librarian.web import flows, job_labels, refusals, rendering, scans
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
@@ -35,7 +35,6 @@ async def lyrics_page(request: Request):
     return rendering._tr(request, "lyrics.html", {
         "page": "lyrics",
         "have_lyrics": lyric_fetch.AVAILABLE,
-        "creds_ok": qobuz_access._creds_ok(),
         "last_run": job_labels._tool_last_run_age("lyrics"),
         # A library-wide lyrics scan in flight, so the page says so instead of
         # showing the idle "Ready · Start lyrics scan" launcher while one runs.

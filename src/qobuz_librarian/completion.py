@@ -45,13 +45,15 @@ class CompletionFailure(str, Enum):
     INVENTORY_MISMATCH = "inventory-mismatch"
     BASELINE_MISMATCH = "baseline-mismatch"
     QUALITY_MISMATCH = "quality-mismatch"
-    RECOVERY_UNRESOLVED = "recovery-unresolved"
 
 
 @dataclass(frozen=True, slots=True)
 class RecoveryOwner:
     operation_id: str
     item_id: str
+
+    def to_record(self) -> dict[str, str]:
+        return {"operation_id": self.operation_id, "item_id": self.item_id}
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,30 @@ class DownloadCounts:
     broken: int = 0
     unmatched: int = 0
     extra: int = 0
+
+    def to_record(self) -> dict:
+        return {
+            "failed": self.failed,
+            "lossy": self.lossy,
+            "broken": self.broken,
+            "unmatched": self.unmatched,
+            "extra": self.extra,
+        }
+
+    @classmethod
+    def from_record(cls, record) -> "DownloadCounts":
+        return cls(
+            failed=record["failed"],
+            lossy=record["lossy"],
+            broken=record["broken"],
+            unmatched=record["unmatched"],
+            extra=record["extra"],
+        )
+
+    def any_nonzero(self) -> bool:
+        return any((
+            self.failed, self.lossy, self.broken, self.unmatched, self.extra,
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,10 +539,7 @@ def _completion_input_record(value):
     expectation = value.expectation
     return {
         "version": 1,
-        "owner": {
-            "operation_id": value.owner.operation_id,
-            "item_id": value.owner.item_id,
-        },
+        "owner": value.owner.to_record(),
         "origin": {
             "kind": value.origin.kind.value,
             "reference": value.origin.reference,
@@ -536,13 +559,7 @@ def _completion_input_record(value):
         "effective_tier": value.effective_tier,
         "download": {
             "counts": (
-                None if value.counts is None else {
-                    "failed": value.counts.failed,
-                    "lossy": value.counts.lossy,
-                    "broken": value.counts.broken,
-                    "unmatched": value.counts.unmatched,
-                    "extra": value.counts.extra,
-                }
+                None if value.counts is None else value.counts.to_record()
             ),
             "lineages": [
                 _source_lineage_record(item) for item in value.lineages
@@ -632,13 +649,7 @@ def parse_completion_input_record(record, *, expected_owner=None):
                 "failed", "lossy", "broken", "unmatched", "extra",
             }:
                 return None
-            counts = DownloadCounts(
-                failed=counts_value["failed"],
-                lossy=counts_value["lossy"],
-                broken=counts_value["broken"],
-                unmatched=counts_value["unmatched"],
-                extra=counts_value["extra"],
-            )
+            counts = DownloadCounts.from_record(counts_value)
         value = CompletionInput(
             owner=owner,
             origin=origin,
@@ -691,13 +702,7 @@ def completion_input_ready(value) -> bool:
     if not _valid_completion_input(value):
         return False
     coverage = value.download_coverage()
-    return coverage is not None and not any((
-        coverage.counts.failed,
-        coverage.counts.lossy,
-        coverage.counts.broken,
-        coverage.counts.unmatched,
-        coverage.counts.extra,
-    ))
+    return coverage is not None and not coverage.counts.any_nonzero()
 
 
 def _mapping_record(mapping, landing):
@@ -762,10 +767,7 @@ def _completion_record(evidence):
     }
     return {
         "version": 1,
-        "owner": {
-            "operation_id": evidence.owner.operation_id,
-            "item_id": evidence.owner.item_id,
-        },
+        "owner": evidence.owner.to_record(),
         "scope": evidence.expectation.scope.value,
         "album_id": evidence.expectation.album_id,
         "catalogue_slots": list(evidence.expectation.catalogue_slots),
@@ -796,13 +798,7 @@ def _completion_record(evidence):
             _quality_record(value, targets[value.slot])
             for value in evidence.quality
         ],
-        "counts": {
-            "failed": evidence.counts.failed,
-            "lossy": evidence.counts.lossy,
-            "broken": evidence.counts.broken,
-            "unmatched": evidence.counts.unmatched,
-            "extra": evidence.counts.extra,
-        },
+        "counts": evidence.counts.to_record(),
     }
 
 
@@ -942,14 +938,7 @@ def parse_completion_record(
                 served_rate=value["served"]["rate"],
             ))
 
-        counts_value = record["counts"]
-        counts = DownloadCounts(
-            failed=counts_value["failed"],
-            lossy=counts_value["lossy"],
-            broken=counts_value["broken"],
-            unmatched=counts_value["unmatched"],
-            extra=counts_value["extra"],
-        )
+        counts = DownloadCounts.from_record(record["counts"])
         download = DownloadCoverage(
             album_id=expectation.album_id,
             catalogue_slots=expectation.catalogue_slots,
@@ -1058,15 +1047,8 @@ def assess_completion(
     quality: tuple[TrackQuality, ...],
     baseline: tuple[BaselineReceipt, ...] = (),
     inventory: AlbumInventory | None = None,
-    recovery_references=(),
 ) -> CompletionAssessment:
     """Combine already live-validated inputs into one exact evidence record."""
-    try:
-        recovery_references = tuple(recovery_references)
-    except (TypeError, ValueError):
-        return _failure(CompletionFailure.MALFORMED)
-    if recovery_references:
-        return _failure(CompletionFailure.RECOVERY_UNRESOLVED)
     if (
         not _valid_owner(owner)
         or type(expectation) is not CompletionExpectation
@@ -1151,13 +1133,7 @@ def assess_completion(
         or not _valid_counts(download.counts)
     ):
         return _failure(CompletionFailure.DOWNLOAD_INCOMPLETE)
-    if any((
-        download.counts.failed,
-        download.counts.lossy,
-        download.counts.broken,
-        download.counts.unmatched,
-        download.counts.extra,
-    )):
+    if download.counts.any_nonzero():
         return _failure(CompletionFailure.DOWNLOAD_REMAINDER)
 
     staged_by_slot = {}

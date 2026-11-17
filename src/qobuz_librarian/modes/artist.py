@@ -1041,28 +1041,6 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
 
 def _report_gap_fill_summary(results):
     """Report each gap-fill outcome in one primary summary bucket."""
-    counts = {
-        "already_complete": 0,
-        "filled": 0,
-        "upgraded": 0,
-        "kept": 0,
-        "partial": 0,
-        "skipped": 0,
-        "no_match": 0,
-        "path_mismatch": 0,
-        "false_match": 0,
-        "nothing_available": 0,
-        "held": 0,
-        "dry_run": 0,
-        "not_imported": 0,
-        "stopped": 0,
-        "own_files_left": 0,
-        "failed": 0,
-        "other": 0,
-    }
-    for result in results:
-        counts[_gap_fill_result_bucket(result)] += 1
-
     labels = (
         ("already_complete", C.GREEN, "✓ already complete:"),
         ("filled", C.GREEN, "✓ tracks filled:"),
@@ -1082,6 +1060,10 @@ def _report_gap_fill_summary(results):
         ("failed", C.RED, "✗ failed:"),
         ("other", C.YELLOW, "other outcomes:"),
     )
+    counts = dict.fromkeys((bucket for bucket, _colour, _label in labels), 0)
+    for result in results:
+        counts[_gap_fill_result_bucket(result)] += 1
+
     for bucket, colour, label in labels:
         if counts[bucket]:
             padded_label = f"{label:<32}"

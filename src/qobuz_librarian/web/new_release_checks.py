@@ -12,7 +12,7 @@ from qobuz_librarian.api.auth import (
 )
 from qobuz_librarian.library import generation_state, new_releases, scan_checkpoint
 from qobuz_librarian.ui_cli.errors import plural
-from qobuz_librarian.web import flows, job_runs, qobuz_access, runtime, write_gate
+from qobuz_librarian.web import flows, job_runs, qobuz_access, runtime, scans, write_gate
 from qobuz_librarian.web import jobs as job_mgr
 
 
@@ -22,12 +22,9 @@ def _active_new_release_check():
     review does NOT block a fresh one: the fresh check folds its finds into
     that list (flows._append_to_parked_new_release_review), so asking again is
     always allowed and never costs the user the ticks already made."""
-    for j in job_mgr.registry.pending_and_running():
-        if j.execute_kind != "new_releases":
-            continue
-        if j.status != job_mgr.JobStatus.AWAITING_REVIEW:
-            return j
-    return None
+    return scans._active_scan("new_releases", statuses=(
+        job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
+        job_mgr.JobStatus.RUNNING))
 
 
 def _pending_new_release_review(job):

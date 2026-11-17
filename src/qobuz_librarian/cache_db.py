@@ -1,7 +1,9 @@
 """Thread-local SQLite connections for persistent caches."""
 import logging
+import math
 import sqlite3
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -9,6 +11,14 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian.ui_cli.logging import vlog
 
 log = logging.getLogger("qobuz_librarian")
+
+
+def is_fresh(fetched_at, ttl_seconds) -> bool:
+    try:
+        fetched_at = float(fetched_at or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(fetched_at) and (time.time() - fetched_at) <= ttl_seconds
 
 
 class _ThreadConnection:

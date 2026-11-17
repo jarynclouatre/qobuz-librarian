@@ -46,7 +46,7 @@
   {% endif %}
 
   {% if upgrade_state.stale %}
-  <section class="ql-work-card ql-quality-entry-card">
+  <section class="ql-work-card">
     <div class="ql-work-card-copy">
       {# Upgrade has no scan of its own by contract, so this card describes the
          situation and hands off. Naming it after a refresh would promise an
@@ -58,7 +58,7 @@
     </div>
   </section>
   {% elif upgrade_state.count %}
-  <section class="ql-work-card ql-quality-entry-card">
+  <section class="ql-work-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">{{ upgrade_state.count }} album{% if upgrade_state.count != 1 %}s{% endif %} to upgrade</p>
       {% if upgrade_state.held_back %}<p class="ql-work-card-text">{{ upgrade_state.held_back }} more album{% if upgrade_state.held_back != 1 %}s{% endif %} from the discarded review {% if upgrade_state.held_back != 1 %}are{% else %}is{% endif %} left out until the next Library scan.</p>{% endif %}
@@ -73,7 +73,7 @@
     </div>
   </section>
   {% elif upgrade_state.complete %}
-  <section class="ql-work-card ql-quality-entry-card">
+  <section class="ql-work-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-text">{% if upgrade_state.discarded %}The next Library scan lists the discarded upgrades again.{% else %}The latest Library scan checked the whole library with your current quality settings.{% if hidden_count %} Every upgrade it found is dismissed.{% endif %}{% endif %}</p>
     </div>
@@ -82,7 +82,7 @@
     </div>
   </section>
   {% else %}
-  <section class="ql-work-card ql-quality-entry-card">
+  <section class="ql-work-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">No Upgrade results yet</p>
       <p class="ql-work-card-text">A Library scan builds them.</p>

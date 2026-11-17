@@ -25,6 +25,7 @@ from qobuz_librarian.completion import (
     TrackQuality,
     _valid_absolute_path,
     _valid_identity,
+    _valid_relative_path,
     assess_completion,
     authoritative_slot,
     authoritative_slots,
@@ -65,18 +66,7 @@ _HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _strict_relative_parts(value):
-    if not isinstance(value, str) or not value or "\x00" in value:
-        return None
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or path.as_posix() != value
-        or not path.parts
-        or len(path.parts) > 32
-        or any(part in ("", ".", "..") for part in path.parts)
-    ):
-        return None
-    return path.parts
+    return PurePosixPath(value).parts if _valid_relative_path(value) else None
 
 
 def _metaflac_value(descriptor, option):
@@ -381,7 +371,6 @@ class LiveCompletionLease:
             baseline=(),
             inventory=inventory,
             quality=tuple(quality),
-            recovery_references=(),
         )
         if assessment.evidence is None:
             raise LiveCompletionUnavailable(

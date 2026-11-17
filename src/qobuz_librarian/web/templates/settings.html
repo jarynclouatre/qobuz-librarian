@@ -155,6 +155,17 @@
 {% endif %}
 {% endmacro %}
 
+{% macro section(id, title, open=False) %}
+<details class="ql-settings-section"{% if open %} open{% endif %}>
+  <summary class="ql-settings-summary">
+    <h2 id="{{ id }}" tabindex="-1" class="ql-anchor-target">{{ title }}</h2>
+    <span class="ql-review-chevron" aria-hidden="true"></span>
+  </summary>
+  <div class="ql-settings-section-body">
+{{ caller() }}  </div>
+</details>
+{% endmacro %}
+
 {% macro setting_toggle(key, label, help) %}
 <label class="ql-setting-row">
   <div class="ql-setting-main">
@@ -253,12 +264,7 @@
 {% endif %}
 
 <div class="ql-settings-stack">
-<details class="ql-settings-section"{% if connected or envchecked or error in _qobuz_errors %} open{% endif %}>
-  <summary class="ql-settings-summary">
-    <h2 id="qobuz" tabindex="-1" class="ql-anchor-target">Qobuz authentication</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("qobuz", "Qobuz authentication", connected or envchecked or error in _qobuz_errors) %}
     {{ qobuz_notices() }}
     <div class="ql-settings-section-head">
       {# "Connected" is a claim about Qobuz accepting the token, so it waits for
@@ -364,15 +370,9 @@
       </div>
     </form>
     {% if auth_token_set %}</details>{% endif %}
-  </div>
-</details>
+{% endcall %}
 
-<details class="ql-settings-section"{% if settings_section == 'behaviour' %} open{% endif %}>
-  <summary class="ql-settings-summary">
-    <h2 id="behaviour" tabindex="-1" class="ql-anchor-target">Behaviour</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("behaviour", "Behaviour", settings_section == 'behaviour') %}
 {% if not rerendered %}{{ behaviour_notices() }}{% endif %}
     <form action="/settings/behavior" method="post" data-busy-submit data-busy-label="Saving…">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -423,15 +423,9 @@
 
       <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Save behaviour</button>
     </form>
-  </div>
-</details>
+{% endcall %}
 
-<details class="ql-settings-section">
-  <summary class="ql-settings-summary">
-    <h2 id="library-paths" tabindex="-1" class="ql-anchor-target">Library paths</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("library-paths", "Library paths") %}
     {% set _any_host = library_paths | selectattr('resolved') | list %}
     {% if in_container and not _any_host %}<p class="ql-path-kind ql-path-caption">Container paths</p>{% endif %}
     <dl class="ql-path-list">
@@ -473,16 +467,10 @@
       copies or moves an existing collection into the <code>Artist/Album (Year)</code> layout as a
       one-time, reviewed step.
     </p>
-  </div>
-</details>
+{% endcall %}
 
 {% if library_baseline_exists %}
-<details class="ql-settings-section">
-  <summary class="ql-settings-summary">
-    <h2 id="library-maintenance" tabindex="-1" class="ql-anchor-target">Library maintenance</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("library-maintenance", "Library maintenance") %}
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
         <p>
@@ -500,16 +488,10 @@
                 data-confirm-action="Rescan">Force full rescan</button>
       </form>
     </div>
-  </div>
-</details>
+{% endcall %}
 {% endif %}
 
-<details class="ql-settings-section"{% if settings_section == 'discover' %} open{% endif %}>
-  <summary class="ql-settings-summary">
-    <h2 id="discover" tabindex="-1" class="ql-anchor-target">Discover</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("discover", "Discover", settings_section == 'discover') %}
     {% if not lastfm_check %}{{ saved_notice('discover') }}{% endif %}
     {% if lastfm_check == 'ok' %}
     <div class="ql-notice ql-notice-success mb-6">
@@ -559,15 +541,9 @@
         {% endif %}
       </div>
     </form>
-  </div>
-</details>
+{% endcall %}
 
-<details class="ql-settings-section"{% if settings_section == 'collection-backup' %} open{% endif %}>
-  <summary class="ql-settings-summary">
-    <h2 id="collection-backup" tabindex="-1" class="ql-anchor-target">Collection backup</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("collection-backup", "Collection backup", settings_section == 'collection-backup') %}
     {{ saved_notice('collection-backup') }}
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
@@ -680,15 +656,9 @@
         <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Save folder</button>
       </div>
     </form>
-  </div>
-</details>
+{% endcall %}
 
-<details class="ql-settings-section"{% if open_restore %} open{% endif %}>
-  <summary class="ql-settings-summary">
-    <h2 id="collection-restore" tabindex="-1" class="ql-anchor-target">Restore from a backup</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("collection-restore", "Restore from a backup", open_restore) %}
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
         <p>
@@ -737,16 +707,10 @@
       </div>
     </form>
     <div id="collection-restore-result" aria-live="polite"></div>
-  </div>
-</details>
+{% endcall %}
 
 {% if web_login_available %}
-<details class="ql-settings-section"{% if settings_section == 'web-login' %} open{% endif %}>
-  <summary class="ql-settings-summary">
-    <h2 id="web-login" tabindex="-1" class="ql-anchor-target">Web login</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("web-login", "Web login", settings_section == 'web-login') %}
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
         <p>
@@ -797,16 +761,10 @@
         <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Change password</button>
       </div>
     </form>
-  </div>
-</details>
+{% endcall %}
 {% endif %}
 
-<details class="ql-settings-section">
-  <summary class="ql-settings-summary">
-    <h2 id="diagnostics" tabindex="-1" class="ql-anchor-target">Diagnostics</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("diagnostics", "Diagnostics") %}
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
         <p>Checks what the container can see before scans or downloads start.</p>
@@ -824,18 +782,12 @@
       {{ diagnostics_html | safe }}
     </div>
     <p id="diagnostics-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
-  </div>
-</details>
+{% endcall %}
 
 {# Shown before credentials are saved too: the terminal's lock-busy message
    sends a fresh install here to switch modes, so the control it names has to
    be on the page. #}
-<details class="ql-settings-section"{% if mode_changed %} open{% endif %}>
-  <summary class="ql-settings-summary">
-    <h2 id="mode" tabindex="-1" class="ql-anchor-target">Mode</h2>
-    <span class="ql-review-chevron" aria-hidden="true"></span>
-  </summary>
-  <div class="ql-settings-section-body">
+{% call section("mode", "Mode", mode_changed) %}
     {% if mode_changed == "refused" and error %}
     <div class="ql-notice ql-notice-warning" data-flash><span>{{ error }}</span></div>
     {% endif %}
@@ -893,8 +845,7 @@
       </form>
     </div>
     {% endif %}
-  </div>
-</details>
+{% endcall %}
 </div>
 
 </div>

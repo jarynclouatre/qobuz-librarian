@@ -719,7 +719,7 @@ def _block_resolving(authority, journal, item, reason):
     _require_authority(authority)
 
 
-def _recover_complete(authority, journal, item, _acknowledge_completion):
+def _recover_complete(authority, journal, item):
     saved = None
     try:
         with _capture_live_completion(journal, item) as (
@@ -758,7 +758,7 @@ def _recover_complete(authority, journal, item, _acknowledge_completion):
         return None
 
 
-def _recover_resolving(authority, journal, item, _acknowledge_completion):
+def _recover_resolving(authority, journal, item):
     owner = RecoveryOwner(journal.operation_id, item.item_id)
     reference = _single_reference(item, _MANAGED_CARRIER_KIND)
     if reference is None:
@@ -952,10 +952,7 @@ def _recover_active_library_backups(authority, journals):
                 continue
 
             owner = RecoveryOwner(current.operation_id, item_id)
-            owner_data = {
-                "operation_id": owner.operation_id,
-                "item_id": owner.item_id,
-            }
+            owner_data = owner.to_record()
             backup = None
             reason = "library-backup-carrier-unavailable"
             if reference.kind == _LIBRARY_BACKUP_INTENT_KIND:
@@ -2283,11 +2280,7 @@ def _recover_startup_state(
                         StartupRecoveryStatus.RESUME_REQUIRED,
                         _classify(journals),
                     )
-                _recover_complete(
-                    authority,
-                    *complete,
-                    acknowledge_completion,
-                )
+                _recover_complete(authority, *complete)
                 continue
 
             resolving = next(
@@ -2308,11 +2301,7 @@ def _recover_startup_state(
                         StartupRecoveryStatus.RESUME_REQUIRED,
                         _classify(journals),
                     )
-                if _recover_resolving(
-                    authority,
-                    *resolving,
-                    acknowledge_completion,
-                ):
+                if _recover_resolving(authority, *resolving):
                     continue
                 key = (resolving[0].operation_id, resolving[1].item_id)
                 tried[key] = (*tried.get(key, ()), BlockedItemSettlementAction.RETRY)

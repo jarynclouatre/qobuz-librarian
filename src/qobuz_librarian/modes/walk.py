@@ -43,26 +43,38 @@ from qobuz_librarian.ui_cli.logging import log, vlog
 from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
 
 
-def load_walk_seen():
-    """Load set of normalized artist names already decided in walk mode."""
-    if not cfg.WALK_SEEN_FILE.exists():
-        return set()
-    seen = set()
+def _seen_lines(path):
+    """The entries of a walk's seen file, without its header comments."""
+    if not path.exists():
+        return
     try:
-        with open(cfg.WALK_SEEN_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 s = line.strip()
                 # Only "# " (hash + SPACE) is a header comment; an artist folder
                 # like "#1 Dads" or "#####" is a real entry and must load back,
                 # or it gets re-prompted every walk and the file grows each time.
-                if not s or s.startswith("# "):
-                    continue
-                n = normalize(s)
-                if n:
-                    seen.add(n)
+                if s and not s.startswith("# "):
+                    yield s
     except OSError as e:
-        log.info(fmt(C.YELLOW, f"  ⚠  Couldn't read {cfg.WALK_SEEN_FILE.name}: {e}."))
-    return seen
+        log.info(fmt(C.YELLOW, f"  ⚠  Couldn't read {path.name}: {e}."))
+
+
+def _library_artists():
+    """The library's artist folders, and the error for each that could not
+    be read."""
+    errors = {}
+
+    def read_failed(path, error):
+        errors[path.name] = str(error)
+        log.warning(unreadable_artist(path.name, error))
+
+    return list_library_artists(on_artist_error=read_failed), errors
+
+
+def load_walk_seen():
+    """Load set of normalized artist names already decided in walk mode."""
+    return {n for s in _seen_lines(cfg.WALK_SEEN_FILE) if (n := normalize(s))}
 
 
 def _atomic_append(path, header_lines, entry):
@@ -130,31 +142,18 @@ def load_album_walk_seen():
     """Albums already decided during the album fill walk, as normalized
     'artist::album' keys mapped to the audio files the folder held then (None
     for an entry written before the count was kept)."""
-    if not cfg.ALBUM_WALK_SEEN_FILE.exists():
-        return {}
     seen = {}
-    try:
-        with open(cfg.ALBUM_WALK_SEEN_FILE, encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                # Only "# " (hash + SPACE) is a header comment; an artist folder
-                # like "#1 Dads" or "#####" is a real entry and must load back,
-                # or it gets re-prompted every walk and the file grows each time.
-                if not s or s.startswith("# "):
-                    continue
-                if " | " not in s:
-                    continue
-                artist, album = s.split(" | ", 1)
-                n_tracks = None
-                head, _sep, tail = album.rpartition(" | ")
-                if head and tail.isdigit():
-                    album, n_tracks = head, int(tail)
-                key = _album_seen_key(artist, album)
-                if key:
-                    seen[key] = n_tracks
-    except OSError as e:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  Couldn't read {cfg.ALBUM_WALK_SEEN_FILE.name}: {e}."))
+    for s in _seen_lines(cfg.ALBUM_WALK_SEEN_FILE):
+        if " | " not in s:
+            continue
+        artist, album = s.split(" | ", 1)
+        n_tracks = None
+        head, _sep, tail = album.rpartition(" | ")
+        if head and tail.isdigit():
+            album, n_tracks = head, int(tail)
+        key = _album_seen_key(artist, album)
+        if key:
+            seen[key] = n_tracks
     return seen
 
 
@@ -277,33 +276,44 @@ def _download_queue(queue, args, token, save, results_out=None):
     return results, drained, parked
 
 
+def _ask_name_filter(all_artists):
+    flt = ask("  Only artists whose name contains (Enter for all): ")
+    if flt is None:
+        return None
+    if not flt:
+        return all_artists
+    artists = [a for a in all_artists if flt in a.name.lower()]
+    log.info(fmt(C.GRAY, f"  {plural(len(artists), 'artist')} match {flt!r}."))
+    return artists
+
+
+def _attention_clause(discovery_errors, retry, own_files_left):
+    if discovery_errors:
+        return f"{plural(len(discovery_errors), 'artist')} could not be read"
+    if retry:
+        return "some albums need a retry"
+    if own_files_left:
+        return own_files_clause()
+    return None
+
+
 def run_album_walk_mode(args, token):
     """Album fill walk: scan every album under every artist and
     prompt only on incomplete ones."""
     banner("Gap Fill: fill missing tracks in albums you already own")
 
-    discovery_errors = {}
-
-    def artist_read_failed(path, error):
-        discovery_errors[path.name] = str(error)
-        log.warning(unreadable_artist(path.name, error))
-
-    all_artists = list_library_artists(on_artist_error=artist_read_failed)
+    all_artists, discovery_errors = _library_artists()
     if not all_artists:
         log.info(fmt(C.YELLOW, wrap(no_artist_folders(), indent="  ⚠  ",
                                     hanging="     ")))
         return EXIT_GENERAL if discovery_errors else 0
 
     vlog(f"  {plural(len(all_artists), 'artist')} in library.")
-    flt = ask("  Only artists whose name contains (Enter for all): ")
-    if flt is None:
+    artists = _ask_name_filter(all_artists)
+    if artists is None:
         return EXIT_GENERAL
-    artists = all_artists
-    if flt:
-        artists = [a for a in all_artists if flt in a.name.lower()]
-        log.info(fmt(C.GRAY, f"  {plural(len(artists), 'artist')} match {flt!r}."))
-        if not artists:
-            return EXIT_GENERAL if discovery_errors else 0
+    if not artists:
+        return EXIT_GENERAL if discovery_errors else 0
 
     hidden = hidden_mod.load()
     seen = load_album_walk_seen()
@@ -551,13 +561,8 @@ def run_album_walk_mode(args, token):
     if (n_artists_scanned and not needs_attention and not walk_stopped
             and not args.dry_run):
         _write_collection_snapshot()
-    clause = None
-    if discovery_errors:
-        clause = f"{plural(len(discovery_errors), 'artist')} could not be read"
-    elif partial_completion or retry_needed:
-        clause = "some albums need a retry"
-    elif own_files_left:
-        clause = own_files_clause()
+    clause = _attention_clause(
+        discovery_errors, partial_completion or retry_needed, own_files_left)
     if interrupted:
         log.info(fmt(C.GRAY, "  Interrupted."))
     elif clause:
@@ -575,13 +580,7 @@ def run_walk_queued_mode(args, token):
     """Walk artists, accumulate decisions across artists, flush on demand."""
     banner("Library walk: scan artists, queue, download when you choose")
 
-    discovery_errors = {}
-
-    def artist_read_failed(path, error):
-        discovery_errors[path.name] = str(error)
-        log.warning(unreadable_artist(path.name, error))
-
-    all_artists = list_library_artists(on_artist_error=artist_read_failed)
+    all_artists, discovery_errors = _library_artists()
     if not all_artists:
         log.info(fmt(C.YELLOW, wrap(no_artist_folders(), indent="  ⚠  ",
                                     hanging="     ")))
@@ -609,15 +608,11 @@ def run_walk_queued_mode(args, token):
         return EXIT_GENERAL if discovery_errors else 0
 
     vlog(f"  {plural(len(all_artists), 'artist')} to walk.")
-    flt = ask("  Only artists whose name contains (Enter for all): ")
-    if flt is None:
+    artists = _ask_name_filter(all_artists)
+    if artists is None:
         return EXIT_GENERAL
-    artists = all_artists
-    if flt:
-        artists = [a for a in all_artists if flt in a.name.lower()]
-        log.info(fmt(C.GRAY, f"  {plural(len(artists), 'artist')} match {flt!r}."))
-        if not artists:
-            return EXIT_GENERAL if discovery_errors else 0
+    if not artists:
+        return EXIT_GENERAL if discovery_errors else 0
 
     log.info(fmt(C.GRAY,
         "  Per artist: y=scan and queue, Enter/n=skip, p=download the queue,"))
@@ -861,13 +856,8 @@ def run_walk_queued_mode(args, token):
     if (n_scanned and not needs_attention and not walk_stopped
             and not args.dry_run):
         _write_collection_snapshot()
-    clause = None
-    if discovery_errors:
-        clause = f"{plural(len(discovery_errors), 'artist')} could not be read"
-    elif partial_completion or retry_needed:
-        clause = "some albums need a retry"
-    elif own_files_left:
-        clause = own_files_clause()
+    clause = _attention_clause(
+        discovery_errors, partial_completion or retry_needed, own_files_left)
     if interrupted:
         log.info(fmt(C.GRAY, "  Interrupted." if ctrl_c else "  Stopped."))
     elif clause:

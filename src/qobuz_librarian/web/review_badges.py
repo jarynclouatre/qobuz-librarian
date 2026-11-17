@@ -60,19 +60,17 @@ def load(*, fail_closed=False) -> dict:
 
 
 @contextmanager
-def _mutation_lock():
-    """Hold the badge-store lock across one load/change/save cycle."""
-    path = cfg.REVIEW_BADGE_STATE_FILE
-    with _STATE_LOCK:
-        stack = ExitStack()
+def _changing():
+    """Hold the badge-store lock across one load/change/save cycle. Yields
+    the stored state, or None when the store cannot be locked or read."""
+    with _STATE_LOCK, ExitStack() as stack:
         try:
-            stack.enter_context(state_file.store_lock(path))
+            stack.enter_context(
+                state_file.store_lock(cfg.REVIEW_BADGE_STATE_FILE))
+            state = load(fail_closed=True)
         except OSError:
-            stack.close()
-            yield False
-            return
-        with stack:
-            yield True
+            state = None
+        yield state
 
 
 def _save(state: dict) -> bool:
@@ -82,13 +80,6 @@ def _save(state: dict) -> bool:
         return True
     except OSError:
         return False
-
-
-def _load_for_mutation():
-    try:
-        return load(fail_closed=True)
-    except OSError:
-        return None
 
 
 def _ts(now=None) -> float:
@@ -104,10 +95,7 @@ def _light(entry, now=None) -> None:
 def mark_ready(surface: str, *, now=None) -> None:
     if surface not in SURFACES:
         return
-    with _mutation_lock() as locked:
-        if not locked:
-            return
-        state = _load_for_mutation()
+    with _changing() as state:
         if state is None:
             return
         _light(state["surfaces"][surface], now)
@@ -133,10 +121,7 @@ def sync_candidates(surface: str, saved: dict, visible, *, now=None) -> None:
     offered_now = sorted({_offer_key(c)
                           for c in (saved or {}).get("candidates") or []})
     visible = undiscarded(surface, saved or {}, visible)
-    with _mutation_lock() as locked:
-        if not locked:
-            return
-        state = _load_for_mutation()
+    with _changing() as state:
         if state is None:
             return
         entry = state["surfaces"][surface]
@@ -157,10 +142,7 @@ def sync_candidates(surface: str, saved: dict, visible, *, now=None) -> None:
 def clear_ready(surface: str) -> None:
     if surface not in SURFACES:
         return
-    with _mutation_lock() as locked:
-        if not locked:
-            return
-        state = _load_for_mutation()
+    with _changing() as state:
         if state is None:
             return
         state["surfaces"][surface]["ready_at"] = 0.0
@@ -171,10 +153,7 @@ def clear_ready_if_generation(surface: str, generation: float) -> bool:
     """Clear only the badge generation the caller actually observed."""
     if surface not in SURFACES or generation <= 0:
         return False
-    with _mutation_lock() as locked:
-        if not locked:
-            return False
-        state = _load_for_mutation()
+    with _changing() as state:
         if state is None:
             return False
         entry = state["surfaces"][surface]
@@ -203,10 +182,7 @@ def ready_generation(surface: str) -> float:
 def mark_seen(surface: str, generation: float) -> None:
     if surface not in SURFACES or generation <= 0:
         return
-    with _mutation_lock() as locked:
-        if not locked:
-            return
-        state = _load_for_mutation()
+    with _changing() as state:
         if state is None:
             return
         entry = state["surfaces"][surface]
@@ -223,10 +199,7 @@ def mark_discarded(surface: str, *, now=None) -> None:
     """Remember when the user discarded the surface's saved review."""
     if surface not in SURFACES:
         return
-    with _mutation_lock() as locked:
-        if not locked:
-            return
-        state = _load_for_mutation()
+    with _changing() as state:
         if state is None:
             return
         entry = state["surfaces"][surface]

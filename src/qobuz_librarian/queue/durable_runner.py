@@ -118,10 +118,7 @@ def _require_current_plan(item, args, plan: DurableNewAlbumPlan) -> None:
 
 
 def _owner_record(owner: RecoveryOwner) -> dict[str, str]:
-    return {
-        "operation_id": owner.operation_id,
-        "item_id": owner.item_id,
-    }
+    return owner.to_record()
 
 
 def _load_exact(operation_id: str) -> queue_state.QueueJournal:
@@ -855,17 +852,6 @@ def execute_durable_new_album(
             ),
         )
         _require_authority(authority)
-    except Exception:
-        _retry_or_attention_after_download(
-            operation_id=operation_id,
-            item_id=item_id,
-            result=item,
-            owner=owner,
-            checkpoint_group=checkpoint_group,
-            reason="download-interrupted",
-            authority=authority,
-        )
-        raise
     except BaseException:
         _retry_or_attention_after_download(
             operation_id=operation_id,

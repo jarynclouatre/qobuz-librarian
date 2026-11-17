@@ -231,12 +231,16 @@ def _output_tail(out, length):
     return " ".join(out.split())[-length:]
 
 
-def _stop_if_auth_lost(out):
+def _check_rip_output(out) -> bool:
+    """Raise for lost auth or a full disk; return whether Qobuz rate-limited."""
     refused = downloads_refused(out)
     if refused is not None:
         raise refused
     if detect_auth_lost(out):
         raise AuthLost("rip output contained auth-lost markers")
+    if detect_disk_full(out):
+        raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
+    return detect_rate_limited(out)
 
 
 def _cool_down(last_out):
@@ -1358,10 +1362,7 @@ def run_album_download(
         rc, out = _rip(url, timeout=cfg.RIP_TIMEOUT, live_output=True, quality=quality)
         last_out = out
         full_album_rc = rc
-        _stop_if_auth_lost(out)
-        if detect_disk_full(out):
-            raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
-        rate_limited = rate_limited or detect_rate_limited(out)
+        rate_limited = _check_rip_output(out) or rate_limited
         # rip exits 0 even when it skipped tracks after persistent retries;
         # count the ERROR markers so a "succeeded" line can't hide a gap.
         n_errors = len(re.findall(r"^\s*(?:\[\d{2}:\d{2}:\d{2}\]\s*)?ERROR\b", out, re.MULTILINE))
@@ -1401,10 +1402,7 @@ def run_album_download(
             report_progress("Downloading", i, len(to_fetch), ttl)
             rc, out, track_audio = _rip_track(t)
             rip_identities.update(_single_track_rip_identities(track_audio, t, qobuz_tracks))
-            _stop_if_auth_lost(out)
-            if detect_disk_full(out):
-                raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
-            rate_limited = rate_limited or detect_rate_limited(out)
+            rate_limited = _check_rip_output(out) or rate_limited
             if rc == 0 and track_audio:
                 track_kept, track_lossy, track_broken = _sort_audio(track_audio)
                 verified.extend(track_kept)
@@ -1492,10 +1490,7 @@ def run_album_download(
                 if is_cancel_requested():
                     break
                 rc, out, retry_audio = _rip_track(t)
-                _stop_if_auth_lost(out)
-                if detect_disk_full(out):
-                    raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
-                rate_limited = rate_limited or detect_rate_limited(out)
+                rate_limited = _check_rip_output(out) or rate_limited
                 last_out = out
                 retry_identities = _single_track_rip_identities(retry_audio, t, qobuz_tracks)
                 retry_kept, retry_lossy, retry_broken = _sort_audio(retry_audio)
@@ -1573,10 +1568,7 @@ def run_album_download(
                 if is_cancel_requested():
                     break
                 rc, out, hard_audio = _rip_track(t)
-                _stop_if_auth_lost(out)
-                if detect_disk_full(out):
-                    raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
-                rate_limited = rate_limited or detect_rate_limited(out)
+                rate_limited = _check_rip_output(out) or rate_limited
                 last_out = out
                 hard_identities = _single_track_rip_identities(hard_audio, t, qobuz_tracks)
                 hard_kept, hard_lossy, hard_broken = _sort_audio(hard_audio)
@@ -1622,10 +1614,7 @@ def run_album_download(
             if is_cancel_requested():
                 break
             rc, out, cd_audio = _rip_track(t, tier=2)
-            _stop_if_auth_lost(out)
-            if detect_disk_full(out):
-                raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
-            rate_limited = rate_limited or detect_rate_limited(out)
+            rate_limited = _check_rip_output(out) or rate_limited
             last_out = out
             cd_identities = _single_track_rip_identities(cd_audio, t, qobuz_tracks)
             cd_kept, cd_lossy, cd_broken = _sort_audio(cd_audio)

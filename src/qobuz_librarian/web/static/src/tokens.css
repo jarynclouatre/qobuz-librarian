@@ -27,16 +27,6 @@
   --ql-bar: color-mix(in oklab, var(--ql-bg) 97%, #000);
   --ql-dialog: color-mix(in oklab, var(--ql-bg) 96%, #fff);
 
-  --color-base-100: var(--ql-bg);
-  --color-base-200: var(--ql-surface);
-  --color-base-300: var(--ql-line);
-  --color-base-content: var(--ql-text);
-  --color-primary: var(--ql-gold);
-  --color-primary-content: var(--ql-action-ink);
-  --color-success: var(--ql-owned);
-  --color-warning: var(--ql-warning);
-  --color-error: var(--ql-danger);
-  --color-info: var(--ql-info);
 }
 
 [data-theme="winter"] {
@@ -65,16 +55,6 @@
   --ql-bar: #efe6d4;
   --ql-dialog: #faf4e8;
 
-  --color-base-100: var(--ql-bg);
-  --color-base-200: var(--ql-surface);
-  --color-base-300: var(--ql-line);
-  --color-base-content: var(--ql-text);
-  --color-primary: var(--ql-gold);
-  --color-primary-content: var(--ql-action-ink);
-  --color-success: var(--ql-owned);
-  --color-warning: var(--ql-warning);
-  --color-error: var(--ql-danger);
-  --color-info: var(--ql-info);
 }
 
 :root {

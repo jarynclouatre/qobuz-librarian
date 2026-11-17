@@ -1733,11 +1733,7 @@ def filter_owned_albums(catalog_pairs, owned_bare_titles, artist_name=None):
         if not key:
             missing.append((album, n_versions))
             continue
-        catalog_yr_str = album_year(album)
-        try:
-            cat_yr = int(catalog_yr_str) if catalog_yr_str else None
-        except ValueError:
-            cat_yr = None
+        cat_yr = album_year_int(album, None)
         if key in owned_bare_titles:
             owned_years = owned_bare_titles[key]
             # Exact bare-title match → owned regardless of year (reissue of
@@ -2031,11 +2027,7 @@ def _year_proximity_bonus(dir_year, album):
     releases (a reissue, an annual live set) that score equally on title."""
     if dir_year is None:
         return 0.0
-    ry_str = album_year(album)
-    try:
-        ry = int(ry_str) if ry_str else None
-    except ValueError:
-        ry = None
+    ry = album_year_int(album, None)
     if ry is None:
         return 0.0
     if ry == dir_year:

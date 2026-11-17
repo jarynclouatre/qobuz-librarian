@@ -296,11 +296,6 @@ def _read_without_release_types(candidates):
                for c in candidates)
 
 
-def _readd_candidate(job, c, listed=True):
-    """Re-add a candidate restored from a scan checkpoint, with a fresh cid."""
-    return _add_candidate_spec(job, c, listed=listed)
-
-
 def _cap_note(job) -> str:
     """A truncation notice appended to a scan summary when the candidate list hit
     the in-memory cap, so a summary never implies more results are reviewable
@@ -318,13 +313,12 @@ def left_out_note(left_out, cap) -> str:
     was left out."""
     if not left_out:
         return ""
-    names = ", ".join(sorted(left_out, key=str.casefold)[:5])
-    more = f" (+{len(left_out) - 5} more)" if len(left_out) > 5 else ""
+    names = _first_names(left_out)
     finds = sum(left_out.values())
     return (f"The review lists at most {cap:,} albums, so {finds:,} "
             f"{'find' if finds == 1 else 'finds'} from "
             f"{plural(len(left_out), 'artist folder')} "
-            f"{'is' if finds == 1 else 'are'} not listed: {names}{more}. "
+            f"{'is' if finds == 1 else 'are'} not listed: {names}. "
             "Work through or dismiss some, then refresh to list them.")
 
 
@@ -540,6 +534,20 @@ def named_albums(candidates, limit=3):
     if len(names) <= limit:
         return ", ".join(names[:-1]) + " and " + names[-1]
     return f"{', '.join(names[:limit])} and {len(names) - limit} more"
+
+
+def _first_names(names, limit=5):
+    """The first ``limit`` names in order, with a count of the rest."""
+    shown = ", ".join(sorted(names, key=str.casefold)[:limit])
+    if len(names) > limit:
+        shown += f" (+{len(names) - limit} more)"
+    return shown
+
+
+def _left_out_note(unreadable):
+    return (f"{plural(len(unreadable), 'artist folder')} couldn't be read and "
+            f"{'was' if len(unreadable) == 1 else 'were'} left out: "
+            f"{_first_names(unreadable)}.")
 
 
 def fold_key(c):
@@ -900,12 +908,7 @@ def refold_restored_missing(artists, fingerprints):
     the restored artists'/albums' candidate specs from the saved scan state
     and fold them back in, unselected. Returns how many rejoined the review,
     or None when no library review is parked (they return on the next scan)."""
-    parked = None
-    for job in job_mgr.registry.awaiting_review():
-        if job.execute_kind != "library":
-            continue
-        if parked is None or (job.created_at or 0) > (parked.created_at or 0):
-            parked = job
+    parked = _newest_parked("library")
     if parked is None:
         return None
     wanted_artists = {hidden_mod.artist_key(a) for a in artists}
@@ -948,12 +951,7 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True,
     fold key, so re-adding a pick already in the review is safe. Returns how
     many rejoined, or None when there's no review to fold into. ``retire``
     is passed on to fold_new_candidates."""
-    parked = None
-    for j in job_mgr.registry.awaiting_review():
-        if j.execute_kind != execute_kind:
-            continue
-        if parked is None or (j.created_at or 0) > (parked.created_at or 0):
-            parked = j
+    parked = _newest_parked(execute_kind)
     if parked is None:
         return None
     specs = [dict(c, selected=True) if ticked else dict(c) for c in picks]
@@ -1034,14 +1032,7 @@ def _park_library_failures(failed_cands, execute_kind="library",
         job._execute_fn = lambda j, chosen: execute_albums(
             j, chosen, fresh_download_token())
     for c in failed_cands:
-        job.add_candidate(
-            kind=c.get("kind", "album"),
-            title=c.get("title") or "?",
-            artist=c.get("artist") or "",
-            detail=c.get("detail") or "",
-            payload=c.get("payload") or {},
-            selected=True if ticked else bool(c.get("selected")),
-        )
+        _add_candidate_spec(job, dict(c, selected=True) if ticked else c)
     n = len(job.candidates)
     if summary is not None:
         job.summary = summary
@@ -2260,7 +2251,7 @@ def _scan_library_impl(
                 if _spec_dismissed(c, hidden):
                     continue
                 listed = _listed(c)
-                if _readd_candidate(job, c, listed=listed) is None:
+                if _add_candidate_spec(job, c, listed=listed) is None:
                     dropped += 1
                 elif listed:
                     total += 1
@@ -2319,7 +2310,7 @@ def _scan_library_impl(
                 if _spec_dismissed(c, hidden):
                     continue
                 listed = _listed(c)
-                if _readd_candidate(job, c, listed=listed) is None:
+                if _add_candidate_spec(job, c, listed=listed) is None:
                     dropped += 1
                 elif listed:
                     shown += 1
@@ -2669,13 +2660,8 @@ def _scan_library_impl(
     if (not job.cancel_requested and publication is not None
             and unchecked == len(unreadable_artists) and unreadable_artists):
         # Finished for everything readable: the rest is not a resume.
-        names = ", ".join(sorted(unreadable_artists, key=str.casefold)[:5])
-        more = (f" (+{len(unreadable_artists) - 5} more)"
-                if len(unreadable_artists) > 5 else "")
         job.summary += (
-            f" {plural(len(unreadable_artists), 'artist folder')} couldn't be "
-            f"read and {'was' if len(unreadable_artists) == 1 else 'were'} "
-            f"left out: {names}{more}. "
+            f" {_left_out_note(unreadable_artists)} "
             + ("Each is checked by itself once it can be read."
                if cfg.AUTO_LIBRARY_SCAN
                else "Scan again once it can be read."
@@ -2690,10 +2676,8 @@ def _scan_library_impl(
         _record_unchecked_artists(job, unchecked)
         job.summary += f" {plural(unchecked, 'artist')} couldn't be checked"
         if unreadable_artists:
-            names = ", ".join(sorted(unreadable_artists, key=str.casefold)[:5])
-            more = (f" (+{len(unreadable_artists) - 5} more)"
-                    if len(unreadable_artists) > 5 else "")
-            job.summary += f" ({len(unreadable_artists)} unreadable: {names}{more})"
+            job.summary += (f" ({len(unreadable_artists)} unreadable: "
+                            f"{_first_names(unreadable_artists)})")
         job.summary += "; scan again to resume from where it left off."
     stale_tabs = [
         label for label, refresh, save_failed in (
@@ -2772,12 +2756,12 @@ def upgrade_finds_note(n, first=False):
     return f"{plural(n, 'album' if first else 'new album')} can be upgraded."
 
 
-def _parked_new_release_review(exclude=None):
-    """The newest new-release review still waiting to be worked through, if any.
-    ``exclude`` skips the check currently running, which is not parked yet."""
+def _newest_parked(kind, exclude=None):
+    """The newest review of ``kind`` still waiting to be worked through, if
+    any. ``exclude`` skips a job that is running and not parked yet."""
     parked = None
     for j in job_mgr.registry.awaiting_review():
-        if j.execute_kind != "new_releases":
+        if j.execute_kind != kind:
             continue
         if exclude is not None and j.id == exclude.id:
             continue
@@ -2792,7 +2776,7 @@ def _new_release_rows_to_recheck(job):
     sealed by an older version: album id to row. A check asks about these
     as if it had never seen them, so each comes back sealed afresh or
     leaves the review."""
-    parked = _parked_new_release_review(exclude=job)
+    parked = _newest_parked("new_releases", exclude=job)
     if parked is None:
         return {}
     with parked._lock:
@@ -2823,7 +2807,7 @@ def _append_to_parked_new_release_review(job, found=0, retire=()):
     checked again, as were the rows ``retire`` names by fold key, which leave.
     This job then finishes as a plain result pointing at the list it fed,
     never as a review of its own. Returns True when the finds were folded."""
-    parked = _parked_new_release_review(exclude=job)
+    parked = _newest_parked("new_releases", exclude=job)
     if parked is None:
         return False
     added = refold_into_living_review(
@@ -2878,11 +2862,9 @@ def scan_new_releases(job, token):
         _set_empty_library_summary(job)
         return
     if not artists:
-        names = sorted(unreadable_artists, key=str.casefold)
         job.summary = (
-            f"No artist folder could be read ({', '.join(names[:5])}"
-            + (f" (+{len(names) - 5} more)" if len(names) > 5 else "")
-            + "), so nothing was checked.")
+            f"No artist folder could be read "
+            f"({_first_names(unreadable_artists)}), so nothing was checked.")
         _mark_job_failed(job)
         return
     state = new_releases_mod.load()
@@ -3044,12 +3026,7 @@ def scan_new_releases(job, token):
         log.info(no_artist)
     skipped_note = ""
     if unreadable_artists:
-        names = sorted(unreadable_artists, key=str.casefold)
-        shown = ", ".join(names[:5]) + (
-            f" (+{len(names) - 5} more)" if len(names) > 5 else "")
-        skipped_note = (
-            f"{plural(len(names), 'artist folder')} couldn't be read and "
-            f"{'was' if len(names) == 1 else 'were'} left out: {shown}.")
+        skipped_note = _left_out_note(unreadable_artists)
     if job.cancel_requested:
         # A cancelled crawl only reached a fraction of the artists, so it can't
         # claim "No new releases" or "First check recorded" definitively.
@@ -4795,7 +4772,7 @@ def _scan_repairs_impl(job, token, checkpoint):
             n_unmatched += counts["unmatched"]
             n_failed_albums += counts["failed_albums"]
             for spec in bundle["candidates"]:
-                _readd_candidate(job, spec)
+                _add_candidate_spec(job, spec)
                 total += 1
         recheck = len(artists) - len(scanned)
         log.info(
@@ -5644,12 +5621,11 @@ def run_collection_snapshot(job, *, force=False):
         return
     unread_note = ""
     if unread:
-        names = ", ".join(sorted(unread, key=str.casefold)[:5])
-        more = f" (+{len(unread) - 5} more)" if len(unread) > 5 else ""
+        names = _first_names(unread)
         unread_note = (
             f" {plural(len(unread), 'artist folder')} couldn't be read in "
             "full, so the backup keeps what the last one recorded there: "
-            f"{names}{more}.")
+            f"{names}.")
     if (not force and previous is not None
             and collection_snapshot.same_collection(document, previous)):
         age = job_labels._format_age(previous.get("updated_at_epoch"))

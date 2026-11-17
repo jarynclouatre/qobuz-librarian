@@ -115,18 +115,13 @@ def _decode_recoveries(value) -> tuple[list[dict], bool]:
     return recoveries, False
 
 
-def _decode_execute_args(value) -> tuple[dict, bool]:
-    """Return saved retry details and whether they are unreadable."""
-    try:
-        args = json.loads(value or "{}")
-    except (TypeError, ValueError):
-        return {}, True
-    if type(args) is not dict:
-        return {}, True
-    return args, False
+def _canonical_json(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False)
 
 
 def _decode_object(value) -> tuple[dict, bool]:
+    """Return a saved JSON object and whether it is unreadable."""
     try:
         decoded = json.loads(value or "{}")
     except (TypeError, ValueError):
@@ -694,13 +689,7 @@ def _job_snapshot(job, *, single=_CURRENT_JOB_SINGLE):
         single_value = job.single if single is _CURRENT_JOB_SINGLE else single
         single_json = json.dumps(single_value or {}, default=str)
         # Recovery receipts are a safety boundary.
-        recoveries_json = json.dumps(
-            getattr(job, "recoveries", []) or [],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+        recoveries_json = _canonical_json(getattr(job, "recoveries", []) or [])
         # Only a finished or parked job's log is stored: a running one is on
         # screen live, and re-serialising a growing blob on every snapshot is
         # waste.
@@ -713,13 +702,7 @@ def _job_snapshot(job, *, single=_CURRENT_JOB_SINGLE):
             or status_value == "awaiting_review" else [],
             default=str,
         )
-        quality_shortfall_json = json.dumps(
-            getattr(job, "quality_shortfall", {}) or {},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+        quality_shortfall_json = _canonical_json(getattr(job, "quality_shortfall", {}) or {})
     except (TypeError, ValueError) as e:
         _note_write_failure(f"serialize {job.id}", e)
         return None
@@ -1323,7 +1306,7 @@ def mark_retried(job_id: str, retry_id: str) -> bool:
             row = conn.execute(
                 "SELECT execute_args FROM jobs WHERE id=?", (job_id,)
             ).fetchone()
-            args, unreadable = _decode_execute_args(row[0] if row else None)
+            args, unreadable = _decode_object(row[0] if row else None)
             if row is None or unreadable:
                 conn.rollback()
                 return False
@@ -1508,13 +1491,7 @@ def persist_recoveries(job) -> bool:
     """
     with job._lock:
         try:
-            recoveries_json = json.dumps(
-                getattr(job, "recoveries", []) or [],
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
+            recoveries_json = _canonical_json(getattr(job, "recoveries", []) or [])
             job_id = job.id
             attention = getattr(job, "attention", "") or ""
         except (TypeError, ValueError) as exc:
@@ -1776,13 +1753,7 @@ def prepare_recovery_resolution(
         location = str(location)
         if not location or "\x00" in location:
             return None
-        canonical_receipt = json.loads(json.dumps(
-            receipt,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ))
+        canonical_receipt = json.loads(_canonical_json(receipt))
         if canonical_receipt is not None and type(canonical_receipt) is not dict:
             return None
     except (TypeError, ValueError):
@@ -1868,13 +1839,7 @@ def resolve_recovery_resolution(
                 attention = row[1] or ""
                 if not remaining and attention == "recovery":
                     attention = ""
-                encoded = json.dumps(
-                    remaining,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                )
+                encoded = _canonical_json(remaining)
                 changed = conn.execute(
                     "UPDATE jobs SET recoveries=?, attention=? WHERE id=?",
                     (encoded, attention, job_id),
@@ -1950,7 +1915,7 @@ def _decode_row(r, *, decode_logs, stored=_NO_ROWS):
     recoveries, recovery_unreadable = _decode_recoveries(r[17])
     if recovery_unreadable:
         return None
-    execute_args, execute_args_unreadable = _decode_execute_args(r[12])
+    execute_args, execute_args_unreadable = _decode_object(r[12])
     candidates, candidates_unreadable = _decode_candidates(r[7], r[5], stored)
     single, single_unreadable = _decode_single(r[15])
     quality_shortfall, _ = _decode_object(r[19])
@@ -2178,7 +2143,7 @@ def history_page(limit: int, offset: int,
     result = []
     for row in rows:
         recoveries, recovery_unreadable = _decode_recoveries(row[12])
-        execute_args, execute_args_unreadable = _decode_execute_args(row[8])
+        execute_args, execute_args_unreadable = _decode_object(row[8])
         single, single_unreadable = _decode_single(row[14])
         result.append({
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
@@ -2235,7 +2200,7 @@ def recovery_history(*, attention_only: bool = False,
         recoveries, recovery_unreadable = _decode_recoveries(row[12])
         if not recoveries and not recovery_unreadable:
             continue
-        execute_args, execute_args_unreadable = _decode_execute_args(row[8])
+        execute_args, execute_args_unreadable = _decode_object(row[8])
         _single, single_unreadable = _decode_single(row[14])
         result.append({
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",

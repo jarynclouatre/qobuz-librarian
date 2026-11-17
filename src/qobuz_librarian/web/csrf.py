@@ -150,6 +150,8 @@ def _set_csrf_cookie(request, response, token):
         token,
         max_age=60 * 60 * 24 * 30,
         samesite="strict",
+        # The page reads the token from its <meta> tag, never from this
+        # cookie, so HttpOnly keeps it out of reach of any injected script.
         httponly=True,
         secure=request_is_https(request),
         path="/",
@@ -271,17 +273,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         # /api responses don't need it.
         is_html = response.headers.get("content-type", "").startswith("text/html")
         if not cookie_token and is_html:
-            response.set_cookie(
-                csrf_cookie_name(request),
-                token,
-                max_age=60 * 60 * 24 * 30,
-                samesite="strict",
-                # The page reads the token from its <meta> tag, never from
-                # this cookie, so HttpOnly costs nothing and keeps it out of
-                # reach of any injected script.
-                httponly=True,
-                secure=request_is_https(request),
-            )
+            _set_csrf_cookie(request, response, token)
         return response
 
 

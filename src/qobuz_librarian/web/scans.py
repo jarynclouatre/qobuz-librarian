@@ -307,13 +307,7 @@ def _fold_into_parked_library_review(job):
     if (job.status not in (job_mgr.JobStatus.SCANNING, job_mgr.JobStatus.RUNNING)
             or job.cancel_requested):
         return
-    parked = None
-    for other in job_mgr.registry.awaiting_review():
-        if (other.execute_kind != "library"
-                or other.id == job.id):
-            continue
-        if parked is None or (other.created_at or 0) > (parked.created_at or 0):
-            parked = other
+    parked = flows._newest_parked("library", exclude=job)
     if parked is None:
         return
     with job._lock:

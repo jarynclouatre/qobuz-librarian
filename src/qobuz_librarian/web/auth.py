@@ -940,17 +940,6 @@ def _record_login_failure(key: str, uname: str, now: float) -> tuple[int, bool]:
     return address_locked, False
 
 
-def clear_login_failures(ip: str, username: str = "") -> None:
-    """Forget an IP's (and the account's) failures after a successful login so an
-    earlier typo run doesn't leave the next session one slip from a lockout."""
-    uname = _norm_user(username)
-    with _login_lock:
-        _login_failures.pop(ip, None)
-        if uname:
-            _user_failures.pop(uname, None)
-            _user_paused_until.pop(uname, None)
-
-
 class AuthMiddleware(BaseHTTPMiddleware):
     """Gate every route behind a session cookie once a login is configured.
 

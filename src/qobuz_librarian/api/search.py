@@ -464,6 +464,20 @@ def get_artist_release_types(artist_id, token, album_ids, fresh=False,
     return types
 
 
+def _releases_page(artist_id, token, release_type, offset):
+    data = _expect_dict(qobuz_get("artist/getReleasesList", {
+        "artist_id": artist_id,
+        "release_type": release_type,
+        "limit": config.ARTIST_CATALOG_PAGE,
+        "offset": offset,
+        "sort": "release_date",
+    }, token), "artist/getReleasesList")
+    items = data.get("items")
+    if not isinstance(items, list):
+        raise QobuzError("artist/getReleasesList returned malformed items")
+    return data, items
+
+
 def _release_list_ids(artist_id, token, name):
     """The ids of the releases Qobuz files in list ``name`` for the artist,
     and whether that is the whole list rather than _RELEASE_LIST_PAGES pages
@@ -471,16 +485,7 @@ def _release_list_ids(artist_id, token, name):
     ids = []
     offset = 0
     for _ in range(_RELEASE_LIST_PAGES):
-        data = _expect_dict(qobuz_get("artist/getReleasesList", {
-            "artist_id": artist_id,
-            "release_type": name,
-            "limit": config.ARTIST_CATALOG_PAGE,
-            "offset": offset,
-            "sort": "release_date",
-        }, token), "artist/getReleasesList")
-        items = data.get("items")
-        if not isinstance(items, list):
-            raise QobuzError("artist/getReleasesList returned malformed items")
+        data, items = _releases_page(artist_id, token, name, offset)
         ids.extend(str(item["id"]) for item in items
                    if isinstance(item, dict) and item.get("id") is not None)
         offset += len(items)
@@ -503,16 +508,7 @@ def get_artist_recent_releases(artist_id, token, is_recent):
     found = []
     offset = 0
     for _ in range(_RECENT_PAGES):
-        data = _expect_dict(qobuz_get("artist/getReleasesList", {
-            "artist_id": artist_id,
-            "release_type": "all",
-            "limit": config.ARTIST_CATALOG_PAGE,
-            "offset": offset,
-            "sort": "release_date",
-        }, token), "artist/getReleasesList")
-        items = data.get("items")
-        if not isinstance(items, list):
-            raise QobuzError("artist/getReleasesList returned malformed items")
+        data, items = _releases_page(artist_id, token, "all", offset)
         page = [item for item in items if isinstance(item, dict)]
         recent = [item for item in page if is_recent(item)]
         found.extend(recent)

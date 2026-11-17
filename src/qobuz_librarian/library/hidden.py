@@ -344,12 +344,17 @@ def restore(scope, artists):
     casing or spacing difference between the posted value and the stored string
     still restores it (and every casing variant of one artist clears together)
     rather than stranding an album as un-restorable."""
+    targets = {artist_key(a) for a in artists if artist_key(a)}
+    return _restore(scope, lambda bucket: [
+        fp for fp, e in bucket.items()
+        if artist_key(e.get("artist") or "") in targets])
+
+
+def _restore(scope, pick):
     with _store_lock():
         store = load()
         bucket = store.get(scope) or {}
-        targets = {artist_key(a) for a in artists if artist_key(a)}
-        drop = [fp for fp, e in bucket.items()
-                if artist_key(e.get("artist") or "") in targets]
+        drop = pick(bucket)
         rows = sum(len(_entry_rows(bucket[fp])) for fp in drop)
         for fp in drop:
             bucket.pop(fp, None)
@@ -409,18 +414,8 @@ def restore_albums(scope, fingerprints):
     Unknown fingerprints are silently skipped: the Hidden page can render
     against a slightly stale store (another tab just restored the same row, or
     the bucket changed mid-request) and a hard 404 there would be hostile."""
-    with _store_lock():
-        store = load()
-        bucket = store.get(scope) or {}
-        drop = [fp for fp in fingerprints if fp in bucket]
-        rows = sum(len(_entry_rows(bucket[fp])) for fp in drop)
-        for fp in drop:
-            bucket.pop(fp, None)
-        if drop:
-            store[scope] = bucket
-            if not save(store):
-                raise OSError(_SAVE_FAILED_MSG)
-    return rows
+    return _restore(scope, lambda bucket: [
+        fp for fp in fingerprints if fp in bucket])
 
 
 def is_hidden_row(scope, artist, title, year, store):

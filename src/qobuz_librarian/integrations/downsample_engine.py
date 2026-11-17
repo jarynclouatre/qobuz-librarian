@@ -142,6 +142,20 @@ def parse_flac_info(data: bytes):
     return sr, bps
 
 
+def _metaflac_int(path, flag, pass_fds) -> int:
+    try:
+        completed = subprocess.run(
+            ["metaflac", flag, str(path)],
+            capture_output=True, text=True, timeout=10,
+            pass_fds=tuple(pass_fds), env=cfg.child_env(), start_new_session=True)
+        if completed.returncode != 0:
+            return 0
+        out = completed.stdout.strip()
+        return int(out) if out else 0
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ValueError):
+        return 0
+
+
 def read_local_bit_depth(path: Path, *, pass_fds=()) -> int:
     """Bit depth of a local FLAC. The 1 KB header byte-parse settles the common
     case in a single read; metaflac backstops a file whose STREAMINFO sits past
@@ -160,17 +174,7 @@ def read_local_bit_depth(path: Path, *, pass_fds=()) -> int:
         return 0
     if bps:
         return bps
-    try:
-        completed = subprocess.run(
-            ["metaflac", "--show-bps", str(path)],
-            capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds), env=cfg.child_env(), start_new_session=True)
-        if completed.returncode != 0:
-            return 0
-        out = completed.stdout.strip()
-        return int(out) if out else 0
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ValueError):
-        return 0
+    return _metaflac_int(path, "--show-bps", pass_fds)
 
 
 def _cached_sample_rate(path: Path) -> int:
@@ -209,17 +213,7 @@ def read_sample_rate(path: Path, *, pass_fds=()) -> int:
         return 0
     if sr:
         return sr
-    try:
-        completed = subprocess.run(
-            ["metaflac", "--show-sample-rate", str(path)],
-            capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds), env=cfg.child_env(), start_new_session=True)
-        if completed.returncode != 0:
-            return 0
-        out = completed.stdout.strip()
-        return int(out) if out else 0
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ValueError):
-        return 0
+    return _metaflac_int(path, "--show-sample-rate", pass_fds)
 
 
 def parse_flac_total_samples(data: bytes) -> int:
@@ -254,17 +248,7 @@ def read_total_samples(path: Path, *, pass_fds=()) -> int:
         return 0
     if n:
         return n
-    try:
-        completed = subprocess.run(
-            ["metaflac", "--show-total-samples", str(path)],
-            capture_output=True, text=True, timeout=10,
-            pass_fds=tuple(pass_fds), env=cfg.child_env(), start_new_session=True)
-        if completed.returncode != 0:
-            return 0
-        out = completed.stdout.strip()
-        return int(out) if out else 0
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired, ValueError):
-        return 0
+    return _metaflac_int(path, "--show-total-samples", pass_fds)
 
 
 def target_rate(sr):

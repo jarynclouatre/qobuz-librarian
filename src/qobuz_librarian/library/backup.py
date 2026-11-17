@@ -30,6 +30,7 @@ from qobuz_librarian.recovery import (
 )
 from qobuz_librarian.safefile import (
     AT_FDCWD,
+    close_descriptors,
     copy_file,
     copy_metadata,
     delete_tree_verified,
@@ -223,11 +224,7 @@ def _open_backup_source(album_dir: Path):
             descriptors.append(child_fd)
         return public, root, parts, descriptors
     except BaseException as exc:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
         if isinstance(exc, (OSError, TypeError, ValueError)):
             return None
         raise
@@ -382,22 +379,10 @@ def _open_rooted_directory(root: Path, path: Path, *, create=False,
             descriptors.append(child_fd)
         return public, root, parts, descriptors
     except BaseException as exc:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
         if isinstance(exc, (OSError, TypeError, ValueError)):
             return None
         raise
-
-
-def _close_descriptors(descriptors) -> None:
-    for descriptor in reversed(descriptors):
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
 
 
 def _open_relative_directories(base_fd, parts, *, create=False):
@@ -426,7 +411,7 @@ def _open_relative_directories(base_fd, parts, *, create=False):
             parent_fd = child_fd
         return descriptors
     except BaseException:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
         raise
 
 
@@ -671,7 +656,7 @@ def _tree_directory_generations(root_fd, snapshot):
         try:
             generations[relative_text] = _directory_identity(descriptors[-1])
         finally:
-            _close_descriptors(descriptors)
+            close_descriptors(descriptors)
     return generations
 
 
@@ -746,7 +731,7 @@ def capture_album_tree_identity(album_dir):
     except (OSError, TypeError, ValueError):
         return None
     finally:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def album_tree_identity(receipt):
@@ -771,7 +756,7 @@ def capture_folder_generations(path):
     try:
         return public, _path_directory_generations(descriptors)
     finally:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def capture_music_root_identity():
@@ -810,7 +795,7 @@ def capture_album_source_receipt(album_dir):
         return _album_source_receipt_from_opened(
             public, music_root, parts, descriptors)
     finally:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def _scan_backup_tree(root_fd):
@@ -871,7 +856,7 @@ def _open_tree_file(root_fd, relative):
     try:
         file_fd = _open_regular_file_at(parent_fd, relative[-1])
     except BaseException:
-        _close_descriptors(parent_descriptors)
+        close_descriptors(parent_descriptors)
         raise
     return parent_descriptors, parent_fd, file_fd
 
@@ -1824,7 +1809,7 @@ def load_backup_result(path, *, expected_owner=None):
             backed_up=receipt["backed_up"],
         )
     finally:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def canonical_album_source_receipt(value, *, expected_origin=None):
@@ -2054,23 +2039,27 @@ def canonical_library_backup_disposal_record(
         return None
 
 
+def _backup_record_value(backup):
+    receipt = backup.receipt
+    return {
+        "version": 1,
+        "kind": receipt.get("kind"),
+        "owner": receipt.get("owner"),
+        "path": os.fspath(backup.path),
+        "origin": receipt.get("origin"),
+        "complete": backup.complete,
+        "requested": backup.requested,
+        "backed_up": backup.backed_up,
+        "receipt": receipt,
+    }
+
+
 def library_backup_record(backup, *, expected_owner=None):
     """Seal a live ``BackupResult`` into the queue journal's closed schema."""
     if not isinstance(backup, BackupResult) or backup.receipt is None:
         return None
-    value = {
-        "version": 1,
-        "kind": backup.receipt.get("kind"),
-        "owner": backup.receipt.get("owner"),
-        "path": os.fspath(backup.path),
-        "origin": backup.receipt.get("origin"),
-        "complete": backup.complete,
-        "requested": backup.requested,
-        "backed_up": backup.backed_up,
-        "receipt": backup.receipt,
-    }
     canonical = canonical_library_backup_record(
-        value,
+        _backup_record_value(backup),
         expected_owner=expected_owner,
     )
     if canonical is None:
@@ -2197,7 +2186,7 @@ def library_backup_origin_state(value, *, expected_owner=None):
                     return "conflict"
             finally:
                 os.close(file_fd)
-                _close_descriptors(parents)
+                close_descriptors(parents)
             matched += 1
         if matched == len(manifest):
             return "restored"
@@ -2215,7 +2204,7 @@ def library_backup_origin_state(value, *, expected_owner=None):
     except OSError:
         return None
     finally:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def library_backup_matches_intent(backup_record, intent, *, expected_owner=None):
@@ -2299,7 +2288,7 @@ def _validated_backup_result(backup, *, origin=None, kinds=None,
         else:
             valid = valid and receipt["origin"] == expected_origin
     if not valid:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
         return None
     return opened
 
@@ -2377,7 +2366,7 @@ def _write_receipt_marker(backup, name, note) -> bool:
     except (OSError, TypeError, ValueError):
         return False
     finally:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def _receipt_owned_marker(directory_fd, name, receipt) -> bool:
@@ -2480,17 +2469,7 @@ def library_backup_disposal_record(backup, *, expected_owner=None):
         if snapshot is None or _exact_tree_snapshot(descriptors[-1]) != snapshot:
             return None
         carrier = canonical_library_backup_record(
-            {
-                "version": 1,
-                "kind": backup.receipt.get("kind"),
-                "owner": backup.receipt.get("owner"),
-                "path": os.fspath(backup.path),
-                "origin": backup.receipt.get("origin"),
-                "complete": backup.complete,
-                "requested": backup.requested,
-                "backed_up": backup.backed_up,
-                "receipt": backup.receipt,
-            },
+            _backup_record_value(backup),
             expected_owner=expected_owner,
         )
         if carrier is None:
@@ -2507,7 +2486,7 @@ def library_backup_disposal_record(backup, *, expected_owner=None):
             expected_owner=expected_owner,
         )
     finally:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def _canonical_receipt(receipt):
@@ -2698,17 +2677,7 @@ def dispose_backup(
             return False
         if expected_disposal_record is not None:
             carrier = canonical_library_backup_record(
-                {
-                    "version": 1,
-                    "kind": receipt.get("kind"),
-                    "owner": receipt.get("owner"),
-                    "path": os.fspath(backup.path),
-                    "origin": receipt.get("origin"),
-                    "complete": backup.complete,
-                    "requested": backup.requested,
-                    "backed_up": backup.backed_up,
-                    "receipt": receipt,
-                },
+                _backup_record_value(backup),
                 expected_owner=expected_owner,
             )
             disposal = canonical_library_backup_disposal_record(
@@ -2731,7 +2700,7 @@ def dispose_backup(
     except (OSError, TypeError, ValueError):
         return False
     finally:
-        _close_descriptors(opened[-1])
+        close_descriptors(opened[-1])
 
     snapshot = _proven_redundant(
         backup.path, backup.path, replacement_path,
@@ -2931,7 +2900,7 @@ def carry_backup_companions(
     except (OSError, TypeError, ValueError, KeyError):
         return None
     finally:
-        _close_descriptors(opened[-1])
+        close_descriptors(opened[-1])
 
 
 def companion_conflicts(backup, replacement_receipt, renamed=None):
@@ -3128,7 +3097,7 @@ def release_backup_owner(backup: BackupResult, *, expected_owner) -> bool:
             os.unlink(temporary, dir_fd=directory_fd)
         except OSError:
             pass
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def pin_unverified_upgrade_backup(backup: BackupResult,
@@ -3354,7 +3323,7 @@ def _complete_upgrade_backup(backup, *, set_aside=False):
     if opened is None:
         return None
     _public, _root, _parts, descriptors = opened
-    _close_descriptors(descriptors)
+    close_descriptors(descriptors)
     return completed
 
 
@@ -4167,7 +4136,7 @@ def _downsample_outputs(backup):
         note = _receipt_marker_note(
             opened[-1][-1], _DOWNSAMPLE_OUTPUTS_SENTINEL, backup.receipt)
     finally:
-        _close_descriptors(opened[-1])
+        close_descriptors(opened[-1])
     try:
         outputs = json.loads(note) if note is not None else None
     except ValueError:
@@ -4905,7 +4874,7 @@ def _restorable(backup, original_path, *, expected_owner, complete=None,
         ):
             return None
     finally:
-        _close_descriptors(opened[-1])
+        close_descriptors(opened[-1])
     return opened[0]
 
 
@@ -5205,7 +5174,7 @@ def interrupted_upgrades():
             note = _receipt_marker_note(
                 descriptors[-1], _UPGRADE_PENDING_SENTINEL, backup.receipt)
         finally:
-            _close_descriptors(descriptors)
+            close_descriptors(descriptors)
         if note is not None:
             found.append((backup, note))
     return found
@@ -5418,7 +5387,7 @@ def _album_parents_unchanged(receipt) -> bool:
     except (OSError, TypeError, ValueError, IndexError):
         return False
     finally:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def album_backup_to_put_back(path, origin):
@@ -6132,7 +6101,7 @@ def _classify_retained_backup(path, origin, budget, *, compare_audio=False):
         if _reserved_backup_entry_present(opened[-1][-1]):
             return BackupClassification("retained", "album_metadata")
     finally:
-        _close_descriptors(opened[-1])
+        close_descriptors(opened[-1])
     result = _classify_backup_contents(
         album, path, budget=budget, renamed=named[1] if named else None)
     # An album track whose bytes differ, or that is filed under another name,
@@ -6200,7 +6169,7 @@ def _classify_retained_backup(path, origin, budget, *, compare_audio=False):
             if _receipt_disposal_snapshot(opened[-1][-1], candidate.receipt) is None:
                 return BackupClassification("retained", "record")
         finally:
-            _close_descriptors(opened[-1])
+            close_descriptors(opened[-1])
     except (OSError, TypeError, ValueError):
         return BackupClassification("unverified", "unreadable")
     return result
@@ -6304,7 +6273,7 @@ def _sealed_consolidation(candidate):
     except OSError:
         return None
     finally:
-        _close_descriptors(opened[-1])
+        close_descriptors(opened[-1])
     return _consolidation_kept(note)
 
 
@@ -6540,7 +6509,7 @@ def album_folder_replaced(backup) -> bool:
     except (OSError, TypeError, ValueError, IndexError):
         return False
     finally:
-        _close_descriptors(descriptors)
+        close_descriptors(descriptors)
 
 
 def files_not_back_in_album(path, *, compare=False, exact=False):

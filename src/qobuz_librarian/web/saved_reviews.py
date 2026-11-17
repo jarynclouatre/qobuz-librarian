@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 
 from qobuz_librarian.library import candidate_premise, downsample_state, generation_state
 from qobuz_librarian.quality import upgrade_state
+from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.web import (
     job_labels,
     job_persistence,
@@ -245,33 +246,27 @@ def _saved_review_specs_from_job(surface, job):
     return specs
 
 
+def _job_review_signature(surface, job):
+    return _saved_review_signature(surface, {
+        "candidates": _saved_review_specs_from_job(surface, job),
+        "quality_signature": (job.execute_args or {}).get(
+            "quality_signature", ""),
+    })
+
+
 def _existing_saved_review_job(surface, signature):
-    review_jobs = [
+    matching = [
         job for job in job_mgr.registry.all()
         if job.execute_kind == surface and job.status in job_mgr.ACTIVE
+        and _job_review_signature(surface, job) == signature
     ]
-    for job in review_jobs:
-        if (job.execute_kind == surface
-                and getattr(job, "_saved_review_signature", None) == signature):
-            current_signature = _saved_review_signature(
-                surface, {
-                    "candidates": _saved_review_specs_from_job(surface, job),
-                    "quality_signature": (job.execute_args or {}).get(
-                        "quality_signature", ""),
-                })
-            if current_signature == signature:
-                return job
-    for job in review_jobs:
-        current_signature = _saved_review_signature(
-            surface, {
-                "candidates": _saved_review_specs_from_job(surface, job),
-                "quality_signature": (job.execute_args or {}).get(
-                    "quality_signature", ""),
-            })
-        if current_signature == signature:
-            job._saved_review_signature = signature
+    for job in matching:
+        if getattr(job, "_saved_review_signature", None) == signature:
             return job
-    return None
+    if not matching:
+        return None
+    matching[0]._saved_review_signature = signature
+    return matching[0]
 
 
 def _active_saved_review_claim(surface, state):
@@ -312,6 +307,16 @@ _SAVED_REVIEW_TITLES_PRIOR = {
     "downsample": "Downsample candidates",
 }
 _SAVED_REVIEW_LOCK = threading.RLock()
+
+
+def _saved_state_summary(surface):
+    if surface == "upgrade":
+        return _upgrade_state_summary()
+    return _downsample_state_summary()
+
+
+def _saved_review_summary(surface, count):
+    return f"{plural(count, 'album')} can be {surface}d."
 
 
 def _is_saved_review_title(surface, title):
@@ -412,12 +417,8 @@ def _sync_saved_review_job(job, surface, state, signature):
                 **(job.execute_args or {}),
                 "quality_signature": str(state.get("quality_signature") or ""),
             }
-        n = len(rebuilt)
         job.title = _SAVED_REVIEW_TITLES[surface]
-        if surface == "downsample":
-            job.summary = f"{n} album{'s' if n != 1 else ''} can be downsampled."
-        else:
-            job.summary = f"{n} album{'s' if n != 1 else ''} can be upgraded."
+        job.summary = _saved_review_summary(surface, len(rebuilt))
         return True
 
     saved, synced = job_persistence.persist_review_mutation(job, _sync)
@@ -449,11 +450,7 @@ def _sync_saved_review_before_approve(job):
             and not _is_saved_review_title(surface, job.title)):
         return job
     with _SAVED_REVIEW_LOCK:
-        state = (
-            _upgrade_state_summary()
-            if surface == "upgrade"
-            else _downsample_state_summary()
-        )
+        state = _saved_state_summary(surface)
         current = {
             "candidates": state["candidates"] if state.get("complete") else [],
         }
@@ -462,15 +459,7 @@ def _sync_saved_review_before_approve(job):
         saved_signature = _saved_review_signature(surface, current)
         if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
             return job
-        review_signature = _saved_review_signature(
-            surface,
-            {
-                "candidates": _saved_review_specs_from_job(surface, job),
-                "quality_signature": (job.execute_args or {}).get(
-                    "quality_signature", ""
-                ),
-            },
-        )
+        review_signature = _job_review_signature(surface, job)
         return job if review_signature == saved_signature else False
 
 
@@ -486,11 +475,7 @@ def open_saved_review(job):
                 and not _is_saved_review_title(surface, job.title))):
         return job
     with _SAVED_REVIEW_LOCK:
-        state = (
-            _upgrade_state_summary()
-            if surface == "upgrade"
-            else _downsample_state_summary()
-        )
+        state = _saved_state_summary(surface)
         if (not state["complete"] or not state["candidates"]
                 or state.get("stale") and surface == "upgrade"
                 or _active_saved_review_claim(surface, state) is not None):
@@ -502,75 +487,33 @@ def open_saved_review(job):
         return _sync_saved_review_job(job, surface, state, signature) or job
 
 
-def _review_job_from_upgrade_state(state):
+def _review_job_from_state(surface, state):
     with _SAVED_REVIEW_LOCK:
-        claimed = _active_saved_review_claim("upgrade", state)
+        claimed = _active_saved_review_claim(surface, state)
         if claimed is not None:
             return claimed
-        signature = _saved_review_signature("upgrade", state)
-        existing = _existing_saved_review_job("upgrade", signature)
+        signature = _saved_review_signature(surface, state)
+        existing = _existing_saved_review_job(surface, signature)
         if existing is not None:
             return existing
-        stale = _stale_saved_review_job("upgrade")
+        stale = _stale_saved_review_job(surface)
         if stale is not None:
-            return _sync_saved_review_job(stale, "upgrade", state, signature)
-        job = job_mgr.Job(title="Albums to upgrade")
+            return _sync_saved_review_job(stale, surface, state, signature)
+        job = job_mgr.Job(title=_SAVED_REVIEW_TITLES[surface])
         job.kind = "scan"
-        job.execute_kind = "upgrade"
-        job.execute_args = {
-            "quality_signature": str(state.get("quality_signature") or ""),
-        }
-        job.review_verb = "Upgrade"
+        job.execute_kind = surface
+        if surface == "upgrade":
+            job.execute_args = {
+                "quality_signature": str(state.get("quality_signature") or ""),
+            }
+        job.review_verb = surface.capitalize()
         job._saved_review_signature = signature
-        job._execute_fn = job_runs._resume_upgrade(job, job.execute_args)
+        job._execute_fn = job_runs._RESUME_EXECUTE[surface](job, job.execute_args)
         for spec in state.get("candidates") or []:
             job.add_candidate(
-                kind="upgrade",
-                title=spec.get("title") or "?",
-                artist=spec.get("artist") or "",
-                detail=spec.get("detail") or "",
-                payload=spec.get("payload") or {},
-                selected=False,
-            )
+                kind=surface, selected=False, **_saved_review_row(surface, spec))
         job.status = job_mgr.JobStatus.AWAITING_REVIEW
-        n = len(job.candidates)
-        job.summary = f"{n} album{'s' if n != 1 else ''} can be upgraded."
-        if not _publish_saved_review(job):
-            return None
-        return job
-
-
-def _review_job_from_downsample_state(state):
-    with _SAVED_REVIEW_LOCK:
-        claimed = _active_saved_review_claim("downsample", state)
-        if claimed is not None:
-            return claimed
-        signature = _saved_review_signature("downsample", state)
-        existing = _existing_saved_review_job("downsample", signature)
-        if existing is not None:
-            return existing
-        stale = _stale_saved_review_job("downsample")
-        if stale is not None:
-            return _sync_saved_review_job(stale, "downsample", state, signature)
-        job = job_mgr.Job(title="Albums to downsample")
-        job.kind = "scan"
-        job.execute_kind = "downsample"
-        job.review_verb = "Downsample"
-        job._saved_review_signature = signature
-        job._execute_fn = job_runs._resume_downsample(job, job.execute_args)
-        for spec in state.get("candidates") or []:
-            payload = _saved_review_row("downsample", spec)["payload"]
-            job.add_candidate(
-                kind="downsample",
-                title=spec.get("title") or "?",
-                artist=spec.get("artist") or "",
-                detail=spec.get("detail") or "",
-                payload=payload,
-                selected=False,
-            )
-        job.status = job_mgr.JobStatus.AWAITING_REVIEW
-        n = len(job.candidates)
-        job.summary = f"{n} album{'s' if n != 1 else ''} can be downsampled."
+        job.summary = _saved_review_summary(surface, len(job.candidates))
         if not _publish_saved_review(job):
             return None
         return job
@@ -584,16 +527,11 @@ def _review_job_from_current_saved_state(surface):
     work that an existing job has already claimed.
     """
     with _SAVED_REVIEW_LOCK:
-        if surface == "upgrade":
-            state = _upgrade_state_summary()
-            factory = _review_job_from_upgrade_state
-        elif surface == "downsample":
-            state = _downsample_state_summary()
-            factory = _review_job_from_downsample_state
-        else:
+        if surface not in _SAVED_REVIEW_TITLES:
             raise ValueError("unsupported saved review surface")
+        state = _saved_state_summary(surface)
         if not state["complete"] or not state["candidates"]:
             return None
         if surface == "upgrade" and state.get("stale"):
             return None
-        return factory(state)
+        return _review_job_from_state(surface, state)

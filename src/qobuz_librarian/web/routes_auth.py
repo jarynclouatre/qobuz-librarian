@@ -114,7 +114,6 @@ async def login_submit(request: Request, username: str = Form(""),
         return _login_again(
             request, "Incorrect username or password." + (f" {wait}" if wait else ""),
             username.strip(), next_path)
-    web_auth.clear_login_failures(ip, username)
     resp = RedirectResponse(url=next_path or "/", status_code=303)
     try:
         web_auth.set_session_cookie(resp, request, expected_generation=generation)

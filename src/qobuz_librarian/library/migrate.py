@@ -53,8 +53,8 @@ from qobuz_librarian.library.tags import (
     normalize,
     strip_year_decoration,
 )
+from qobuz_librarian.safefile import close_descriptors, fsync_dirs, stat_identity
 from qobuz_librarian.safefile import digest_fd as _digest_fd
-from qobuz_librarian.safefile import fsync_dirs, stat_identity
 from qobuz_librarian.safefile import named_entry_matches as _named_entry_matches
 from qobuz_librarian.safefile import named_entry_missing as _named_entry_missing
 from qobuz_librarian.safefile import rename_noreplace as _rename_noreplace_at
@@ -365,10 +365,6 @@ def track_filename(meta: dict) -> str:
     title = meta.get("title") or ""
     name = f"{track:02d} - {title}" if track > 0 else title
     return _truncate_component(beets_sanitize(name), ext=meta.get("ext", ""))
-
-
-def _album_key(meta: dict) -> tuple:
-    return album_components(meta)
 
 
 def _album_source_dir(source) -> Path:
@@ -881,11 +877,7 @@ def _capture_root_receipt(path: Path, *, allow_missing=False) -> dict:
             "mount_coordinate": _mount_coordinate(absolute),
         }
     finally:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
 
 
 class _RootBinding:
@@ -966,11 +958,7 @@ class _RootBinding:
         )
 
     def close(self) -> None:
-        for descriptor in reversed(self.descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(self.descriptors)
         self.descriptors = []
 
 
@@ -1100,11 +1088,7 @@ def _open_root_receipt(receipt, *, create_missing=False) -> _RootBinding:
             raise OSError("migration root changed while it was opened")
         return binding
     finally:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
 
 
 def _relative_parts(path: Path, root: Path) -> tuple:
@@ -1167,11 +1151,7 @@ def _capture_file_receipt(binding: _RootBinding, path: Path, *,
                 os.close(file_fd)
             except OSError:
                 pass
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
 
 
 def _same_file_snapshot(left, right) -> bool:
@@ -1240,11 +1220,7 @@ class _OpenedFile:
             os.close(self.descriptor)
         except OSError:
             pass
-        for descriptor in reversed(self.parents):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(self.parents)
 
 
 def _open_file_receipt(binding: _RootBinding, receipt, *,
@@ -1315,11 +1291,7 @@ def _open_file_receipt(binding: _RootBinding, receipt, *,
                 os.close(file_fd)
             except OSError:
                 pass
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
 
 
 def _source_root_for_items(items, sources) -> Optional[Path]:
@@ -1407,11 +1379,7 @@ def _destination_state(root_receipt, dest_root, dest_rel):
     except OSError:
         return True, None, None, "destination path is unsafe"
     finally:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
         binding.close()
 
 
@@ -1662,7 +1630,7 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
     albums: dict = {}
     for row in placeable:
         source, meta = row[0], row[1]
-        artist_folder, album_folder = _album_key({**meta, "year": 0})
+        artist_folder, album_folder = album_components({**meta, "year": 0})
         albums.setdefault(
             (_fold_name(artist_folder),
              _fold_name(_without_year_bracket(album_folder)),
@@ -1678,7 +1646,7 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
     keyed = []
     for identity, members in albums.items():
         year = _album_year(meta for _, meta, _, _ in members)
-        folders = [_album_key({**meta, "year": year})
+        folders = [album_components({**meta, "year": year})
                    for _, meta, _, _ in members]
         for artist_folder, album_folder in folders:
             artist_key = _fold_name(artist_folder)
@@ -3148,11 +3116,7 @@ def _open_destination_parent(binding: _RootBinding, dest_rel: Path,
             raise OSError("migration destination root changed")
         return descriptors, parent_fd, parts[-1]
     except BaseException:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
         raise
 
 
@@ -3366,11 +3330,7 @@ def _stream_copy_noreplace(source: _OpenedFile, source_receipt,
                 os.close(temporary_fd)
             except OSError:
                 pass
-        for descriptor in reversed(parents):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(parents)
         raise
 
 
@@ -3452,11 +3412,7 @@ def _open_sealed_directory_chain(binding, chain):
             raise OSError("migration source root changed after preview")
         return descriptors
     except BaseException:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
         raise
 
 
@@ -3489,11 +3445,7 @@ def _remove_empty_sealed_directory(binding, chain) -> bool:
     except OSError:
         return False
     finally:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        close_descriptors(descriptors)
 
 
 def _prune_retired_source_parents(binding, receipts, *, result=None,
@@ -3598,11 +3550,7 @@ def _close_published_file(published) -> None:
         os.close(descriptor)
     except OSError:
         pass
-    for parent in reversed(parents):
-        try:
-            os.close(parent)
-        except OSError:
-            pass
+    close_descriptors(parents)
 
 
 def _path_evidence(path) -> str:

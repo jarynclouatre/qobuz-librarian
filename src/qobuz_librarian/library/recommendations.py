@@ -211,11 +211,11 @@ _library_lock = threading.Lock()
 _LIBRARY_CACHE_SECONDS = 60.0
 
 
-def library(*, max_age: float = _LIBRARY_CACHE_SECONDS) -> Library:
+def library() -> Library:
     global _library_cache, _library_cache_at
     with _library_lock:
         fresh = (_library_cache is not None
-                 and (time.time() - _library_cache_at) <= max_age)
+                 and (time.time() - _library_cache_at) <= _LIBRARY_CACHE_SECONDS)
         if fresh:
             return _library_cache
     built = read_library()
@@ -410,24 +410,13 @@ def resolve_album(
     if best is None:
         cache.put_resolution_miss(key)
         return None
-    best_group_key = (
-        normalize(catalog.strip_album_decorations(best.get("title") or ""))
-        or catalog.strip_album_decorations(best.get("title") or "")
-        .strip()
-        .casefold(),
-        catalog.album_year_int(best),
-    )
-    same_release = [
-        album
-        for album, _score in matches
-        if (
-            normalize(catalog.strip_album_decorations(album.get("title") or ""))
-            or catalog.strip_album_decorations(album.get("title") or "")
-            .strip()
-            .casefold(),
-            catalog.album_year_int(album),
-        ) == best_group_key
-    ]
+    def release_key(album):
+        title = catalog.strip_album_decorations(album.get("title") or "")
+        return (normalize(title) or title.strip().casefold(),
+                catalog.album_year_int(album))
+
+    same_release = [album for album, _score in matches
+                    if release_key(album) == release_key(best)]
     picked = catalog.dedup_album_versions(
         same_release, prefer_hires=prefer_hires)
     if picked:
@@ -640,6 +629,34 @@ def start_build(kind: str, worker, *args, library_sig: str = "") -> dict:
     return snapshot
 
 
+def _lastfm_lookup(make_key, ttl, fetch):
+    """A per-artist lookup that answers from the cache and asks Last.fm
+    otherwise. Once Last.fm has answered, a failed request falls back to the
+    stale answer until too many fail in a row."""
+    failures = 0
+    reached = False
+
+    def rows_for(seed):
+        nonlocal failures, reached
+        key = make_key(normalize(seed) or seed)
+        rows = cache.get_lastfm(key, ttl)
+        if rows is not None:
+            return rows
+        try:
+            rows = fetch(seed)
+        except LastfmUnavailable:
+            failures += 1
+            if not reached or failures >= _MAX_CONSECUTIVE_FAILURES:
+                raise
+            return cache.get_lastfm(key, ttl, allow_stale=True) or []
+        cache.put_lastfm(key, rows)
+        failures = 0
+        reached = True
+        return rows
+
+    return rows_for
+
+
 def _similar_worker(
     kind: str,
     token,
@@ -652,25 +669,10 @@ def _similar_worker(
     hidden = discover_hidden.current()
     total = len(owned)
     _publish(kind, total=total)
-    consecutive_failures = 0
-    reached_lastfm = False
+    similar_to = _lastfm_lookup(
+        cache.similar_key, cache.SIMILAR_TTL, get_similar_artists)
     for index, seed in enumerate(owned.seeds, start=1):
-        key = cache.similar_key(normalize(seed) or seed)
-        rows = cache.get_lastfm(key, cache.SIMILAR_TTL)
-        if rows is None:
-            try:
-                rows = get_similar_artists(seed)
-                cache.put_lastfm(key, rows)
-                consecutive_failures = 0
-                reached_lastfm = True
-            except LastfmUnavailable:
-                consecutive_failures += 1
-                if (not reached_lastfm
-                        or consecutive_failures >= _MAX_CONSECUTIVE_FAILURES):
-                    raise
-                rows = cache.get_lastfm(key, cache.SIMILAR_TTL,
-                                        allow_stale=True) or []
-        for row in rows:
+        for row in similar_to(seed):
             name = str(row.get("name") or "").strip()
             if not name:
                 continue
@@ -757,25 +759,9 @@ def _tags_worker(kind: str, token, owned: Library) -> None:
     weights: dict[str, float] = {}
     labels: dict[str, str] = {}
     _publish(kind, total=len(sample))
-    consecutive_failures = 0
-    reached_lastfm = False
+    tags_of = _lastfm_lookup(cache.tags_key, cache.TAGS_TTL, get_artist_top_tags)
     for index, seed in enumerate(sample, start=1):
-        key = cache.tags_key(normalize(seed) or seed)
-        rows = cache.get_lastfm(key, cache.TAGS_TTL)
-        if rows is None:
-            try:
-                rows = get_artist_top_tags(seed)
-                cache.put_lastfm(key, rows)
-                consecutive_failures = 0
-                reached_lastfm = True
-            except LastfmUnavailable:
-                consecutive_failures += 1
-                if (not reached_lastfm
-                        or consecutive_failures >= _MAX_CONSECUTIVE_FAILURES):
-                    raise
-                rows = cache.get_lastfm(key, cache.TAGS_TTL,
-                                        allow_stale=True) or []
-        for row in rows:
+        for row in tags_of(seed):
             name = str(row.get("name") or "").strip()
             if not _tag_is_musical(name):
                 continue

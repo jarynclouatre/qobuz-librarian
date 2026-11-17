@@ -4,7 +4,7 @@ import math
 import sqlite3
 import time
 
-from qobuz_librarian.cache_db import CacheDB
+from qobuz_librarian.cache_db import CacheDB, is_fresh
 from qobuz_librarian.ui_cli.logging import vlog
 
 # How long each kind of row stays usable.
@@ -79,16 +79,8 @@ def _read(table: str, id_column: str, key: str, ttl_seconds: float,
         return None
     if not row:
         return None
-    if not allow_stale:
-        try:
-            fetched_at = float(row[1] or 0)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if (
-            not math.isfinite(fetched_at)
-            or (time.time() - fetched_at) > ttl_seconds
-        ):
-            return None
+    if not allow_stale and not is_fresh(row[1], ttl_seconds):
+        return None
     try:
         return json.loads(row[0])
     except (ValueError, TypeError):

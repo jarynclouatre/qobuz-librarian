@@ -61,7 +61,7 @@
       <p>{% if _ds_executing %}Your files are being rewritten in place.{% elif downsample_running.status.value == 'pending' %}Starts when the current job finishes.{% else %}Checking your files for albums that can be downsampled.{% endif %} <a href="/jobs/{{ downsample_running.id }}" class="ql-inline-link">Watch progress →</a></p>
     </div>
     {% elif downsample_state.stale %}
-    <section class="ql-work-card ql-quality-entry-card">
+    <section class="ql-work-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">Refresh Downsample results</p>
         <p class="ql-work-card-text">The saved result is not current.</p>
@@ -76,7 +76,7 @@
       </div>
     </section>
     {% elif downsample_state.count %}
-    <section class="ql-work-card ql-quality-entry-card">
+    <section class="ql-work-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">{{ downsample_state.count }} album{% if downsample_state.count != 1 %}s{% endif %} can be downsampled</p>
         <p class="ql-work-card-text">Files are rewritten in place at 44.1 / 48 kHz{% if ds_originals_chosen() and keeps_ds_originals() %}, and the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}{% elif ds_originals_chosen() %} and the hi-res originals are not kept{% else %}. You choose whether the hi-res originals are kept{% endif %}.</p>
@@ -97,7 +97,7 @@
       </div>
     </section>
     {% else %}
-    <section class="ql-work-card ql-quality-entry-card">
+    <section class="ql-work-card">
       <div class="ql-work-card-copy">
       {% if not downsample_state.discarded and not downsample_state.complete %}<p class="ql-work-card-title">No Downsample results yet</p>{% endif %}
         <p class="ql-work-card-text">Refresh checks the files already on disk.</p>
@@ -113,7 +113,7 @@
     </section>
     {% endif %}
   {% else %}
-  <section class="ql-work-card ql-quality-entry-card">
+  <section class="ql-work-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-kicker">Unavailable</p>
       <p class="ql-work-card-title">Downsampling is unavailable</p>

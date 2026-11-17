@@ -534,6 +534,14 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
     def recovery_result():
         return retained_recovery.backup if retained_recovery is not None else None
 
+    def failed(backup=None, n_fail=None):
+        return {
+            "n_ok": 0,
+            "n_fail": len(verified_truncated) if n_fail is None else n_fail,
+            "imported": False,
+            "backup": backup,
+        }
+
     def interrupt_with_recovery(cause, stage, reason):
         recovery, _ = checkpoint_recovery(
             backup_path, stage, reason)
@@ -547,12 +555,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         except OSError as exc:
             log.info(fmt(C.RED,
                 f"  ✗  Repair needs a fresh exact scan ({exc})."))
-            return {
-                "n_ok": 0,
-                "n_fail": len(verified_truncated),
-                "imported": False,
-                "backup": None,
-            }
+            return failed()
 
         # Everything Qobuz-side happens up front, while the truncated
         # originals are still in place. If the parent-album lookup hits a
@@ -608,12 +611,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         if album_identity is None:
             log.info(fmt(C.RED,
                 "  ✗  The selected album could not be held."))
-            return {
-                "n_ok": 0,
-                "n_fail": len(verified_truncated),
-                "imported": False,
-                "backup": None,
-            }
+            return failed()
 
         expected_generation = getattr(token, "credential_generation", "")
         if expected_generation:
@@ -625,7 +623,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 f"  ✗  {link} is a symbolic link, which Repair can't check or "
                 "back up. Replace it with a copy of its file, then "
                 "try again."))
-            return {"n_ok": 0, "n_fail": len(verified_truncated), "backup": None}
+            return failed()
         broken_paths = [b["path"] for b in verified_truncated]
         replaced_entries = beets_entry_ids(broken_paths)
         backup_path = backup_gap_fill_files(
@@ -645,7 +643,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     "file could be put back. No replacement was downloaded; "
                     "the missing files are in the backup listed under "
                     "Settings → Diagnostics."))
-            return {"n_ok": 0, "n_fail": len(verified_truncated), "backup": None}
+            return failed()
         _initial_recovery, recovery_saved = checkpoint_recovery(
             backup_path,
             "backup",
@@ -672,24 +670,14 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     "Every moved original was restored after recovery "
                     "persistence failed.",
                 )
-                return {
-                    "n_ok": 0,
-                    "n_fail": len(verified_truncated),
-                    "imported": False,
-                    "backup": None,
-                }
+                return failed()
             checkpoint_recovery(
                 backup_path,
                 "backup",
                 "Repair could not save its recovery record and automatic "
                 "restore did not complete.",
             )
-            return {
-                "n_ok": 0,
-                "n_fail": len(verified_truncated),
-                "imported": False,
-                "backup": recovery_result(),
-            }
+            return failed(recovery_result())
 
         def pin_repair_recovery(note):
             if (backup_path.exists()
@@ -713,12 +701,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             log.info(fmt(C.RED,
                 "  ✗  The selected album changed during backup; "
                 f"the originals are preserved at:\n     {backup_path}"))
-            return {
-                "n_ok": 0,
-                "n_fail": len(verified_truncated),
-                "imported": False,
-                "backup": recovery_result(),
-            }
+            return failed(recovery_result())
         post_backup_premise = candidate_premise.capture(
             "repair",
             album_dir,
@@ -738,12 +721,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "damaged files were backed up. No replacement download was "
                 f"started; the originals are preserved at:\n     {backup_path}",
             ))
-            return {
-                "n_ok": 0,
-                "n_fail": len(verified_truncated),
-                "imported": False,
-                "backup": recovery_result(),
-            }
+            return failed(recovery_result())
         qi["_source_premise"] = post_backup_premise
         qi["_gap_fill_receipts"] = candidate_premise.gap_fill_receipts(
             post_backup_premise
@@ -862,12 +840,8 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "The selected album changed while replacement tracks were "
                 "downloaded.",
             )
-            return {
-                "n_ok": 0,
-                "n_fail": max(qi.get("n_fail", 0), len(verified_truncated)),
-                "imported": False,
-                "backup": recovery_result(),
-            }
+            return failed(recovery_result(), n_fail=max(
+                qi.get("n_fail", 0), len(verified_truncated)))
 
         n_fail_final = qi.get("n_fail", 0)
         n_ok_final = qi.get("n_ok", 0)
@@ -893,12 +867,8 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 f"  ✗  {unproven} The originals are preserved at:\n"
                 f"     {backup_path}"))
             checkpoint_recovery(backup_path, "placement", unproven)
-            return {
-                "n_ok": 0,
-                "n_fail": max(n_fail_final, len(verified_truncated)),
-                "imported": False,
-                "backup": recovery_result(),
-            }
+            return failed(recovery_result(), n_fail=max(
+                n_fail_final, len(verified_truncated)))
         if back_in_place and bool(wanted_isrcs):
             try:
                 repaired = _refills_intact(album_dir, wanted_counts, token,

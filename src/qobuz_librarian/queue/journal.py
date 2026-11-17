@@ -1492,21 +1492,12 @@ def _locked_queue_load(function):
 
 
 def _locked_queue_list(function):
+    load = _locked_queue_load(function)
+
     @wraps(function)
     def locked(*args, **kwargs):
-        try:
-            with _journal_namespace_lock():
-                return function(*args, **kwargs)
-        except (OSError, QueueJournalError) as exc:
-            return (QueueLoad(
-                status=QueueLoadStatus.BLOCKED,
-                reason=str(exc),
-                paths=getattr(
-                    exc,
-                    "paths",
-                    (cfg.QUEUE_JOURNAL_DIR / _JOURNAL_LOCK_NAME,),
-                ),
-            ),)
+        loaded = load(*args, **kwargs)
+        return (loaded,) if isinstance(loaded, QueueLoad) else loaded
 
     return locked
 
@@ -1563,17 +1554,16 @@ def _committed_journal(path: Path, operation_id: str) -> QueueJournal | None:
     return journal
 
 
+def _canonical_bytes(value) -> bytes:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False,
+                      sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 def _write_durable_json(path: Path, payload: dict[str, Any]) -> None:
     directory = _ensure_journal_dir()
     if path.parent != directory:
         raise QueueJournalError("queue journal path is outside its configured directory")
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    encoded = _canonical_bytes(payload)
     safefile.write_atomic(path, encoded, prefix=f".{path.stem}.", strict=True)
 
 
@@ -1596,19 +1586,7 @@ def _read_regular_file(path: Path) -> bytes:
         settled = os.fstat(descriptor)
         if (
             len(raw) != opened.st_size
-            or (
-                settled.st_dev,
-                settled.st_ino,
-                settled.st_size,
-                settled.st_mtime_ns,
-                settled.st_ctime_ns,
-            ) != (
-                opened.st_dev,
-                opened.st_ino,
-                opened.st_size,
-                opened.st_mtime_ns,
-                opened.st_ctime_ns,
-            )
+            or _file_identity(settled) != _file_identity(opened)
         ):
             raise QueueJournalError(
                 f"queue journal changed while it was read: {path}")
@@ -1649,13 +1627,7 @@ def create_queue_journal(items, *, mode: str) -> QueueJournal:
 def _journal_snapshot_bytes(journal: QueueJournal) -> bytes:
     payload = _journal_payload(journal)
     validated = _parse_journal(payload, journal.operation_id)
-    return json.dumps(
-        _journal_payload(validated),
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return _canonical_bytes(_journal_payload(validated))
 
 
 @_locked_transaction
@@ -1966,13 +1938,7 @@ def _refuse_overfull(journal: QueueJournal, saved_count: int) -> None:
     shrank or kept its length is always saved."""
     if len(journal.items) <= saved_count:
         return
-    encoded = json.dumps(
-        _journal_payload(journal),
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    encoded = _canonical_bytes(_journal_payload(journal))
     if len(encoded) > _MAX_GROWING_QUEUE_BYTES:
         raise QueueJournalFull(
             f"the saved queue would exceed {_MAX_GROWING_QUEUE_BYTES} bytes")
@@ -2007,13 +1973,7 @@ def transition_journal_item(
             )
         recovery_references = tuple(canonical_references)
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     allowed = {
         QueuePhase.PENDING: {QueuePhase.ACTIVE, QueuePhase.BLOCKED},
         QueuePhase.ACTIVE: {QueuePhase.ACTIVE, QueuePhase.RESOLVING, QueuePhase.BLOCKED},
@@ -2109,18 +2069,8 @@ def transition_journal_item(
         input_record = None
         next_input = None
     else:
-        if type(completion_input) is CompletionInput:
-            input_record = completion_input.to_record()
-        elif type(completion_input) is dict:
-            input_record = _json_copy(completion_input)
-        else:
-            raise ValueError("completion_input must be a completion input record")
-        next_input = parse_completion_input_record(
-            input_record,
-            expected_owner=RecoveryOwner(previous.operation_id, item_id),
-        )
-        if next_input is None:
-            raise ValueError("completion_input is invalid")
+        next_input = _parsed_completion_input(
+            completion_input, RecoveryOwner(previous.operation_id, item_id))
         input_record = next_input.to_record()
     if previous_input is None:
         if next_input is not None and not (
@@ -2223,13 +2173,7 @@ def _append_staging_reference(
     kind: str,
 ) -> QueueJournal:
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     allowed_phases = {QueuePhase.ACTIVE}
     if kind == _STAGING_GROUP_REFERENCE_KIND:
         # Parking a group is also how an authorised recovery throws away a
@@ -2321,13 +2265,7 @@ def reconcile_staging_references(
     if type(settled_references) is not tuple or not settled_references:
         raise ValueError("settled staging references must be a non-empty tuple")
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     if target.phase not in {
         QueuePhase.ACTIVE,
         QueuePhase.RESOLVING,
@@ -2382,13 +2320,7 @@ def append_library_backup_intent(
 ) -> QueueJournal:
     """Commit the owner-bound backup destination before source mutation."""
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     inventory = _recovery_reference_inventory(
         target.recovery_references,
         expected_operation_id=previous.operation_id,
@@ -2439,13 +2371,7 @@ def promote_library_backup_carrier(
 ) -> QueueJournal:
     """Replace one exact pre-mutation intent with its sealed carrier."""
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     inventory = _recovery_reference_inventory(
         target.recovery_references,
         expected_operation_id=previous.operation_id,
@@ -2512,13 +2438,7 @@ def begin_library_backup_settlement(
 ) -> QueueJournal:
     """Persist exact disposal authority before retiring a library backup."""
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     inventory = _recovery_reference_inventory(
         target.recovery_references,
         expected_operation_id=previous.operation_id,
@@ -2592,17 +2512,7 @@ def upgrade_library_backup_settlement(
 ) -> QueueJournal:
     """Add exact disposal authority to one untouched legacy settlement."""
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (
-            index
-            for index, item in enumerate(previous.items)
-            if item.item_id == item_id
-        ),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     inventory = _recovery_reference_inventory(
         target.recovery_references,
         expected_operation_id=previous.operation_id,
@@ -2676,13 +2586,7 @@ def finish_library_backup_settlement(
 ) -> QueueJournal:
     """Forget only the exact settlement whose carrier is proved retired."""
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     inventory = _recovery_reference_inventory(
         target.recovery_references,
         expected_operation_id=previous.operation_id,
@@ -2749,13 +2653,7 @@ def forget_unused_library_backup_intent(
 def _forget_library_backup_reference(journal, item_id, reference, listed,
                                      strict, *, source_premise=None):
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     inventory = _recovery_reference_inventory(
         target.recovery_references,
         expected_operation_id=previous.operation_id,
@@ -2801,13 +2699,7 @@ def reset_unstarted_item_to_pending(
 ) -> QueueJournal:
     """Reset only an ACTIVE item proven not to have crossed a mutation gate."""
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     frozen_input = parse_completion_input_record(
         target.completion_input,
         expected_owner=RecoveryOwner(previous.operation_id, item_id),
@@ -2845,13 +2737,7 @@ def reserve_managed_carrier(
 ) -> QueueJournal:
     """Durably reserve the exact private carrier path before it is created."""
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     inventory = _recovery_reference_inventory(
         target.recovery_references,
         expected_operation_id=previous.operation_id,
@@ -2907,13 +2793,7 @@ def promote_managed_carrier(
 ) -> QueueJournal:
     """Publish an exact created carrier and enter the resolving phase."""
     previous = _reload_matching_journal(journal)
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     inventory = _recovery_reference_inventory(
         target.recovery_references,
         expected_operation_id=previous.operation_id,
@@ -2969,18 +2849,7 @@ def promote_managed_carrier(
         target.completion_input,
         expected_owner=expected_owner,
     )
-    if type(completion_input) is CompletionInput:
-        input_record = completion_input.to_record()
-    elif type(completion_input) is dict:
-        input_record = _json_copy(completion_input)
-    else:
-        raise ValueError("completion_input must be a completion input record")
-    next_input = parse_completion_input_record(
-        input_record,
-        expected_owner=expected_owner,
-    )
-    if next_input is None:
-        raise ValueError("completion_input is invalid")
+    next_input = _parsed_completion_input(completion_input, expected_owner)
     if (
         previous_input is None
         or not completion_input_extends(previous_input, next_input)
@@ -3049,13 +2918,7 @@ def commit_completed_item_removal(
 
 
 def _validated_completed_removal(previous, item_id, live_evidence):
-    target_index = next(
-        (index for index, item in enumerate(previous.items) if item.item_id == item_id),
-        None,
-    )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    target_index, target = _item_target(previous, item_id)
     if target.phase is not QueuePhase.COMPLETE:
         raise QueueJournalBlocked("only a completed queue item can be removed")
     owner = RecoveryOwner(previous.operation_id, item_id)
@@ -3501,18 +3364,31 @@ def process_carrier_retirement(
     return saved, result
 
 
-def _settlement_target(previous: QueueJournal, item_id: str):
-    target_index = next(
-        (
-            index
-            for index, item in enumerate(previous.items)
-            if item.item_id == item_id
-        ),
-        None,
+def _item_target(journal: QueueJournal, item_id: str):
+    for index, item in enumerate(journal.items):
+        if item.item_id == item_id:
+            return index, item
+    raise KeyError(f"unknown queue journal item: {item_id}")
+
+
+def _parsed_completion_input(completion_input, expected_owner):
+    if type(completion_input) is CompletionInput:
+        input_record = completion_input.to_record()
+    elif type(completion_input) is dict:
+        input_record = _json_copy(completion_input)
+    else:
+        raise ValueError("completion_input must be a completion input record")
+    parsed = parse_completion_input_record(
+        input_record,
+        expected_owner=expected_owner,
     )
-    if target_index is None:
-        raise KeyError(f"unknown queue journal item: {item_id}")
-    target = previous.items[target_index]
+    if parsed is None:
+        raise ValueError("completion_input is invalid")
+    return parsed
+
+
+def _settlement_target(previous: QueueJournal, item_id: str):
+    target_index, target = _item_target(previous, item_id)
     if target.phase is not QueuePhase.BLOCKED:
         raise QueueJournalBlocked("only a blocked queue item can be settled")
     return target_index, target

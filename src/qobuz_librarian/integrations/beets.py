@@ -58,6 +58,7 @@ from qobuz_librarian.library.scanner import (
 )
 from qobuz_librarian.recovery import (
     decode_recovery_json,
+    is_hex64,
     normalise_recovery_owner,
 )
 from qobuz_librarian.safefile import (
@@ -968,15 +969,15 @@ def _valid_managed_ownership_identity(value):
     )
 
 
+def _canonical_bytes(value) -> bytes:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"),
+                      sort_keys=True).encode("ascii")
+
+
 def _managed_payload_hash(payload):
     unsigned = dict(payload)
     unsigned.pop("hash", None)
-    encoded = json.dumps(
-        unsigned,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
+    encoded = _canonical_bytes(unsigned)
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -1138,19 +1139,11 @@ def _valid_managed_snapshot(value):
         and value["generation"] >= 0
         and (
             value.get("previous_hash") is None
-            or (
-                isinstance(value.get("previous_hash"), str)
-                and len(value["previous_hash"]) == 64
-                and all(char in "0123456789abcdef" for char in value["previous_hash"])
-            )
+            or is_hex64(value.get("previous_hash"))
         )
-        and isinstance(value.get("hash"), str)
-        and len(value["hash"]) == 64
-        and all(char in "0123456789abcdef" for char in value["hash"])
+        and is_hex64(value.get("hash"))
         and value["hash"] == _managed_payload_hash(value)
-        and isinstance(value.get("nonce"), str)
-        and len(value["nonce"]) == 64
-        and all(char in "0123456789abcdef" for char in value["nonce"])
+        and is_hex64(value.get("nonce"))
         and owner is not None
         and value["owner"] == owner
         and isinstance(value.get("root"), str)
@@ -1194,12 +1187,7 @@ def _write_managed_snapshot(descriptor, payload):
     payload = dict(payload)
     payload["hash"] = _managed_payload_hash(payload)
     encoded = (
-        json.dumps(
-            payload,
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("ascii")
+        _canonical_bytes(payload)
         + b"\n"
     )
     current_size = os.fstat(descriptor).st_size
@@ -1617,12 +1605,7 @@ def _read_managed_ownership_evidence(capture):
     if not all(_valid_managed_snapshot(item) for item in snapshots):
         return None
     for line, snapshot in zip(lines, snapshots):
-        canonical = json.dumps(
-            snapshot,
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("ascii")
+        canonical = _canonical_bytes(snapshot)
         if line != canonical:
             return None
     first = snapshots[0]
@@ -2030,12 +2013,7 @@ def _managed_carrier_history(
     if not all(_valid_managed_snapshot(snapshot) for snapshot in snapshots):
         return None
     for line, snapshot in zip(lines, snapshots):
-        canonical = json.dumps(
-            snapshot,
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("ascii")
+        canonical = _canonical_bytes(snapshot)
         if line != canonical:
             return None
     first = snapshots[0]
@@ -2212,10 +2190,7 @@ def _managed_prelaunch_retirement_history(
 
 def _managed_carrier_parameters(carrier_reference, expected_owner):
     if type(expected_owner) is RecoveryOwner:
-        expected_owner = {
-            "operation_id": expected_owner.operation_id,
-            "item_id": expected_owner.item_id,
-        }
+        expected_owner = expected_owner.to_record()
     try:
         expected_owner = normalise_recovery_owner(expected_owner)
     except ValueError:
@@ -2245,9 +2220,7 @@ def _managed_carrier_parameters(carrier_reference, expected_owner):
                 "parent_inode",
             )
         )
-        or not isinstance(carrier_reference.get("nonce"), str)
-        or len(carrier_reference["nonce"]) != 64
-        or any(value not in "0123456789abcdef" for value in carrier_reference["nonce"])
+        or not is_hex64(carrier_reference.get("nonce"))
     ):
         return None
     try:
@@ -2291,10 +2264,7 @@ def _managed_carrier_parameters(carrier_reference, expected_owner):
 
 def _managed_reservation_parameters(reservation, expected_owner):
     if type(expected_owner) is RecoveryOwner:
-        expected_owner = {
-            "operation_id": expected_owner.operation_id,
-            "item_id": expected_owner.item_id,
-        }
+        expected_owner = expected_owner.to_record()
     try:
         expected_owner = normalise_recovery_owner(expected_owner)
         reference_owner = normalise_recovery_owner(reservation.get("owner"))
@@ -2319,9 +2289,7 @@ def _managed_reservation_parameters(reservation, expected_owner):
             type(reservation.get(field)) is not int or reservation[field] < 0
             for field in ("parent_device", "parent_inode")
         )
-        or not isinstance(reservation.get("nonce"), str)
-        or len(reservation["nonce"]) != 64
-        or any(value not in "0123456789abcdef" for value in reservation["nonce"])
+        or not is_hex64(reservation.get("nonce"))
         or reference_owner != expected_owner
     ):
         return None
@@ -2346,9 +2314,7 @@ def _managed_retirement_parameters(
     parameters = _managed_carrier_parameters(carrier_reference, expected_owner)
     if (
         parameters is None
-        or not isinstance(expected_manifest_hash, str)
-        or len(expected_manifest_hash) != 64
-        or any(value not in "0123456789abcdef" for value in expected_manifest_hash)
+        or not is_hex64(expected_manifest_hash)
     ):
         return None
     prefix = ".qobuz-retire-managed-beets-"
@@ -2976,10 +2942,7 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
     lease = None
     try:
         if type(expected_owner) is RecoveryOwner:
-            expected_owner = {
-                "operation_id": expected_owner.operation_id,
-                "item_id": expected_owner.item_id,
-            }
+            expected_owner = expected_owner.to_record()
         expected_owner = normalise_recovery_owner(expected_owner)
         if (
             expected_owner is None
@@ -3006,9 +2969,7 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
                     "parent_inode",
                 )
             )
-            or not isinstance(carrier_reference.get("nonce"), str)
-            or len(carrier_reference["nonce"]) != 64
-            or any(value not in "0123456789abcdef" for value in carrier_reference["nonce"])
+            or not is_hex64(carrier_reference.get("nonce"))
             or normalise_recovery_owner(carrier_reference.get("owner")) != expected_owner
         ):
             raise ManagedEvidenceUnavailable("managed completion carrier reference is malformed")
@@ -3075,12 +3036,7 @@ def _open_managed_evidence_lease_with_interrupts_deferred(carrier_reference, exp
         if not lines or len(lines) > 10_000:
             raise ManagedEvidenceUnavailable("managed completion carrier history is malformed")
         first = decode_recovery_json(lines[0], max_bytes=_OWNERSHIP_MAX_BYTES)
-        canonical_first = json.dumps(
-            first,
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("ascii")
+        canonical_first = _canonical_bytes(first)
         if (
             lines[0] != canonical_first
             or not _valid_managed_snapshot(first)
@@ -6586,8 +6542,7 @@ def _beets_snapshot_from_record(record):
                     if type(value) is dict and set(value) == {"kind", "sha256"}:
                         digest = value["sha256"]
                         if (value["kind"] not in ("text", "blob")
-                                or type(digest) is not str or len(digest) != 64
-                                or any(char not in "0123456789abcdef" for char in digest)):
+                                or not is_hex64(digest)):
                             return None
                         value = _BeetsValueDigest(value["kind"], digest)
                     elif type(value) is dict and set(value) == {"bytes"}:

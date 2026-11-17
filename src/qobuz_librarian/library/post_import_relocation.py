@@ -3174,6 +3174,11 @@ def relocate_post_import_album(
                     if state not in {DatabaseRowsState.NEW, DatabaseRowsState.EMPTY}:
                         raise OSError("Beets path publication did not complete")
                     _checkpoint("after-database-publication")
+                    kept = (
+                        "kept " + plural(
+                            len(plan["conflicts"]), "existing destination name")
+                        if plan["conflicts"] else None
+                    )
                     if await_handoff:
                         payload["phase"] = "awaiting-handoff"
                         _write_journal(namespace_fd, payload)
@@ -3183,12 +3188,7 @@ def relocate_post_import_album(
                             operation_id,
                             payload["ownership_receipt"],
                             True,
-                            (
-                                "kept " + plural(
-                                    len(plan["conflicts"]),
-                                    "existing destination name")
-                                if plan["conflicts"] else None
-                            ),
+                            kept,
                         )
                     payload["phase"] = "committed"
                     _write_journal(namespace_fd, payload)
@@ -3202,12 +3202,7 @@ def relocate_post_import_album(
                         operation_id,
                         payload["ownership_receipt"],
                         True,
-                        (
-                            "kept " + plural(
-                                len(plan["conflicts"]),
-                                "existing destination name")
-                            if plan["conflicts"] else None
-                        ),
+                        kept,
                     )
                 except BaseException as exc:
                     if workspace_fd is not None:

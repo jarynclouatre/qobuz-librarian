@@ -333,6 +333,10 @@ def _restore_refused_notice(request: Request, target: Path, origin, *,
     return _stuck_backup_notice(request, target, headline, verified=verified)
 
 
+_BACKUP_GONE = ("That backup isn't there anymore. It may already be restored "
+                "or cleaned up.")
+
+
 @contextlib.contextmanager
 def _library_held(request: Request, operation: str, verb: str):
     """Hold the library for one diagnostics action. Yields None while it is
@@ -343,14 +347,12 @@ def _library_held(request: Request, operation: str, verb: str):
     if state == "paused":
         yield (_diagnostics_result_notice(
                    "warning", f"Library writes were paused before {verb} "
-                   "could start. Resume the web app, then try again.")
-               + diagnostics._diagnostics_fragment(request))
+                   "could start. Resume the web app, then try again."))
         return
     if state == "busy":
         yield (_diagnostics_result_notice(
                    "warning", "A job is working in the library right now. "
-                   "Try again once it finishes.")
-               + diagnostics._diagnostics_fragment(request))
+                   "Try again once it finishes."))
         return
     try:
         yield None
@@ -385,17 +387,17 @@ async def _run_diagnostics_action(request: Request, action, arg):
     busy = refusals._lock_busy_response(request)
     if busy is not None:
         return busy
-    loop = asyncio.get_running_loop()
-    return HTMLResponse(await loop.run_in_executor(None, action, request, arg))
+    def run():
+        return action(request, arg) + diagnostics._diagnostics_fragment(request)
+
+    return HTMLResponse(await asyncio.get_running_loop().run_in_executor(None, run))
 
 
 def _discard_unchecked_backup_sync(request: Request, backup: str,
                                    album_gone=False) -> str:
     target = _backup_target(backup, leftover=True)
     if target is None:
-        return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
-                                "It may already be restored or cleaned up.")
-                + diagnostics._diagnostics_fragment(request))
+        return _diagnostics_result_notice("error", _BACKUP_GONE)
     with _library_held(request, "Backup removal", "Delete") as refusal:
         if refusal:
             return refusal
@@ -427,7 +429,7 @@ def _discard_unchecked_backup_sync(request: Request, backup: str,
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "
                 f"{html.escape(location)} outside the app.")
-    return note + diagnostics._diagnostics_fragment(request)
+    return note
 
 
 def _read_only_note(names):
@@ -457,9 +459,7 @@ def _refresh_tool_lists(origin, reason):
 def _restore_backup_sync(request: Request, backup: str) -> str:
     target = _backup_target(backup)
     if target is None:
-        return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
-                                "It may already be restored or cleaned up.")
-                + diagnostics._diagnostics_fragment(request))
+        return _diagnostics_result_notice("error", _BACKUP_GONE)
     with _library_held(request, "Backup restore", "Restore") as refusal:
         if refusal:
             return refusal
@@ -586,7 +586,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
             note = _diagnostics_result_notice(
                 "error", "This backup has an unsupported recovery record, so "
                 "it was left untouched.")
-    return note + diagnostics._diagnostics_fragment(request)
+    return note
 
 
 @router.post("/backups/restore", response_class=HTMLResponse)
@@ -611,9 +611,7 @@ def _discard_replaced(carried, lyrics) -> bool:
 def _discard_backup_sync(request: Request, backup: str) -> str:
     target = _backup_target(backup, leftover=True)
     if target is None:
-        return (_diagnostics_result_notice("error", "That backup isn't there anymore. "
-                                "It may already be restored or cleaned up.")
-                + diagnostics._diagnostics_fragment(request))
+        return _diagnostics_result_notice("error", _BACKUP_GONE)
     with _library_held(request, "Backup removal", "Remove") as refusal:
         if refusal:
             return refusal
@@ -663,7 +661,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                     (refusal.detail if not refusal.removable else
                      "Couldn't verify that the album still holds every file "
                      "this backup does.") + " What is left of the backup "
-                    "was kept.") + diagnostics._diagnostics_fragment(request)
+                    "was kept.")
             if not refusal.removable:
                 body = (f"{html.escape(refusal.detail)} The backup was left "
                         "untouched.")
@@ -680,16 +678,15 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                         "file this backup does, so the backup was left "
                         "untouched.")
             note = _diagnostics_result_notice("error", body)
-    return note + diagnostics._diagnostics_fragment(request)
+    return note
 
 
 def _release_undo_copy_sync(request: Request, backup: str) -> str:
     target = _backup_target(backup, leftover=True)
     if target is None:
-        return (_diagnostics_result_notice("error", "Those originals aren't there "
-                                "anymore. They may already be restored or "
-                                "cleared.")
-                + diagnostics._diagnostics_fragment(request))
+        return _diagnostics_result_notice(
+            "error", "Those originals aren't there anymore. They may already "
+            "be restored or cleared.")
     with _library_held(request, "Backup removal", "Delete") as refusal:
         if refusal:
             return refusal
@@ -734,7 +731,7 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
                    if backup_mod.downsample_outputs_in_place(carried) else
                    " They may be the only copy of a track the album no "
                    "longer has."))
-    return note + diagnostics._diagnostics_fragment(request)
+    return note
 
 
 def _staging_group_target(group):
@@ -749,12 +746,10 @@ def _staging_group_target(group):
 def _discard_staging_group_sync(request: Request, group: str) -> str:
     target = _staging_group_target(group)
     if target is None:
-        return (_diagnostics_result_notice(
-                    "error", "That isn't a group of kept files.")
-                + diagnostics._diagnostics_fragment(request))
+        return _diagnostics_result_notice(
+            "error", "That isn't a group of kept files.")
     if not target.is_dir():
-        return (_diagnostics_result_notice("error", "Those files aren't there anymore.")
-                + diagnostics._diagnostics_fragment(request))
+        return _diagnostics_result_notice("error", "Those files aren't there anymore.")
     with _library_held(request, "Staging cleanup", "Remove") as refusal:
         if refusal:
             return refusal
@@ -782,18 +777,16 @@ def _discard_staging_group_sync(request: Request, group: str) -> str:
             removed = staging_mod.discard_group(target)
             note = (_diagnostics_result_notice("success", "Removed the kept files.")
                     if removed else stuck)
-    return note + diagnostics._diagnostics_fragment(request)
+    return note
 
 
 def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
     target = _staging_group_target(group)
     if target is None:
-        return (_diagnostics_result_notice(
-                    "error", "That isn't a group of kept files.")
-                + diagnostics._diagnostics_fragment(request))
+        return _diagnostics_result_notice(
+            "error", "That isn't a group of kept files.")
     if not target.is_dir():
-        return (_diagnostics_result_notice("error", "Those files aren't there anymore.")
-                + diagnostics._diagnostics_fragment(request))
+        return _diagnostics_result_notice("error", "Those files aren't there anymore.")
     with _library_held(request, "Staging cleanup", "Delete") as refusal:
         if refusal:
             return refusal
@@ -805,7 +798,7 @@ def _discard_staging_group_unchecked_sync(request: Request, group: str) -> str:
             note = _diagnostics_result_notice(
                 "error", "The app couldn't delete the folder. Remove "
                 f"{html.escape(location)} outside the app.")
-    return note + diagnostics._diagnostics_fragment(request)
+    return note
 
 
 @router.post("/staging/discard-unchecked", response_class=HTMLResponse)
