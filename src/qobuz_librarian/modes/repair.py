@@ -475,35 +475,48 @@ def _verified_repair_source_receipts(verified_truncated, album_dir):
     return _normalise_gap_fill_expected_receipts(receipts)
 
 
-def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
-                     *, recovery_checkpoint=None):
-    """Back up truncated originals, ISRC-refill them, resolve the backup.
+class _AlbumRepair:
+    """One album's repair: back up, refill, verify, then settle the backup."""
 
-    Non-interactive and self-contained, the CLI repair mode and the web
-    Repair flow both call this so there is one implementation of the
-    risky part. Forces no-upgrade for the run so a quality delta can never
-    escalate a surgical repair into a full wipe-and-replace. Auth lost
-    before the backup is taken aborts with the originals untouched;
-    exceptional exits after backup carry the exact retained recovery. Returns
-    {"n_ok", "n_fail", "backup"}. ``backup`` is the exact carried
-    ``BackupResult`` while recovery data remains, never just its pathname.
-    """
-    saved_no_upgrade = getattr(args, "no_upgrade", False)
-    retained_recovery = None
+    def __init__(self, album_dir, verified_truncated, artist_name, args,
+                 token, recovery_checkpoint):
+        self.album_dir = album_dir
+        self.verified_truncated = verified_truncated
+        self.artist_name = artist_name
+        self.args = args
+        self.token = token
+        self.recovery_checkpoint = recovery_checkpoint
+        self.retained_recovery = None
+        self.partial = []
+        self.put_back = None
 
-    def checkpoint_recovery(backup, stage, reason, *, required=False):
-        nonlocal retained_recovery
+    def run(self):
+        saved_no_upgrade = getattr(self.args, "no_upgrade", False)
+        self.args.no_upgrade = True
+        try:
+            for step in (self._plan_refill, self._back_up_originals,
+                         self._check_album_after_backup,
+                         self._download_refills, self._verify_refills,
+                         self._settle_backup):
+                stopped = step()
+                if stopped is not None:
+                    return stopped
+            return self._finish()
+        finally:
+            self.args.no_upgrade = saved_no_upgrade
+
+    def _checkpoint_recovery(self, backup, stage, reason, *, required=False):
         recovery = RepairRecovery(
             backup=backup,
-            album_dir=Path(album_dir),
+            album_dir=Path(self.album_dir),
             stage=stage,
             reason=reason,
         )
-        retained_recovery = recovery
-        if recovery_checkpoint is None:
+        self.retained_recovery = recovery
+        if self.recovery_checkpoint is None:
             return recovery, True
         try:
-            persisted = recovery_checkpoint(recovery) is True
+            persisted = self.recovery_checkpoint(recovery) is True
         except Exception as exc:
             persisted = False
             log.info(fmt(C.RED,
@@ -514,48 +527,61 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "because its recovery record could not be saved."))
         return recovery, persisted
 
-    def resolve_recovery(backup, reason):
-        nonlocal retained_recovery
+    def _resolve_recovery(self, backup, reason):
         recovery = RepairRecovery(
             backup=backup,
-            album_dir=Path(album_dir),
+            album_dir=Path(self.album_dir),
             stage="resolved",
             reason=reason,
             retained=False,
         )
-        retained_recovery = None
-        if recovery_checkpoint is not None:
+        self.retained_recovery = None
+        if self.recovery_checkpoint is not None:
             try:
-                recovery_checkpoint(recovery)
+                self.recovery_checkpoint(recovery)
             except Exception as exc:
                 log.info(fmt(C.RED,
                     f"  ✗  Couldn't save the Repair recovery record ({exc})."))
 
-    def recovery_result():
-        return retained_recovery.backup if retained_recovery is not None else None
+    def _recovery_result(self):
+        if self.retained_recovery is None:
+            return None
+        return self.retained_recovery.backup
 
-    def failed(backup=None, n_fail=None):
+    def _failed(self, backup=None, n_fail=None):
         return {
             "n_ok": 0,
-            "n_fail": len(verified_truncated) if n_fail is None else n_fail,
+            "n_fail": len(self.verified_truncated) if n_fail is None else n_fail,
             "imported": False,
             "backup": backup,
         }
 
-    def interrupt_with_recovery(cause, stage, reason):
-        recovery, _ = checkpoint_recovery(
-            backup_path, stage, reason)
+    def _interrupt_with_recovery(self, cause, stage, reason):
+        recovery, _ = self._checkpoint_recovery(
+            self.backup_path, stage, reason)
         raise RepairRecoveryRequired(recovery, cause) from cause
 
-    args.no_upgrade = True
-    try:
+    def _pin_repair_recovery(self, note):
+        if (self.backup_path.exists()
+                and not pin_unverified_upgrade_backup(self.backup_path, note)):
+            warn_pin_failed(self.backup_path)
+
+    def _settle_beets_after_stop(self):
+        # The import step settles beets right after the refills land; a
+        # stop there would leave each refilled track listed twice.
+        with contextlib.suppress(KeyboardInterrupt):
+            settle_tracks_added_to_album(self.album_dir, self.last_old_id)
+
+    def _plan_refill(self):
+        album_dir = self.album_dir
+        verified_truncated = self.verified_truncated
         try:
-            source_receipts = _verified_repair_source_receipts(
+            self.source_receipts = _verified_repair_source_receipts(
                 verified_truncated, album_dir)
         except OSError as exc:
             log.info(fmt(C.RED,
                 f"  ✗  Repair needs a fresh exact scan ({exc})."))
-            return failed()
+            return self._failed()
 
         # Everything Qobuz-side happens up front, while the truncated
         # originals are still in place. If the parent-album lookup hits a
@@ -569,9 +595,12 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         # treated as repaired when only one refill lands.
         wanted_counts = Counter(_norm_isrc(b.get("isrc")) for b in verified_truncated)
         wanted_counts.pop("", None)
+        self.wanted_isrcs = wanted_isrcs
+        self.wanted_counts = wanted_counts
 
-        album = _resolve_parent_album(album_dir, artist_name,
-                                      verified_truncated, wanted_isrcs, token)
+        album = _resolve_parent_album(album_dir, self.artist_name,
+                                      verified_truncated, wanted_isrcs,
+                                      self.token)
 
         qobuz_tracks_full = (album.get("tracks") or {}).get("items") or []
         missing_tracks = [b["qobuz_track"] for b in verified_truncated]
@@ -594,7 +623,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         qi = _build_queue_item(
             album=album,
             album_dir=album_dir,
-            label=f"{artist_name} - {album_dir.name}  [repair]",
+            label=f"{self.artist_name} - {album_dir.name}  [repair]",
             missing=missing_tracks,
             present=present_synth,
             upgrade_only=False,
@@ -604,32 +633,36 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         )
         qi["_capture_import_ownership"] = True
         qi["refill_places"] = _refill_places(verified_truncated, album_dir)
+        self.qi = qi
 
         # The album folder's identity before the first backup/download
         # mutation, so a same-name replacement can't pass for it later.
-        album_identity = _album_identity(album_dir)
-        if album_identity is None:
+        self.album_identity = _album_identity(album_dir)
+        if self.album_identity is None:
             log.info(fmt(C.RED,
                 "  ✗  The selected album could not be held."))
-            return failed()
+            return self._failed()
 
-        expected_generation = getattr(token, "credential_generation", "")
+        expected_generation = getattr(self.token, "credential_generation", "")
         if expected_generation:
-            token = api_client.authorize_bound_download(token)
+            self.token = api_client.authorize_bound_download(self.token)
+        return None
 
+    def _back_up_originals(self):
+        album_dir = self.album_dir
         link = first_symlink(album_dir)
         if link:
             log.info(fmt(C.RED,
                 f"  ✗  {link} is a symbolic link, which Repair can't check or "
                 "back up. Replace it with a copy of its file, then "
                 "try again."))
-            return failed()
-        broken_paths = [b["path"] for b in verified_truncated]
-        replaced_entries = beets_entry_ids(broken_paths)
+            return self._failed()
+        broken_paths = [b["path"] for b in self.verified_truncated]
+        self.replaced_entries = beets_entry_ids(broken_paths)
         backup_path = backup_gap_fill_files(
             broken_paths,
             album_dir,
-            expected_receipts=source_receipts,
+            expected_receipts=self.source_receipts,
             kind="repair",
         )
         if backup_path is None:
@@ -643,57 +676,52 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     "file could be put back. No replacement was downloaded; "
                     "the missing files are in the backup listed under "
                     "Settings → Diagnostics."))
-            return failed()
-        _initial_recovery, recovery_saved = checkpoint_recovery(
+            return self._failed()
+        self.backup_path = backup_path
+        _initial_recovery, recovery_saved = self._checkpoint_recovery(
             backup_path,
             "backup",
             "Original files are held while replacement tracks are downloaded.",
             required=True,
         )
-        if not recovery_saved:
-            restored = 0
-            if _album_identity(album_dir) == album_identity:
-                try:
-                    restored = restore_gap_fill_backup(backup_path, album_dir)
-                except BaseException as exc:
-                    recovery, _ = checkpoint_recovery(
-                        backup_path,
-                        "restore",
-                        "Repair could not save its recovery record and "
-                        "automatic restoration was interrupted.",
-                    )
-                    raise RepairRecoveryRequired(recovery, exc) from exc
-            if (restored == backup_path.backed_up
-                    and restored > 0 and not backup_path.exists()):
-                resolve_recovery(
+        if recovery_saved:
+            return None
+        restored = 0
+        if _album_identity(album_dir) == self.album_identity:
+            try:
+                restored = restore_gap_fill_backup(backup_path, album_dir)
+            except BaseException as exc:
+                recovery, _ = self._checkpoint_recovery(
                     backup_path,
-                    "Every moved original was restored after recovery "
-                    "persistence failed.",
+                    "restore",
+                    "Repair could not save its recovery record and "
+                    "automatic restoration was interrupted.",
                 )
-                return failed()
-            checkpoint_recovery(
+                raise RepairRecoveryRequired(recovery, exc) from exc
+        if (restored == backup_path.backed_up
+                and restored > 0 and not backup_path.exists()):
+            self._resolve_recovery(
                 backup_path,
-                "backup",
-                "Repair could not save its recovery record and automatic "
-                "restore did not complete.",
+                "Every moved original was restored after recovery "
+                "persistence failed.",
             )
-            return failed(recovery_result())
+            return self._failed()
+        self._checkpoint_recovery(
+            backup_path,
+            "backup",
+            "Repair could not save its recovery record and automatic "
+            "restore did not complete.",
+        )
+        return self._failed(self._recovery_result())
 
-        def pin_repair_recovery(note):
-            if (backup_path.exists()
-                    and not pin_unverified_upgrade_backup(backup_path, note)):
-                warn_pin_failed(backup_path)
-
-        def settle_beets_after_stop():
-            # The import step settles beets right after the refills land; a
-            # stop there would leave each refilled track listed twice.
-            with contextlib.suppress(KeyboardInterrupt):
-                settle_tracks_added_to_album(album_dir, last_old_id)
-
-        if _album_identity(album_dir) != album_identity:
-            pin_repair_recovery(
+    def _check_album_after_backup(self):
+        album_dir = self.album_dir
+        backup_path = self.backup_path
+        qi = self.qi
+        if _album_identity(album_dir) != self.album_identity:
+            self._pin_repair_recovery(
                 "repair backup kept, the selected album changed after backup")
-            checkpoint_recovery(
+            self._checkpoint_recovery(
                 backup_path,
                 "backup",
                 "The selected album changed after its originals were backed up.",
@@ -701,16 +729,16 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             log.info(fmt(C.RED,
                 "  ✗  The selected album changed during backup; "
                 f"the originals are preserved at:\n     {backup_path}"))
-            return failed(recovery_result())
+            return self._failed(self._recovery_result())
         post_backup_premise = candidate_premise.capture(
             "repair",
             album_dir,
         )
         if post_backup_premise is None:
-            pin_repair_recovery(
+            self._pin_repair_recovery(
                 "repair backup kept, the remaining album could not be checked"
             )
-            checkpoint_recovery(
+            self._checkpoint_recovery(
                 backup_path,
                 "backup",
                 "The remaining album could not be checked before its refill.",
@@ -721,15 +749,20 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 "damaged files were backed up. No replacement download was "
                 f"started; the originals are preserved at:\n     {backup_path}",
             ))
-            return failed(recovery_result())
+            return self._failed(self._recovery_result())
         qi["_source_premise"] = post_backup_premise
         qi["_gap_fill_receipts"] = candidate_premise.gap_fill_receipts(
             post_backup_premise
         )
         log.info(fmt(C.GRAY,
-            f"  ⟳  Moved {plural(len(verified_truncated), 'broken file')} "
+            f"  ⟳  Moved {plural(len(self.verified_truncated), 'broken file')} "
             f"to backup: {backup_path.name}"))
+        return None
 
+    def _download_refills(self):
+        album_dir = self.album_dir
+        backup_path = self.backup_path
+        qi = self.qi
         # Baseline: ISRC counts of what remains on disk now that the truncated
         # originals are in the backup. The presence/intact gates below compare
         # against baseline + wanted, so a healthy PRE-EXISTING file sharing a
@@ -742,6 +775,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         baseline_counts.pop("", None)
         if _bl_errs:
             baseline_counts = None
+        self.baseline_counts = baseline_counts
 
         # Carry the truncated originals' own tags + art onto the refills
         # before beets files them. The audio is fetched by track ID (the right
@@ -749,15 +783,15 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         # ISRC, so without this the refill would import tagged + named for a
         # different album than the folder it lives in.
         retag_sources = _backup_source_by_isrc(
-            verified_truncated, album_dir, backup_path)
-        retag_failed = set()
+            self.verified_truncated, album_dir, backup_path)
+        self.retag_failed = set()
         if retag_sources:
             qi["pre_import_retag"] = _make_retag_callback(
-                retag_sources, retag_failed)
+                retag_sources, self.retag_failed)
 
-        last_old_id = _highest_album_id()
+        self.last_old_id = _highest_album_id()
         try:
-            _execute_download_queue([qi], args, token)
+            _execute_download_queue([qi], self.args, self.token)
         except AuthLost as exc:
             # Don't auto-restore: a multi-track refill may have already written
             # good replacements, and moving the truncated originals back would
@@ -768,83 +802,96 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             else:
                 lost, until = "rejected the token", "your token is refreshed"
             if backup_path and backup_path.exists():
-                pin_repair_recovery(
+                self._pin_repair_recovery(
                     "repair backup kept, authentication was lost mid-refill")
-                settle_beets_after_stop()
+                self._settle_beets_after_stop()
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Qobuz {lost} mid-refill; damaged originals preserved at:\n"
                     f"     {backup_path}\n"
                     f"     Re-run Repair once {until}, or restore "
                     f"them by hand."))
-            interrupt_with_recovery(
+            self._interrupt_with_recovery(
                 exc,
                 "refill",
                 f"Qobuz {lost} while replacement tracks were being "
                 "downloaded.",
             )
         except BaseException as exc:
-            # Interrupted or an unexpected failure mid-refill. The originals
-            # go back only where nothing landed: a refill that did may be
-            # good, so it stays and the backup keeps the original it replaced.
-            # A refill filed under another name would sit beside its original,
-            # so nothing goes back once a new track is in the album.
-            now_held = _audio_files(album_dir)
-            if (backup_path.exists()
-                    and _album_identity(album_dir) == album_identity
-                    and held_tracks is not None and now_held is not None
-                    and now_held - held_tracks
-                    <= set(backup_payload(backup_path.receipt))):
-                try:
-                    restore_gap_fill_backup(
-                        backup_path, album_dir, replace_dst=False,
-                        keep=files_replaced_in_album(backup_path))
-                except BaseException as restore_exc:
-                    log.info(fmt(C.RED,
-                        "  ✗  Putting the originals back stopped "
-                        f"({restore_exc!r})."))
-            if not backup_path.exists():
-                resolve_recovery(
-                    backup_path,
-                    "Repair stopped before a replacement landed, so every "
-                    "original was put back.",
-                )
-                log.info(fmt(C.YELLOW,
-                    "  ⚠  Repair stopped; the damaged originals are back in "
-                    "the album. Re-run Repair to retry."))
-                raise
-            pin_repair_recovery("repair backup kept, refill was interrupted")
-            settle_beets_after_stop()
-            landed = len(files_replaced_in_album(backup_path))
-            stopped = (
-                f"Repair stopped after {plural(landed, 'replacement track')} "
-                "reached the album, before they were checked."
-                if landed else
-                "Repair stopped while replacement tracks were being "
-                "downloaded.")
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  {stopped} Damaged originals are kept at:\n"
-                f"     {backup_path}\n"
-                f"     Settings → Diagnostics lists them and can put them "
-                f"back."))
-            interrupt_with_recovery(exc, "refill", stopped)
+            self._stopped_mid_refill(exc, held_tracks)
+        return None
 
-        if _album_identity(album_dir) != album_identity:
-            pin_repair_recovery(
+    def _stopped_mid_refill(self, exc, held_tracks):
+        # Interrupted or an unexpected failure mid-refill. The originals
+        # go back only where nothing landed: a refill that did may be
+        # good, so it stays and the backup keeps the original it replaced.
+        # A refill filed under another name would sit beside its original,
+        # so nothing goes back once a new track is in the album.
+        album_dir = self.album_dir
+        backup_path = self.backup_path
+        now_held = _audio_files(album_dir)
+        if (backup_path.exists()
+                and _album_identity(album_dir) == self.album_identity
+                and held_tracks is not None and now_held is not None
+                and now_held - held_tracks
+                <= set(backup_payload(backup_path.receipt))):
+            try:
+                restore_gap_fill_backup(
+                    backup_path, album_dir, replace_dst=False,
+                    keep=files_replaced_in_album(backup_path))
+            except BaseException as restore_exc:
+                log.info(fmt(C.RED,
+                    "  ✗  Putting the originals back stopped "
+                    f"({restore_exc!r})."))
+        if not backup_path.exists():
+            self._resolve_recovery(
+                backup_path,
+                "Repair stopped before a replacement landed, so every "
+                "original was put back.",
+            )
+            log.info(fmt(C.YELLOW,
+                "  ⚠  Repair stopped; the damaged originals are back in "
+                "the album. Re-run Repair to retry."))
+            raise exc
+        self._pin_repair_recovery("repair backup kept, refill was interrupted")
+        self._settle_beets_after_stop()
+        landed = len(files_replaced_in_album(backup_path))
+        stopped = (
+            f"Repair stopped after {plural(landed, 'replacement track')} "
+            "reached the album, before they were checked."
+            if landed else
+            "Repair stopped while replacement tracks were being "
+            "downloaded.")
+        log.info(fmt(C.YELLOW,
+            f"  ⚠  {stopped} Damaged originals are kept at:\n"
+            f"     {backup_path}\n"
+            f"     Settings → Diagnostics lists them and can put them "
+            f"back."))
+        self._interrupt_with_recovery(exc, "refill", stopped)
+
+    def _verify_refills(self):
+        album_dir = self.album_dir
+        backup_path = self.backup_path
+        qi = self.qi
+        verified_truncated = self.verified_truncated
+        if _album_identity(album_dir) != self.album_identity:
+            self._pin_repair_recovery(
                 "repair backup kept, the album changed during refill")
             log.info(fmt(C.RED,
                 "  ✗  The selected album changed during the refill. "
                 f"The originals are preserved at:\n     {backup_path}"))
-            checkpoint_recovery(
+            self._checkpoint_recovery(
                 backup_path,
                 "refill",
                 "The selected album changed while replacement tracks were "
                 "downloaded.",
             )
-            return failed(recovery_result(), n_fail=max(
+            return self._failed(self._recovery_result(), n_fail=max(
                 qi.get("n_fail", 0), len(verified_truncated)))
 
         n_fail_final = qi.get("n_fail", 0)
         n_ok_final = qi.get("n_ok", 0)
+        self.n_fail_final = n_fail_final
+        self.n_ok_final = n_ok_final
         download_clean = (n_fail_final == 0 and n_ok_final > 0
                           and qi.get("imported", False))
         # "Back in place" = the refilled files are in album_dir. Success
@@ -852,11 +899,12 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
         # presence check alone would let a short re-rip pass, and "no ISRC to
         # verify by" is unproven, not proven.
         back_in_place = download_clean and _refills_present_in(
-            album_dir, wanted_counts, baseline_counts)
+            album_dir, self.wanted_counts, self.baseline_counts)
+        self.back_in_place = back_in_place
         if download_clean and not back_in_place:
-            pin_repair_recovery(
+            self._pin_repair_recovery(
                 "repair backup kept, refill location could not be proven")
-            if baseline_counts is None:
+            if self.baseline_counts is None:
                 unproven = ("The album folder could not be read in full "
                             "before the import, so the replacement tracks "
                             "could not be checked in it.")
@@ -866,13 +914,14 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
             log.info(fmt(C.RED,
                 f"  ✗  {unproven} The originals are preserved at:\n"
                 f"     {backup_path}"))
-            checkpoint_recovery(backup_path, "placement", unproven)
-            return failed(recovery_result(), n_fail=max(
+            self._checkpoint_recovery(backup_path, "placement", unproven)
+            return self._failed(self._recovery_result(), n_fail=max(
                 n_fail_final, len(verified_truncated)))
-        if back_in_place and bool(wanted_isrcs):
+        if back_in_place and bool(self.wanted_isrcs):
             try:
-                repaired = _refills_intact(album_dir, wanted_counts, token,
-                                           baseline_counts)
+                self.repaired = _refills_intact(
+                    album_dir, self.wanted_counts, self.token,
+                    self.baseline_counts)
             except (AuthLost, QobuzUnavailable) as exc:
                 # _refills_intact verifies via Qobuz, so a token loss / outage
                 # here aborts before the backup-resolution block below, leaving
@@ -880,7 +929,7 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                 # pointer for the user. Surface the location (same as the
                 # download-phase AuthLost branch) before re-raising.
                 if backup_path and backup_path.exists():
-                    pin_repair_recovery(
+                    self._pin_repair_recovery(
                         "repair backup kept, final refill verification was "
                         "unavailable")
                     log.info(fmt(C.YELLOW,
@@ -889,190 +938,210 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                         f"preserved at:\n     {backup_path}\n"
                         f"     Re-run Repair once Qobuz is reachable, or restore "
                         f"them by hand."))
-                interrupt_with_recovery(
+                self._interrupt_with_recovery(
                     exc,
                     "verification",
                     "Qobuz became unavailable before the replacement tracks "
                     "could be verified.",
                 )
         else:
-            repaired = False
+            self.repaired = False
+        return None
 
+    def _settle_backup(self):
+        backup_path = self.backup_path
+        if not (backup_path and backup_path.exists()):
+            return None
+        if self.repaired:
+            self._settle_verified_backup()
+        elif self.back_in_place:
+            # The re-downloaded tracks are physically back but couldn't be
+            # verified as intact (still short of the listed length, or no
+            # ISRC to check against). Keep the originals, deleting the
+            # only other copy on a presence check alone is how a bad re-
+            # rip silently replaces a good-enough track with a worse one.
+            self._pin_repair_recovery(
+                "repair backup kept, replacement could not be verified "
+                "intact")
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  The re-download couldn't be shown to be complete: "
+                f"it may be short of its listed length too, or Qobuz "
+                f"couldn't confirm its recording. The album now holds "
+                f"that download and your original is kept in the backup "
+                f"below; restore it from Settings → Diagnostics to put it "
+                f"back. Backup:\n     {backup_path}"))
+            self._checkpoint_recovery(
+                backup_path,
+                "verification",
+                "The replacement is in the album but could not be shown "
+                "to be any better than the original, which is kept here. "
+                "Restore puts the original back.",
+            )
+        else:
+            self._restore_after_failed_refill()
+        return None
+
+    def _settle_verified_backup(self):
+        backup_path = self.backup_path
+        if self.retag_failed:
+            # The audio is verifiably fixed, but the originals' tags/art
+            # couldn't be carried onto some refills, the backup holds the
+            # only copy of that metadata, so keep it. Pin it too: the age
+            # sweep proves redundancy by same-path same-or-larger bytes,
+            # which the (usually larger) refill satisfies, without the pin
+            # the only copy of those tags would be reaped on schedule.
+            if not pin_unverified_upgrade_backup(
+                    backup_path,
+                    "repair kept, original tags/art not carried onto the "
+                    "refill; this backup holds their only copy"):
+                warn_pin_failed(backup_path)
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  Repaired, but the original tags/art couldn't be "
+                f"carried onto {plural(len(self.retag_failed), 'refilled track')}, "
+                f"keeping the backup; it still holds them.\n"
+                f"     Backup: {backup_path}"))
+            self._checkpoint_recovery(
+                backup_path,
+                "verification",
+                "The replacement audio was verified, but the original "
+                "tags or artwork could not be carried onto it.",
+            )
+        elif retire_verified_repair_backup(backup_path):
+            self._resolve_recovery(
+                backup_path,
+                "The replacement tracks verified, so the damaged "
+                "originals' backup was removed.",
+            )
+            log.info(fmt(C.GREEN,
+                "  ✓  Replacement tracks verified, removed the "
+                "damaged originals' backup."))
+        else:
+            if not pin_unverified_upgrade_backup(
+                    backup_path,
+                    "repair backup kept, could not be proven "
+                    "redundant after a verified refill"):
+                warn_pin_failed(backup_path)
+            log.info(fmt(C.YELLOW,
+                "  ⚠  Replacement tracks verified, but the originals' "
+                "backup couldn't be proven redundant, keeping it:\n"
+                f"     {backup_path}"))
+            self._checkpoint_recovery(
+                backup_path,
+                "verification",
+                "The replacement tracks verified, but the originals' "
+                "backup could not be proven redundant.",
+            )
+
+    def _restore_after_failed_refill(self):
+        # A refill failed to download, or beets didn't import the
+        # replacement. Restore so the album is at least back to its
+        # pre-repair state instead of silently short a track. A refill
+        # that did land keeps its place.
+        album_dir = self.album_dir
+        backup_path = self.backup_path
+        n_fail_final = self.n_fail_final
         partial = []
-        put_back = None
-        if backup_path and backup_path.exists():
-            if repaired and retag_failed:
-                # The audio is verifiably fixed, but the originals' tags/art
-                # couldn't be carried onto some refills, the backup holds the
-                # only copy of that metadata, so keep it. Pin it too: the age
-                # sweep proves redundancy by same-path same-or-larger bytes,
-                # which the (usually larger) refill satisfies, without the pin
-                # the only copy of those tags would be reaped on schedule.
-                if not pin_unverified_upgrade_backup(
-                        backup_path,
-                        "repair kept, original tags/art not carried onto the "
-                        "refill; this backup holds their only copy"):
-                    warn_pin_failed(backup_path)
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  Repaired, but the original tags/art couldn't be "
-                    f"carried onto {plural(len(retag_failed), 'refilled track')}, "
-                    f"keeping the backup; it still holds them.\n"
-                    f"     Backup: {backup_path}"))
-                checkpoint_recovery(
-                    backup_path,
+        if n_fail_final > 0:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  {plural(n_fail_final, 'track')} failed to re-download, "
+                "restoring "
+                f"{'their damaged originals' if n_fail_final > 1 else 'its damaged original'} "
+                "so the album isn't left short. A track that did "
+                "download keeps its place."))
+        else:
+            log.info(fmt(C.YELLOW,
+                "  ⚠  Refill didn't return to the album folder, "
+                "restoring the damaged originals so it isn't left "
+                "short."))
+        try:
+            n_restored = restore_gap_fill_backup(
+                backup_path, album_dir, replace_dst=not n_fail_final,
+                keep=(files_replaced_in_album(backup_path)
+                      if n_fail_final else frozenset()))
+        except BaseException as exc:
+            self._pin_repair_recovery(
+                "repair backup kept, automatic restore was "
+                "interrupted")
+            self._interrupt_with_recovery(
+                exc,
+                "restore",
+                "Automatic restoration stopped before every original "
+                "was returned.",
+            )
+        if backup_path.exists() and self.n_ok_final and self.wanted_isrcs:
+            replaced = files_replaced_in_album(backup_path)
+            partial = [b for b in self.verified_truncated
+                       if b["source_receipt"]["relative"] in replaced]
+        landed = Counter(_norm_isrc(b.get("isrc")) for b in partial)
+        partial_ok = False
+        if partial and "" not in landed:
+            # The tracks that did download stay in the album, so the
+            # backup may go once they verify as a full refill does.
+            try:
+                partial_ok = (
+                    _refills_intact(album_dir, landed, self.token,
+                                    self.baseline_counts)
+                    and retire_verified_repair_backup(backup_path))
+            except (AuthLost, QobuzUnavailable) as exc:
+                self._pin_repair_recovery(
+                    "repair backup kept, final refill verification "
+                    "was unavailable")
+                self._interrupt_with_recovery(
+                    exc,
                     "verification",
-                    "The replacement audio was verified, but the original "
-                    "tags or artwork could not be carried onto it.",
+                    "Qobuz became unavailable before the replacement "
+                    "tracks could be verified.",
                 )
-            elif repaired:
-                if retire_verified_repair_backup(backup_path):
-                    resolve_recovery(
-                        backup_path,
-                        "The replacement tracks verified, so the damaged "
-                        "originals' backup was removed.",
-                    )
-                    log.info(fmt(C.GREEN,
-                        "  ✓  Replacement tracks verified, removed the "
-                        "damaged originals' backup."))
-                else:
-                    if not pin_unverified_upgrade_backup(
-                            backup_path,
-                            "repair backup kept, could not be proven "
-                            "redundant after a verified refill"):
-                        warn_pin_failed(backup_path)
-                    log.info(fmt(C.YELLOW,
-                        "  ⚠  Replacement tracks verified, but the originals' "
-                        "backup couldn't be proven redundant, keeping it:\n"
-                        f"     {backup_path}"))
-                    checkpoint_recovery(
-                        backup_path,
-                        "verification",
-                        "The replacement tracks verified, but the originals' "
-                        "backup could not be proven redundant.",
-                    )
-            elif back_in_place:
-                # The re-downloaded tracks are physically back but couldn't be
-                # verified as intact (still short of the listed length, or no
-                # ISRC to check against). Keep the originals, deleting the
-                # only other copy on a presence check alone is how a bad re-
-                # rip silently replaces a good-enough track with a worse one.
-                pin_repair_recovery(
-                    "repair backup kept, replacement could not be verified "
-                    "intact")
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  The re-download couldn't be shown to be complete: "
-                    f"it may be short of its listed length too, or Qobuz "
-                    f"couldn't confirm its recording. The album now holds "
-                    f"that download and your original is kept in the backup "
-                    f"below; restore it from Settings → Diagnostics to put it "
-                    f"back. Backup:\n     {backup_path}"))
-                checkpoint_recovery(
-                    backup_path,
-                    "verification",
-                    "The replacement is in the album but could not be shown "
-                    "to be any better than the original, which is kept here. "
-                    "Restore puts the original back.",
-                )
-            else:
-                # A refill failed to download, or beets didn't import the
-                # replacement. Restore so the album is at least back to its
-                # pre-repair state instead of silently short a track. A refill
-                # that did land keeps its place.
-                if n_fail_final > 0:
-                    log.info(fmt(C.YELLOW,
-                        f"  ⚠  {plural(n_fail_final, 'track')} failed to re-download, "
-                        "restoring "
-                        f"{'their damaged originals' if n_fail_final > 1 else 'its damaged original'} "
-                        "so the album isn't left short. A track that did "
-                        "download keeps its place."))
-                else:
-                    log.info(fmt(C.YELLOW,
-                        "  ⚠  Refill didn't return to the album folder, "
-                        "restoring the damaged originals so it isn't left "
-                        "short."))
-                try:
-                    n_restored = restore_gap_fill_backup(
-                        backup_path, album_dir, replace_dst=not n_fail_final,
-                        keep=(files_replaced_in_album(backup_path)
-                              if n_fail_final else frozenset()))
-                except BaseException as exc:
-                    pin_repair_recovery(
-                        "repair backup kept, automatic restore was "
-                        "interrupted")
-                    interrupt_with_recovery(
-                        exc,
-                        "restore",
-                        "Automatic restoration stopped before every original "
-                        "was returned.",
-                    )
-                if backup_path.exists() and n_ok_final and wanted_isrcs:
-                    replaced = files_replaced_in_album(backup_path)
-                    partial = [b for b in verified_truncated
-                               if b["source_receipt"]["relative"] in replaced]
-                landed = Counter(_norm_isrc(b.get("isrc")) for b in partial)
-                partial_ok = False
-                if partial and "" not in landed:
-                    # The tracks that did download stay in the album, so the
-                    # backup may go once they verify as a full refill does.
-                    try:
-                        partial_ok = (
-                            _refills_intact(album_dir, landed, token,
-                                            baseline_counts)
-                            and retire_verified_repair_backup(backup_path))
-                    except (AuthLost, QobuzUnavailable) as exc:
-                        pin_repair_recovery(
-                            "repair backup kept, final refill verification "
-                            "was unavailable")
-                        interrupt_with_recovery(
-                            exc,
-                            "verification",
-                            "Qobuz became unavailable before the replacement "
-                            "tracks could be verified.",
-                        )
-                if partial_ok:
-                    resolve_recovery(
-                        backup_path,
-                        "The tracks that downloaded verified, and the others' "
-                        "originals were put back.",
-                    )
-                    log.info(fmt(C.GREEN,
-                        f"  ✓  Repaired {plural(len(partial), 'track')}, "
-                        "verified; the originals of the tracks that failed "
-                        "are back in the album."))
-                elif n_restored and not backup_path.exists():
-                    put_back = backup_path.receipt
-                    resolve_recovery(
-                        backup_path,
-                        "The refill did not complete, so every original was "
-                        "restored.",
-                    )
-                    log.info(fmt(C.GREEN,
-                        "  ✓  Restored the originals; re-run Repair to retry."))
-                else:
-                    partial = []
-                    pin_repair_recovery(
-                        "repair backup kept, automatic restore was partial or "
-                        "failed")
-                    log.info(fmt(C.RED,
-                        f"  ✗  Restored {plural(n_restored, 'track')}; remaining "
-                        f"originals are at:\n     {backup_path}"))
-                    checkpoint_recovery(
-                        backup_path,
-                        "restore",
-                        "The refill did not complete and automatic "
-                        "restoration was incomplete.",
-                    )
+        if partial_ok:
+            self._resolve_recovery(
+                backup_path,
+                "The tracks that downloaded verified, and the others' "
+                "originals were put back.",
+            )
+            log.info(fmt(C.GREEN,
+                f"  ✓  Repaired {plural(len(partial), 'track')}, "
+                "verified; the originals of the tracks that failed "
+                "are back in the album."))
+        elif n_restored and not backup_path.exists():
+            self.put_back = backup_path.receipt
+            self._resolve_recovery(
+                backup_path,
+                "The refill did not complete, so every original was "
+                "restored.",
+            )
+            log.info(fmt(C.GREEN,
+                "  ✓  Restored the originals; re-run Repair to retry."))
+        else:
+            partial = []
+            self._pin_repair_recovery(
+                "repair backup kept, automatic restore was partial or "
+                "failed")
+            log.info(fmt(C.RED,
+                f"  ✗  Restored {plural(n_restored, 'track')}; remaining "
+                f"originals are at:\n     {backup_path}"))
+            self._checkpoint_recovery(
+                backup_path,
+                "restore",
+                "The refill did not complete and automatic "
+                "restoration was incomplete.",
+            )
+        self.partial = partial
 
+    def _finish(self):
+        qi = self.qi
+        repaired = self.repaired
+        partial = self.partial
+        verified_truncated = self.verified_truncated
         # Beets took each refill in as a new entry at its original's path.
-        if (back_in_place or partial) and replaced_entries:
-            forget_replaced_beets_entries(replaced_entries)
+        if (self.back_in_place or partial) and self.replaced_entries:
+            forget_replaced_beets_entries(self.replaced_entries)
 
         # A verified refill is a repair whether or not the originals' backup
         # could also be retired; a kept backup rides along in "backup".
         if repaired or partial:
             log_entries = [{
-                "artist": artist_name,
-                "album":  album_dir.name,
+                "artist": self.artist_name,
+                "album":  self.album_dir.name,
                 "title":  b["title"],
             } for b in (verified_truncated if repaired else partial)]
             if append_repair_log(log_entries):
@@ -1082,18 +1151,33 @@ def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                     f"     {cfg.REPAIR_LOG_PATH}"))
 
         return {
-            "n_ok": n_ok_final if repaired else len(partial),
-            "n_fail": (n_fail_final if repaired or partial
-                       else max(n_fail_final, len(verified_truncated))),
+            "n_ok": self.n_ok_final if repaired else len(partial),
+            "n_fail": (self.n_fail_final if repaired or partial
+                       else max(self.n_fail_final, len(verified_truncated))),
             "imported": repaired or bool(partial),
             "cancelled": qi.get("result") == "cancelled",
-            "backup": recovery_result(),
-            "put_back": put_back,
+            "backup": self._recovery_result(),
+            "put_back": self.put_back,
             "cd_quality_tracks": (qi.get("cd_quality_tracks", [])
                                   if repaired or partial else []),
         }
-    finally:
-        args.no_upgrade = saved_no_upgrade
+
+
+def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
+                     *, recovery_checkpoint=None):
+    """Back up truncated originals, ISRC-refill them, resolve the backup.
+
+    Non-interactive and self-contained, the CLI repair mode and the web
+    Repair flow both call this so there is one implementation of the
+    risky part. Forces no-upgrade for the run so a quality delta can never
+    escalate a surgical repair into a full wipe-and-replace. Auth lost
+    before the backup is taken aborts with the originals untouched;
+    exceptional exits after backup carry the exact retained recovery. Returns
+    {"n_ok", "n_fail", "backup"}. ``backup`` is the exact carried
+    ``BackupResult`` while recovery data remains, never just its pathname.
+    """
+    return _AlbumRepair(album_dir, verified_truncated, artist_name, args,
+                        token, recovery_checkpoint).run()
 
 
 def _report_repair_recovery(backup, *, reason=""):

@@ -2199,6 +2199,1267 @@ def _durable_completion_line(result, elapsed):
     return colour, f"    {symbol} {plural(n_ok, 'track')} · {detail} · {int(elapsed)}s"
 
 
+_NEXT_ALBUM = object()
+_STOP_QUEUE = object()
+
+
+class _QueueFlush:
+    """One flush of the download queue, an album at a time."""
+
+    def __init__(self, queue, args, token, *, on_progress, refresh_review,
+                 consolidate_duplicates, results_out):
+        self.queue = queue
+        self.args = args
+        self.token = token
+        self.on_progress = on_progress
+        self.refresh_review = refresh_review
+        self.consolidate_duplicates = consolidate_duplicates
+        self.results_out = results_out
+
+    def run(self):
+        self._start()
+        for idx, item in enumerate(self.items, 1):
+            self.idx, self.item = idx, item
+            if self._run_album() is _STOP_QUEUE:
+                break
+        return self._finish()
+
+    def _run_album(self):
+        for step in (self._recover_finished_album, self._claim,
+                     self._check_before_download, self._run_durable_lane,
+                     self._download, self._import):
+            verdict = step()
+            if verdict is not None:
+                return verdict
+        return self._resolve()
+
+    def _start(self):
+        self.expected_generation = getattr(self.token, "credential_generation", "")
+        if self.expected_generation:
+            from qobuz_librarian.api.client import authorize_bound_download
+
+            self.token = authorize_bound_download(self.token, prepare=False)
+
+        self.authority = run_lock.current_lease()
+        _require_executor_authority(self.authority)
+        (
+            self.origin,
+            self.execution_mode,
+            self.web_album_id,
+            self.external_acknowledge_completion,
+        ) = _durable_execution_origin()
+        self.items = list(self.queue)
+        self.n_items = len(self.items)
+        self.interrupted = False
+        self.cancelled = False
+        self.disk_full = False
+        self.io_error = False
+        self.auth_lost_exc = None
+        self.any_imported = False
+        self._parked_post_dirs = []
+        self.preflight_done = False
+        self.durable_stopped = False
+        self.recovery_persist_blocked = False
+        self.results = [] if self.results_out is None else self.results_out
+        self.never_started = []
+        self.saved_state_changes = []
+        self.recorded = len(self.results)
+
+    def _record_finished(self):
+        """Give each album that finished its History row and hook call when
+        it finishes, so a stop later in the queue keeps them."""
+        if not self.refresh_review:
+            return
+        finished = [
+            result for result in self.results[self.recorded:]
+            if result.get("album")
+            and all(result is not skipped for skipped in self.never_started)
+        ]
+        self.recorded = len(self.results)
+        _record_terminal_results(finished, self.args)
+
+    def _persist(self):
+        if self.on_progress is not None:
+            # This is the durable commit gate for the caller's shrinking
+            # queue.  Continuing after an I/O/CAS failure lets memory claim an
+            # item is finished while the saved journal still says it is
+            # pending, so stop before another album can mutate the library.
+            #
+            # Callers rewrite the journal as pending, which it refuses while it
+            # holds blocked or retired work. Every mid-batch call is safe only
+            # because a durable stop breaks the loop before the next one: an
+            # album parked for attention stays blocked, and the batch-end call
+            # below stands down for exactly that reason.
+            self.on_progress()
+
+    def _stop_for_full_disk(self, location):
+        log.info(fmt(C.RED,
+            f"\n    Out of disk space{location}. Stopping "
+            "the queue; restoring backups and keeping the rest for a "
+            "retry once space is freed."))
+        self.disk_full = True
+
+    def _ensure_preflight(self):
+        if self.preflight_done:
+            return
+        _require_executor_authority(self.authority)
+        staging_preflight(self.args)
+        _require_executor_authority(self.authority)
+        try:
+            parked_imported, parked_dirs = _reimport_parked_albums()
+        except OSError as exc:
+            if exc.errno != errno.ENOSPC:
+                raise
+            parked_imported, parked_dirs = getattr(
+                exc, "parked_results", (False, []))
+            self._stop_for_full_disk(" during library import")
+        _require_executor_authority(self.authority)
+        self.any_imported = self.any_imported or parked_imported
+        self._parked_post_dirs.extend(parked_dirs)
+        if parked_imported:
+            self.saved_state_changes.extend({
+                "album": None,
+                "dir": post_dir,
+                "imported": True,
+                "n_ok": 1,
+            } for post_dir in (parked_dirs or [None]))
+        self.preflight_done = True
+
+    def _drop(self, item):
+        """An item that's fully handled leaves the queue so a retry won't redo
+        it. Persist immediately, so even a hard crash mid-flush can't resurrect
+        already-imported albums."""
+        try:
+            self.queue.remove(item)
+        except ValueError:
+            pass
+        self._persist()
+
+    def _short_circuit(self, item):
+        """Drain an item we can no longer process (cancel / interrupt / auth
+        loss / disk full): mark it, run backup resolution so any upgrade backup
+        gets restored, and keep it queued for a later retry. Skipping
+        resolution would orphan the original tracks under their backup path."""
+        # _build_queue_item seeds these keys with None, so setdefault() would
+        # leave them None and _resolve_queue_item would label the stop
+        # "nothing_landed". Assign over None, keeping a real result a prior
+        # run's flush recorded.
+        if item.get("snapshot_before") is None:
+            item["snapshot_before"] = set()
+        if not item.get("result"):
+            item["result"] = ("cancelled" if self.cancelled
+                              else "interrupted" if self.interrupted
+                              else "disk_full" if self.disk_full
+                              else "io_error" if self.io_error
+                              else "auth_lost")
+        result = _resolve_queue_item(
+            item,
+            self.args,
+            False,
+            authority=self.authority,
+        )
+        self.results.append(result)
+        self.never_started.append(result)
+
+    def _retain_failed_staging(self, item, *, label=None):
+        """Capture a retention failure without skipping backup resolution."""
+        try:
+            if label is None:
+                return retain_download_staging(item), None
+            return retain_download_staging(item, label=label), None
+        except BaseException as preserve_exc:
+            log.info(fmt(
+                C.RED,
+                "    Could not preserve the failed staging run; resolving "
+                "the album backup before returning the storage error.",
+            ))
+            return False, preserve_exc
+
+    def _resolve_failed_item(self, item, retention_exc=None, *, cause=None):
+        self.results.append(_resolve_queue_item(
+            item, self.args, False, authority=self.authority))
+        if retention_exc is not None:
+            if cause is None:
+                raise retention_exc
+            raise retention_exc from cause
+
+    def _cancel_item(self, item):
+        item["result"] = "cancelled"
+        self.cancelled = True
+        _retained, retention_exc = self._retain_failed_staging(item)
+        if retention_exc is None:
+            log.info(fmt(C.YELLOW,
+                "    Cancelled; retained this album's partial download "
+                "for review."))
+        self._resolve_failed_item(item, retention_exc)
+
+    def _handle_download_exception(self, item, exc, *, phase=None):
+        if isinstance(exc, KeyboardInterrupt):
+            log.info(fmt(C.YELLOW,
+                "\n    Interrupted. Stopping further downloads."))
+            item["result"] = "interrupted"
+            self.interrupted = True
+        elif isinstance(exc, AuthLost):
+            reason = (str(exc) if isinstance(exc, DownloadsRefused)
+                      else "Qobuz rejected the token.")
+            log.info(fmt(C.RED,
+                f"\n    {reason} Stopping further downloads; "
+                "will restore upgrade backups and exit."))
+            item["result"] = "auth_lost"
+            self.auth_lost_exc = exc
+        elif isinstance(exc, OSError):
+            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                self._stop_for_full_disk(
+                    f" during {phase}"
+                    if phase
+                    else f" at {cfg.STAGING_DIR}"
+                )
+                item["result"] = "disk_full"
+            else:
+                from qobuz_librarian.ui_cli.errors import oserr_hint
+                # oserr_hint already ends the sentence for a permissions or
+                # read-only mount; only an unclassified errno falls back to
+                # the raw exception, which at least says something.
+                hint = oserr_hint(exc)
+                detail = hint if hint else f" ({exc})."
+                log.info(fmt(C.RED,
+                    f"\n    Storage error{detail} Stopping the queue; "
+                    "restoring backups and keeping the rest for a retry."))
+                item["result"] = "io_error"
+                self.io_error = True
+        else:
+            raise exc
+        _retained, retention_exc = self._retain_failed_staging(item)
+        self._resolve_failed_item(item, retention_exc, cause=exc)
+
+    def _record_durable_completion(self, item, post_dir, idx):
+        self.any_imported = True
+        result = {**_durable_completed_result(item, post_dir),
+                  "album": item.get("album")}
+        self.results.append(result)
+        self.saved_state_changes.append({**result, "album": item.get("album")})
+        log.info(fmt(*_durable_completion_line(
+            result, item.get("elapsed", 0)
+        )))
+        verdict = result.get("quality_verdict") or {}
+        if verdict.get("under"):
+            log.info(fmt(C.YELLOW, f"    {quality_below_line(verdict)}"))
+        self._after_album(item, post_dir, idx)
+
+    def _after_album(self, item, post_dir, idx):
+        """Recheck a finished album's track lengths, then pause before the
+        next one. A Ctrl-C here stops the queue and keeps the album."""
+        self._record_finished()
+        if self.interrupted:
+            return
+        try:
+            # A frame-boundary truncation decodes fine and only shows against
+            # the real Qobuz length. Advisory: it never alters the album.
+            if post_dir is not None and self.token and item.get("n_ok", 0) > 0:
+                try:
+                    warn_if_download_truncated(
+                        post_dir, self.token, item["album"].get("title"),
+                        item["missing"] if item.get("present") else None)
+                except Exception as _e_rc:
+                    vlog(f"post-download recheck raised: {_e_rc}")
+            # Qobuz throttles sustained bulk queues. When the last rip showed
+            # throttle signals, pause longer than the normal inter-album gap.
+            if idx < self.n_items:
+                cooldown = (
+                    cfg.RATE_LIMIT_COOLDOWN if item.get("rate_limited") else 0
+                )
+                if cooldown:
+                    log.info(fmt(
+                        C.YELLOW,
+                        f"    ⏳ Qobuz rate-limit detected; cooling down "
+                        f"{int(cooldown)}s before the next album.",
+                    ))
+                    if _sleep_unless_cancelled(cooldown, is_cancel_requested):
+                        self.cancelled = True
+                else:
+                    _sleep_unless_cancelled(
+                        cfg.DELAY_BETWEEN,
+                        is_cancel_requested,
+                    )
+        except KeyboardInterrupt:
+            log.info(fmt(C.YELLOW,
+                "\n    Interrupted. Stopping further downloads."))
+            self.interrupted = True
+
+    def _recover_finished_album(self):
+        self._record_finished()
+        _require_executor_authority(self.authority)
+        self.requires_library_backup = queue_item_may_create_library_backup(self.item)
+        self.plan = plan_durable_new_album(self.item, self.args, check_beets=False)
+        self.recoverable = _durable_plan_allowed(
+            self.items,
+            self.item,
+            execution_mode=self.execution_mode,
+            web_album_id=self.web_album_id,
+        )
+        if not self.recoverable:
+            self.plan = None
+        # An album that finished before a restart is acknowledged even if a
+        # beets path template changed since; it is already filed.
+        if self.plan is not None and not durable_import_possible(self.item.get("album_dir")):
+            self.plan = None
+
+        recovered_completion = {}
+
+        def _acknowledge_recovered_completion(
+            recovered_origin,
+            recovered_owner,
+            *,
+            album_id,
+            completion_hash,
+            planned,
+            post_dir,
+        ):
+            if not self.recoverable:
+                return False
+            details = _recovered_completion_details(
+                self.item,
+                expected_origin=self.origin,
+                execution_mode=self.execution_mode,
+                origin=recovered_origin,
+                owner=recovered_owner,
+                album_id=album_id,
+                planned=planned,
+                post_dir=post_dir,
+            )
+            if details is None:
+                return False
+            if self.execution_mode.startswith("web-job:") and (
+                len(self.queue) != 1
+                or self.queue[0] is not self.item
+                or not callable(self.external_acknowledge_completion)
+            ):
+                return False
+            if recovered_origin.kind is CompletionOriginKind.WEB_JOB:
+                if self.external_acknowledge_completion(
+                    recovered_origin,
+                    recovered_owner,
+                    album_id=album_id,
+                    completion_hash=completion_hash,
+                    planned=planned,
+                    post_dir=post_dir,
+                ) is not True:
+                    return False
+            _require_executor_authority(self.authority)
+            caller_index = next(
+                (
+                    index
+                    for index, queued in enumerate(self.queue)
+                    if queued is self.item
+                ),
+                None,
+            )
+            if caller_index is None:
+                return False
+            del self.queue[caller_index]
+            recovered_completion.update(
+                post_dir=details[0],
+                n_ok=details[1],
+                n_fail=details[2],
+                n_lossy=details[3],
+                owner=recovered_owner,
+            )
+            return True
+
+        self.startup = recover_startup_state(
+            authority=self.authority,
+            acknowledge_completion=_acknowledge_recovered_completion,
+        )
+        _require_executor_authority(self.authority)
+        if recovered_completion:
+            if (
+                self.startup.status is StartupRecoveryStatus.ATTENTION_REQUIRED
+                or not _recovered_owner_settled(
+                    recovered_completion["owner"]
+                )
+            ):
+                self.recovery_persist_blocked = True
+                self.durable_stopped = True
+                log.info(fmt(
+                    C.YELLOW,
+                    "  ⚠  Saved completion recovery remains unsettled; "
+                    "stopping this batch.",
+                ))
+                return _STOP_QUEUE
+            self.item.update(
+                n_ok=recovered_completion["n_ok"],
+                n_fail=recovered_completion["n_fail"],
+                n_lossy=recovered_completion["n_lossy"],
+                elapsed=0.0,
+            )
+            self._persist()
+            self._record_durable_completion(
+                self.item,
+                recovered_completion["post_dir"],
+                self.idx,
+            )
+            return _NEXT_ALBUM
+
+    def _claim(self):
+        try:
+            self.resume_owner, self.durable_mode, self.resume_action = _exact_resume_owner(
+                self.startup,
+                self.item,
+                execution_mode=self.execution_mode,
+            )
+        except DurableAlbumUnavailable:
+            if self.any_imported:
+                self.durable_stopped = True
+                log.info(fmt(
+                    C.YELLOW,
+                    "  ⚠  Remaining saved queue work needs exact recovery; "
+                    "stopping this batch.",
+                ))
+                return _STOP_QUEUE
+            raise
+        if self.resume_owner is not None and self.plan is None:
+            # Every walk saves its queue before flushing it, so during an
+            # ordinary flush each item resolves an owner for its own pending
+            # entry. A pending entry is a persisted decision, not recovery
+            # state, so give it back and let the legacy lane run the album.
+            if _release_unplannable_claim(
+                self.resume_owner,
+                self.resume_action,
+                authority=self.authority,
+            ):
+                self.resume_owner = None
+            elif self.any_imported:
+                self.durable_stopped = True
+                log.info(fmt(
+                    C.YELLOW,
+                    "  ⚠  Remaining saved queue work is not yet supported "
+                    "by safe recovery; stopping this batch.",
+                ))
+                return _STOP_QUEUE
+            else:
+                raise DurableAlbumUnavailable(
+                    "the saved queue item is not yet supported by safe recovery"
+                )
+        if (
+            self.resume_owner is None
+            or self.resume_action is StartupRecoveryAction.PENDING
+        ):
+            try:
+                self.token = _admit_new_queue_items([self.item], self.token)
+            except CandidateStale as exc:
+                log.info(fmt(C.YELLOW,
+                    f"    ⚠  {truncate(self.item['album'].get('title') or '?', 55)}: {exc}"))
+                self.item["result"] = "stale_candidate"
+                self._drop(self.item)
+                self.results.append(_resolve_queue_item(
+                    self.item,
+                    self.args,
+                    False,
+                    authority=self.authority,
+                ))
+                return _NEXT_ALBUM
+        else:
+            _bind_resumed_queue_item_premise(self.item)
+        if (
+            self.expected_generation
+            and self.resume_owner is not None
+            and self.resume_action is not StartupRecoveryAction.PENDING
+        ):
+            from qobuz_librarian.api.client import authorize_bound_download
+
+            self.token = authorize_bound_download(self.token)
+        if self.resume_owner is None:
+            self._ensure_preflight()
+
+    def _check_before_download(self):
+        # A cancel raised while the PREVIOUS album was importing (i.e. after its
+        # own post-download checkpoint at the bottom of the loop) hasn't set
+        # `cancelled` yet. Re-check here so the next album short-circuits at the
+        # boundary instead of downloading in full before the stale check lands.
+        # set the flag first so _short_circuit marks the item 'cancelled', not
+        # the auth_lost fallback.
+        if not self.cancelled and is_cancel_requested():
+            self.cancelled = True
+        if self.resume_owner is not None and self.cancelled:
+            raise KeyboardInterrupt
+        if (self.interrupted or self.cancelled or self.disk_full or self.io_error
+                or self.auth_lost_exc is not None):
+            self._short_circuit(self.item)
+            return _NEXT_ALBUM
+        # A retried item may still carry a stop marker ('disk_full',
+        # 'interrupted', ...) from an earlier flush; clear it so a
+        # now-successful re-download isn't read as still-stopped by
+        # _queue_item_needs_retry and left in the queue forever.
+        self.item["result"] = None
+        self.item["folder_denied"] = None
+        self.item["quality_verdict"] = None
+        self.item["upgrade_unverified"] = False
+        self.item["catalogue_unverified"] = False
+        self.item["recovery_unverified"] = False
+        self.item["resampled_n"] = 0
+        self.item.update(
+            downsample_errors=0,
+            downsample_saved_bytes=0,
+            downsample_flush_warnings=0,
+            downsample_cancelled=False,
+        )
+        self.item["post_import_signatures"] = []
+        self.retention_exc = None
+
+        self.album = self.item["album"]
+        self.album_dir = self.item["album_dir"]
+        self.title = self.album.get("title") or "?"
+
+        print()
+        log.info(fmt(C.BOLD + C.WHITE,
+            f"  [Q {self.idx}/{self.n_items}] {truncate(self.title, 55)}"))
+        if self.requires_library_backup and self.plan is None:
+            # The exact-recovery lane only covers a handful of shapes (no
+            # sibling replacement, no downsampling, whole-album requests). The
+            # rest still run, on the path that backs up before it replaces.
+            log.info(fmt(C.GRAY,
+                "    Crash-safe recovery doesn't cover this album; using the "
+                "standard path, which backs up anything it replaces."))
+
+        if self.plan is not None and self.resume_owner is None and (
+                refusal := disk_support.refusal("whole_albums")):
+            log.info(fmt(C.YELLOW, f"    ⚠  {refusal} Nothing was downloaded."))
+            self.item["result"] = "disk_refused"
+            self._drop(self.item)
+            self.results.append(_resolve_queue_item(
+                self.item, self.args, False, authority=self.authority))
+            return _NEXT_ALBUM
+
+        if self.resume_owner is None and self.album_dir and self.album_dir.is_dir() and (
+                folder := unwritable_folder(
+                    self.album_dir, parent=bool(self.item["auto_upgrade"]))):
+            log.info(fmt(C.RED,
+                f"    ✗  The app can't write to {folder}. Nothing was "
+                "downloaded."))
+            self.item["result"] = "folder_read_only"
+            self.item["folder_denied"] = str(folder)
+            self.results.append(_resolve_queue_item(
+                self.item, self.args, False, authority=self.authority))
+            return _NEXT_ALBUM
+
+    def _run_durable_lane(self):
+        if self.plan is not None:
+            def _prepare_staged(album_dirs, checkpoint_sources):
+                title = edition_album_title(self.album) if self.item.get("exact_edition") else None
+                if title:
+                    prepare_managed_staging_tags(
+                        album_dirs, staged_track_bindings(self.item), album_title=title,
+                        authority_check=lambda: _require_executor_authority(self.authority))
+                    checkpoint_sources(SourceTransitionKind.BEETS_TAG_CLEAN)
+                prepared = _run_pre_import_hooks_for_dirs(
+                    album_dirs,
+                    self.args,
+                    on_sources_changed=checkpoint_sources,
+                )
+                note_superseded_attempts(self.item)
+                return prepared
+
+            try:
+                outcome = execute_durable_new_album(
+                    self.queue,
+                    self.item,
+                    self.args,
+                    plan=self.plan,
+                    origin=self.origin,
+                    mode=self.durable_mode,
+                    authority=self.authority,
+                    resume_owner=self.resume_owner,
+                    prepare_staged=_prepare_staged,
+                    acknowledge_completion=self.external_acknowledge_completion,
+                )
+            except (KeyboardInterrupt, AuthLost) as exc:
+                # The album is back in the queue or parked for recovery as it
+                # stands; the albums that finished before it are still
+                # wrapped up below.
+                if isinstance(exc, KeyboardInterrupt):
+                    log.info(fmt(C.YELLOW,
+                        "\n    Interrupted. Stopping further downloads."))
+                    self.interrupted = True
+                    self.item["result"] = "interrupted"
+                else:
+                    reason = (str(exc) if isinstance(exc, DownloadsRefused)
+                              else "Qobuz rejected the token.")
+                    log.info(fmt(C.RED,
+                        f"\n    {reason} Stopping further downloads."))
+                    self.auth_lost_exc = exc
+                    self.item["result"] = "auth_lost"
+                self.results.append({
+                    "album": self.item["album"],
+                    "dir": self.item.get("album_dir"),
+                    "result": self.item["result"],
+                    "n_ok": 0,
+                    "n_fail": 0,
+                    "imported": False,
+                    "auto_upgrade": bool(self.item.get("auto_upgrade")),
+                })
+                self.durable_stopped = True
+                return _STOP_QUEUE
+            return self._settle_durable_outcome(outcome)
+
+    def _settle_durable_outcome(self, outcome):
+        removed = all(queued is not self.item for queued in self.queue)
+        if removed:
+            self._persist()
+        if outcome.status is DurableAlbumStatus.CANCELLED:
+            self.item["result"] = "cancelled"
+            self.cancelled = True
+            log.info(fmt(C.YELLOW,
+                "    Cancelled; discarded this album's partial "
+                "download."))
+            self.results.append(_resolve_queue_item(
+                self.item, self.args, False, authority=self.authority))
+            return _NEXT_ALBUM
+        # A new album has nothing in the library to put back, so when
+        # some of its tracks arrived it is fetched again on the standard
+        # path, which imports the tracks it gets like any partial album.
+        refetch = (
+            outcome.status is DurableAlbumStatus.INCOMPLETE
+            and self.plan.library_backup_kind is None
+            and self.item.get("n_ok", 0) > 0
+            and not self.item.get("rate_limited")
+        )
+        if outcome.status is DurableAlbumStatus.INCOMPLETE and not refetch:
+            # Qobuz could not serve the whole album, or the download did
+            # not hold up against the tracks it would replace. The
+            # download is gone and nothing is left waiting on recovery, so
+            # the rest of the queue carries on.
+            self.item["result"] = "incomplete"
+            if outcome.reason == "upgrade-unverified":
+                # The original stays, and another try would fetch the
+                # same copy, so nothing is left to retry.
+                self.item["upgrade_put_back"] = True
+                verdict = self.item.get("quality_verdict") or {}
+                if verdict.get("under"):
+                    mark_album_capped(self.item["album"].get("id"), self.item["album"], {
+                        "n_below": verdict["n_below"], "n_at": 0, "n_above": 0})
+                self._drop(self.item)
+                log.info(fmt(C.YELLOW,
+                    "    ⚠  The new copy couldn't be verified against "
+                    "yours, so your original was kept and the download "
+                    "was discarded."))
+            else:
+                log.info(fmt(C.YELLOW,
+                    "    ⚠  Qobuz didn't deliver every track; nothing was "
+                    "imported and the partial download was discarded."))
+            self.results.append(_resolve_queue_item(
+                self.item, self.args, False, authority=self.authority))
+            return _NEXT_ALBUM
+        if outcome.status is DurableAlbumStatus.RETRY:
+            # Nothing was imported and nothing waits on recovery, so the
+            # album stays queued for another try and the rest carry on.
+            log.info(fmt(C.YELLOW, wrap(
+                "Qobuz couldn't deliver the whole album. Nothing was "
+                "imported; it stays queued for another try.",
+                indent="    ⚠  ", hanging="       ")))
+            self.results.append(_resolve_queue_item(
+                self.item, self.args, False, authority=self.authority))
+            return _NEXT_ALBUM
+        if outcome.status not in (
+            DurableAlbumStatus.COMPLETE, DurableAlbumStatus.INCOMPLETE,
+        ):
+            self.results.append({
+                "album": self.item["album"],
+                "dir": outcome.post_dir,
+                "result": outcome.status.value,
+                "n_ok": self.item.get("n_ok", 0),
+                "n_fail": self.item.get("n_fail", 0),
+                "n_lossy": self.item.get("n_lossy", 0),
+                "siblings_preserved": [],
+                "imported": False,
+                "auto_upgrade": bool(self.item.get("auto_upgrade")),
+                "companions_unsettled": outcome.reason
+                    == "library-backup-companions-unsettled",
+            })
+            self.durable_stopped = True
+            if outcome.reason == "managed-import-disk-full":
+                self.results[-1]["disk_full"] = True
+                self._stop_for_full_disk(" during library import")
+            elif self.results[-1]["companions_unsettled"]:
+                # Kept as it is, as the next start would keep it, so
+                # nothing of it is left to resume.
+                self.queue.remove(self.item)
+                kept = None
+                web_job = self.execution_mode.startswith("web-job:")
+                if not web_job:
+                    try:
+                        kept = settle_blocked_item(
+                            authority=self.authority,
+                            operation_id=outcome.operation_id,
+                            item_id=outcome.item_id,
+                            action=BlockedItemSettlementAction.DISCARD,
+                        )
+                    except (OSError, sqlite3.Error,
+                            queue_state.QueueJournalError) as exc:
+                        vlog(f"keeping the uncarried upgrade failed: {exc}")
+                if (kept is not None and kept.status
+                        is BlockedItemSettlementStatus.DISCARDED):
+                    self.durable_stopped = False
+                    self.results[-1]["companions_settled"] = True
+                    self._persist()
+                    log.info(fmt(C.YELLOW, wrap(
+                        kept.reason, indent="    ⚠  ", hanging="       ")))
+                    return _NEXT_ALBUM
+                log.info(fmt(
+                    C.YELLOW,
+                    "    ⚠  The new copy is in your library, but files "
+                    "from the album it replaced could not be carried "
+                    "into it. "
+                    + ("When this download ends, the app keeps that "
+                       "album as a backup." if web_job else
+                       "Stopping the queue; the next time the app "
+                       "starts, it keeps that album as a backup."),
+                ))
+            else:
+                log.info(fmt(
+                    C.YELLOW,
+                    "    ⚠  This album needs a safe retry or recovery; "
+                    "stopping the queue.",
+                ))
+            return _STOP_QUEUE
+        if outcome.status is DurableAlbumStatus.COMPLETE:
+            if not removed or outcome.post_dir is None:
+                raise DurableAlbumUnavailable(
+                    "the completed durable album was not finalised exactly"
+                )
+            self._record_durable_completion(self.item, outcome.post_dir, self.idx)
+            return _NEXT_ALBUM
+        log.info(fmt(C.YELLOW,
+            "    ⚠  Qobuz didn't deliver every track; downloading the "
+            "album again to keep the tracks that arrive."))
+
+    def _download(self):
+        _seal_queue_item_siblings(self.item)
+        if self.item["auto_upgrade"] and self.album_dir and self.album_dir.exists():
+            # The album's beets entry takes in the replacement once it checks
+            # out, so the album keeps its id and fields.
+            self.item["_replaced_beets_entries"] = capture_beets_album_entries(self.album_dir)
+            bp = backup_album_dir(
+                self.album_dir,
+                expected_receipt=self.item.get("_validated_source_receipt"),
+            )
+            if bp is not None and not bp.complete:
+                from qobuz_librarian.modes.process import (
+                    _recover_incomplete_upgrade_backup,
+                )
+
+                _recover_incomplete_upgrade_backup(
+                    bp, self.album_dir, operation="queued upgrade backup")
+                log.info(fmt(C.RED,
+                    "    ✗  The backup was interrupted; skipping this "
+                    "album."))
+                self.item["result"] = "upgrade_aborted_backup_failed"
+                self.results.append(_resolve_queue_item(
+                    self.item, self.args, False, authority=self.authority))
+                return _NEXT_ALBUM
+            if bp is None:
+                log.info(fmt(C.RED,
+                    "    ✗  Could not back up; skipping this album."))
+                self.item["result"] = "upgrade_aborted_backup_failed"
+                self.results.append(_resolve_queue_item(
+                    self.item, self.args, False, authority=self.authority))
+                return _NEXT_ALBUM   # Nothing downloaded, so it stays queued for retry.
+            self.item["backup_path"] = bp
+        # Snapshot staging AFTER the backup: a custom config can point
+        # UPGRADE_BACKUP_DIR inside STAGING_DIR, and a backup copied in BEFORE
+        # the snapshot is already present at snapshot time, so it's correctly
+        # excluded from the freshly-downloaded diff (not re-imported/downsampled).
+        try:
+            self.item["snapshot_before"] = snapshot_staging()
+            _download_for_queue_item(self.item)
+        except (KeyboardInterrupt, AuthLost, OSError) as exc:
+            self._handle_download_exception(self.item, exc)
+            return _NEXT_ALBUM
+
+        if is_cancel_requested():
+            self._cancel_item(self.item)
+            return _NEXT_ALBUM
+
+        self.summary_n_ok = self.item.get("n_ok", 0)
+        self.summary_n_missing = sum(incomplete_track_counts(self.item))
+        summary_elapsed = int(self.item.get("elapsed", 0))
+        if self.summary_n_ok and not self.summary_n_missing:
+            log.info(fmt(C.GREEN, f"    ✓ {plural(self.summary_n_ok, 'track')} · {summary_elapsed}s"))
+        elif self.summary_n_ok:
+            log.info(fmt(C.YELLOW,
+                f"    ⚠ {self.summary_n_ok} ok · {self.summary_n_missing} missing · {summary_elapsed}s"))
+        else:
+            log.info(fmt(C.RED, f"    ✗ download failed · {summary_elapsed}s"))
+
+    def _import(self):
+        self.item_imported = False
+        if self.summary_n_ok > 0 and not self.args.no_import:
+            try:
+                self.album_dirs = _staged_album_dirs(self.item)
+            except OSError as exc:
+                self._handle_download_exception(self.item, exc)
+                return _NEXT_ALBUM
+            if not self.album_dirs:
+                log.info(fmt(C.YELLOW,
+                    "    ⚠  No staged audio dir found for this album; skipping beets."))
+            else:
+                return self._import_staged()
+        elif self.args.no_import:
+            # Without the pre-import hooks a multi-disc cover would stay in
+            # the album root, where the manual import leaves it behind.
+            try:
+                for staged in _staged_album_dirs(self.item):
+                    relocate_disc_album_artwork(staged)
+            except OSError as exc:
+                vlog(f"artwork relocation raised: {exc}")
+            if self.summary_n_ok and not self.summary_n_missing:
+                keep_unimported_download(self.item)
+                kept_in = cfg.STAGING_DIR
+            elif self.retention_exc is None:
+                _retained, self.retention_exc = self._retain_failed_staging(
+                    self.item, label="incomplete")
+                kept_in = cfg.STAGING_DIR / cfg.BEETS_RETRY_DIR
+            log.info(fmt(C.YELLOW,
+                f"  --no-import: skipping beets. Files in {kept_in}/"))
+        elif self.summary_n_ok == 0:
+            log.info(fmt(C.GRAY, "  Skipping beets: nothing landed."))
+            retire_failed_download_staging(self.item)
+
+    def _import_staged(self):
+        for step in (self._check_quality, self._prepare_staged_album,
+                     self._import_with_beets):
+            verdict = step()
+            if verdict is not None:
+                return verdict
+        self._accept_import()
+
+    def _redownload_at_max(self):
+        saved_q = self.item.get("quality")
+        retry_item = dict(self.item)
+        retry_item["quality"] = 4
+        retry_item.pop("_staging_run", None)
+        retry_item.pop("_staging_run_retained", None)
+
+        def _run_retry():
+            _download_for_queue_item(retry_item)
+
+        try:
+            fresh_dirs, retry_kept = redownload_with_staged_fallback(
+                self.album_dirs,
+                run_retry=_run_retry,
+                collect_staged_dirs=lambda: (
+                    _staged_album_dirs(retry_item)
+                    if retry_item.get("n_ok", 0) > 0 else []),
+                discard_retry=lambda: discard_retry_staging(
+                    retry_item),
+                retry_preserves_original=lambda: (
+                    retry_preserves_track_coverage(
+                        self.item, retry_item)))
+            # Kept or not, a throttled re-download slows the next album.
+            if retry_item.get("rate_limited"):
+                self.item["rate_limited"] = True
+            if retry_kept:
+                retire_empty_download_staging(self.item)
+                for key in ("n_ok", "n_fail", "n_lossy", "n_broken",
+                            "n_unavailable", "failed_tracks",
+                            "lossy_tracks", "broken_tracks",
+                            "unavailable_tracks", "elapsed",
+                            "cd_quality_tracks",
+                            "_cd_quality_paths",
+                            "gap_fill_backup_path", "_staging_run",
+                            "_staging_run_retained",
+                            "_expected_track_keys",
+                            "_clean_track_keys",
+                            "_exact_track_coverage",
+                            "_unmatched_audio",
+                            "_clean_staged_files",
+                            "_all_staged_audio",
+                            "_staged_track_bindings"):
+                    if key in retry_item:
+                        self.item[key] = retry_item[key]
+                    else:
+                        self.item.pop(key, None)
+            else:
+                retire_empty_download_staging(retry_item)
+        finally:
+            self.item["quality"] = saved_q
+        return fresh_dirs, self.item.get("_cd_quality_paths", ())
+
+    def _check_quality(self):
+        effective_tier = self.item.get("quality") or cfg.STREAMRIP_QUALITY
+        try:
+            self.item["quality_verdict"] = verify_and_recover(
+                self.album, self.album_dirs,
+                redownload_at_max=self._redownload_at_max,
+                effective_tier=effective_tier,
+                allow_retry=self.item.get("gap_fill_backup_path") is None,
+                exempt=self.item.get("_cd_quality_paths", ()))
+        except (KeyboardInterrupt, AuthLost, OSError) as exc:
+            self._handle_download_exception(self.item, exc)
+            return _NEXT_ALBUM
+        if is_cancel_requested():
+            self._cancel_item(self.item)
+            return _NEXT_ALBUM
+        if self.item["quality_verdict"]["retried"]:
+            self.album_dirs = self.item["quality_verdict"]["staged_dirs"]
+        if self.item["quality_verdict"]["recovered"]:
+            log.info(fmt(C.CYAN,
+                "    ↻ recovered: re-fetched at the highest source."))
+        elif not self.item["quality_verdict"]["under"]:
+            met = quality_met_line(
+                self.item.get("n_ok", 0), self.item.get("cd_quality_tracks"))
+            if met:
+                log.info(fmt(C.GRAY, f"    {met}"))
+        else:
+            log.info(fmt(C.YELLOW,
+                f"    {quality_below_line(self.item['quality_verdict'])}"))
+            # Still under target: the import proceeds, but the owning
+            # job must not look like a clean finish.
+            if on_quality_shortfall is not None:
+                on_quality_shortfall(self.item["quality_verdict"])
+
+    def _prepare_staged_album(self):
+        # Repair carries a callback that re-tags the staged refills
+        # with the originals' own metadata before beets files them, so
+        # a recording that also lives on a compilation comes back tagged
+        # for the album the user owns. No-op for every other queue item.
+        retag = self.item.get("pre_import_retag")
+        if callable(retag):
+            try:
+                retag(self.album_dirs)
+            except Exception as _e_rt:
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  repair retag step failed: {_e_rt}"))
+        try:
+            if self.item.get("backup_path") is not None:
+                fill_tags = fill_album_tags(self.item["backup_path"])
+            else:
+                fill_tags = (
+                    fill_album_tags(self.album_dir)
+                    if self.album_dir is not None
+                    and not self.item.get("download_full_album") else None)
+            if fill_tags:
+                _prepare_staging_tags(self.album_dirs, album_tags=fill_tags)
+            elif self.item.get("exact_edition") or (
+                    self.item.get("backup_path") is not None
+                    and edition_album_title(self.album)):
+                _prepare_staging_tags(self.album_dirs, album_title=edition_album_title(self.album))
+            prepared = _run_pre_import_hooks_for_dirs(self.album_dirs, self.args)
+            if self.item.get("backup_path") is not None:
+                from qobuz_librarian.modes.process import (
+                    _keep_own_cover,
+                )
+
+                _keep_own_cover(self.item["backup_path"], self.album_dirs)
+            note_superseded_attempts(self.item)
+            self.item["resampled_n"] = prepared.resampled
+            self.item.update(_pre_import_outcome_fields(prepared))
+            self.item["post_import_signatures"] = (
+                track_signatures_for_album_dirs(self.album_dirs))
+        except KeyboardInterrupt:
+            log.info(fmt(C.YELLOW,
+                "  ⚠  Pre-import hook interrupted; skipping beets "
+                "for this album; stopping the queue."))
+            self.interrupted = True
+            # Mark interrupted so _resolve_queue_item labels it as such
+            # instead of falling through to "downloaded" (the album did
+            # not import).
+            self.item["result"] = "interrupted"
+            self.results.append(_resolve_queue_item(
+                self.item, self.args, False, authority=self.authority))
+            return _NEXT_ALBUM
+        except OSError as exc:
+            self._handle_download_exception(self.item, exc, phase="staged preparation")
+            return _NEXT_ALBUM
+
+    def _import_with_beets(self):
+        self.parking_receipts = tuple(
+            capture_tree(directory) for directory in self.album_dirs)
+        if any(receipt is None for receipt in self.parking_receipts):
+            self.parking_receipts = ()
+        try:
+            self.ownership_capture = (
+                {} if self.item.get("_capture_import_ownership") is True
+                else None
+            )
+            pin = (
+                {} if self.item.get("album_dir") is None
+                else {"album_dir": self.item["album_dir"],
+                      "places": self.item.get("refill_places")}
+            )
+            if self.item.get("backup_path") is not None:
+                pin["folder"] = self.item["album_dir"]
+                if self.item.get("_replaced_beets_entries") is not None:
+                    del pin["album_dir"]
+                    from qobuz_librarian.modes.process import mark_pending_upgrade
+                    if not mark_pending_upgrade(
+                            self.item["backup_path"],
+                            self.item["_replaced_beets_entries"], self.album_dirs):
+                        raise OSError(
+                            "couldn't record the upgrade in its backup")
+            failure = {}
+            if self.ownership_capture is None:
+                self.item_imported = _import_album_with_retry(
+                    self.album_dirs, failure_out=failure, **pin)
+            else:
+                self.item_imported = _import_album_with_retry(
+                    self.album_dirs,
+                    ownership_out=self.ownership_capture,
+                    failure_out=failure,
+                    **pin,
+                )
+            if not self.item_imported and failure.get("permission_denied"):
+                self.item["import_denied"] = failure["permission_denied"]
+        except ImportedThenInterrupted:
+            log.info(fmt(C.YELLOW,
+                "\n    Interrupted. Stopping further downloads."))
+            self.interrupted = True
+            self.item_imported = True
+        except KeyboardInterrupt:
+            log.info(fmt(C.YELLOW,
+                "\n  beets interrupted. Resolving backups based on disk."))
+            self.interrupted = True
+            self.item_imported = False
+            # Label as interrupted (not "downloaded"). Beets did not
+            # finish importing this album.
+            self.item["result"] = "interrupted"
+            self.results.append(_resolve_queue_item(
+                self.item, self.args, False, authority=self.authority))
+            return _NEXT_ALBUM
+        except OSError as exc:
+            # The original may already be in the upgrade backup.
+            # Resolve it before stopping the queue.
+            self._handle_download_exception(
+                self.item, exc, phase="library import"
+            )
+            return _NEXT_ALBUM
+
+    def _accept_import(self):
+        if self.item_imported and self.ownership_capture is not None:
+            ownership_result = self.ownership_capture.get("result")
+            if isinstance(ownership_result, dict):
+                self.item["_import_ownership"] = ownership_result
+
+        retired_import_staging = True
+        if self.item_imported and "_staging_run" in self.item:
+            try:
+                retired_import_staging = (
+                    retire_download_staging_after_import(self.item)
+                )
+            except BaseException as cleanup_exc:
+                retired_import_staging = False
+                self.retention_exc = cleanup_exc
+                log.info(fmt(
+                    C.RED,
+                    "  ✗  Could not retire the exact imported staging "
+                    "run; resolving the album backup before returning "
+                    "the storage error.",
+                ))
+        if self.item_imported and retired_import_staging:
+            self.any_imported = True
+            clear_attempts_after_import(self.item)
+        else:
+            if self.item_imported:
+                log.info(fmt(
+                    C.RED,
+                    "  ✗  The exact download run was not empty "
+                    "after beets; the import was not accepted.",
+                ))
+            self.item_imported = False
+            self.item["result"] = "import_failed"
+            if self.retention_exc is None:
+                retained, self.retention_exc = self._retain_failed_staging(
+                    self.item, label="beets-incomplete")
+                if retained:
+                    log.info(fmt(
+                        C.YELLOW,
+                        "  ⚠  Kept the exact residual download run in "
+                        "private staging recovery; the queue item "
+                        "remains pending.",
+                    ))
+                elif self.retention_exc is None:
+                    try:
+                        _move_to_beets_retry(
+                            self.album_dirs,
+                            self.title,
+                            expected=self.parking_receipts,
+                        )
+                    except BaseException as parking_exc:
+                        self.retention_exc = parking_exc
+                        log.info(fmt(
+                            C.RED,
+                            "  ✗  Could not park the failed beets "
+                            "import; resolving the album backup before "
+                            "returning the storage error.",
+                        ))
+
+    def _resolve(self):
+        # Drop a finished item from the persisted queue BEFORE resolving its
+        # backup. If the process dies between the two, the worst case is an
+        # orphaned backup the retention sweep clears, not a completed album
+        # left queued and needlessly re-downloaded on the next resume.
+        if not _queue_item_needs_retry(self.item):
+            self._drop(self.item)
+        result = _resolve_queue_item(
+            self.item, self.args, self.item_imported, authority=self.authority)
+        self.results.append(result)
+        if result.get("imported") and result.get("n_ok", 0) > 0:
+            change = {**result, "album": self.item.get("album")}
+            if self.item.get("_resolved_post_dir") is not None:
+                change["_resolved_post_dir"] = self.item["_resolved_post_dir"]
+            self.saved_state_changes.append(change)
+        if self.retention_exc is not None:
+            raise self.retention_exc
+
+        self._after_album(
+            self.item,
+            self.item.get("_resolved_post_dir")
+            if self.item_imported and not self.args.no_import else None,
+            self.idx,
+        )
+
+    def _preflight_if_skipped(self):
+        self._record_finished()
+        if not self.preflight_done and not self.durable_stopped:
+            _require_executor_authority(self.authority)
+            final_startup = recover_startup_state(
+                authority=self.authority,
+                acknowledge_completion=None,
+            )
+            _require_executor_authority(self.authority)
+            # Albums of this queue still waiting for another try are no recovery.
+            if final_startup.status is StartupRecoveryStatus.CLEAR or (
+                final_startup.status is StartupRecoveryStatus.RESUME_REQUIRED
+                and all(entry.phase is queue_state.QueuePhase.PENDING
+                        for entry in final_startup.items)
+            ):
+                self._ensure_preflight()
+            else:
+                self.durable_stopped = True
+                log.info(fmt(
+                    C.YELLOW,
+                    "  ⚠  Saved queue recovery remains unfinished; "
+                    "skipping unrelated staging work.",
+                ))
+
+    def _consolidate(self):
+        # Consolidate duplicate albums once if anything landed. The fold is a
+        # library-wide pass, so running it per-album would waste work.
+        ownership_scope_resolved = any(
+            item.get("_resolved_post_dir_from_import_ownership") is True
+            for item in self.items
+        )
+        if (self.consolidate_duplicates
+                and self.any_imported
+                and not any(item.get("exact_edition") for item in self.items)
+                and not ownership_scope_resolved):
+            try:
+                protected_ownership_dirs = [
+                    item.get("_resolved_post_dir")
+                    for item in self.items
+                    if isinstance(item.get("_import_ownership"), dict)
+                    and item.get("_resolved_post_dir") is not None
+                ]
+                if protected_ownership_dirs:
+                    _consolidate_duplicate_albums(
+                        protected_paths=protected_ownership_dirs)
+                else:
+                    _consolidate_duplicate_albums()
+            except KeyboardInterrupt:
+                self.interrupted = True
+                log.info(fmt(C.YELLOW, _FINISHING_UP))
+            except Exception as _e_c:
+                vlog(f"consolidate duplicate albums raised: {_e_c}")
+        elif self.consolidate_duplicates and ownership_scope_resolved:
+            vlog(
+                "skipping duplicate consolidation for descriptor-verified "
+                "one-track ownership scope"
+            )
+
+    def _write_sidecars(self):
+        print()
+        _post_dirs = [it.get("_resolved_post_dir") for it in self.items
+                      if it.get("_resolved_post_dir") is not None]
+        # Materialise .lrc sidecars (and strip the embedded tag in sidecar mode) for
+        # every imported album: the lyric hook always embeds, and this pass emits
+        # the sidecars. No-op when LYRICS_FORMAT is embed.
+        ownership_tracks = [
+            it["_import_ownership"]
+            for it in self.items
+            if isinstance(it.get("_import_ownership"), dict)
+        ]
+        if self.any_imported and (
+                _post_dirs or self._parked_post_dirs or ownership_tracks):
+            capture_ownership = bool(ownership_tracks)
+            ownership_changes = [] if capture_ownership else None
+            ownership_created_files = [] if capture_ownership else None
+            ownership_directory_changes = [] if capture_ownership else None
+            try:
+                if ownership_changes is None:
+                    write_post_import_sidecars(_post_dirs + self._parked_post_dirs)
+                else:
+                    write_post_import_sidecars(
+                        _post_dirs + self._parked_post_dirs,
+                        identity_changes_out=ownership_changes,
+                        created_files_out=ownership_created_files,
+                        directory_changes_out=ownership_directory_changes,
+                        owned_tracks=ownership_tracks,
+                    )
+            except KeyboardInterrupt:
+                self.interrupted = True
+                log.info(fmt(C.YELLOW, _FINISHING_UP))
+            except Exception as _e_sc:
+                vlog(f"post-import sidecar write raised: {_e_sc}")
+            finally:
+                if capture_ownership:
+                    _advance_import_ownership_identities(
+                        self.items,
+                        ownership_changes,
+                        ownership_created_files,
+                        ownership_directory_changes,
+                    )
+
+        # After the sidecar pass, because writing a sidecar can rewrite the audio
+        # file (embedded lyrics are stripped in sidecar mode) and that would leave
+        # every row just written already stale.
+        if self.any_imported:
+            cache_album_tags(_post_dirs + self._parked_post_dirs)
+
+    def _finish(self):
+        self._preflight_if_skipped()
+        self._consolidate()
+        self._write_sidecars()
+        log.info(fmt(*_queue_done_line(
+            self.results, self.n_items,
+            stopped=(self.interrupted or self.disk_full or self.io_error or self.durable_stopped
+                     or self.auth_lost_exc is not None))))
+
+        # A durable stop leaves the journal holding blocked or retired work on
+        # purpose, and rewriting it as pending is what the journal refuses. Every
+        # album that finished already persisted through _drop, so the saved state is
+        # current without this.
+        if not self.recovery_persist_blocked and not self.durable_stopped:
+            self._persist()
+        # Only the CLI batch callers (walk / artist / album / queue resume) refresh
+        # saved state here. The web single-track and CLI Repair callers refresh
+        # after their own higher-level operation has verified the file change.
+        if self.refresh_review:
+            _refresh_review_state_after_downloads(
+                self.saved_state_changes,
+                self.token,
+                self.args,
+                allow_upgrade_refresh=(self.auth_lost_exc is None and not self.interrupted),
+                record=False,
+            )
+        if self.auth_lost_exc is not None:
+            raise self.auth_lost_exc
+        # Re-raising KeyboardInterrupt is what stops the caller's _flush_queue
+        # from reaching its clear-on-drain branch and discarding the items that
+        # were short-circuited (and so still need a retry).
+        if self.interrupted:
+            raise KeyboardInterrupt
+        return self.results, not self.queue and not self.durable_stopped
+
+
 def _execute_download_queue(queue, args, token, *, on_progress=None,
                             refresh_review=False,
                             consolidate_duplicates=True,
@@ -2241,1204 +3502,9 @@ def _execute_download_queue(queue, args, token, *, on_progress=None,
                                     "n_missing": len(item["missing"])})
         return dry_run_results, True
 
-    expected_generation = getattr(token, "credential_generation", "")
-    if expected_generation:
-        from qobuz_librarian.api.client import authorize_bound_download
-
-        token = authorize_bound_download(token, prepare=False)
-
-    authority = run_lock.current_lease()
-    _require_executor_authority(authority)
-    (
-        origin,
-        execution_mode,
-        web_album_id,
-        external_acknowledge_completion,
-    ) = _durable_execution_origin()
-    items = list(queue)
-    n_items = len(items)
-    interrupted = False
-    cancelled = False
-    disk_full = False
-    io_error = False
-    auth_lost_exc = None
-    any_imported = False
-    _parked_post_dirs = []
-    preflight_done = False
-    durable_stopped = False
-    recovery_persist_blocked = False
-    results = [] if results_out is None else results_out
-    never_started = []
-    saved_state_changes = []
-    recorded = len(results)
-
-    def _record_finished():
-        """Give each album that finished its History row and hook call when
-        it finishes, so a stop later in the queue keeps them."""
-        nonlocal recorded
-        if not refresh_review:
-            return
-        finished = [
-            result for result in results[recorded:]
-            if result.get("album")
-            and all(result is not skipped for skipped in never_started)
-        ]
-        recorded = len(results)
-        _record_terminal_results(finished, args)
-
-    def _persist():
-        if on_progress is not None:
-            # This is the durable commit gate for the caller's shrinking
-            # queue.  Continuing after an I/O/CAS failure lets memory claim an
-            # item is finished while the saved journal still says it is
-            # pending, so stop before another album can mutate the library.
-            #
-            # Callers rewrite the journal as pending, which it refuses while it
-            # holds blocked or retired work. Every mid-batch call is safe only
-            # because a durable stop breaks the loop before the next one: an
-            # album parked for attention stays blocked, and the batch-end call
-            # below stands down for exactly that reason.
-            on_progress()
-
-    def _stop_for_full_disk(location):
-        nonlocal disk_full
-        log.info(fmt(C.RED,
-            f"\n    Out of disk space{location}. Stopping "
-            "the queue; restoring backups and keeping the rest for a "
-            "retry once space is freed."))
-        disk_full = True
-
-    def _ensure_preflight():
-        nonlocal any_imported, _parked_post_dirs, preflight_done
-        if preflight_done:
-            return
-        _require_executor_authority(authority)
-        staging_preflight(args)
-        _require_executor_authority(authority)
-        try:
-            parked_imported, parked_dirs = _reimport_parked_albums()
-        except OSError as exc:
-            if exc.errno != errno.ENOSPC:
-                raise
-            parked_imported, parked_dirs = getattr(
-                exc, "parked_results", (False, []))
-            _stop_for_full_disk(" during library import")
-        _require_executor_authority(authority)
-        any_imported = any_imported or parked_imported
-        _parked_post_dirs.extend(parked_dirs)
-        if parked_imported:
-            saved_state_changes.extend({
-                "album": None,
-                "dir": post_dir,
-                "imported": True,
-                "n_ok": 1,
-            } for post_dir in (parked_dirs or [None]))
-        preflight_done = True
-
-    def _drop(item):
-        """An item that's fully handled leaves the queue so a retry won't redo
-        it. Persist immediately, so even a hard crash mid-flush can't resurrect
-        already-imported albums."""
-        try:
-            queue.remove(item)
-        except ValueError:
-            pass
-        _persist()
-
-    def _short_circuit(item):
-        """Drain an item we can no longer process (cancel / interrupt / auth
-        loss / disk full): mark it, run backup resolution so any upgrade backup
-        gets restored, and keep it queued for a later retry. Skipping
-        resolution would orphan the original tracks under their backup path."""
-        # _build_queue_item seeds these keys with None, so setdefault() would
-        # leave them None and _resolve_queue_item would label the stop
-        # "nothing_landed". Assign over None, keeping a real result a prior
-        # run's flush recorded.
-        if item.get("snapshot_before") is None:
-            item["snapshot_before"] = set()
-        if not item.get("result"):
-            item["result"] = ("cancelled" if cancelled
-                              else "interrupted" if interrupted
-                              else "disk_full" if disk_full
-                              else "io_error" if io_error
-                              else "auth_lost")
-        result = _resolve_queue_item(
-            item,
-            args,
-            False,
-            authority=authority,
-        )
-        results.append(result)
-        never_started.append(result)
-
-    def _retain_failed_staging(item, *, label=None):
-        """Capture a retention failure without skipping backup resolution."""
-        try:
-            if label is None:
-                return retain_download_staging(item), None
-            return retain_download_staging(item, label=label), None
-        except BaseException as preserve_exc:
-            log.info(fmt(
-                C.RED,
-                "    Could not preserve the failed staging run; resolving "
-                "the album backup before returning the storage error.",
-            ))
-            return False, preserve_exc
-
-    def _resolve_failed_item(item, retention_exc=None, *, cause=None):
-        results.append(_resolve_queue_item(
-            item, args, False, authority=authority))
-        if retention_exc is not None:
-            if cause is None:
-                raise retention_exc
-            raise retention_exc from cause
-
-    def _cancel_item(item):
-        nonlocal cancelled
-        item["result"] = "cancelled"
-        cancelled = True
-        _retained, retention_exc = _retain_failed_staging(item)
-        if retention_exc is None:
-            log.info(fmt(C.YELLOW,
-                "    Cancelled; retained this album's partial download "
-                "for review."))
-        _resolve_failed_item(item, retention_exc)
-
-    def _handle_download_exception(item, exc, *, phase=None):
-        nonlocal interrupted, io_error, auth_lost_exc
-        if isinstance(exc, KeyboardInterrupt):
-            log.info(fmt(C.YELLOW,
-                "\n    Interrupted. Stopping further downloads."))
-            item["result"] = "interrupted"
-            interrupted = True
-        elif isinstance(exc, AuthLost):
-            reason = (str(exc) if isinstance(exc, DownloadsRefused)
-                      else "Qobuz rejected the token.")
-            log.info(fmt(C.RED,
-                f"\n    {reason} Stopping further downloads; "
-                "will restore upgrade backups and exit."))
-            item["result"] = "auth_lost"
-            auth_lost_exc = exc
-        elif isinstance(exc, OSError):
-            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
-                _stop_for_full_disk(
-                    f" during {phase}"
-                    if phase
-                    else f" at {cfg.STAGING_DIR}"
-                )
-                item["result"] = "disk_full"
-            else:
-                from qobuz_librarian.ui_cli.errors import oserr_hint
-                # oserr_hint already ends the sentence for a permissions or
-                # read-only mount; only an unclassified errno falls back to
-                # the raw exception, which at least says something.
-                hint = oserr_hint(exc)
-                detail = hint if hint else f" ({exc})."
-                log.info(fmt(C.RED,
-                    f"\n    Storage error{detail} Stopping the queue; "
-                    "restoring backups and keeping the rest for a retry."))
-                item["result"] = "io_error"
-                io_error = True
-        else:
-            raise exc
-        _retained, retention_exc = _retain_failed_staging(item)
-        _resolve_failed_item(item, retention_exc, cause=exc)
-
-    def _record_durable_completion(item, post_dir, idx):
-        nonlocal any_imported, cancelled
-        any_imported = True
-        result = {**_durable_completed_result(item, post_dir),
-                  "album": item.get("album")}
-        results.append(result)
-        saved_state_changes.append({**result, "album": item.get("album")})
-        log.info(fmt(*_durable_completion_line(
-            result, item.get("elapsed", 0)
-        )))
-        verdict = result.get("quality_verdict") or {}
-        if verdict.get("under"):
-            log.info(fmt(C.YELLOW, f"    {quality_below_line(verdict)}"))
-        _after_album(item, post_dir, idx)
-
-    def _after_album(item, post_dir, idx):
-        """Recheck a finished album's track lengths, then pause before the
-        next one. A Ctrl-C here stops the queue and keeps the album."""
-        nonlocal cancelled, interrupted
-        _record_finished()
-        if interrupted:
-            return
-        try:
-            # A frame-boundary truncation decodes fine and only shows against
-            # the real Qobuz length. Advisory: it never alters the album.
-            if post_dir is not None and token and item.get("n_ok", 0) > 0:
-                try:
-                    warn_if_download_truncated(
-                        post_dir, token, item["album"].get("title"),
-                        item["missing"] if item.get("present") else None)
-                except Exception as _e_rc:
-                    vlog(f"post-download recheck raised: {_e_rc}")
-            # Qobuz throttles sustained bulk queues. When the last rip showed
-            # throttle signals, pause longer than the normal inter-album gap.
-            if idx < n_items:
-                cooldown = (
-                    cfg.RATE_LIMIT_COOLDOWN if item.get("rate_limited") else 0
-                )
-                if cooldown:
-                    log.info(fmt(
-                        C.YELLOW,
-                        f"    ⏳ Qobuz rate-limit detected; cooling down "
-                        f"{int(cooldown)}s before the next album.",
-                    ))
-                    if _sleep_unless_cancelled(cooldown, is_cancel_requested):
-                        cancelled = True
-                else:
-                    _sleep_unless_cancelled(
-                        cfg.DELAY_BETWEEN,
-                        is_cancel_requested,
-                    )
-        except KeyboardInterrupt:
-            log.info(fmt(C.YELLOW,
-                "\n    Interrupted. Stopping further downloads."))
-            interrupted = True
-
-    for idx, item in enumerate(items, 1):
-        _record_finished()
-        _require_executor_authority(authority)
-        requires_library_backup = queue_item_may_create_library_backup(item)
-        plan = plan_durable_new_album(item, args, check_beets=False)
-        recoverable = _durable_plan_allowed(
-            items,
-            item,
-            execution_mode=execution_mode,
-            web_album_id=web_album_id,
-        )
-        if not recoverable:
-            plan = None
-        # An album that finished before a restart is acknowledged even if a
-        # beets path template changed since; it is already filed.
-        if plan is not None and not durable_import_possible(item.get("album_dir")):
-            plan = None
-
-        recovered_completion = {}
-
-        def _acknowledge_recovered_completion(
-            recovered_origin,
-            recovered_owner,
-            *,
-            album_id,
-            completion_hash,
-            planned,
-            post_dir,
-        ):
-            if not recoverable:
-                return False
-            details = _recovered_completion_details(
-                item,
-                expected_origin=origin,
-                execution_mode=execution_mode,
-                origin=recovered_origin,
-                owner=recovered_owner,
-                album_id=album_id,
-                planned=planned,
-                post_dir=post_dir,
-            )
-            if details is None:
-                return False
-            if execution_mode.startswith("web-job:") and (
-                len(queue) != 1
-                or queue[0] is not item
-                or not callable(external_acknowledge_completion)
-            ):
-                return False
-            if recovered_origin.kind is CompletionOriginKind.WEB_JOB:
-                if external_acknowledge_completion(
-                    recovered_origin,
-                    recovered_owner,
-                    album_id=album_id,
-                    completion_hash=completion_hash,
-                    planned=planned,
-                    post_dir=post_dir,
-                ) is not True:
-                    return False
-            _require_executor_authority(authority)
-            caller_index = next(
-                (
-                    index
-                    for index, queued in enumerate(queue)
-                    if queued is item
-                ),
-                None,
-            )
-            if caller_index is None:
-                return False
-            del queue[caller_index]
-            recovered_completion.update(
-                post_dir=details[0],
-                n_ok=details[1],
-                n_fail=details[2],
-                n_lossy=details[3],
-                owner=recovered_owner,
-            )
-            return True
-
-        startup = recover_startup_state(
-            authority=authority,
-            acknowledge_completion=_acknowledge_recovered_completion,
-        )
-        _require_executor_authority(authority)
-        if recovered_completion:
-            if (
-                startup.status is StartupRecoveryStatus.ATTENTION_REQUIRED
-                or not _recovered_owner_settled(
-                    recovered_completion["owner"]
-                )
-            ):
-                recovery_persist_blocked = True
-                durable_stopped = True
-                log.info(fmt(
-                    C.YELLOW,
-                    "  ⚠  Saved completion recovery remains unsettled; "
-                    "stopping this batch.",
-                ))
-                break
-            item.update(
-                n_ok=recovered_completion["n_ok"],
-                n_fail=recovered_completion["n_fail"],
-                n_lossy=recovered_completion["n_lossy"],
-                elapsed=0.0,
-            )
-            _persist()
-            _record_durable_completion(
-                item,
-                recovered_completion["post_dir"],
-                idx,
-            )
-            continue
-        try:
-            resume_owner, durable_mode, resume_action = _exact_resume_owner(
-                startup,
-                item,
-                execution_mode=execution_mode,
-            )
-        except DurableAlbumUnavailable:
-            if any_imported:
-                durable_stopped = True
-                log.info(fmt(
-                    C.YELLOW,
-                    "  ⚠  Remaining saved queue work needs exact recovery; "
-                    "stopping this batch.",
-                ))
-                break
-            raise
-        if resume_owner is not None and plan is None:
-            # Every walk saves its queue before flushing it, so during an
-            # ordinary flush each item resolves an owner for its own pending
-            # entry. A pending entry is a persisted decision, not recovery
-            # state, so give it back and let the legacy lane run the album.
-            if _release_unplannable_claim(
-                resume_owner,
-                resume_action,
-                authority=authority,
-            ):
-                resume_owner = None
-            elif any_imported:
-                durable_stopped = True
-                log.info(fmt(
-                    C.YELLOW,
-                    "  ⚠  Remaining saved queue work is not yet supported "
-                    "by safe recovery; stopping this batch.",
-                ))
-                break
-            else:
-                raise DurableAlbumUnavailable(
-                    "the saved queue item is not yet supported by safe recovery"
-                )
-        if (
-            resume_owner is None
-            or resume_action is StartupRecoveryAction.PENDING
-        ):
-            try:
-                token = _admit_new_queue_items([item], token)
-            except CandidateStale as exc:
-                log.info(fmt(C.YELLOW,
-                    f"    ⚠  {truncate(item['album'].get('title') or '?', 55)}: {exc}"))
-                item["result"] = "stale_candidate"
-                _drop(item)
-                results.append(_resolve_queue_item(
-                    item,
-                    args,
-                    False,
-                    authority=authority,
-                ))
-                continue
-        else:
-            _bind_resumed_queue_item_premise(item)
-        if (
-            expected_generation
-            and resume_owner is not None
-            and resume_action is not StartupRecoveryAction.PENDING
-        ):
-            from qobuz_librarian.api.client import authorize_bound_download
-
-            token = authorize_bound_download(token)
-        if resume_owner is None:
-            _ensure_preflight()
-
-        # A cancel raised while the PREVIOUS album was importing (i.e. after its
-        # own post-download checkpoint at the bottom of the loop) hasn't set
-        # `cancelled` yet. Re-check here so the next album short-circuits at the
-        # boundary instead of downloading in full before the stale check lands.
-        # set the flag first so _short_circuit marks the item 'cancelled', not
-        # the auth_lost fallback.
-        if not cancelled and is_cancel_requested():
-            cancelled = True
-        if resume_owner is not None and cancelled:
-            raise KeyboardInterrupt
-        if (interrupted or cancelled or disk_full or io_error
-                or auth_lost_exc is not None):
-            _short_circuit(item)
-            continue
-        # A retried item may still carry a stop marker ('disk_full',
-        # 'interrupted', ...) from an earlier flush; clear it so a
-        # now-successful re-download isn't read as still-stopped by
-        # _queue_item_needs_retry and left in the queue forever.
-        item["result"] = None
-        item["folder_denied"] = None
-        item["quality_verdict"] = None
-        item["upgrade_unverified"] = False
-        item["catalogue_unverified"] = False
-        item["recovery_unverified"] = False
-        item["resampled_n"] = 0
-        item.update(
-            downsample_errors=0,
-            downsample_saved_bytes=0,
-            downsample_flush_warnings=0,
-            downsample_cancelled=False,
-        )
-        item["post_import_signatures"] = []
-        retention_exc = None
-
-        album = item["album"]
-        album_dir = item["album_dir"]
-        title = album.get("title") or "?"
-
-        print()
-        log.info(fmt(C.BOLD + C.WHITE,
-            f"  [Q {idx}/{n_items}] {truncate(title, 55)}"))
-        if requires_library_backup and plan is None:
-            # The exact-recovery lane only covers a handful of shapes (no
-            # sibling replacement, no downsampling, whole-album requests). The
-            # rest still run, on the path that backs up before it replaces.
-            log.info(fmt(C.GRAY,
-                "    Crash-safe recovery doesn't cover this album; using the "
-                "standard path, which backs up anything it replaces."))
-
-        if plan is not None and resume_owner is None and (
-                refusal := disk_support.refusal("whole_albums")):
-            log.info(fmt(C.YELLOW, f"    ⚠  {refusal} Nothing was downloaded."))
-            item["result"] = "disk_refused"
-            _drop(item)
-            results.append(_resolve_queue_item(
-                item, args, False, authority=authority))
-            continue
-
-        if resume_owner is None and album_dir and album_dir.is_dir() and (
-                folder := unwritable_folder(
-                    album_dir, parent=bool(item["auto_upgrade"]))):
-            log.info(fmt(C.RED,
-                f"    ✗  The app can't write to {folder}. Nothing was "
-                "downloaded."))
-            item["result"] = "folder_read_only"
-            item["folder_denied"] = str(folder)
-            results.append(_resolve_queue_item(
-                item, args, False, authority=authority))
-            continue
-
-        if plan is not None:
-            def _prepare_staged(album_dirs, checkpoint_sources):
-                title = edition_album_title(album) if item.get("exact_edition") else None
-                if title:
-                    prepare_managed_staging_tags(
-                        album_dirs, staged_track_bindings(item), album_title=title,
-                        authority_check=lambda: _require_executor_authority(authority))
-                    checkpoint_sources(SourceTransitionKind.BEETS_TAG_CLEAN)
-                prepared = _run_pre_import_hooks_for_dirs(
-                    album_dirs,
-                    args,
-                    on_sources_changed=checkpoint_sources,
-                )
-                note_superseded_attempts(item)
-                return prepared
-
-            try:
-                outcome = execute_durable_new_album(
-                    queue,
-                    item,
-                    args,
-                    plan=plan,
-                    origin=origin,
-                    mode=durable_mode,
-                    authority=authority,
-                    resume_owner=resume_owner,
-                    prepare_staged=_prepare_staged,
-                    acknowledge_completion=external_acknowledge_completion,
-                )
-            except (KeyboardInterrupt, AuthLost) as exc:
-                # The album is back in the queue or parked for recovery as it
-                # stands; the albums that finished before it are still
-                # wrapped up below.
-                if isinstance(exc, KeyboardInterrupt):
-                    log.info(fmt(C.YELLOW,
-                        "\n    Interrupted. Stopping further downloads."))
-                    interrupted = True
-                    item["result"] = "interrupted"
-                else:
-                    reason = (str(exc) if isinstance(exc, DownloadsRefused)
-                              else "Qobuz rejected the token.")
-                    log.info(fmt(C.RED,
-                        f"\n    {reason} Stopping further downloads."))
-                    auth_lost_exc = exc
-                    item["result"] = "auth_lost"
-                results.append({
-                    "album": item["album"],
-                    "dir": item.get("album_dir"),
-                    "result": item["result"],
-                    "n_ok": 0,
-                    "n_fail": 0,
-                    "imported": False,
-                    "auto_upgrade": bool(item.get("auto_upgrade")),
-                })
-                durable_stopped = True
-                break
-            removed = all(queued is not item for queued in queue)
-            if removed:
-                _persist()
-            if outcome.status is DurableAlbumStatus.CANCELLED:
-                item["result"] = "cancelled"
-                cancelled = True
-                log.info(fmt(C.YELLOW,
-                    "    Cancelled; discarded this album's partial "
-                    "download."))
-                results.append(_resolve_queue_item(
-                    item, args, False, authority=authority))
-                continue
-            # A new album has nothing in the library to put back, so when
-            # some of its tracks arrived it is fetched again on the standard
-            # path, which imports the tracks it gets like any partial album.
-            refetch = (
-                outcome.status is DurableAlbumStatus.INCOMPLETE
-                and plan.library_backup_kind is None
-                and item.get("n_ok", 0) > 0
-                and not item.get("rate_limited")
-            )
-            if outcome.status is DurableAlbumStatus.INCOMPLETE and not refetch:
-                # Qobuz could not serve the whole album, or the download did
-                # not hold up against the tracks it would replace. The
-                # download is gone and nothing is left waiting on recovery, so
-                # the rest of the queue carries on.
-                item["result"] = "incomplete"
-                if outcome.reason == "upgrade-unverified":
-                    # The original stays, and another try would fetch the
-                    # same copy, so nothing is left to retry.
-                    item["upgrade_put_back"] = True
-                    verdict = item.get("quality_verdict") or {}
-                    if verdict.get("under"):
-                        mark_album_capped(item["album"].get("id"), item["album"], {
-                            "n_below": verdict["n_below"], "n_at": 0, "n_above": 0})
-                    _drop(item)
-                    log.info(fmt(C.YELLOW,
-                        "    ⚠  The new copy couldn't be verified against "
-                        "yours, so your original was kept and the download "
-                        "was discarded."))
-                else:
-                    log.info(fmt(C.YELLOW,
-                        "    ⚠  Qobuz didn't deliver every track; nothing was "
-                        "imported and the partial download was discarded."))
-                results.append(_resolve_queue_item(
-                    item, args, False, authority=authority))
-                continue
-            if outcome.status is DurableAlbumStatus.RETRY:
-                # Nothing was imported and nothing waits on recovery, so the
-                # album stays queued for another try and the rest carry on.
-                log.info(fmt(C.YELLOW, wrap(
-                    "Qobuz couldn't deliver the whole album. Nothing was "
-                    "imported; it stays queued for another try.",
-                    indent="    ⚠  ", hanging="       ")))
-                results.append(_resolve_queue_item(
-                    item, args, False, authority=authority))
-                continue
-            if outcome.status not in (
-                DurableAlbumStatus.COMPLETE, DurableAlbumStatus.INCOMPLETE,
-            ):
-                results.append({
-                    "album": item["album"],
-                    "dir": outcome.post_dir,
-                    "result": outcome.status.value,
-                    "n_ok": item.get("n_ok", 0),
-                    "n_fail": item.get("n_fail", 0),
-                    "n_lossy": item.get("n_lossy", 0),
-                    "siblings_preserved": [],
-                    "imported": False,
-                    "auto_upgrade": bool(item.get("auto_upgrade")),
-                    "companions_unsettled": outcome.reason
-                        == "library-backup-companions-unsettled",
-                })
-                durable_stopped = True
-                if outcome.reason == "managed-import-disk-full":
-                    results[-1]["disk_full"] = True
-                    _stop_for_full_disk(" during library import")
-                elif results[-1]["companions_unsettled"]:
-                    # Kept as it is, as the next start would keep it, so
-                    # nothing of it is left to resume.
-                    queue.remove(item)
-                    kept = None
-                    web_job = execution_mode.startswith("web-job:")
-                    if not web_job:
-                        try:
-                            kept = settle_blocked_item(
-                                authority=authority,
-                                operation_id=outcome.operation_id,
-                                item_id=outcome.item_id,
-                                action=BlockedItemSettlementAction.DISCARD,
-                            )
-                        except (OSError, sqlite3.Error,
-                                queue_state.QueueJournalError) as exc:
-                            vlog(f"keeping the uncarried upgrade failed: {exc}")
-                    if (kept is not None and kept.status
-                            is BlockedItemSettlementStatus.DISCARDED):
-                        durable_stopped = False
-                        results[-1]["companions_settled"] = True
-                        _persist()
-                        log.info(fmt(C.YELLOW, wrap(
-                            kept.reason, indent="    ⚠  ", hanging="       ")))
-                        continue
-                    log.info(fmt(
-                        C.YELLOW,
-                        "    ⚠  The new copy is in your library, but files "
-                        "from the album it replaced could not be carried "
-                        "into it. "
-                        + ("When this download ends, the app keeps that "
-                           "album as a backup." if web_job else
-                           "Stopping the queue; the next time the app "
-                           "starts, it keeps that album as a backup."),
-                    ))
-                else:
-                    log.info(fmt(
-                        C.YELLOW,
-                        "    ⚠  This album needs a safe retry or recovery; "
-                        "stopping the queue.",
-                    ))
-                break
-            if outcome.status is DurableAlbumStatus.COMPLETE:
-                if not removed or outcome.post_dir is None:
-                    raise DurableAlbumUnavailable(
-                        "the completed durable album was not finalised exactly"
-                    )
-                _record_durable_completion(item, outcome.post_dir, idx)
-                continue
-            log.info(fmt(C.YELLOW,
-                "    ⚠  Qobuz didn't deliver every track; downloading the "
-                "album again to keep the tracks that arrive."))
-
-        _seal_queue_item_siblings(item)
-        if item["auto_upgrade"] and album_dir and album_dir.exists():
-            # The album's beets entry takes in the replacement once it checks
-            # out, so the album keeps its id and fields.
-            item["_replaced_beets_entries"] = capture_beets_album_entries(album_dir)
-            bp = backup_album_dir(
-                album_dir,
-                expected_receipt=item.get("_validated_source_receipt"),
-            )
-            if bp is not None and not bp.complete:
-                from qobuz_librarian.modes.process import (
-                    _recover_incomplete_upgrade_backup,
-                )
-
-                _recover_incomplete_upgrade_backup(
-                    bp, album_dir, operation="queued upgrade backup")
-                log.info(fmt(C.RED,
-                    "    ✗  The backup was interrupted; skipping this "
-                    "album."))
-                item["result"] = "upgrade_aborted_backup_failed"
-                results.append(_resolve_queue_item(
-                    item, args, False, authority=authority))
-                continue
-            if bp is None:
-                log.info(fmt(C.RED,
-                    "    ✗  Could not back up; skipping this album."))
-                item["result"] = "upgrade_aborted_backup_failed"
-                results.append(_resolve_queue_item(
-                    item, args, False, authority=authority))
-                continue   # Nothing downloaded, so it stays queued for retry.
-            item["backup_path"] = bp
-        # Snapshot staging AFTER the backup: a custom config can point
-        # UPGRADE_BACKUP_DIR inside STAGING_DIR, and a backup copied in BEFORE
-        # the snapshot is already present at snapshot time, so it's correctly
-        # excluded from the freshly-downloaded diff (not re-imported/downsampled).
-        try:
-            item["snapshot_before"] = snapshot_staging()
-            _download_for_queue_item(item)
-        except (KeyboardInterrupt, AuthLost, OSError) as exc:
-            _handle_download_exception(item, exc)
-            continue
-
-        if is_cancel_requested():
-            _cancel_item(item)
-            continue
-
-        summary_n_ok = item.get("n_ok", 0)
-        summary_n_missing = sum(incomplete_track_counts(item))
-        summary_elapsed = int(item.get("elapsed", 0))
-        if summary_n_ok and not summary_n_missing:
-            log.info(fmt(C.GREEN, f"    ✓ {plural(summary_n_ok, 'track')} · {summary_elapsed}s"))
-        elif summary_n_ok:
-            log.info(fmt(C.YELLOW,
-                f"    ⚠ {summary_n_ok} ok · {summary_n_missing} missing · {summary_elapsed}s"))
-        else:
-            log.info(fmt(C.RED, f"    ✗ download failed · {summary_elapsed}s"))
-
-        item_imported = False
-        if summary_n_ok > 0 and not args.no_import:
-            try:
-                album_dirs = _staged_album_dirs(item)
-            except OSError as exc:
-                _handle_download_exception(item, exc)
-                continue
-            if not album_dirs:
-                log.info(fmt(C.YELLOW,
-                    "    ⚠  No staged audio dir found for this album; skipping beets."))
-            else:
-                effective_tier = item.get("quality") or cfg.STREAMRIP_QUALITY
-
-                def _redownload_at_max():
-                    saved_q = item.get("quality")
-                    retry_item = dict(item)
-                    retry_item["quality"] = 4
-                    retry_item.pop("_staging_run", None)
-                    retry_item.pop("_staging_run_retained", None)
-
-                    def _run_retry():
-                        _download_for_queue_item(retry_item)
-
-                    try:
-                        fresh_dirs, retry_kept = redownload_with_staged_fallback(
-                            album_dirs,
-                            run_retry=_run_retry,
-                            collect_staged_dirs=lambda: (
-                                _staged_album_dirs(retry_item)
-                                if retry_item.get("n_ok", 0) > 0 else []),
-                            discard_retry=lambda: discard_retry_staging(
-                                retry_item),
-                            retry_preserves_original=lambda: (
-                                retry_preserves_track_coverage(
-                                    item, retry_item)))
-                        # Kept or not, a throttled re-download slows the next album.
-                        if retry_item.get("rate_limited"):
-                            item["rate_limited"] = True
-                        if retry_kept:
-                            retire_empty_download_staging(item)
-                            for key in ("n_ok", "n_fail", "n_lossy", "n_broken",
-                                        "n_unavailable", "failed_tracks",
-                                        "lossy_tracks", "broken_tracks",
-                                        "unavailable_tracks", "elapsed",
-                                        "cd_quality_tracks",
-                                        "_cd_quality_paths",
-                                        "gap_fill_backup_path", "_staging_run",
-                                        "_staging_run_retained",
-                                        "_expected_track_keys",
-                                        "_clean_track_keys",
-                                        "_exact_track_coverage",
-                                        "_unmatched_audio",
-                                        "_clean_staged_files",
-                                        "_all_staged_audio",
-                                        "_staged_track_bindings"):
-                                if key in retry_item:
-                                    item[key] = retry_item[key]
-                                else:
-                                    item.pop(key, None)
-                        else:
-                            retire_empty_download_staging(retry_item)
-                    finally:
-                        item["quality"] = saved_q
-                    return fresh_dirs, item.get("_cd_quality_paths", ())
-
-                try:
-                    item["quality_verdict"] = verify_and_recover(
-                        album, album_dirs,
-                        redownload_at_max=_redownload_at_max,
-                        effective_tier=effective_tier,
-                        allow_retry=item.get("gap_fill_backup_path") is None,
-                        exempt=item.get("_cd_quality_paths", ()))
-                except (KeyboardInterrupt, AuthLost, OSError) as exc:
-                    _handle_download_exception(item, exc)
-                    continue
-                if is_cancel_requested():
-                    _cancel_item(item)
-                    continue
-                if item["quality_verdict"]["retried"]:
-                    album_dirs = item["quality_verdict"]["staged_dirs"]
-                if item["quality_verdict"]["recovered"]:
-                    log.info(fmt(C.CYAN,
-                        "    ↻ recovered: re-fetched at the highest source."))
-                elif not item["quality_verdict"]["under"]:
-                    met = quality_met_line(
-                        item.get("n_ok", 0), item.get("cd_quality_tracks"))
-                    if met:
-                        log.info(fmt(C.GRAY, f"    {met}"))
-                else:
-                    log.info(fmt(C.YELLOW,
-                        f"    {quality_below_line(item['quality_verdict'])}"))
-                    # Still under target: the import proceeds, but the owning
-                    # job must not look like a clean finish.
-                    if on_quality_shortfall is not None:
-                        on_quality_shortfall(item["quality_verdict"])
-
-                # Repair carries a callback that re-tags the staged refills
-                # with the originals' own metadata before beets files them, so
-                # a recording that also lives on a compilation comes back tagged
-                # for the album the user owns. No-op for every other queue item.
-                retag = item.get("pre_import_retag")
-                if callable(retag):
-                    try:
-                        retag(album_dirs)
-                    except Exception as _e_rt:
-                        log.info(fmt(C.YELLOW,
-                            f"  ⚠  repair retag step failed: {_e_rt}"))
-                try:
-                    if item.get("backup_path") is not None:
-                        fill_tags = fill_album_tags(item["backup_path"])
-                    else:
-                        fill_tags = (
-                            fill_album_tags(album_dir)
-                            if album_dir is not None
-                            and not item.get("download_full_album") else None)
-                    if fill_tags:
-                        _prepare_staging_tags(album_dirs, album_tags=fill_tags)
-                    elif item.get("exact_edition") or (
-                            item.get("backup_path") is not None
-                            and edition_album_title(album)):
-                        _prepare_staging_tags(album_dirs, album_title=edition_album_title(album))
-                    prepared = _run_pre_import_hooks_for_dirs(album_dirs, args)
-                    if item.get("backup_path") is not None:
-                        from qobuz_librarian.modes.process import (
-                            _keep_own_cover,
-                        )
-
-                        _keep_own_cover(item["backup_path"], album_dirs)
-                    note_superseded_attempts(item)
-                    item["resampled_n"] = prepared.resampled
-                    item.update(_pre_import_outcome_fields(prepared))
-                    item["post_import_signatures"] = (
-                        track_signatures_for_album_dirs(album_dirs))
-                except KeyboardInterrupt:
-                    log.info(fmt(C.YELLOW,
-                        "  ⚠  Pre-import hook interrupted; skipping beets "
-                        "for this album; stopping the queue."))
-                    interrupted = True
-                    # Mark interrupted so _resolve_queue_item labels it as such
-                    # instead of falling through to "downloaded" (the album did
-                    # not import).
-                    item["result"] = "interrupted"
-                    results.append(_resolve_queue_item(
-                        item, args, False, authority=authority))
-                    continue
-                except OSError as exc:
-                    _handle_download_exception(item, exc, phase="staged preparation")
-                    continue
-
-                parking_receipts = tuple(
-                    capture_tree(directory) for directory in album_dirs)
-                if any(receipt is None for receipt in parking_receipts):
-                    parking_receipts = ()
-                try:
-                    ownership_capture = (
-                        {} if item.get("_capture_import_ownership") is True
-                        else None
-                    )
-                    pin = (
-                        {} if item.get("album_dir") is None
-                        else {"album_dir": item["album_dir"],
-                              "places": item.get("refill_places")}
-                    )
-                    if item.get("backup_path") is not None:
-                        pin["folder"] = item["album_dir"]
-                        if item.get("_replaced_beets_entries") is not None:
-                            del pin["album_dir"]
-                            from qobuz_librarian.modes.process import mark_pending_upgrade
-                            if not mark_pending_upgrade(
-                                    item["backup_path"],
-                                    item["_replaced_beets_entries"], album_dirs):
-                                raise OSError(
-                                    "couldn't record the upgrade in its backup")
-                    failure = {}
-                    if ownership_capture is None:
-                        item_imported = _import_album_with_retry(
-                            album_dirs, failure_out=failure, **pin)
-                    else:
-                        item_imported = _import_album_with_retry(
-                            album_dirs,
-                            ownership_out=ownership_capture,
-                            failure_out=failure,
-                            **pin,
-                        )
-                    if not item_imported and failure.get("permission_denied"):
-                        item["import_denied"] = failure["permission_denied"]
-                except ImportedThenInterrupted:
-                    log.info(fmt(C.YELLOW,
-                        "\n    Interrupted. Stopping further downloads."))
-                    interrupted = True
-                    item_imported = True
-                except KeyboardInterrupt:
-                    log.info(fmt(C.YELLOW,
-                        "\n  beets interrupted. Resolving backups based on disk."))
-                    interrupted = True
-                    item_imported = False
-                    # Label as interrupted (not "downloaded"). Beets did not
-                    # finish importing this album.
-                    item["result"] = "interrupted"
-                    results.append(_resolve_queue_item(
-                        item, args, False, authority=authority))
-                    continue
-                except OSError as exc:
-                    # The original may already be in the upgrade backup.
-                    # Resolve it before stopping the queue.
-                    _handle_download_exception(
-                        item, exc, phase="library import"
-                    )
-                    continue
-
-                if item_imported and ownership_capture is not None:
-                    ownership_result = ownership_capture.get("result")
-                    if isinstance(ownership_result, dict):
-                        item["_import_ownership"] = ownership_result
-
-                retired_import_staging = True
-                if item_imported and "_staging_run" in item:
-                    try:
-                        retired_import_staging = (
-                            retire_download_staging_after_import(item)
-                        )
-                    except BaseException as cleanup_exc:
-                        retired_import_staging = False
-                        retention_exc = cleanup_exc
-                        log.info(fmt(
-                            C.RED,
-                            "  ✗  Could not retire the exact imported staging "
-                            "run; resolving the album backup before returning "
-                            "the storage error.",
-                        ))
-                if item_imported and retired_import_staging:
-                    any_imported = True
-                    clear_attempts_after_import(item)
-                else:
-                    if item_imported:
-                        log.info(fmt(
-                            C.RED,
-                            "  ✗  The exact download run was not empty "
-                            "after beets; the import was not accepted.",
-                        ))
-                    item_imported = False
-                    item["result"] = "import_failed"
-                    if retention_exc is None:
-                        retained, retention_exc = _retain_failed_staging(
-                            item, label="beets-incomplete")
-                        if retained:
-                            log.info(fmt(
-                                C.YELLOW,
-                                "  ⚠  Kept the exact residual download run in "
-                                "private staging recovery; the queue item "
-                                "remains pending.",
-                            ))
-                        elif retention_exc is None:
-                            try:
-                                _move_to_beets_retry(
-                                    album_dirs,
-                                    title,
-                                    expected=parking_receipts,
-                                )
-                            except BaseException as parking_exc:
-                                retention_exc = parking_exc
-                                log.info(fmt(
-                                    C.RED,
-                                    "  ✗  Could not park the failed beets "
-                                    "import; resolving the album backup before "
-                                    "returning the storage error.",
-                                ))
-        elif args.no_import:
-            # Without the pre-import hooks a multi-disc cover would stay in
-            # the album root, where the manual import leaves it behind.
-            try:
-                for staged in _staged_album_dirs(item):
-                    relocate_disc_album_artwork(staged)
-            except OSError as exc:
-                vlog(f"artwork relocation raised: {exc}")
-            if summary_n_ok and not summary_n_missing:
-                keep_unimported_download(item)
-                kept_in = cfg.STAGING_DIR
-            elif retention_exc is None:
-                _retained, retention_exc = _retain_failed_staging(
-                    item, label="incomplete")
-                kept_in = cfg.STAGING_DIR / cfg.BEETS_RETRY_DIR
-            log.info(fmt(C.YELLOW,
-                f"  --no-import: skipping beets. Files in {kept_in}/"))
-        elif summary_n_ok == 0:
-            log.info(fmt(C.GRAY, "  Skipping beets: nothing landed."))
-            retire_failed_download_staging(item)
-
-        # Drop a finished item from the persisted queue BEFORE resolving its
-        # backup. If the process dies between the two, the worst case is an
-        # orphaned backup the retention sweep clears, not a completed album
-        # left queued and needlessly re-downloaded on the next resume.
-        if not _queue_item_needs_retry(item):
-            _drop(item)
-        result = _resolve_queue_item(
-            item, args, item_imported, authority=authority)
-        results.append(result)
-        if result.get("imported") and result.get("n_ok", 0) > 0:
-            change = {**result, "album": item.get("album")}
-            if item.get("_resolved_post_dir") is not None:
-                change["_resolved_post_dir"] = item["_resolved_post_dir"]
-            saved_state_changes.append(change)
-        if retention_exc is not None:
-            raise retention_exc
-
-        _after_album(
-            item,
-            item.get("_resolved_post_dir")
-            if item_imported and not args.no_import else None,
-            idx,
-        )
-
-    _record_finished()
-    if not preflight_done and not durable_stopped:
-        _require_executor_authority(authority)
-        final_startup = recover_startup_state(
-            authority=authority,
-            acknowledge_completion=None,
-        )
-        _require_executor_authority(authority)
-        # Albums of this queue still waiting for another try are no recovery.
-        if final_startup.status is StartupRecoveryStatus.CLEAR or (
-            final_startup.status is StartupRecoveryStatus.RESUME_REQUIRED
-            and all(entry.phase is queue_state.QueuePhase.PENDING
-                    for entry in final_startup.items)
-        ):
-            _ensure_preflight()
-        else:
-            durable_stopped = True
-            log.info(fmt(
-                C.YELLOW,
-                "  ⚠  Saved queue recovery remains unfinished; "
-                "skipping unrelated staging work.",
-            ))
-
-    # Consolidate duplicate albums once if anything landed. The fold is a
-    # library-wide pass, so running it per-album would waste work.
-    ownership_scope_resolved = any(
-        item.get("_resolved_post_dir_from_import_ownership") is True
-        for item in items
-    )
-    if (consolidate_duplicates
-            and any_imported
-            and not any(item.get("exact_edition") for item in items)
-            and not ownership_scope_resolved):
-        try:
-            protected_ownership_dirs = [
-                item.get("_resolved_post_dir")
-                for item in items
-                if isinstance(item.get("_import_ownership"), dict)
-                and item.get("_resolved_post_dir") is not None
-            ]
-            if protected_ownership_dirs:
-                _consolidate_duplicate_albums(
-                    protected_paths=protected_ownership_dirs)
-            else:
-                _consolidate_duplicate_albums()
-        except KeyboardInterrupt:
-            interrupted = True
-            log.info(fmt(C.YELLOW, _FINISHING_UP))
-        except Exception as _e_c:
-            vlog(f"consolidate duplicate albums raised: {_e_c}")
-    elif consolidate_duplicates and ownership_scope_resolved:
-        vlog(
-            "skipping duplicate consolidation for descriptor-verified "
-            "one-track ownership scope"
-        )
-
-    print()
-    _post_dirs = [it.get("_resolved_post_dir") for it in items
-                  if it.get("_resolved_post_dir") is not None]
-    # Materialise .lrc sidecars (and strip the embedded tag in sidecar mode) for
-    # every imported album: the lyric hook always embeds, and this pass emits
-    # the sidecars. No-op when LYRICS_FORMAT is embed.
-    ownership_tracks = [
-        it["_import_ownership"]
-        for it in items
-        if isinstance(it.get("_import_ownership"), dict)
-    ]
-    if any_imported and (
-            _post_dirs or _parked_post_dirs or ownership_tracks):
-        capture_ownership = bool(ownership_tracks)
-        ownership_changes = [] if capture_ownership else None
-        ownership_created_files = [] if capture_ownership else None
-        ownership_directory_changes = [] if capture_ownership else None
-        try:
-            if ownership_changes is None:
-                write_post_import_sidecars(_post_dirs + _parked_post_dirs)
-            else:
-                write_post_import_sidecars(
-                    _post_dirs + _parked_post_dirs,
-                    identity_changes_out=ownership_changes,
-                    created_files_out=ownership_created_files,
-                    directory_changes_out=ownership_directory_changes,
-                    owned_tracks=ownership_tracks,
-                )
-        except KeyboardInterrupt:
-            interrupted = True
-            log.info(fmt(C.YELLOW, _FINISHING_UP))
-        except Exception as _e_sc:
-            vlog(f"post-import sidecar write raised: {_e_sc}")
-        finally:
-            if capture_ownership:
-                _advance_import_ownership_identities(
-                    items,
-                    ownership_changes,
-                    ownership_created_files,
-                    ownership_directory_changes,
-                )
-
-    # After the sidecar pass, because writing a sidecar can rewrite the audio
-    # file (embedded lyrics are stripped in sidecar mode) and that would leave
-    # every row just written already stale.
-    if any_imported:
-        cache_album_tags(_post_dirs + _parked_post_dirs)
-
-    log.info(fmt(*_queue_done_line(
-        results, n_items,
-        stopped=(interrupted or disk_full or io_error or durable_stopped
-                 or auth_lost_exc is not None))))
-
-    # A durable stop leaves the journal holding blocked or retired work on
-    # purpose, and rewriting it as pending is what the journal refuses. Every
-    # album that finished already persisted through _drop, so the saved state is
-    # current without this.
-    if not recovery_persist_blocked and not durable_stopped:
-        _persist()
-    # Only the CLI batch callers (walk / artist / album / queue resume) refresh
-    # saved state here. The web single-track and CLI Repair callers refresh
-    # after their own higher-level operation has verified the file change.
-    if refresh_review:
-        _refresh_review_state_after_downloads(
-            saved_state_changes,
-            token,
-            args,
-            allow_upgrade_refresh=(auth_lost_exc is None and not interrupted),
-            record=False,
-        )
-    if auth_lost_exc is not None:
-        raise auth_lost_exc
-    # Re-raising KeyboardInterrupt is what stops the caller's _flush_queue
-    # from reaching its clear-on-drain branch and discarding the items that
-    # were short-circuited (and so still need a retry).
-    if interrupted:
-        raise KeyboardInterrupt
-    return results, not queue and not durable_stopped
+    return _QueueFlush(
+        queue, args, token, on_progress=on_progress,
+        refresh_review=refresh_review,
+        consolidate_duplicates=consolidate_duplicates,
+        results_out=results_out,
+    ).run()

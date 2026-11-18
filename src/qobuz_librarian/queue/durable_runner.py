@@ -563,6 +563,984 @@ def _abandon_blocked_item(
     )
 
 
+class _DurableAlbumRun:
+    """One album's journal-owned download, import and completion."""
+
+    def __init__(self, queue, item, args, *, plan, origin, mode, authority,
+                 resume_owner, prepare_staged, acknowledge_completion):
+        self.queue = queue
+        self.item = item
+        self.args = args
+        self.plan = plan
+        self.origin = origin
+        self.mode = mode
+        self.authority = authority
+        self.resume_owner = resume_owner
+        self.prepare_staged = prepare_staged
+        self.acknowledge_completion = acknowledge_completion
+        self.backup_intent = None
+        self.backup_carrier = None
+        self.reservation = None
+        self.carrier = None
+
+    def run(self) -> DurableAlbumResult:
+        self._claim()
+        for step in (self._back_up_originals, self._download,
+                     self._check_library_backup, self._record_coverage,
+                     self._verify_staged, self._run_staged_preparation,
+                     self._prepare_tags, self._import, self._retire_staging,
+                     self._prepare_backup_settlement,
+                     self._publish_completion):
+            stopped = step()
+            if stopped is not None:
+                return stopped
+        return self._finish()
+
+    def _claim(self):
+        _require_authority(self.authority)
+        _require_current_plan(self.item, self.args, self.plan)
+        self.journal, journal_item = _claim_pending_item(
+            self.item,
+            mode=self.mode,
+            authority=self.authority,
+            resume_owner=self.resume_owner,
+        )
+        self.owner = RecoveryOwner(self.journal.operation_id, journal_item.item_id)
+        self.initial = initial_completion_input(self.plan, self.owner, self.origin)
+        if journal_item.phase is queue_state.QueuePhase.ACTIVE:
+            if (
+                journal_item.recovery_references
+                or journal_item.block_reason is not None
+                or journal_item.completion_evidence is not None
+                or journal_item.completion_input != self.initial.to_record()
+            ):
+                raise DurableAlbumUnavailable(
+                    "the matching durable queue item cannot resume its download"
+                )
+        _require_authority(self.authority)
+        if isolated_staging_run_names():
+            raise DurableAlbumUnavailable("an unclaimed download staging run needs attention")
+        if journal_item.phase is queue_state.QueuePhase.PENDING:
+            self.journal = queue_state.transition_journal_item(
+                self.journal,
+                journal_item.item_id,
+                queue_state.QueuePhase.ACTIVE,
+                completion_input=self.initial,
+                multi_artist_filing=bool(
+                    getattr(self.args, "migrate_multi_artist", False)
+                ),
+            )
+            _require_authority(self.authority)
+        self.operation_id = self.journal.operation_id
+        self.item_id = journal_item.item_id
+
+    def _checkpoint_group(self, record):
+        _require_authority(self.authority)
+        if (
+            type(record) is not dict
+            or record.get("version") != 2
+            or record.get("owner") != _owner_record(self.owner)
+        ):
+            raise ValueError("staging recovery checkpoint is malformed")
+        self.journal = queue_state.append_staging_group_intent(
+            self.journal,
+            self.item_id,
+            record,
+        )
+        _require_authority(self.authority)
+
+    def _checkpoint_backup_intent(self, record):
+        _require_authority(self.authority)
+        if (
+            type(record) is not dict
+            or record.get("version") != 1
+            or record.get("kind") not in {"upgrade", "gap-fill"}
+            or record.get("kind") != self.plan.library_backup_kind
+            or record.get("owner") != _owner_record(self.owner)
+        ):
+            raise ValueError("library backup intent is malformed")
+        self.journal = queue_state.append_library_backup_intent(
+            self.journal,
+            self.item_id,
+            record,
+        )
+        _require_authority(self.authority)
+        matches = tuple(
+            reference
+            for reference in _journal_item(self.journal, self.item_id).recovery_references
+            if reference.kind == _LIBRARY_BACKUP_INTENT
+        )
+        if len(matches) != 1:
+            raise DurableAlbumUnavailable(
+                "library backup intent was not committed exactly"
+            )
+        self.backup_intent = matches[0]
+
+    def _checkpoint_backup_carrier(self, payload):
+        _require_authority(self.authority)
+        if (
+            type(payload) is not dict
+            or set(payload) != {"version", "kind", "owner", "carrier"}
+            or payload.get("version") != 1
+            or payload.get("kind") != "library-backup-carrier"
+            or payload.get("owner") != _owner_record(self.owner)
+            or type(payload.get("carrier")) is not dict
+            or self.backup_intent is None
+        ):
+            raise ValueError("library backup carrier is malformed")
+        self.journal = queue_state.promote_library_backup_carrier(
+            self.journal,
+            self.item_id,
+            self.backup_intent,
+            payload["carrier"],
+        )
+        _require_authority(self.authority)
+        matches = tuple(
+            reference
+            for reference in _journal_item(self.journal, self.item_id).recovery_references
+            if reference.kind == _LIBRARY_BACKUP_CARRIER
+        )
+        if len(matches) != 1:
+            raise DurableAlbumUnavailable(
+                "library backup carrier was not committed exactly"
+            )
+        self.backup_carrier = matches[0]
+
+    def _checkpoint_staging(self, payload):
+        _require_authority(self.authority)
+        if type(payload) is dict and payload.get("version") == 2:
+            self._checkpoint_group(payload)
+            return
+        if (
+            type(payload) is dict
+            and payload.get("version") == 1
+            and payload.get("kind") in {"upgrade", "gap-fill"}
+        ):
+            self._checkpoint_backup_intent(payload)
+            return
+        if (
+            type(payload) is dict
+            and payload.get("version") == 1
+            and payload.get("kind") == "library-backup-carrier"
+        ):
+            self._checkpoint_backup_carrier(payload)
+            return
+        if (
+            type(payload) is not dict
+            or set(payload) != {"version", "kind", "owner", "record"}
+            or payload.get("version") != 1
+            or payload.get("kind") != "staging-run"
+            or payload.get("owner") != _owner_record(self.owner)
+            or type(payload.get("record")) is not dict
+        ):
+            raise ValueError("download staging checkpoint is malformed")
+        self.journal = queue_state.append_staging_run_reference(
+            self.journal,
+            self.item_id,
+            payload["record"],
+        )
+        _require_authority(self.authority)
+
+    def _back_up_originals(self):
+        if self.plan.library_backup_kind == "upgrade":
+            _require_authority(self.authority)
+            _require_current_plan(self.item, self.args, self.plan)
+            backup = backup_album_dir(
+                Path(self.item["album_dir"]),
+                expected_receipt=self.item.get("_validated_source_receipt"),
+                owner=_owner_record(self.owner),
+                on_intent=self._checkpoint_backup_intent,
+            )
+            _require_authority(self.authority)
+            if backup is None:
+                reason = "library-backup-unavailable"
+                if self.backup_intent is not None:
+                    # The album was left in place, so once its planned backup is
+                    # settled this is an ordinary retry.
+                    try:
+                        restored = _restore_library_backup(
+                            self.operation_id, self.item_id, self.owner, self.item,
+                            authority=self.authority)
+                    except (OSError, ValueError, queue_state.QueueJournalError):
+                        restored = None
+                    if (
+                        restored is None
+                        or restored.status
+                        is not LibraryBackupResolutionStatus.SETTLED
+                    ):
+                        reason = "library-backup-intent-unsettled"
+                        if restored is not None and restored.reason:
+                            reason = restored.reason
+                        _block(self.operation_id, self.item_id, reason, authority=self.authority)
+                        return DurableAlbumResult(
+                            DurableAlbumStatus.ATTENTION,
+                            reason,
+                            operation_id=self.operation_id,
+                            item_id=self.item_id,
+                        )
+                _reset_unstarted(
+                    self.operation_id,
+                    self.item_id,
+                    authority=self.authority,
+                )
+                return DurableAlbumResult(
+                    DurableAlbumStatus.RETRY,
+                    reason,
+                    operation_id=self.operation_id,
+                    item_id=self.item_id,
+                )
+            carrier_record = library_backup_record(
+                backup,
+                expected_owner=_owner_record(self.owner),
+            )
+            if carrier_record is None:
+                _require_authority(self.authority)
+                pinned = pin_unverified_upgrade_backup(
+                    backup,
+                    "queue backup kept; its exact carrier could not be reopened",
+                    expected_owner=_owner_record(self.owner),
+                )
+                _require_authority(self.authority)
+                if not pinned:
+                    warn_pin_failed(backup.path)
+                reason = "library-backup-carrier-unavailable"
+                _block(self.operation_id, self.item_id, reason, authority=self.authority)
+                return DurableAlbumResult(
+                    DurableAlbumStatus.ATTENTION,
+                    reason,
+                    operation_id=self.operation_id,
+                    item_id=self.item_id,
+                )
+            self._checkpoint_backup_carrier({
+                "version": 1,
+                "kind": "library-backup-carrier",
+                "owner": _owner_record(self.owner),
+                "carrier": carrier_record,
+            })
+            self.item["backup_path"] = backup
+            if backup.complete is not True:
+                _require_authority(self.authority)
+                pinned = pin_unverified_upgrade_backup(
+                    backup,
+                    "queue backup kept; source retirement did not finish exactly",
+                    expected_owner=_owner_record(self.owner),
+                )
+                _require_authority(self.authority)
+                if not pinned:
+                    warn_pin_failed(backup.path)
+                reason = "library-backup-incomplete"
+                _block(self.operation_id, self.item_id, reason, authority=self.authority)
+                return DurableAlbumResult(
+                    DurableAlbumStatus.ATTENTION,
+                    reason,
+                    operation_id=self.operation_id,
+                    item_id=self.item_id,
+                )
+
+    def _download(self):
+        _require_authority(self.authority)
+        self.item["snapshot_before"] = snapshot_staging()
+        _require_authority(self.authority)
+        _require_current_plan(self.item, self.args, self.plan)
+
+        try:
+            _require_authority(self.authority)
+            _require_current_plan(self.item, self.args, self.plan)
+            run_album_download(
+                album=self.item["album"],
+                missing=self.item["missing"],
+                present=self.item["present"],
+                album_dir=self.item.get("album_dir"),
+                snapshot=self.item["snapshot_before"],
+                existing=(
+                    None if self.plan.library_backup_kind == "gap-fill" else []
+                ),
+                quality=self.plan.effective_tier,
+                upgrade_only=bool(self.item.get("upgrade_only")),
+                force_track_by_track=False,
+                exact_edition=self.item.get("exact_edition", False),
+                result=self.item,
+                recovery_owner=_owner_record(self.owner),
+                recovery_checkpoint=self._checkpoint_staging,
+                required_backup_kind=self.plan.library_backup_kind,
+                expected_gap_fill_receipts=self.item.get(
+                    "_validated_gap_fill_receipts"
+                ),
+            )
+            _require_authority(self.authority)
+        except BaseException:
+            _retry_or_attention_after_download(
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+                result=self.item,
+                owner=self.owner,
+                checkpoint_group=self._checkpoint_group,
+                reason="download-interrupted",
+                authority=self.authority,
+            )
+            raise
+
+    def _check_library_backup(self):
+        if self.plan.library_backup_kind is not None:
+            live_backup = self.item.get(
+                "backup_path"
+                if self.plan.library_backup_kind == "upgrade"
+                else "gap_fill_backup_path"
+            )
+            live_record = library_backup_record(
+                live_backup,
+                expected_owner=_owner_record(self.owner),
+            )
+            if (
+                self.backup_carrier is None
+                or live_record is None
+                or live_record != self.backup_carrier.data
+            ):
+                reason = "library-backup-carrier-unsettled"
+                _block(self.operation_id, self.item_id, reason, authority=self.authority)
+                return DurableAlbumResult(
+                    DurableAlbumStatus.ATTENTION,
+                    reason,
+                    operation_id=self.operation_id,
+                    item_id=self.item_id,
+                )
+        elif self.backup_intent is not None or self.backup_carrier is not None:
+            reason = "unexpected-library-backup-state"
+            _block(self.operation_id, self.item_id, reason, authority=self.authority)
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                reason,
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+            )
+
+    def _record_coverage(self):
+        coverage = exact_download_coverage(self.item, self.item["album"])
+        self.ready_input = (
+            completion_input_from_download(self.initial, coverage) if coverage is not None else None
+        )
+        if self.ready_input is None:
+            if is_cancel_requested():
+                settled = _cancel_after_download(
+                    operation_id=self.operation_id,
+                    item_id=self.item_id,
+                    result=self.item,
+                    owner=self.owner,
+                    checkpoint_group=self._checkpoint_group,
+                    authority=self.authority,
+                )
+                if settled is not None:
+                    return settled
+            outcome = _retry_or_attention_after_download(
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+                result=self.item,
+                owner=self.owner,
+                checkpoint_group=self._checkpoint_group,
+                reason="download-incomplete",
+                authority=self.authority,
+            )
+            if outcome.status is not DurableAlbumStatus.ATTENTION:
+                return outcome
+            return _abandon_blocked_item(
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+                result=self.item,
+                reason="download-incomplete",
+                fallback=outcome,
+                authority=self.authority,
+            )
+        _require_authority(self.authority)
+        self.journal = queue_state.transition_journal_item(
+            _load_exact(self.operation_id),
+            self.item_id,
+            queue_state.QueuePhase.ACTIVE,
+            completion_input=self.ready_input,
+        )
+        _require_authority(self.authority)
+
+    def _verify_staged(self):
+        try:
+            self.album_dirs = validated_staged_album_dirs(self.item)
+            if rip_shortfall(self.album_dirs, self.item["album"], effective_tier=2)["under"]:
+                raise OSError("the staged album is below CD quality")
+            self.item["quality_verdict"] = verify_and_recover(
+                self.item["album"],
+                self.album_dirs,
+                effective_tier=self.plan.effective_tier,
+                allow_retry=False,
+                exempt=self.item.get("_cd_quality_paths", ()),
+            )
+            bindings = staged_track_bindings(self.item)
+        except (OSError, TypeError, ValueError):
+            return _retry_or_attention_after_download(
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+                result=self.item,
+                owner=self.owner,
+                checkpoint_group=self._checkpoint_group,
+                reason="staged-album-unverified",
+                authority=self.authority,
+            )
+        if self.plan.library_backup_kind is not None:
+            from qobuz_librarian.modes import process
+
+            _require_authority(self.authority)
+            backup = load_library_backup_record(
+                self.backup_carrier.data, expected_owner=_owner_record(self.owner),
+            )
+            # Beets files a copy over the user's tracks only when it holds up
+            # against them, track by track; otherwise they go back.
+            if (
+                backup is not None
+                and len(self.album_dirs) == 1
+                and not process._upgrade_trees_verified(self.album_dirs[0], backup.path)
+            ):
+                outcome = _retry_or_attention_after_download(
+                    operation_id=self.operation_id,
+                    item_id=self.item_id,
+                    result=self.item,
+                    owner=self.owner,
+                    checkpoint_group=self._checkpoint_group,
+                    reason="upgrade-unverified",
+                    authority=self.authority,
+                )
+                if outcome.status is not DurableAlbumStatus.ATTENTION:
+                    return outcome
+                return _abandon_blocked_item(
+                    operation_id=self.operation_id,
+                    item_id=self.item_id,
+                    result=self.item,
+                    reason="upgrade-unverified",
+                    fallback=outcome,
+                    authority=self.authority,
+                )
+        self.binding_records = managed_binding_records(self.ready_input)
+        if self.binding_records is None or tuple(bindings) != self.binding_records:
+            return _retry_or_attention_after_download(
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+                result=self.item,
+                owner=self.owner,
+                checkpoint_group=self._checkpoint_group,
+                reason="staged-bindings-changed",
+                authority=self.authority,
+            )
+
+    def _checkpoint_sources(self, kind):
+        _require_authority(self.authority)
+        if type(kind) is not SourceTransitionKind:
+            raise ValueError("staged source transition is invalid")
+        records = refresh_staged_track_bindings(self.item)
+        try:
+            current_bindings = tuple(
+                StagedBinding(
+                    record["slot"],
+                    record["path"],
+                    tuple(record["identity"]),
+                )
+                for record in records
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise OSError("staged source transition is malformed") from exc
+        advanced = advance_completion_sources(self.ready_input, current_bindings, kind)
+        if advanced is None:
+            raise OSError("staged source transition could not be proved")
+        self.journal = queue_state.transition_journal_item(
+            _load_exact(self.operation_id),
+            self.item_id,
+            queue_state.QueuePhase.ACTIVE,
+            completion_input=advanced,
+        )
+        _require_authority(self.authority)
+        self.ready_input = advanced
+        self.binding_records = managed_binding_records(self.ready_input)
+        if self.binding_records is None:
+            raise OSError("staged source transition lost completion lineage")
+
+    def _run_staged_preparation(self):
+        if self.prepare_staged is not None:
+            if not callable(self.prepare_staged):
+                raise ValueError("prepare_staged must be callable")
+            try:
+                _require_authority(self.authority)
+                prepared = self.prepare_staged(self.album_dirs, self._checkpoint_sources)
+                _require_authority(self.authority)
+                resampled = getattr(prepared, "resampled", None)
+                if not isinstance(resampled, int):
+                    raise OSError("staged preparation result is malformed")
+                self.item["resampled_n"] = resampled
+                self.item["downsample_errors"] = getattr(prepared, "errors", 0)
+                self.item["downsample_saved_bytes"] = getattr(
+                    prepared, "saved_bytes", 0
+                )
+                self.item["downsample_flush_warnings"] = getattr(
+                    prepared, "flush_warnings", 0
+                )
+                self.item["downsample_cancelled"] = bool(
+                    getattr(prepared, "cancelled", False)
+                )
+                if validated_staged_album_dirs(self.item) != self.album_dirs:
+                    raise OSError("staged album roots changed during preparation")
+                current_records = tuple(staged_track_bindings(self.item))
+                if self.binding_records is None or current_records != self.binding_records:
+                    raise OSError("prepared staged bindings were not checkpointed")
+            except Exception:
+                return _retry_or_attention_after_download(
+                    operation_id=self.operation_id,
+                    item_id=self.item_id,
+                    result=self.item,
+                    owner=self.owner,
+                    checkpoint_group=self._checkpoint_group,
+                    reason="staged-preparation-unsettled",
+                    authority=self.authority,
+                )
+            except BaseException:
+                _retry_or_attention_after_download(
+                    operation_id=self.operation_id,
+                    item_id=self.item_id,
+                    result=self.item,
+                    owner=self.owner,
+                    checkpoint_group=self._checkpoint_group,
+                    reason="staged-preparation-interrupted",
+                    authority=self.authority,
+                )
+                raise
+
+    def _prepare_tags(self):
+        try:
+            if self.plan.library_backup_kind == "upgrade":
+                from qobuz_librarian.modes import process
+
+                _require_authority(self.authority)
+                backup = load_library_backup_record(
+                    self.backup_carrier.data, expected_owner=_owner_record(self.owner),
+                )
+                if backup is None or len(self.album_dirs) != 1:
+                    raise OSError("upgrade originals could not be read")
+                if not process._track_annotations_preserved(backup.path, self.album_dirs[0]):
+                    if not process._carry_track_annotations(backup.path, self.album_dirs[0]):
+                        raise OSError("original track tags could not be carried")
+                    self._checkpoint_sources(SourceTransitionKind.ORIGINAL_TAGS)
+                if (load_library_backup_record(
+                        self.backup_carrier.data, expected_owner=_owner_record(self.owner),
+                    ) is None
+                        or not process._track_annotations_preserved(
+                            backup.path, self.album_dirs[0])):
+                    raise OSError("original track tags could not be verified")
+                process._keep_own_cover(backup.path, self.album_dirs)
+                _require_authority(self.authority)
+            cleaned_bindings = prepare_managed_staging_tags(
+                self.album_dirs,
+                self.binding_records,
+                authority_check=lambda: _require_authority(self.authority),
+            )
+            if tuple(cleaned_bindings) != self.binding_records:
+                self._checkpoint_sources(SourceTransitionKind.BEETS_TAG_CLEAN)
+                if tuple(cleaned_bindings) != self.binding_records:
+                    raise OSError("tag-clean source checkpoint changed")
+        except Exception:
+            return _retry_or_attention_after_download(
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+                result=self.item,
+                owner=self.owner,
+                checkpoint_group=self._checkpoint_group,
+                reason="staged-tag-clean-unsettled",
+                authority=self.authority,
+            )
+        except BaseException:
+            _retry_or_attention_after_download(
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+                result=self.item,
+                owner=self.owner,
+                checkpoint_group=self._checkpoint_group,
+                reason="staged-tag-clean-interrupted",
+                authority=self.authority,
+            )
+            raise
+
+    def _checkpoint_reservation(self, payload):
+        _require_authority(self.authority)
+        if (
+            type(payload) is not dict
+            or set(payload) != {"version", "kind", "owner", "reservation"}
+            or payload.get("version") != 1
+            or payload.get("kind") != _MANAGED_RESERVATION
+            or payload.get("owner") != _owner_record(self.owner)
+            or type(payload.get("reservation")) is not dict
+        ):
+            raise ValueError("managed import reservation is malformed")
+        reference = queue_state.RecoveryReference(
+            "managed-import",
+            _MANAGED_RESERVATION,
+            payload["reservation"],
+        )
+        self.journal = queue_state.reserve_managed_carrier(
+            self.journal,
+            self.item_id,
+            reference,
+        )
+        _require_authority(self.authority)
+        self.reservation = reference
+
+    def _checkpoint_carrier(self, payload):
+        _require_authority(self.authority)
+        if (
+            type(payload) is not dict
+            or set(payload) != {"version", "kind", "owner", "carrier"}
+            or payload.get("version") != 1
+            or payload.get("kind") != _MANAGED_CARRIER
+            or payload.get("owner") != _owner_record(self.owner)
+            or type(payload.get("carrier")) is not dict
+            or self.reservation is None
+        ):
+            raise ValueError("managed import carrier is malformed")
+        reference = queue_state.RecoveryReference(
+            "managed-import",
+            _MANAGED_CARRIER,
+            payload["carrier"],
+        )
+        self.journal = queue_state.promote_managed_carrier(
+            self.journal,
+            self.item_id,
+            self.reservation,
+            reference,
+            self.ready_input,
+        )
+        _require_authority(self.authority)
+        self.carrier = reference
+
+    def _import(self):
+        try:
+            _require_authority(self.authority)
+            replaced = (
+                {} if self.item.get("album_dir") is None
+                else {"album_dir": self.item["album_dir"]}
+            )
+            self.imported = beets_import_managed(
+                self.album_dirs,
+                self.binding_records,
+                owner=_owner_record(self.owner),
+                on_reservation=self._checkpoint_reservation,
+                on_intent=self._checkpoint_carrier,
+                authority_check=lambda: _require_authority(self.authority),
+                **replaced,
+            )
+            _require_authority(self.authority)
+        except BaseException:
+            _block(
+                self.operation_id,
+                self.item_id,
+                "managed-import-interrupted",
+                authority=self.authority,
+            )
+            raise
+
+        self.journal = _load_exact(self.operation_id)
+        current = _journal_item(self.journal, self.item_id)
+        persisted_carriers = tuple(
+            reference for reference in current.recovery_references if reference.kind == _MANAGED_CARRIER
+        )
+        self.managed = managed_completion_evidence(self.imported)
+        sealed_input = managed_completion_input(self.ready_input, self.managed) if self.managed is not None else None
+        if (
+            self.imported.kind != "ok"
+            or self.imported.spawned is not True
+            or self.managed is None
+            or sealed_input != self.ready_input
+            or self.carrier is None
+            or persisted_carriers != (self.carrier,)
+            or self.imported.carrier != self.carrier.data
+        ):
+            _block(
+                self.operation_id,
+                self.item_id,
+                "managed-import-unsettled",
+                authority=self.authority,
+            )
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                "managed-import-disk-full" if self.imported.disk_full
+                else "managed-import-unsettled",
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+            )
+
+    def _retire_staging(self):
+        try:
+            _require_authority(self.authority)
+            retired = retire_empty_download_staging(
+                self.item,
+                recovery_checkpoint=self._checkpoint_group,
+            )
+            _require_authority(self.authority)
+        except (OSError, TypeError, ValueError, queue_state.QueueJournalError):
+            retired = False
+        if not retired:
+            try:
+                _require_authority(self.authority)
+                retired = retire_download_staging_after_import(
+                    self.item,
+                    recovery_checkpoint=self._checkpoint_group,
+                )
+                _require_authority(self.authority)
+            except (OSError, TypeError, ValueError, queue_state.QueueJournalError):
+                retired = False
+        self.journal = _load_exact(self.operation_id)
+        self.journal = (
+            _reconcile_absent_staging(
+                self.journal,
+                self.item_id,
+                self.owner,
+                authority=self.authority,
+            )
+            if retired
+            else None
+        )
+        if self.journal is None:
+            _block(
+                self.operation_id,
+                self.item_id,
+                "download-staging-unsettled",
+                authority=self.authority,
+            )
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                "download-staging-unsettled",
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+            )
+
+        current = _journal_item(self.journal, self.item_id)
+        expected_references = (
+            (self.backup_carrier, self.carrier)
+            if self.backup_carrier is not None
+            else (self.carrier,)
+        )
+        if current.recovery_references != expected_references:
+            _block(
+                self.operation_id,
+                self.item_id,
+                "recovery-reference-unsettled",
+                authority=self.authority,
+            )
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                "recovery-reference-unsettled",
+                operation_id=self.operation_id,
+                item_id=self.item_id,
+            )
+
+    def _prepare_backup_settlement(self):
+        self.post_dir = Path(self.managed.library_root) / self.managed.album_path
+        backup_resolution = prepare_library_backup_settlement(
+            self.journal,
+            self.item_id,
+            self.owner,
+            self.item["album"],
+            self.post_dir,
+            authority_check=lambda: _require_authority(self.authority),
+        )
+        if backup_resolution.status is LibraryBackupResolutionStatus.ATTENTION:
+            reason = backup_resolution.reason or "library-backup-unsettled"
+            _block(self.operation_id, self.item_id, reason, authority=self.authority)
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                reason,
+                self.post_dir,
+                self.operation_id,
+                self.item_id,
+            )
+        self.journal = backup_resolution.journal
+
+        refreshed_managed = managed_completion_evidence(self.imported)
+        stable_managed = (
+            refreshed_managed is not None
+            and refreshed_managed.owner == self.managed.owner
+            and refreshed_managed.library_root == self.managed.library_root
+            and refreshed_managed.library_root_identity
+                == self.managed.library_root_identity
+            and refreshed_managed.album_path == self.managed.album_path
+            and refreshed_managed.manifest_hash == self.managed.manifest_hash
+            and refreshed_managed.mappings == self.managed.mappings
+        )
+        if not stable_managed or (
+            self.plan.library_backup_kind != "upgrade"
+            and refreshed_managed != self.managed
+        ):
+            reason = "managed-completion-changed-during-backup-resolution"
+            _block(self.operation_id, self.item_id, reason, authority=self.authority)
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                reason,
+                self.post_dir,
+                self.operation_id,
+                self.item_id,
+            )
+        self.managed = refreshed_managed
+        self.post_dir = Path(self.managed.library_root) / self.managed.album_path
+
+    def _publish_completion(self):
+        try:
+            _require_authority(self.authority)
+            backup_resolution = finish_library_backup_settlement(
+                self.journal,
+                self.item_id,
+                self.owner,
+                self.item["album"],
+                authority_check=lambda: _require_authority(self.authority),
+            )
+            if (
+                backup_resolution.status
+                is LibraryBackupResolutionStatus.ATTENTION
+            ):
+                reason = (
+                    backup_resolution.reason
+                    or "library-backup-settlement-unavailable"
+                )
+                _block(
+                    self.operation_id,
+                    self.item_id,
+                    reason,
+                    authority=self.authority,
+                )
+                return DurableAlbumResult(
+                    DurableAlbumStatus.ATTENTION,
+                    reason,
+                    self.post_dir,
+                    self.operation_id,
+                    self.item_id,
+                )
+            self.journal = backup_resolution.journal
+            settled_managed = managed_completion_evidence(self.imported)
+            if settled_managed != self.managed:
+                reason = "managed-completion-changed-during-backup-resolution"
+                _block(self.operation_id, self.item_id, reason, authority=self.authority)
+                return DurableAlbumResult(
+                    DurableAlbumStatus.ATTENTION,
+                    reason,
+                    self.post_dir,
+                    self.operation_id,
+                    self.item_id,
+                )
+            self.managed = settled_managed
+            self.post_dir = Path(self.managed.library_root) / self.managed.album_path
+            with reopen_managed_evidence(self.carrier.data, self.owner) as managed_lease:
+                if managed_lease.evidence != self.managed:
+                    raise DurableAlbumUnavailable("managed completion changed before publication")
+                with capture_new_album_completion(
+                    managed_lease=managed_lease,
+                    owner=self.owner,
+                    expectation=self.ready_input.expectation,
+                    download=self.ready_input.download_coverage(),
+                ) as live_lease:
+                    evidence = live_lease.revalidate()
+                    _require_authority(self.authority)
+                    self.journal = queue_state.transition_journal_item(
+                        self.journal,
+                        self.item_id,
+                        queue_state.QueuePhase.COMPLETE,
+                        completion_evidence=evidence.to_record(),
+                    )
+                    _require_authority(self.authority)
+                    live_lease.revalidate()
+                    _require_authority(self.authority)
+                    post_import_action = plan_post_import_action(
+                        self.journal,
+                        self.item_id,
+                        self.post_dir,
+                        authority=self.authority,
+                    )
+                    _require_authority(self.authority)
+                    live_lease.revalidate()
+                    self.journal = queue_state.commit_completed_item_removal(
+                        self.journal,
+                        self.queue,
+                        item_id=self.item_id,
+                        caller_item=self.item,
+                        live_evidence=evidence,
+                        post_import_action=post_import_action,
+                    )
+                    _require_authority(self.authority)
+                    live_lease.revalidate()
+        except LibraryBackupPersistenceError:
+            raise
+        except Exception:
+            # The queue-removal commit deliberately replaces the item with a
+            # retirement record.  A final lease check can therefore fail after the
+            # item is already, correctly, absent; recovery must preserve that
+            # committed state instead of treating the absence as corruption.
+            current = _find_journal_item(_load_exact(self.operation_id), self.item_id)
+            if current is not None and current.phase is queue_state.QueuePhase.RESOLVING:
+                _block(
+                    self.operation_id,
+                    self.item_id,
+                    "completion-proof-unavailable",
+                    authority=self.authority,
+                )
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                "completion-proof-unavailable",
+                self.post_dir,
+                self.operation_id,
+                self.item_id,
+            )
+
+    def _finish(self):
+        try:
+            _require_authority(self.authority)
+            self.journal, final_path, retirement = finalize_carrier_retirement(
+                self.journal,
+                self.item_id,
+                authority=self.authority,
+                acknowledge_completion=self.acknowledge_completion,
+            )
+            _require_authority(self.authority)
+        except (OSError, ValueError, queue_state.QueueJournalError):
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                "managed-carrier-retirement-unsettled",
+                self.post_dir,
+                self.operation_id,
+                self.item_id,
+            )
+        if final_path is not None:
+            self.post_dir = final_path
+        if retirement.outcome not in {
+            ManagedCarrierRetirementOutcome.RETIRED,
+            ManagedCarrierRetirementOutcome.ALREADY_ABSENT,
+        }:
+            return DurableAlbumResult(
+                DurableAlbumStatus.ATTENTION,
+                "managed-carrier-retirement-unsettled",
+                self.post_dir,
+                self.operation_id,
+                self.item_id,
+            )
+        if not self.journal.items and not self.journal.retirements:
+            try:
+                _require_authority(self.authority)
+                queue_state.clear_queue_journal(self.operation_id)
+                _require_authority(self.authority)
+            except (OSError, ValueError, queue_state.QueueJournalError):
+                return DurableAlbumResult(
+                    DurableAlbumStatus.ATTENTION,
+                    "completed-journal-cleanup-unsettled",
+                    self.post_dir,
+                    self.operation_id,
+                    self.item_id,
+                )
+        clear_attempts_after_import(self.item)
+        return DurableAlbumResult(
+            DurableAlbumStatus.COMPLETE,
+            post_dir=self.post_dir,
+            operation_id=self.operation_id,
+            item_id=self.item_id,
+        )
+
+
 def execute_durable_new_album(
     queue: list,
     item: dict,
@@ -577,944 +1555,9 @@ def execute_durable_new_album(
     acknowledge_completion=None,
 ) -> DurableAlbumResult:
     """Run one exact full-album replacement without ambiguous replay."""
-    _require_authority(authority)
-    _require_current_plan(item, args, plan)
-    journal, journal_item = _claim_pending_item(
-        item,
-        mode=mode,
-        authority=authority,
-        resume_owner=resume_owner,
-    )
-    owner = RecoveryOwner(journal.operation_id, journal_item.item_id)
-    initial = initial_completion_input(plan, owner, origin)
-    if journal_item.phase is queue_state.QueuePhase.ACTIVE:
-        if (
-            journal_item.recovery_references
-            or journal_item.block_reason is not None
-            or journal_item.completion_evidence is not None
-            or journal_item.completion_input != initial.to_record()
-        ):
-            raise DurableAlbumUnavailable(
-                "the matching durable queue item cannot resume its download"
-            )
-    _require_authority(authority)
-    if isolated_staging_run_names():
-        raise DurableAlbumUnavailable("an unclaimed download staging run needs attention")
-    if journal_item.phase is queue_state.QueuePhase.PENDING:
-        journal = queue_state.transition_journal_item(
-            journal,
-            journal_item.item_id,
-            queue_state.QueuePhase.ACTIVE,
-            completion_input=initial,
-            multi_artist_filing=bool(
-                getattr(args, "migrate_multi_artist", False)
-            ),
-        )
-        _require_authority(authority)
-    operation_id = journal.operation_id
-    item_id = journal_item.item_id
-    backup_intent = None
-    backup_carrier = None
-
-    def checkpoint_group(record):
-        nonlocal journal
-        _require_authority(authority)
-        if (
-            type(record) is not dict
-            or record.get("version") != 2
-            or record.get("owner") != _owner_record(owner)
-        ):
-            raise ValueError("staging recovery checkpoint is malformed")
-        journal = queue_state.append_staging_group_intent(
-            journal,
-            item_id,
-            record,
-        )
-        _require_authority(authority)
-
-    def checkpoint_backup_intent(record):
-        nonlocal journal, backup_intent
-        _require_authority(authority)
-        if (
-            type(record) is not dict
-            or record.get("version") != 1
-            or record.get("kind") not in {"upgrade", "gap-fill"}
-            or record.get("kind") != plan.library_backup_kind
-            or record.get("owner") != _owner_record(owner)
-        ):
-            raise ValueError("library backup intent is malformed")
-        journal = queue_state.append_library_backup_intent(
-            journal,
-            item_id,
-            record,
-        )
-        _require_authority(authority)
-        matches = tuple(
-            reference
-            for reference in _journal_item(journal, item_id).recovery_references
-            if reference.kind == _LIBRARY_BACKUP_INTENT
-        )
-        if len(matches) != 1:
-            raise DurableAlbumUnavailable(
-                "library backup intent was not committed exactly"
-            )
-        backup_intent = matches[0]
-
-    def checkpoint_backup_carrier(payload):
-        nonlocal journal, backup_carrier
-        _require_authority(authority)
-        if (
-            type(payload) is not dict
-            or set(payload) != {"version", "kind", "owner", "carrier"}
-            or payload.get("version") != 1
-            or payload.get("kind") != "library-backup-carrier"
-            or payload.get("owner") != _owner_record(owner)
-            or type(payload.get("carrier")) is not dict
-            or backup_intent is None
-        ):
-            raise ValueError("library backup carrier is malformed")
-        journal = queue_state.promote_library_backup_carrier(
-            journal,
-            item_id,
-            backup_intent,
-            payload["carrier"],
-        )
-        _require_authority(authority)
-        matches = tuple(
-            reference
-            for reference in _journal_item(journal, item_id).recovery_references
-            if reference.kind == _LIBRARY_BACKUP_CARRIER
-        )
-        if len(matches) != 1:
-            raise DurableAlbumUnavailable(
-                "library backup carrier was not committed exactly"
-            )
-        backup_carrier = matches[0]
-
-    def checkpoint_staging(payload):
-        nonlocal journal
-        _require_authority(authority)
-        if type(payload) is dict and payload.get("version") == 2:
-            checkpoint_group(payload)
-            return
-        if (
-            type(payload) is dict
-            and payload.get("version") == 1
-            and payload.get("kind") in {"upgrade", "gap-fill"}
-        ):
-            checkpoint_backup_intent(payload)
-            return
-        if (
-            type(payload) is dict
-            and payload.get("version") == 1
-            and payload.get("kind") == "library-backup-carrier"
-        ):
-            checkpoint_backup_carrier(payload)
-            return
-        if (
-            type(payload) is not dict
-            or set(payload) != {"version", "kind", "owner", "record"}
-            or payload.get("version") != 1
-            or payload.get("kind") != "staging-run"
-            or payload.get("owner") != _owner_record(owner)
-            or type(payload.get("record")) is not dict
-        ):
-            raise ValueError("download staging checkpoint is malformed")
-        journal = queue_state.append_staging_run_reference(
-            journal,
-            item_id,
-            payload["record"],
-        )
-        _require_authority(authority)
-
-    if plan.library_backup_kind == "upgrade":
-        _require_authority(authority)
-        _require_current_plan(item, args, plan)
-        backup = backup_album_dir(
-            Path(item["album_dir"]),
-            expected_receipt=item.get("_validated_source_receipt"),
-            owner=_owner_record(owner),
-            on_intent=checkpoint_backup_intent,
-        )
-        _require_authority(authority)
-        if backup is None:
-            reason = "library-backup-unavailable"
-            if backup_intent is not None:
-                # The album was left in place, so once its planned backup is
-                # settled this is an ordinary retry.
-                try:
-                    restored = _restore_library_backup(
-                        operation_id, item_id, owner, item,
-                        authority=authority)
-                except (OSError, ValueError, queue_state.QueueJournalError):
-                    restored = None
-                if (
-                    restored is None
-                    or restored.status
-                    is not LibraryBackupResolutionStatus.SETTLED
-                ):
-                    reason = "library-backup-intent-unsettled"
-                    if restored is not None and restored.reason:
-                        reason = restored.reason
-                    _block(operation_id, item_id, reason, authority=authority)
-                    return DurableAlbumResult(
-                        DurableAlbumStatus.ATTENTION,
-                        reason,
-                        operation_id=operation_id,
-                        item_id=item_id,
-                    )
-            _reset_unstarted(
-                operation_id,
-                item_id,
-                authority=authority,
-            )
-            return DurableAlbumResult(
-                DurableAlbumStatus.RETRY,
-                reason,
-                operation_id=operation_id,
-                item_id=item_id,
-            )
-        carrier_record = library_backup_record(
-            backup,
-            expected_owner=_owner_record(owner),
-        )
-        if carrier_record is None:
-            _require_authority(authority)
-            pinned = pin_unverified_upgrade_backup(
-                backup,
-                "queue backup kept; its exact carrier could not be reopened",
-                expected_owner=_owner_record(owner),
-            )
-            _require_authority(authority)
-            if not pinned:
-                warn_pin_failed(backup.path)
-            reason = "library-backup-carrier-unavailable"
-            _block(operation_id, item_id, reason, authority=authority)
-            return DurableAlbumResult(
-                DurableAlbumStatus.ATTENTION,
-                reason,
-                operation_id=operation_id,
-                item_id=item_id,
-            )
-        checkpoint_backup_carrier({
-            "version": 1,
-            "kind": "library-backup-carrier",
-            "owner": _owner_record(owner),
-            "carrier": carrier_record,
-        })
-        item["backup_path"] = backup
-        if backup.complete is not True:
-            _require_authority(authority)
-            pinned = pin_unverified_upgrade_backup(
-                backup,
-                "queue backup kept; source retirement did not finish exactly",
-                expected_owner=_owner_record(owner),
-            )
-            _require_authority(authority)
-            if not pinned:
-                warn_pin_failed(backup.path)
-            reason = "library-backup-incomplete"
-            _block(operation_id, item_id, reason, authority=authority)
-            return DurableAlbumResult(
-                DurableAlbumStatus.ATTENTION,
-                reason,
-                operation_id=operation_id,
-                item_id=item_id,
-            )
-
-    _require_authority(authority)
-    item["snapshot_before"] = snapshot_staging()
-    _require_authority(authority)
-    _require_current_plan(item, args, plan)
-
-    try:
-        _require_authority(authority)
-        _require_current_plan(item, args, plan)
-        run_album_download(
-            album=item["album"],
-            missing=item["missing"],
-            present=item["present"],
-            album_dir=item.get("album_dir"),
-            snapshot=item["snapshot_before"],
-            existing=(
-                None if plan.library_backup_kind == "gap-fill" else []
-            ),
-            quality=plan.effective_tier,
-            upgrade_only=bool(item.get("upgrade_only")),
-            force_track_by_track=False,
-            exact_edition=item.get("exact_edition", False),
-            result=item,
-            recovery_owner=_owner_record(owner),
-            recovery_checkpoint=checkpoint_staging,
-            required_backup_kind=plan.library_backup_kind,
-            expected_gap_fill_receipts=item.get(
-                "_validated_gap_fill_receipts"
-            ),
-        )
-        _require_authority(authority)
-    except BaseException:
-        _retry_or_attention_after_download(
-            operation_id=operation_id,
-            item_id=item_id,
-            result=item,
-            owner=owner,
-            checkpoint_group=checkpoint_group,
-            reason="download-interrupted",
-            authority=authority,
-        )
-        raise
-
-    if plan.library_backup_kind is not None:
-        live_backup = item.get(
-            "backup_path"
-            if plan.library_backup_kind == "upgrade"
-            else "gap_fill_backup_path"
-        )
-        live_record = library_backup_record(
-            live_backup,
-            expected_owner=_owner_record(owner),
-        )
-        if (
-            backup_carrier is None
-            or live_record is None
-            or live_record != backup_carrier.data
-        ):
-            reason = "library-backup-carrier-unsettled"
-            _block(operation_id, item_id, reason, authority=authority)
-            return DurableAlbumResult(
-                DurableAlbumStatus.ATTENTION,
-                reason,
-                operation_id=operation_id,
-                item_id=item_id,
-            )
-    elif backup_intent is not None or backup_carrier is not None:
-        reason = "unexpected-library-backup-state"
-        _block(operation_id, item_id, reason, authority=authority)
-        return DurableAlbumResult(
-            DurableAlbumStatus.ATTENTION,
-            reason,
-            operation_id=operation_id,
-            item_id=item_id,
-        )
-
-    coverage = exact_download_coverage(item, item["album"])
-    ready_input = (
-        completion_input_from_download(initial, coverage) if coverage is not None else None
-    )
-    if ready_input is None:
-        if is_cancel_requested():
-            settled = _cancel_after_download(
-                operation_id=operation_id,
-                item_id=item_id,
-                result=item,
-                owner=owner,
-                checkpoint_group=checkpoint_group,
-                authority=authority,
-            )
-            if settled is not None:
-                return settled
-        outcome = _retry_or_attention_after_download(
-            operation_id=operation_id,
-            item_id=item_id,
-            result=item,
-            owner=owner,
-            checkpoint_group=checkpoint_group,
-            reason="download-incomplete",
-            authority=authority,
-        )
-        if outcome.status is not DurableAlbumStatus.ATTENTION:
-            return outcome
-        return _abandon_blocked_item(
-            operation_id=operation_id,
-            item_id=item_id,
-            result=item,
-            reason="download-incomplete",
-            fallback=outcome,
-            authority=authority,
-        )
-    _require_authority(authority)
-    journal = queue_state.transition_journal_item(
-        _load_exact(operation_id),
-        item_id,
-        queue_state.QueuePhase.ACTIVE,
-        completion_input=ready_input,
-    )
-    _require_authority(authority)
-
-    try:
-        album_dirs = validated_staged_album_dirs(item)
-        if rip_shortfall(album_dirs, item["album"], effective_tier=2)["under"]:
-            raise OSError("the staged album is below CD quality")
-        item["quality_verdict"] = verify_and_recover(
-            item["album"],
-            album_dirs,
-            effective_tier=plan.effective_tier,
-            allow_retry=False,
-            exempt=item.get("_cd_quality_paths", ()),
-        )
-        bindings = staged_track_bindings(item)
-    except (OSError, TypeError, ValueError):
-        return _retry_or_attention_after_download(
-            operation_id=operation_id,
-            item_id=item_id,
-            result=item,
-            owner=owner,
-            checkpoint_group=checkpoint_group,
-            reason="staged-album-unverified",
-            authority=authority,
-        )
-    if plan.library_backup_kind is not None:
-        from qobuz_librarian.modes import process
-
-        _require_authority(authority)
-        backup = load_library_backup_record(
-            backup_carrier.data, expected_owner=_owner_record(owner),
-        )
-        # Beets files a copy over the user's tracks only when it holds up
-        # against them, track by track; otherwise they go back.
-        if (
-            backup is not None
-            and len(album_dirs) == 1
-            and not process._upgrade_trees_verified(album_dirs[0], backup.path)
-        ):
-            outcome = _retry_or_attention_after_download(
-                operation_id=operation_id,
-                item_id=item_id,
-                result=item,
-                owner=owner,
-                checkpoint_group=checkpoint_group,
-                reason="upgrade-unverified",
-                authority=authority,
-            )
-            if outcome.status is not DurableAlbumStatus.ATTENTION:
-                return outcome
-            return _abandon_blocked_item(
-                operation_id=operation_id,
-                item_id=item_id,
-                result=item,
-                reason="upgrade-unverified",
-                fallback=outcome,
-                authority=authority,
-            )
-    binding_records = managed_binding_records(ready_input)
-    if binding_records is None or tuple(bindings) != binding_records:
-        return _retry_or_attention_after_download(
-            operation_id=operation_id,
-            item_id=item_id,
-            result=item,
-            owner=owner,
-            checkpoint_group=checkpoint_group,
-            reason="staged-bindings-changed",
-            authority=authority,
-        )
-
-    def checkpoint_sources(kind):
-        nonlocal journal, ready_input, binding_records
-        _require_authority(authority)
-        if type(kind) is not SourceTransitionKind:
-            raise ValueError("staged source transition is invalid")
-        records = refresh_staged_track_bindings(item)
-        try:
-            current_bindings = tuple(
-                StagedBinding(
-                    record["slot"],
-                    record["path"],
-                    tuple(record["identity"]),
-                )
-                for record in records
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise OSError("staged source transition is malformed") from exc
-        advanced = advance_completion_sources(ready_input, current_bindings, kind)
-        if advanced is None:
-            raise OSError("staged source transition could not be proved")
-        journal = queue_state.transition_journal_item(
-            _load_exact(operation_id),
-            item_id,
-            queue_state.QueuePhase.ACTIVE,
-            completion_input=advanced,
-        )
-        _require_authority(authority)
-        ready_input = advanced
-        binding_records = managed_binding_records(ready_input)
-        if binding_records is None:
-            raise OSError("staged source transition lost completion lineage")
-
-    if prepare_staged is not None:
-        if not callable(prepare_staged):
-            raise ValueError("prepare_staged must be callable")
-        try:
-            _require_authority(authority)
-            prepared = prepare_staged(album_dirs, checkpoint_sources)
-            _require_authority(authority)
-            resampled = getattr(prepared, "resampled", None)
-            if not isinstance(resampled, int):
-                raise OSError("staged preparation result is malformed")
-            item["resampled_n"] = resampled
-            item["downsample_errors"] = getattr(prepared, "errors", 0)
-            item["downsample_saved_bytes"] = getattr(
-                prepared, "saved_bytes", 0
-            )
-            item["downsample_flush_warnings"] = getattr(
-                prepared, "flush_warnings", 0
-            )
-            item["downsample_cancelled"] = bool(
-                getattr(prepared, "cancelled", False)
-            )
-            if validated_staged_album_dirs(item) != album_dirs:
-                raise OSError("staged album roots changed during preparation")
-            current_records = tuple(staged_track_bindings(item))
-            if binding_records is None or current_records != binding_records:
-                raise OSError("prepared staged bindings were not checkpointed")
-        except Exception:
-            return _retry_or_attention_after_download(
-                operation_id=operation_id,
-                item_id=item_id,
-                result=item,
-                owner=owner,
-                checkpoint_group=checkpoint_group,
-                reason="staged-preparation-unsettled",
-                authority=authority,
-            )
-        except BaseException:
-            _retry_or_attention_after_download(
-                operation_id=operation_id,
-                item_id=item_id,
-                result=item,
-                owner=owner,
-                checkpoint_group=checkpoint_group,
-                reason="staged-preparation-interrupted",
-                authority=authority,
-            )
-            raise
-
-    try:
-        if plan.library_backup_kind == "upgrade":
-            from qobuz_librarian.modes import process
-
-            _require_authority(authority)
-            backup = load_library_backup_record(
-                backup_carrier.data, expected_owner=_owner_record(owner),
-            )
-            if backup is None or len(album_dirs) != 1:
-                raise OSError("upgrade originals could not be read")
-            if not process._track_annotations_preserved(backup.path, album_dirs[0]):
-                if not process._carry_track_annotations(backup.path, album_dirs[0]):
-                    raise OSError("original track tags could not be carried")
-                checkpoint_sources(SourceTransitionKind.ORIGINAL_TAGS)
-            if (load_library_backup_record(
-                    backup_carrier.data, expected_owner=_owner_record(owner),
-                ) is None
-                    or not process._track_annotations_preserved(
-                        backup.path, album_dirs[0])):
-                raise OSError("original track tags could not be verified")
-            process._keep_own_cover(backup.path, album_dirs)
-            _require_authority(authority)
-        cleaned_bindings = prepare_managed_staging_tags(
-            album_dirs,
-            binding_records,
-            authority_check=lambda: _require_authority(authority),
-        )
-        if tuple(cleaned_bindings) != binding_records:
-            checkpoint_sources(SourceTransitionKind.BEETS_TAG_CLEAN)
-            if tuple(cleaned_bindings) != binding_records:
-                raise OSError("tag-clean source checkpoint changed")
-    except Exception:
-        return _retry_or_attention_after_download(
-            operation_id=operation_id,
-            item_id=item_id,
-            result=item,
-            owner=owner,
-            checkpoint_group=checkpoint_group,
-            reason="staged-tag-clean-unsettled",
-            authority=authority,
-        )
-    except BaseException:
-        _retry_or_attention_after_download(
-            operation_id=operation_id,
-            item_id=item_id,
-            result=item,
-            owner=owner,
-            checkpoint_group=checkpoint_group,
-            reason="staged-tag-clean-interrupted",
-            authority=authority,
-        )
-        raise
-
-    reservation = None
-    carrier = None
-
-    def checkpoint_reservation(payload):
-        nonlocal journal, reservation
-        _require_authority(authority)
-        if (
-            type(payload) is not dict
-            or set(payload) != {"version", "kind", "owner", "reservation"}
-            or payload.get("version") != 1
-            or payload.get("kind") != _MANAGED_RESERVATION
-            or payload.get("owner") != _owner_record(owner)
-            or type(payload.get("reservation")) is not dict
-        ):
-            raise ValueError("managed import reservation is malformed")
-        reference = queue_state.RecoveryReference(
-            "managed-import",
-            _MANAGED_RESERVATION,
-            payload["reservation"],
-        )
-        journal = queue_state.reserve_managed_carrier(
-            journal,
-            item_id,
-            reference,
-        )
-        _require_authority(authority)
-        reservation = reference
-
-    def checkpoint_carrier(payload):
-        nonlocal journal, carrier
-        _require_authority(authority)
-        if (
-            type(payload) is not dict
-            or set(payload) != {"version", "kind", "owner", "carrier"}
-            or payload.get("version") != 1
-            or payload.get("kind") != _MANAGED_CARRIER
-            or payload.get("owner") != _owner_record(owner)
-            or type(payload.get("carrier")) is not dict
-            or reservation is None
-        ):
-            raise ValueError("managed import carrier is malformed")
-        reference = queue_state.RecoveryReference(
-            "managed-import",
-            _MANAGED_CARRIER,
-            payload["carrier"],
-        )
-        journal = queue_state.promote_managed_carrier(
-            journal,
-            item_id,
-            reservation,
-            reference,
-            ready_input,
-        )
-        _require_authority(authority)
-        carrier = reference
-
-    try:
-        _require_authority(authority)
-        replaced = (
-            {} if item.get("album_dir") is None
-            else {"album_dir": item["album_dir"]}
-        )
-        imported = beets_import_managed(
-            album_dirs,
-            binding_records,
-            owner=_owner_record(owner),
-            on_reservation=checkpoint_reservation,
-            on_intent=checkpoint_carrier,
-            authority_check=lambda: _require_authority(authority),
-            **replaced,
-        )
-        _require_authority(authority)
-    except BaseException:
-        _block(
-            operation_id,
-            item_id,
-            "managed-import-interrupted",
-            authority=authority,
-        )
-        raise
-
-    journal = _load_exact(operation_id)
-    current = _journal_item(journal, item_id)
-    persisted_carriers = tuple(
-        reference for reference in current.recovery_references if reference.kind == _MANAGED_CARRIER
-    )
-    managed = managed_completion_evidence(imported)
-    sealed_input = managed_completion_input(ready_input, managed) if managed is not None else None
-    if (
-        imported.kind != "ok"
-        or imported.spawned is not True
-        or managed is None
-        or sealed_input != ready_input
-        or carrier is None
-        or persisted_carriers != (carrier,)
-        or imported.carrier != carrier.data
-    ):
-        _block(
-            operation_id,
-            item_id,
-            "managed-import-unsettled",
-            authority=authority,
-        )
-        return DurableAlbumResult(
-            DurableAlbumStatus.ATTENTION,
-            "managed-import-disk-full" if imported.disk_full
-            else "managed-import-unsettled",
-            operation_id=operation_id,
-            item_id=item_id,
-        )
-
-    try:
-        _require_authority(authority)
-        retired = retire_empty_download_staging(
-            item,
-            recovery_checkpoint=checkpoint_group,
-        )
-        _require_authority(authority)
-    except (OSError, TypeError, ValueError, queue_state.QueueJournalError):
-        retired = False
-    if not retired:
-        try:
-            _require_authority(authority)
-            retired = retire_download_staging_after_import(
-                item,
-                recovery_checkpoint=checkpoint_group,
-            )
-            _require_authority(authority)
-        except (OSError, TypeError, ValueError, queue_state.QueueJournalError):
-            retired = False
-    journal = _load_exact(operation_id)
-    journal = (
-        _reconcile_absent_staging(
-            journal,
-            item_id,
-            owner,
-            authority=authority,
-        )
-        if retired
-        else None
-    )
-    if journal is None:
-        _block(
-            operation_id,
-            item_id,
-            "download-staging-unsettled",
-            authority=authority,
-        )
-        return DurableAlbumResult(
-            DurableAlbumStatus.ATTENTION,
-            "download-staging-unsettled",
-            operation_id=operation_id,
-            item_id=item_id,
-        )
-
-    current = _journal_item(journal, item_id)
-    expected_references = (
-        (backup_carrier, carrier)
-        if backup_carrier is not None
-        else (carrier,)
-    )
-    if current.recovery_references != expected_references:
-        _block(
-            operation_id,
-            item_id,
-            "recovery-reference-unsettled",
-            authority=authority,
-        )
-        return DurableAlbumResult(
-            DurableAlbumStatus.ATTENTION,
-            "recovery-reference-unsettled",
-            operation_id=operation_id,
-            item_id=item_id,
-        )
-
-    post_dir = Path(managed.library_root) / managed.album_path
-    backup_resolution = prepare_library_backup_settlement(
-        journal,
-        item_id,
-        owner,
-        item["album"],
-        post_dir,
-        authority_check=lambda: _require_authority(authority),
-    )
-    if backup_resolution.status is LibraryBackupResolutionStatus.ATTENTION:
-        reason = backup_resolution.reason or "library-backup-unsettled"
-        _block(operation_id, item_id, reason, authority=authority)
-        return DurableAlbumResult(
-            DurableAlbumStatus.ATTENTION,
-            reason,
-            post_dir,
-            operation_id,
-            item_id,
-        )
-    journal = backup_resolution.journal
-
-    refreshed_managed = managed_completion_evidence(imported)
-    stable_managed = (
-        refreshed_managed is not None
-        and refreshed_managed.owner == managed.owner
-        and refreshed_managed.library_root == managed.library_root
-        and refreshed_managed.library_root_identity
-            == managed.library_root_identity
-        and refreshed_managed.album_path == managed.album_path
-        and refreshed_managed.manifest_hash == managed.manifest_hash
-        and refreshed_managed.mappings == managed.mappings
-    )
-    if not stable_managed or (
-        plan.library_backup_kind != "upgrade"
-        and refreshed_managed != managed
-    ):
-        reason = "managed-completion-changed-during-backup-resolution"
-        _block(operation_id, item_id, reason, authority=authority)
-        return DurableAlbumResult(
-            DurableAlbumStatus.ATTENTION,
-            reason,
-            post_dir,
-            operation_id,
-            item_id,
-        )
-    managed = refreshed_managed
-    post_dir = Path(managed.library_root) / managed.album_path
-    try:
-        _require_authority(authority)
-        backup_resolution = finish_library_backup_settlement(
-            journal,
-            item_id,
-            owner,
-            item["album"],
-            authority_check=lambda: _require_authority(authority),
-        )
-        if (
-            backup_resolution.status
-            is LibraryBackupResolutionStatus.ATTENTION
-        ):
-            reason = (
-                backup_resolution.reason
-                or "library-backup-settlement-unavailable"
-            )
-            _block(
-                operation_id,
-                item_id,
-                reason,
-                authority=authority,
-            )
-            return DurableAlbumResult(
-                DurableAlbumStatus.ATTENTION,
-                reason,
-                post_dir,
-                operation_id,
-                item_id,
-            )
-        journal = backup_resolution.journal
-        settled_managed = managed_completion_evidence(imported)
-        if settled_managed != managed:
-            reason = "managed-completion-changed-during-backup-resolution"
-            _block(operation_id, item_id, reason, authority=authority)
-            return DurableAlbumResult(
-                DurableAlbumStatus.ATTENTION,
-                reason,
-                post_dir,
-                operation_id,
-                item_id,
-            )
-        managed = settled_managed
-        post_dir = Path(managed.library_root) / managed.album_path
-        with reopen_managed_evidence(carrier.data, owner) as managed_lease:
-            if managed_lease.evidence != managed:
-                raise DurableAlbumUnavailable("managed completion changed before publication")
-            with capture_new_album_completion(
-                managed_lease=managed_lease,
-                owner=owner,
-                expectation=ready_input.expectation,
-                download=ready_input.download_coverage(),
-            ) as live_lease:
-                evidence = live_lease.revalidate()
-                _require_authority(authority)
-                journal = queue_state.transition_journal_item(
-                    journal,
-                    item_id,
-                    queue_state.QueuePhase.COMPLETE,
-                    completion_evidence=evidence.to_record(),
-                )
-                _require_authority(authority)
-                live_lease.revalidate()
-                _require_authority(authority)
-                post_import_action = plan_post_import_action(
-                    journal,
-                    item_id,
-                    post_dir,
-                    authority=authority,
-                )
-                _require_authority(authority)
-                live_lease.revalidate()
-                journal = queue_state.commit_completed_item_removal(
-                    journal,
-                    queue,
-                    item_id=item_id,
-                    caller_item=item,
-                    live_evidence=evidence,
-                    post_import_action=post_import_action,
-                )
-                _require_authority(authority)
-                live_lease.revalidate()
-    except LibraryBackupPersistenceError:
-        raise
-    except Exception:
-        # The queue-removal commit deliberately replaces the item with a
-        # retirement record.  A final lease check can therefore fail after the
-        # item is already, correctly, absent; recovery must preserve that
-        # committed state instead of treating the absence as corruption.
-        current = _find_journal_item(_load_exact(operation_id), item_id)
-        if current is not None and current.phase is queue_state.QueuePhase.RESOLVING:
-            _block(
-                operation_id,
-                item_id,
-                "completion-proof-unavailable",
-                authority=authority,
-            )
-        return DurableAlbumResult(
-            DurableAlbumStatus.ATTENTION,
-            "completion-proof-unavailable",
-            post_dir,
-            operation_id,
-            item_id,
-        )
-
-    try:
-        _require_authority(authority)
-        journal, final_path, retirement = finalize_carrier_retirement(
-            journal,
-            item_id,
-            authority=authority,
-            acknowledge_completion=acknowledge_completion,
-        )
-        _require_authority(authority)
-    except (OSError, ValueError, queue_state.QueueJournalError):
-        return DurableAlbumResult(
-            DurableAlbumStatus.ATTENTION,
-            "managed-carrier-retirement-unsettled",
-            post_dir,
-            operation_id,
-            item_id,
-        )
-    if final_path is not None:
-        post_dir = final_path
-    if retirement.outcome not in {
-        ManagedCarrierRetirementOutcome.RETIRED,
-        ManagedCarrierRetirementOutcome.ALREADY_ABSENT,
-    }:
-        return DurableAlbumResult(
-            DurableAlbumStatus.ATTENTION,
-            "managed-carrier-retirement-unsettled",
-            post_dir,
-            operation_id,
-            item_id,
-        )
-    if not journal.items and not journal.retirements:
-        try:
-            _require_authority(authority)
-            queue_state.clear_queue_journal(operation_id)
-            _require_authority(authority)
-        except (OSError, ValueError, queue_state.QueueJournalError):
-            return DurableAlbumResult(
-                DurableAlbumStatus.ATTENTION,
-                "completed-journal-cleanup-unsettled",
-                post_dir,
-                operation_id,
-                item_id,
-            )
-    clear_attempts_after_import(item)
-    return DurableAlbumResult(
-        DurableAlbumStatus.COMPLETE,
-        post_dir=post_dir,
-        operation_id=operation_id,
-        item_id=item_id,
-    )
+    return _DurableAlbumRun(
+        queue, item, args, plan=plan, origin=origin, mode=mode,
+        authority=authority, resume_owner=resume_owner,
+        prepare_staged=prepare_staged,
+        acknowledge_completion=acknowledge_completion,
+    ).run()

@@ -5799,85 +5799,43 @@ def _beets_direct(
     return result
 
 
-def _beets_direct_guarded(
-    override_path,
-    paths,
-    *,
-    ownership_capture=None,
-    intended_audio=None,
-    managed_capture=None,
-    beets_runtime=None,
-    before_managed_spawn=None,
-    failure_out=None,
-):
-    """Call ``beet import`` as a direct subprocess (bundled mode), scoped to
-    the given paths. Returns ``(ok: bool, kind: str)`` where kind is
-    ``"ok"`` / ``"timeout"`` / ``"disk_full"`` / ``"error"``."""
-    audio_before = _count_audio_under(paths, include_retry=True)
-    if intended_audio is not None:
-        intended_audio = tuple(intended_audio)
-        if managed_capture is not None:
-            intended_valid = bool(intended_audio) and all(
-                _valid_managed_binding(record)
-                and staging_mod.capture_file(
-                    record["path"],
-                    expected=tuple(record["identity"]),
-                )
-                is not None
-                for record in intended_audio
+def _staged_tracks_unchanged(intended_audio, managed):
+    """Whether every exact staged track is still the file that was captured."""
+    if managed:
+        return bool(intended_audio) and all(
+            _valid_managed_binding(record)
+            and staging_mod.capture_file(
+                record["path"],
+                expected=tuple(record["identity"]),
             )
-        else:
-            intended_valid = bool(intended_audio) and all(
-                staging_mod.capture_file(receipt.path, expected=receipt.identity) is not None
-                for receipt in intended_audio
-            )
-        if not intended_valid:
-            log.info(
-                fmt(
-                    C.RED,
-                    "  ✗  The exact staged tracks changed before beets started; "
-                    "refusing to import them.",
-                )
-            )
-            return False, "error"
-    if isinstance(managed_capture, dict):
-        runtime = managed_capture.get("_beets_runtime")
-        if not _beets_runtime_matches(runtime):
-            return False, "error"
-        cmd = [
-            runtime.python,
-            "-I",
-            str(_managed_beets_entrypoint()),
-        ]
-    else:
-        runtime = beets_runtime
-        if not _beets_runtime_matches(runtime):
-            return False, "error"
-        cmd = [
-            runtime.python,
-            "-I",
-            str(_managed_beets_entrypoint()),
-            "--run-beets",
-        ]
+            is not None
+            for record in intended_audio
+        )
+    return bool(intended_audio) and all(
+        staging_mod.capture_file(receipt.path, expected=receipt.identity) is not None
+        for receipt in intended_audio
+    )
+
+
+def _beets_import_command(override_path, paths, managed_capture, beets_runtime):
+    """The checked runtime and its ``beet import`` command, or None when the
+    runtime is no longer the one that was checked."""
+    managed = isinstance(managed_capture, dict)
+    runtime = managed_capture.get("_beets_runtime") if managed else beets_runtime
+    if not _beets_runtime_matches(runtime):
+        return None
+    cmd = [runtime.python, "-I", str(_managed_beets_entrypoint())]
+    if not managed:
+        cmd.append("--run-beets")
     if override_path:
         cmd += ["-c", str(override_path)]
     cmd += ["import", *paths]
+    return runtime, cmd
 
-    # Total album count when the caller passed explicit paths; 0 (= indeterminate
-    # progress bar) when the whole staging dir is being scanned.
-    staging_root = str(cfg.STAGING_DIR).rstrip("/")
-    explicit_album_paths = [p for p in paths if p.rstrip("/") != staging_root]
-    total_albums = len(explicit_album_paths)
-    report_progress("Importing into your library", 0, total_albums, "")
-    log.info(fmt(C.CYAN, "  ⟳  Running beets import ..."))
-    out_lines = []
-    in_traceback = [False]
-    last_output = [time.monotonic()]
-    # Captured by _reader for per-album progress updates. A list-of-1 lets the
-    # nested function can mutate without `nonlocal`.
-    last_album = [None]
-    seen_albums = [0]
 
+def _beets_child_env(override_path, paths, ownership_capture, managed_capture):
+    """The environment and Popen options that hand beets its ownership
+    descriptors, or None when a managed capture is not fit to pass on."""
     config_dir = os.path.abspath(os.fspath(cfg.BEETS_CONFIG_DIR))
     beet_env = {**cfg.child_env(), "BEETSDIR": config_dir}
     for variable in _OWNERSHIP_ENV_KEYS:
@@ -5921,56 +5879,78 @@ def _beets_direct_guarded(
             and override_seals & required_seals == required_seals
             and _managed_generation_zero_matches(managed_capture)
         )
-        if managed_ready:
-            beet_env[_OWNERSHIP_FD_ENV] = str(descriptor)
-            beet_env[_OWNERSHIP_NONCE_ENV] = nonce
-            beet_env[_OWNERSHIP_SOURCE_ROOTS_ENV] = json.dumps(
-                [os.path.abspath(os.fspath(path)) for path in paths]
-            )
-            beet_env[_OWNERSHIP_MODE_ENV] = _MANAGED_OWNERSHIP_MODE
-            pass_fds = set(popen_options.get("pass_fds", ()))
-            pass_fds.add(descriptor)
-            pass_fds.add(override_descriptor)
-            popen_options["pass_fds"] = tuple(sorted(pass_fds))
-        else:
-            return False, "error"
+        if not managed_ready:
+            return None
+        beet_env[_OWNERSHIP_FD_ENV] = str(descriptor)
+        beet_env[_OWNERSHIP_NONCE_ENV] = nonce
+        beet_env[_OWNERSHIP_SOURCE_ROOTS_ENV] = json.dumps(
+            [os.path.abspath(os.fspath(path)) for path in paths]
+        )
+        beet_env[_OWNERSHIP_MODE_ENV] = _MANAGED_OWNERSHIP_MODE
+        pass_fds = set(popen_options.get("pass_fds", ()))
+        pass_fds.add(descriptor)
+        pass_fds.add(override_descriptor)
+        popen_options["pass_fds"] = tuple(sorted(pass_fds))
+    return beet_env, popen_options
 
-    def _handle_beets_output_line(line):
-        out_lines.append(line)
+
+class _BeetsOutput:
+    """What beets prints as it arrives: kept for the verdict, logged, and read
+    for which album the import is on."""
+
+    def __init__(self, staging_root, total_albums):
+        self.staging_root = staging_root
+        self.total_albums = total_albums
+        self.lines = []
+        # A list of one: the idle watchdog reads it while the reader writes.
+        self.last_output = [time.monotonic()]
+        self._in_traceback = False
+        self._last_album = None
+        self._seen_albums = 0
+
+    def handle_line(self, line):
+        self.lines.append(line)
         stripped = line.strip()
         if not stripped:
             return
         # Staging-path echoes are too noisy for the log, but they're the
         # signal that tells us which album beets is on.
-        album = _beets_progress_album(stripped, staging_root)
+        album = _beets_progress_album(stripped, self.staging_root)
         if album is not None:
-            if album != last_album[0]:
-                last_album[0] = album
-                seen_albums[0] += 1
-                report_progress("Importing into your library", seen_albums[0], total_albums, album)
+            if album != self._last_album:
+                self._last_album = album
+                self._seen_albums += 1
+                report_progress("Importing into your library", self._seen_albums,
+                                self.total_albums, album)
             return
         # Route through the shared logger so the web UI's SSE stream
         # sees beets output too (raw sys.stdout would only land in
         # docker logs, leaving the job page silent during import).
-        in_traceback[0] = _traceback_line(line, in_traceback[0])
-        _log_beets_output(fmt(C.GRAY, "    " + line.rstrip()), in_traceback[0])
+        self._in_traceback = _traceback_line(line, self._in_traceback)
+        _log_beets_output(fmt(C.GRAY, "    " + line.rstrip()), self._in_traceback)
 
-    def _read_beets_output():
+    def read(self, stream, stop):
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         pending = [""]
 
         def consume(chunk):
-            last_output[0] = time.monotonic()
+            self.last_output[0] = time.monotonic()
             pending[0] += decoder.decode(chunk)
             while "\n" in pending[0]:
                 line, pending[0] = pending[0].split("\n", 1)
-                _handle_beets_output_line(line + "\n")
+                self.handle_line(line + "\n")
 
-        _read_cancellable_beets_pipe(proc.stdout, reader_stop, consume)
+        _read_cancellable_beets_pipe(stream, stop, consume)
         pending[0] += decoder.decode(b"", final=True)
         if pending[0]:
-            _handle_beets_output_line(pending[0])
+            self.handle_line(pending[0])
 
+
+def _run_beets_process(cmd, runtime, beet_env, popen_options, output, paths,
+                       managed_capture, before_managed_spawn):
+    """Start beets, read its output until it exits, and retire it whatever
+    happened. Returns ``(process, error, spawn_failed)``; a failure to retire
+    it is the error, or a note on the one already caught."""
     reader_start = threading.Event()
     reader_done = threading.Event()
     reader_stop = threading.Event()
@@ -5980,7 +5960,7 @@ def _beets_direct_guarded(
         try:
             reader_start.wait()
             if not reader_cancelled[0]:
-                _read_beets_output()
+                output.read(proc.stdout, reader_stop)
         finally:
             reader_done.set()
 
@@ -6040,7 +6020,7 @@ def _beets_direct_guarded(
             try:
                 reader.start()
                 reader_start.set()
-                _wait_or_idle_kill(proc, last_output)
+                _wait_or_idle_kill(proc, output.last_output)
             except BaseException as exc:
                 if reader.ident is None:
                     reader_cancelled[0] = True
@@ -6070,6 +6050,109 @@ def _beets_direct_guarded(
             wait_error.add_note(f"beets process cleanup also failed: {retirement_error}")
         else:
             wait_error = retirement_error
+    return proc, wait_error, spawn_failed
+
+
+def _exact_source_remains(intended_audio, managed):
+    """Whether any exact staged track still has something at its name."""
+    for receipt in intended_audio:
+        source_path = receipt["path"] if managed else receipt.path
+        try:
+            os.stat(source_path, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        return True
+    return False
+
+
+def _report_beets_failure(returncode, full_out, override_path, failure_out):
+    """Log why a beets run that exited non-zero stopped, and return its kind."""
+    if "database is locked" in full_out:
+        log.info(fmt(
+            C.RED,
+            "  ✗  The beets database was busy: another program held it for "
+            f"over {beets_db.timeout():g} seconds. Retry once it has finished.",
+        ))
+    log.info(fmt(C.RED, f"  ✗  beets exited {returncode}."))
+    log.info(fmt(C.GRAY, f"     Config: {cfg.BEETS_CONFIG_DIR}/config.yaml"))
+    if override_path:
+        vlog(f"beets override config: {override_path}")
+    lines = full_out.splitlines()
+    parts, part = [], False
+    for line in lines:
+        if line.strip():
+            part = _traceback_line(line, part)
+        parts.append(part)
+    shown = list(zip(lines, parts))[-20:]
+    last_error = max(
+        (index for index, (_line, part) in enumerate(shown) if part == "error"),
+        default=None)
+    for index, (line, part) in enumerate(shown):
+        if index == last_error:
+            error = line.strip().partition(": ")[2] or line.strip()
+            error = re.sub(r"^\[Errno \d+\]\s*", "", error)
+            log.info(fmt(C.GRAY, f"     Beets stopped on an error: {error}."))
+        else:
+            _log_beets_output(fmt(C.GRAY, f"    {line}"), part)
+    _report_staging_remnants()
+    # Beets ends on a traceback, or logs "Error: ..." or "error writing ...".
+    stopped = "\n".join(line for line, part in zip(lines, parts)
+                        if part == "error" or line.lower().startswith("error"))
+    denied = _permission_denied_folder(stopped)
+    if denied is not None and failure_out is not None:
+        failure_out["permission_denied"] = denied
+    return "disk_full" if detect_disk_full(stopped) else "error"
+
+
+def _beets_direct_guarded(
+    override_path,
+    paths,
+    *,
+    ownership_capture=None,
+    intended_audio=None,
+    managed_capture=None,
+    beets_runtime=None,
+    before_managed_spawn=None,
+    failure_out=None,
+):
+    """Call ``beet import`` as a direct subprocess (bundled mode), scoped to
+    the given paths. Returns ``(ok: bool, kind: str)`` where kind is
+    ``"ok"`` / ``"timeout"`` / ``"disk_full"`` / ``"error"``."""
+    audio_before = _count_audio_under(paths, include_retry=True)
+    if intended_audio is not None:
+        intended_audio = tuple(intended_audio)
+        if not _staged_tracks_unchanged(intended_audio, managed_capture is not None):
+            log.info(
+                fmt(
+                    C.RED,
+                    "  ✗  The exact staged tracks changed before beets started; "
+                    "refusing to import them.",
+                )
+            )
+            return False, "error"
+    command = _beets_import_command(override_path, paths, managed_capture, beets_runtime)
+    if command is None:
+        return False, "error"
+    runtime, cmd = command
+
+    # Total album count when the caller passed explicit paths; 0 (= indeterminate
+    # progress bar) when the whole staging dir is being scanned.
+    staging_root = str(cfg.STAGING_DIR).rstrip("/")
+    explicit_album_paths = [p for p in paths if p.rstrip("/") != staging_root]
+    total_albums = len(explicit_album_paths)
+    report_progress("Importing into your library", 0, total_albums, "")
+    log.info(fmt(C.CYAN, "  ⟳  Running beets import ..."))
+    output = _BeetsOutput(staging_root, total_albums)
+    child = _beets_child_env(override_path, paths, ownership_capture, managed_capture)
+    if child is None:
+        return False, "error"
+    beet_env, popen_options = child
+
+    proc, wait_error, spawn_failed = _run_beets_process(
+        cmd, runtime, beet_env, popen_options, output, paths,
+        managed_capture, before_managed_spawn)
     if spawn_failed and isinstance(wait_error, OSError):
         log.info(
             fmt(
@@ -6099,7 +6182,7 @@ def _beets_direct_guarded(
         clear_scan_caches()
         raise wait_error.with_traceback(wait_error.__traceback__)
 
-    full_out = "".join(out_lines)
+    full_out = "".join(output.lines)
     ownership_payload = _read_ownership_payload(ownership_capture)
     ownership_result = (
         ownership_payload
@@ -6124,26 +6207,16 @@ def _beets_direct_guarded(
     imported_nothing = proc.returncode == 0 and (
         (audio_before > 0 and not moved_any) or audio_before == 0
     )
-    receipt_incomplete = False
-    if proc.returncode == 0 and intended_audio is not None:
-        # A successful explicit import consumes every exact source name. A
-        # receipt still present at that name, a replacement at the same name,
-        # or any audio left anywhere below the explicit roots makes the whole
-        # import fail closed.
-        receipt_incomplete = audio_after != 0
-        if not receipt_incomplete:
-            for receipt in intended_audio:
-                source_path = receipt["path"] if managed_capture is not None else receipt.path
-                try:
-                    os.stat(source_path, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                except OSError:
-                    receipt_incomplete = True
-                    break
-                else:
-                    receipt_incomplete = True
-                    break
+    # A successful explicit import consumes every exact source name. A
+    # receipt still present at that name, a replacement at the same name,
+    # or any audio left anywhere below the explicit roots makes the whole
+    # import fail closed.
+    receipt_incomplete = (
+        proc.returncode == 0
+        and intended_audio is not None
+        and (audio_after != 0
+             or _exact_source_remains(intended_audio, managed_capture is not None))
+    )
     managed_incomplete = managed_capture is not None and managed_result is None
 
     clear_scan_caches()
@@ -6201,41 +6274,8 @@ def _beets_direct_guarded(
         _report_staging_remnants()
         return False, "error"
     _reclaim_ownership_capture(ownership_capture, ownership_payload)
-    if "database is locked" in full_out:
-        log.info(fmt(
-            C.RED,
-            "  ✗  The beets database was busy: another program held it for "
-            f"over {beets_db.timeout():g} seconds. Retry once it has finished.",
-        ))
-    log.info(fmt(C.RED, f"  ✗  beets exited {proc.returncode}."))
-    log.info(fmt(C.GRAY, f"     Config: {cfg.BEETS_CONFIG_DIR}/config.yaml"))
-    if override_path:
-        vlog(f"beets override config: {override_path}")
-    lines = full_out.splitlines()
-    parts, part = [], False
-    for line in lines:
-        if line.strip():
-            part = _traceback_line(line, part)
-        parts.append(part)
-    shown = list(zip(lines, parts))[-20:]
-    last_error = max(
-        (index for index, (_line, part) in enumerate(shown) if part == "error"),
-        default=None)
-    for index, (line, part) in enumerate(shown):
-        if index == last_error:
-            error = line.strip().partition(": ")[2] or line.strip()
-            error = re.sub(r"^\[Errno \d+\]\s*", "", error)
-            log.info(fmt(C.GRAY, f"     Beets stopped on an error: {error}."))
-        else:
-            _log_beets_output(fmt(C.GRAY, f"    {line}"), part)
-    _report_staging_remnants()
-    # Beets ends on a traceback, or logs "Error: ..." or "error writing ...".
-    stopped = "\n".join(line for line, part in zip(lines, parts)
-                        if part == "error" or line.lower().startswith("error"))
-    denied = _permission_denied_folder(stopped)
-    if denied is not None and failure_out is not None:
-        failure_out["permission_denied"] = denied
-    return False, "disk_full" if detect_disk_full(stopped) else "error"
+    return False, _report_beets_failure(
+        proc.returncode, full_out, override_path, failure_out)
 
 
 _DENIED_RES = (
