@@ -5638,8 +5638,10 @@ def execute_repairs(job, chosen, token):
         f"{'it' if failed_tracks == 1 else 'them'} again."
         if partly else ""
     )
+    repaired = fixed + len(partly)
+    of_chosen = "" if repaired == len(chosen) else f"{repaired} of "
     job.summary = (
-        f"Repaired {fixed + len(partly)}/{plural(len(chosen), 'album')}."
+        f"Repaired {of_chosen}{plural(len(chosen), 'album')}."
         f"{part}{kept}{unproven}{rescan}")
     if cd_quality_tracks:
         job.summary += f" {cd_quality_note(cd_quality_tracks)}"

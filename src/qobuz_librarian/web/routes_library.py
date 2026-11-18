@@ -158,6 +158,10 @@ def _library_header_note():
         detail = f"{current:,} of {total:,}"
         if unit:
             detail += f" {unit}s"
+        # Each step of a scan counts the artists again from the start.
+        step = str(job.progress_phase or "").partition(":")[0]
+        if step.startswith("Step "):
+            detail = f"{step.lower()} · {detail}"
     return {"label": "Refreshing…", "detail": detail,
             "title": "Checking your folders for music added outside the app."}
 

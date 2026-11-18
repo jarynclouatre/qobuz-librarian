@@ -115,3 +115,12 @@ def test_release_types_are_fetched_again_for_an_album_the_cache_never_saw(
         assert search.get_artist_release_types("empty", "tok", ["a1"]) is None
     finally:
         album_cache._reset_for_tests()
+
+
+def test_a_numeric_album_version_from_qobuz_is_read_as_text():
+    # Qobuz sends "Carta al mundo" with version 2018 as a number, and every
+    # reader of the field expects text.
+    from qobuz_librarian.api import search
+
+    album = search._normalize_album_fields({"title": "Carta al mundo", "version": 2018})
+    assert album["version"] == "2018"

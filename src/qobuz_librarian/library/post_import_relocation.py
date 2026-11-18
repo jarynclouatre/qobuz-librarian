@@ -1529,19 +1529,25 @@ def _remove_workspace(root_fd, workspace_fd, payload) -> None:
             continue
         if "prepared_record" not in unit:
             container = unit.get("container")
-            if container is None:
-                raise OSError("unfinished relocation copy has no identity proof")
             value = os.stat(name, dir_fd=workspace_fd, follow_symlinks=False)
-            if not _same_node_record(_stat_record(value), container):
+            if container is None:
+                # A kill between making the unit and journalling its identity
+                # leaves it empty, and only the unit being copied can be there.
+                if unit["index"] != payload["copying_index"] or (
+                    stat.S_ISREG(value.st_mode) and value.st_size
+                ):
+                    raise OSError("unfinished relocation copy has no identity proof")
+            elif not _same_node_record(_stat_record(value), container):
                 raise OSError("unfinished relocation copy changed")
             if stat.S_ISDIR(value.st_mode):
-                descriptor = _open_directory(name, dir_fd=workspace_fd)
-                try:
-                    _remove_incomplete_tree(descriptor)
-                    if os.listdir(descriptor):
-                        raise OSError("unfinished relocation tree is not empty")
-                finally:
-                    os.close(descriptor)
+                if container is not None:
+                    descriptor = _open_directory(name, dir_fd=workspace_fd)
+                    try:
+                        _remove_incomplete_tree(descriptor)
+                        if os.listdir(descriptor):
+                            raise OSError("unfinished relocation tree is not empty")
+                    finally:
+                        os.close(descriptor)
                 os.rmdir(name, dir_fd=workspace_fd)
             elif stat.S_ISREG(value.st_mode):
                 os.unlink(name, dir_fd=workspace_fd)

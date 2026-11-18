@@ -40,6 +40,15 @@ def test_normalize_tags_parses_slashed_track_and_disc_and_year():
     assert m.album_components(meta) == ("A", "B")
 
 
+def test_an_empty_original_date_does_not_hide_the_release_year():
+    # Beets writes ORIGINALDATE as "0000" when it has no original date.
+    meta = m.normalize_tags(
+        {"albumartist": ["A"], "album": ["B"], "title": ["T"],
+         "originaldate": ["0000"], "date": ["1983-08-01"]},
+        stem="T", ext=".flac")
+    assert meta["year"] == 1983
+
+
 def test_album_folder_keeps_an_edition_bracket_that_holds_a_year(tmp_path):
     """"Old Record (2011 Remaster)" from 1979 is named like the beets path,
     not folded into the plain "Old Record (1979)"; only a bracket that is

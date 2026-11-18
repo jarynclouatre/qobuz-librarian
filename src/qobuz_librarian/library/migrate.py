@@ -219,6 +219,15 @@ def _parse_year(s: str) -> int:
     return int(known_year(m.group(1)) or 0) if m else 0
 
 
+def _tag_year(tags: Mapping) -> int:
+    # Beets writes an unknown original date as "0000".
+    for key in ("originaldate", "date", "year"):
+        year = _parse_year(_first(tags, key))
+        if year:
+            return year
+    return 0
+
+
 def _is_compilation(tags: Mapping, albumartist: str) -> bool:
     flag = _first(tags, "compilation", "cpil", "tcmp").lower()
     if flag in ("1", "yes", "true"):
@@ -268,7 +277,7 @@ def normalize_tags(tags: Mapping, stem: str, ext: str, folder: str = "") -> dict
         "track": track,
         "disc": disc or 1,
         "disctotal": disc_total or disc_total_inline or 0,
-        "year": _parse_year(_first(tags, "originaldate", "date", "year")),
+        "year": _tag_year(tags),
         "compilation": _is_compilation(tags, albumartist),
         "ext": ext.lower(),
     }

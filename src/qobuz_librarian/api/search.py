@@ -30,6 +30,9 @@ def _normalize_album_fields(album):
         return album
     if "title" in album:
         album["title"] = clean_qobuz_string(album.get("title"))
+    if album.get("version"):
+        # Qobuz sends a version made only of digits ("2018") as a number.
+        album["version"] = clean_qobuz_string(str(album["version"]))
     artist = album.get("artist")
     if isinstance(artist, dict) and "name" in artist:
         artist["name"] = clean_qobuz_string(artist.get("name"))
@@ -51,8 +54,8 @@ def _normalize_track_fields(track):
         track["title"] = clean_qobuz_string(track.get("title"))
     if "album_artist" in track:
         track["album_artist"] = clean_qobuz_string(track.get("album_artist"))
-    if "version" in track and track.get("version"):
-        track["version"] = clean_qobuz_string(track.get("version"))
+    if track.get("version"):
+        track["version"] = clean_qobuz_string(str(track["version"]))
     inner_album = track.get("album")
     if isinstance(inner_album, dict):
         _normalize_album_fields(inner_album)

@@ -26,6 +26,7 @@ from qobuz_librarian.integrations import downsample_engine
 from qobuz_librarian.library import (
     backup,
     candidate_premise,
+    collection_snapshot,
     generation_state,
     library_scan_state,
     missing_types,
@@ -51,6 +52,7 @@ from qobuz_librarian.web import (
     runtime,
     saved_reviews,
     settings_store,
+    storage,
     track_downloads,
     write_gate,
 )
@@ -67,6 +69,10 @@ _LIBRARY_SURFACE_KINDS = ("library", "new_releases")
 _QOBUZ_REVIEW_KINDS = ("library", "new_releases", "upgrade", "repair",
                        "collection_restore")
 _PREMISE_REVIEW_KINDS = _QOBUZ_REVIEW_KINDS + ("downsample",)
+# Reviews of the library as it stands, which an empty music folder that once
+# held albums cannot act on. A restore is what refills one.
+_MUSIC_ROOT_REVIEW_KINDS = ("library", "new_releases", "upgrade", "repair",
+                            "downsample")
 # What the work each review starts needs of the disks it writes to.
 _REVIEW_DISK_FEATURES = {
     "library": ("downloads", "picks"),
@@ -675,6 +681,15 @@ async def _approve(request: Request, job_id: str):
                 *_REVIEW_DISK_FEATURES.get(job.execute_kind, ())))
         if disk_refusal:
             return _error_redirect(dest, disk_refusal)
+        if job.execute_kind in _MUSIC_ROOT_REVIEW_KINDS:
+            # Said before the folder checks below, which would call every
+            # album changed and advise a refresh that cannot run.
+            root_state, recorded = await loop.run_in_executor(
+                None, collection_snapshot.music_root_write_state)
+            if root_state != "ready":
+                return _error_redirect(
+                    dest, storage._music_write_target_message(
+                        root_state, recorded, diagnostic=True))
         if job.execute_kind in _PREMISE_REVIEW_KINDS:
             stale_premise_candidate_ids = await _stale_premise_candidates(
                 loop, job, selected_candidate_snapshot)

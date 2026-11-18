@@ -225,7 +225,8 @@ def _census_view():
             bar.append({"key": seg[tier],
                         "pct": max(1, round(100 * size / total_bytes))})
         view = {
-            "total": f"{raw['total_tracks']:,} tracks · "
+            "total": f"{raw['total_tracks']:,} "
+                     f"track{'s' if raw['total_tracks'] != 1 else ''} · "
                      f"{format_size(raw['total_bytes'])}",
             "rows": rows,
             "bar": bar,

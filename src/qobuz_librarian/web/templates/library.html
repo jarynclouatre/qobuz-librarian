@@ -72,6 +72,12 @@
   {% endif %}
 
   {% if library_job %}
+  {% set _root_gone = not library_scan_state.ready and not library_scan_state.empty %}
+  {% if _root_gone %}
+  <div class="ql-notice ql-notice-warning" role="status">
+    <span class="ql-notice-copy"><strong>Music library unavailable.</strong> {{ library_scan_state.message }}</span>
+  </div>
+  {% endif %}
   {% if library_resume and library_baseline_exists %}
   <div class="ql-notice ql-notice-info flex items-start flex-wrap gap-3 p-4">
     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-info" fill="none"
@@ -95,7 +101,9 @@
      reconnect ABOVE the review instead of replacing it - ticking and
      dismissing are local, only downloading needs Qobuz. #}
   {% with census_folded = true %}{% include "_census.html" %}{% endwith %}
-  {% with job = library_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
+  {% with job = library_job, embedded_surface = true,
+          downloads_paused = downloads_paused or _root_gone,
+          downloads_paused_reason = downloads_paused_reason or 'The music library is unavailable.' %}{% include "_job_body.html" %}{% endwith %}
 
   {% elif not library_scan_state.ready %}
   <section class="ql-work-card">
