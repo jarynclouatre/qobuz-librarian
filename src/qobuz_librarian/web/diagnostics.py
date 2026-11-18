@@ -353,57 +353,55 @@ def _size_note(path) -> str:
     return f" · {format_size(size)}" if size else ""
 
 
-def _diagnostics():
-    """Read-only health checks surfaced on the Settings page."""
-    checks = []
+def _dir_check(checks, label, path, *, want_writable, skip_names=(),
+               unit=("entry", "entries"), show_size=False,
+               dirs_only=False, note=""):
+    # The Library paths section above already resolves the same folders to
+    # the host path Docker exposes them at; naming this one by its
+    # container path would make the two sections disagree about what to
+    # call the same folder.
+    p = Path(path)
+    display, _is_host = storage._resolve_host_path(str(p))
+    if not p.exists():
+        hint = " (volume not mounted?)" if cfg.in_container() else ""
+        checks.append({"label": label, "ok": False,
+                       "detail": f"{display} does not exist{hint}"})
+        return
+    if not p.is_dir():
+        checks.append({"label": label, "ok": False,
+                       "detail": f"{display} exists but is not a directory"})
+        return
+    if want_writable and storage._docker_made_folder(p):
+        checks.append({"label": label, "ok": False,
+                       "detail": f"{display} {storage.DOCKER_MADE}. "
+                       "Check the path in your .env"})
+        return
+    if (want_writable and label == "Music library"
+            and storage.music_mounted_read_only()):
+        checks.append({"label": label, "ok": False,
+                       "detail": f"{display} is mounted read-only. "
+                       "Scans run; downloads are off"})
+        return
+    if want_writable and not os.access(p, os.W_OK):
+        checks.append({"label": label, "ok": False,
+                       "detail": f"{display} is not writable by the container user. "
+                       "On a NAS, set PUID/PGID in .env to your media-share owner"})
+        return
+    try:
+        n = sum(1 for entry in p.iterdir()
+                if entry.name not in skip_names
+                and (not dirs_only or entry.is_dir()))
+    except OSError as e:
+        checks.append({"label": label, "ok": False,
+                       "detail": f"{display} unreadable: {e}"})
+        return
+    size = (f" · {format_size(_tree_size(p, skip_names))}"
+            if show_size else "")
+    checks.append({"label": label, "ok": True, "mono": True,
+                   "detail": f"{display}: {plural(n, *unit)}{size}{note}"})
 
-    def _dir_check(label, path, *, want_writable, skip_names=(),
-                   unit=("entry", "entries"), show_size=False,
-                   dirs_only=False, note=""):
-        # The Library paths section above already resolves the same folders to
-        # the host path Docker exposes them at; naming this one by its
-        # container path would make the two sections disagree about what to
-        # call the same folder.
-        p = Path(path)
-        display, _is_host = storage._resolve_host_path(str(p))
-        if not p.exists():
-            hint = " (volume not mounted?)" if cfg.in_container() else ""
-            checks.append({"label": label, "ok": False,
-                           "detail": f"{display} does not exist{hint}"})
-            return
-        if not p.is_dir():
-            checks.append({"label": label, "ok": False,
-                           "detail": f"{display} exists but is not a directory"})
-            return
-        if want_writable and storage._docker_made_folder(p):
-            checks.append({"label": label, "ok": False,
-                           "detail": f"{display} {storage.DOCKER_MADE}. "
-                           "Check the path in your .env"})
-            return
-        if (want_writable and label == "Music library"
-                and storage.music_mounted_read_only()):
-            checks.append({"label": label, "ok": False,
-                           "detail": f"{display} is mounted read-only. "
-                           "Scans run; downloads are off"})
-            return
-        if want_writable and not os.access(p, os.W_OK):
-            checks.append({"label": label, "ok": False,
-                           "detail": f"{display} is not writable by the container user. "
-                           "On a NAS, set PUID/PGID in .env to your media-share owner"})
-            return
-        try:
-            n = sum(1 for entry in p.iterdir()
-                    if entry.name not in skip_names
-                    and (not dirs_only or entry.is_dir()))
-        except OSError as e:
-            checks.append({"label": label, "ok": False,
-                           "detail": f"{display} unreadable: {e}"})
-            return
-        size = (f" · {format_size(_tree_size(p, skip_names))}"
-                if show_size else "")
-        checks.append({"label": label, "ok": True, "mono": True,
-                       "detail": f"{display}: {plural(n, *unit)}{size}{note}"})
 
+def _pause_check(checks):
     # The panel exists to say what stops a scan or a download before one is
     # started, and a pause is the most direct reason there is.
     paused = write_gate._writes_paused_notice()
@@ -420,6 +418,8 @@ def _diagnostics():
         checks.append({"label": "Writes on", "ok": True,
                        "detail": "Not paused"})
 
+
+def _secret_file_checks(checks):
     for key, label in (("QOBUZ_USER_AUTH_TOKEN", "Qobuz token file"),
                        ("LASTFM_API_KEY", "Last.fm key file")):
         problem = cfg.SECRET_FILE_PROBLEMS.get(key)
@@ -428,9 +428,11 @@ def _diagnostics():
                            "detail": f"{problem} Fix the file or remove "
                                      f"{key}_FILE, then restart."})
 
+
+def _music_library_check(checks):
     music_state, recorded_albums = collection_snapshot.music_root_write_state()
     if music_state == "ready":
-        _dir_check("Music library", cfg.MUSIC_ROOT, want_writable=True,
+        _dir_check(checks, "Music library", cfg.MUSIC_ROOT, want_writable=True,
                    skip_names=scanner.SYSTEM_FOLDER_NAMES,
                    unit=("artist folder", "artist folders"), dirs_only=True)
     else:
@@ -443,6 +445,9 @@ def _diagnostics():
                 diagnostic=True,
             ),
         })
+
+
+def _staging_checks(checks):
     try:
         blocking = beets_mod.staging_leftover_entries()
         kept = tuple(name for name in staging_mod.kept_staging_run_names()
@@ -455,7 +460,7 @@ def _diagnostics():
         f" and {len(kept) - 3} more" if len(kept) > 3 else "")
     # The app's own recovery folder is not a staging entry and gets its own
     # check below, so this row says what it counted rather than "0 entries".
-    _dir_check("Staging area", cfg.STAGING_DIR, want_writable=True,
+    _dir_check(checks, "Staging area", cfg.STAGING_DIR, want_writable=True,
                skip_names={cfg.BEETS_RETRY_DIR, *idle}, show_size=True,
                unit=("album waiting to import", "albums waiting to import"),
                note=(f" · kept by --no-import for a manual beet import: "
@@ -463,7 +468,10 @@ def _diagnostics():
     if blocking:
         checks.append({"label": "Staging files", "ok": False,
                        "detail": str(beets_mod.StagingNotEmpty(blocking))})
-    _dir_check("Data folder", cfg.DATA_DIR, want_writable=True,
+
+
+def _data_folder_checks(checks):
+    _dir_check(checks, "Data folder", cfg.DATA_DIR, want_writable=True,
                unit=("item", "items"))
     # A single file left owned by another user, as a command run as root or a
     # PUID change leaves behind, passes the folder check above.
@@ -480,18 +488,13 @@ def _diagnostics():
         checks.append({"label": "Data folder files", "ok": False,
                        "detail": f"Not readable and writable by the container "
                        f"user: {shown}. Set their owner to PUID/PGID"})
+
+
+def _upgrade_backups_check(checks, retained, waiting):
     # A whole-directory count and size, the same shape as the Staging area
     # row above. The rows further down (Unfinished upgrade backups, Backups
     # needing review) each cover one problem subset; this is the total the
     # folder is actually holding.
-    try:
-        retained = backup_mod.list_retained_backups()
-    except Exception as exc:
-        retained = None
-        _log.warning(
-            "couldn't inspect kept recovery backups: %s", exc)
-    waiting = {item[0] for item in retained or ()
-               if backup_mod.awaiting_retention(item[0])}
     note = (f" · {plural(len(waiting), 'old copy', 'old copies')}, cleared "
             f"after {plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}"
             if waiting else "")
@@ -503,13 +506,12 @@ def _diagnostics():
                  if name.startswith(backup_mod._PARTIAL_COPY_PREFIX)}
     except OSError:
         pass
-    _dir_check("Upgrade backups", cfg.UPGRADE_BACKUP_DIR, want_writable=True,
+    _dir_check(checks, "Upgrade backups", cfg.UPGRADE_BACKUP_DIR, want_writable=True,
                show_size=True, unit=("kept backup", "kept backups"),
                dirs_only=True, note=note, skip_names=skip)
-    for label, ok, detail in disk_support.report(
-            lambda path: storage._resolve_host_path(str(path))[0]):
-        checks.append({"label": label, "ok": ok, "detail": detail})
 
+
+def _beets_database_check(checks):
     beets_db = Path(cfg.BEETS_DB_PATH)
     beets_db_display, _is_host = storage._resolve_host_path(str(beets_db))
     if beets_db.exists():
@@ -525,6 +527,8 @@ def _diagnostics():
         checks.append({"label": "Beets database", "ok": False,
                        "detail": f"{parent_display} does not exist"})
 
+
+def _tool_checks(checks):
     missing_tool_fix = ("Pull the image again (docker compose pull)."
                         if cfg.in_container()
                         else "See Quick start in the README.")
@@ -543,6 +547,8 @@ def _diagnostics():
         "detail": beets_detail,
     })
 
+
+def _unfinished_backup_check(checks):
     copies = []
     left_in_backups = []
     restores = []
@@ -600,6 +606,9 @@ def _diagnostics():
     else:
         checks.append({"label": "Unfinished upgrade backups", "ok": True,
                        "detail": "none"})
+
+
+def _backup_folder_check(checks):
     backup_dir = collection_snapshot.snapshot_dir()
     if cfg.collection_backup_dir_in_music(backup_dir):
         checks.append({
@@ -610,7 +619,8 @@ def _diagnostics():
                       "the backups with it.",
         })
 
-    inventory = {"orphans": [], "undo": [], "leftovers": []}
+
+def _backup_review_checks(checks, inventory, retained, waiting):
     if retained is not None:
         # An upgrade's backup inside its retention window is expected, not a
         # fault; the age sweep settles it.
@@ -655,6 +665,8 @@ def _diagnostics():
         checks.append({"label": "Backups needing review", "ok": True,
                        "detail": "none"})
 
+
+def _undo_copy_check(checks, inventory):
     # Counted separately from the backups above, which are a fault. These are
     # the undo copies a downsample was asked to keep, and the restore rows
     # below are theirs.
@@ -680,6 +692,8 @@ def _diagnostics():
                       "while the album still holds each track.",
         })
 
+
+def _staging_leftover_check(checks, inventory):
     try:
         inventory["leftovers"] = _staging_leftovers()
     except Exception as exc:
@@ -702,6 +716,36 @@ def _diagnostics():
     elif not any(d["label"] == "Files kept in staging" for d in checks):
         checks.append({"label": "Files kept in staging", "ok": True,
                        "detail": "none"})
+
+
+def _diagnostics():
+    """Read-only health checks surfaced on the Settings page."""
+    checks = []
+    _pause_check(checks)
+    _secret_file_checks(checks)
+    _music_library_check(checks)
+    _staging_checks(checks)
+    _data_folder_checks(checks)
+    try:
+        retained = backup_mod.list_retained_backups()
+    except Exception as exc:
+        retained = None
+        _log.warning(
+            "couldn't inspect kept recovery backups: %s", exc)
+    waiting = {item[0] for item in retained or ()
+               if backup_mod.awaiting_retention(item[0])}
+    _upgrade_backups_check(checks, retained, waiting)
+    for label, ok, detail in disk_support.report(
+            lambda path: storage._resolve_host_path(str(path))[0]):
+        checks.append({"label": label, "ok": ok, "detail": detail})
+    _beets_database_check(checks)
+    _tool_checks(checks)
+    _unfinished_backup_check(checks)
+    _backup_folder_check(checks)
+    inventory = {"orphans": [], "undo": [], "leftovers": []}
+    _backup_review_checks(checks, inventory, retained, waiting)
+    _undo_copy_check(checks, inventory)
+    _staging_leftover_check(checks, inventory)
     return {"checks": checks, **inventory}
 
 
@@ -730,19 +774,17 @@ def _album_gone_delete_form(tok, name, action, confirm):
         f'</form>')
 
 
-def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
-    """The diagnostics list items, plus a row per retained backup.
-
-    Shared by the Settings page render, the Recheck partial, and the restore
-    POST, which re-renders the list in place so a restored backup disappears
-    from it without a page reload."""
+def _fragment_report(diagnostics):
     if not isinstance(diagnostics, dict):
         report = _diagnostics()
         if diagnostics is not None:
             report["checks"] = diagnostics
     else:
         report = diagnostics
-    checks = report["checks"]
+    return report
+
+
+def _check_rows(checks):
     rows = []
     originals_at = None
     for d in checks:
@@ -761,289 +803,301 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
         )
         if d["label"] == "Hi-res originals kept" and d["ok"]:
             originals_at = len(rows)
-    orphans = report["orphans"]
-    tok = html.escape(request.state.csrf_token)
-    shared = Counter(
-        (origin, backup_mod.is_repair_backup(path)) for path, origin, _ in orphans)
-    for path, origin, classification in orphans:
-        name = html.escape(path.name)
-        if origin:
-            dest_display, _is_host = storage._resolve_host_path(str(origin))
-            dest = html.escape(dest_display)
-            album = html.escape(_album_name(origin))
+    return rows, originals_at
+
+
+def _backup_names(path, origin):
+    name = html.escape(path.name)
+    if origin:
+        dest_display, _is_host = storage._resolve_host_path(str(origin))
+        dest = html.escape(dest_display)
+        album = html.escape(_album_name(origin))
+    else:
+        dest = "its album folder"
+        album = ""
+    return name, dest, album
+
+
+def _disposal_leftover_row(rows, tok, path, origin, name, dest):
+    # Its Remove is the one a backup of its kind has, run on what is
+    # left.
+    location = html.escape(storage._resolve_host_path(str(path))[0])
+    if not origin:
+        detail = ("Deleting a backup did not finish, and the app can't "
+                  "tell which album it came from. What is left of it "
+                  "is in this folder:")
+        route, action = "/backups/discard-unchecked", "Delete anyway"
+        confirm = (f"Delete what is left of this backup at {location} "
+                   "without checking it? The app can't tell which "
+                   "album it came from, so this may be the only copy "
+                   "of its files. It cannot be undone.")
+    elif backup_mod.leftover_holds_originals(path):
+        detail = (f"Deleting the hi-res originals of {dest} did not "
+                  "finish. What is left of them is in this folder:")
+        route, action = "/backups/release-originals", "Remove"
+        confirm = ("Delete what is left of these hi-res originals? "
+                   "They are deleted only after the app checks that "
+                   "the album still holds each of these tracks. They "
+                   "are the only copies left at the original quality.")
+    else:
+        detail = (f"Deleting a backup of {dest} did not finish. What "
+                  "is left of it is in this folder:")
+        route, action = "/backups/discard", "Remove"
+        confirm = ("Delete what is left of this backup? It is deleted "
+                   f"only after the app checks that {dest} holds every "
+                   "file in it, or a verified copy of each track. If a "
+                   "track here has lyrics the album's copy lacks, "
+                   "Remove copies them onto it first, so they are kept.")
+    rows.append(
+        f'<div class="ql-diagnostic-row">'
+        f'<span class="ql-diagnostic-status '
+        f'ql-diagnostic-status-error" '
+        f'aria-label="Needs attention">!</span>'
+        f'<div class="min-w-0"><div '
+        f'class="ql-diagnostic-label">Unfinished backup deletion'
+        f'</div><div class="ql-diagnostic-detail">{detail}</div>'
+        f'<div class="ql-diagnostic-detail ql-diagnostic-detail-mono">'
+        f'{location}</div>'
+        f'<form hx-post="{route}" '
+        f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
+        f'<input type="hidden" name="_csrf_token" value="{tok}">'
+        f'<input type="hidden" name="backup" value="{name}">'
+        f'<button type="submit" class="ql-btn ql-btn-sm" '
+        f'data-confirm="{confirm}" data-confirm-action="{action}" '
+        f'data-irreversible>{action}</button>'
+        f'</form></div></div>'
+    )
+
+
+def _set_aside_row(rows, tok, path, classification, name, dest, album):
+    # Restore would put this download over the album's original. One
+    # whose folder is gone is listed as a backup, which Restore can
+    # put back. A later upgrade that landed the same files leaves
+    # nothing here the album lacks.
+    same = classification.reason == "identical"
+    if same:
+        chip = ('<span class="ql-diagnostic-status '
+                'ql-diagnostic-status-ok" aria-label="OK">OK</span>')
+        detail = (f"{dest} now holds the same files as this "
+                  "download, so it is safe to delete.")
+        confirm = "Delete this download? The album holds the same files."
+        irreversible = ""
+    else:
+        chip = ('<span class="ql-diagnostic-status '
+                'ql-diagnostic-status-error" '
+                'aria-label="Needs attention">!</span>')
+        detail = ("An upgrade couldn't verify this download, so the "
+                  f"original album was put back in {dest}.")
+        confirm = ("Delete this download? The album keeps the files "
+                   "it has now.")
+        irreversible = " data-irreversible"
+    rows.append(
+        f'<div class="ql-diagnostic-row" data-backup-status="set-aside">'
+        f'{chip}'
+        f'<div class="min-w-0"><div class="ql-diagnostic-label">'
+        f'Download set aside{f": {album}" if album else ""}'
+        f'{_size_note(path)}</div>'
+        f'<div class="ql-diagnostic-detail">{detail}</div>'
+        f'<form hx-post="/backups/discard-unchecked" '
+        f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
+        f'<input type="hidden" name="_csrf_token" value="{tok}">'
+        f'<input type="hidden" name="backup" value="{name}">'
+        f'<button type="submit" class="ql-btn ql-btn-sm" '
+        f'data-confirm="{confirm}" data-confirm-action="Delete"'
+        f'{irreversible}>Delete</button>'
+        f'</form></div></div>'
+    )
+
+
+def _backup_row(rows, tok, shared, path, origin, classification,
+                name, dest, album):
+    reason = html.escape(classification.detail)
+    status = "ok" if classification.removable else "error"
+    icon = "OK" if classification.removable else "!"
+    aria = "OK" if classification.removable else "Needs attention"
+    where = dest if origin else "the album folder it came from"
+    by_file = re.match(
+        r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_", path.name)
+    repaired = backup_mod.is_repair_backup(path)
+    kept = ""
+    if shared[origin, repaired] > 1:
+        stamp = re.match(r"(\d{8}_\d{6})_", path.name)
+        try:
+            when = datetime.strptime(stamp.group(1), "%Y%m%d_%H%M%S")
+        except (AttributeError, ValueError):
+            pass
         else:
-            dest = "its album folder"
-            album = ""
-        if backup_mod.is_disposal_leftover(path):
-            # Its Remove is the one a backup of its kind has, run on what is
-            # left.
-            location = html.escape(storage._resolve_host_path(str(path))[0])
-            if not origin:
-                detail = ("Deleting a backup did not finish, and the app can't "
-                          "tell which album it came from. What is left of it "
-                          "is in this folder:")
-                route, action = "/backups/discard-unchecked", "Delete anyway"
-                confirm = (f"Delete what is left of this backup at {location} "
-                           "without checking it? The app can't tell which "
-                           "album it came from, so this may be the only copy "
-                           "of its files. It cannot be undone.")
-            elif backup_mod.leftover_holds_originals(path):
-                detail = (f"Deleting the hi-res originals of {dest} did not "
-                          "finish. What is left of them is in this folder:")
-                route, action = "/backups/release-originals", "Remove"
-                confirm = ("Delete what is left of these hi-res originals? "
-                           "They are deleted only after the app checks that "
-                           "the album still holds each of these tracks. They "
-                           "are the only copies left at the original quality.")
-            else:
-                detail = (f"Deleting a backup of {dest} did not finish. What "
-                          "is left of it is in this folder:")
-                route, action = "/backups/discard", "Remove"
-                confirm = ("Delete what is left of this backup? It is deleted "
-                           f"only after the app checks that {dest} holds every "
-                           "file in it, or a verified copy of each track. If a "
-                           "track here has lyrics the album's copy lacks, "
-                           "Remove copies them onto it first, so they are kept.")
-            rows.append(
-                f'<div class="ql-diagnostic-row">'
-                f'<span class="ql-diagnostic-status '
-                f'ql-diagnostic-status-error" '
-                f'aria-label="Needs attention">!</span>'
-                f'<div class="min-w-0"><div '
-                f'class="ql-diagnostic-label">Unfinished backup deletion'
-                f'</div><div class="ql-diagnostic-detail">{detail}</div>'
-                f'<div class="ql-diagnostic-detail ql-diagnostic-detail-mono">'
-                f'{location}</div>'
-                f'<form hx-post="{route}" '
-                f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
-                f'<input type="hidden" name="_csrf_token" value="{tok}">'
-                f'<input type="hidden" name="backup" value="{name}">'
-                f'<button type="submit" class="ql-btn ql-btn-sm" '
-                f'data-confirm="{confirm}" data-confirm-action="{action}" '
-                f'data-irreversible>{action}</button>'
-                f'</form></div></div>'
-            )
-            continue
-        if (backup_mod.is_set_aside_replacement(path)
-                and origin and Path(origin).is_dir()):
-            # Restore would put this download over the album's original. One
-            # whose folder is gone is listed as a backup, which Restore can
-            # put back. A later upgrade that landed the same files leaves
-            # nothing here the album lacks.
-            same = classification.reason == "identical"
-            if same:
-                chip = ('<span class="ql-diagnostic-status '
-                        'ql-diagnostic-status-ok" aria-label="OK">OK</span>')
-                detail = (f"{dest} now holds the same files as this "
-                          "download, so it is safe to delete.")
-                confirm = "Delete this download? The album holds the same files."
-                irreversible = ""
-            else:
-                chip = ('<span class="ql-diagnostic-status '
-                        'ql-diagnostic-status-error" '
-                        'aria-label="Needs attention">!</span>')
-                detail = ("An upgrade couldn't verify this download, so the "
-                          f"original album was put back in {dest}.")
-                confirm = ("Delete this download? The album keeps the files "
-                           "it has now.")
-                irreversible = " data-irreversible"
-            rows.append(
-                f'<div class="ql-diagnostic-row" data-backup-status="set-aside">'
-                f'{chip}'
-                f'<div class="min-w-0"><div class="ql-diagnostic-label">'
-                f'Download set aside{f": {album}" if album else ""}'
-                f'{_size_note(path)}</div>'
-                f'<div class="ql-diagnostic-detail">{detail}</div>'
-                f'<form hx-post="/backups/discard-unchecked" '
-                f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
-                f'<input type="hidden" name="_csrf_token" value="{tok}">'
-                f'<input type="hidden" name="backup" value="{name}">'
-                f'<button type="submit" class="ql-btn ql-btn-sm" '
-                f'data-confirm="{confirm}" data-confirm-action="Delete"'
-                f'{irreversible}>Delete</button>'
-                f'</form></div></div>'
-            )
-            continue
-        reason = html.escape(classification.detail)
-        status = "ok" if classification.removable else "error"
-        icon = "OK" if classification.removable else "!"
-        aria = "OK" if classification.removable else "Needs attention"
-        where = dest if origin else "the album folder it came from"
-        by_file = re.match(
-            r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_", path.name)
-        repaired = backup_mod.is_repair_backup(path)
-        kept = ""
-        if shared[origin, repaired] > 1:
-            stamp = re.match(r"(\d{8}_\d{6})_", path.name)
-            try:
-                when = datetime.strptime(stamp.group(1), "%Y%m%d_%H%M%S")
-            except (AttributeError, ValueError):
-                pass
-            else:
-                kept = (f", kept {when:%b} {when.day}, {when:%H:%M:%S}"
-                        f"{clock_zone()}")
-        if repaired:
-            restore_confirm = (
-                f"Put these damaged tracks back in {where}? They replace "
-                "any file of the same name there, including a replacement "
-                "Repair downloaded, and that file cannot be brought back.")
-        elif by_file:
-            # These restore file by file and the backup wins each swap.
-            restore_confirm = (
-                f"Put these files back in {where}? Any file of the same name "
-                "there is replaced and cannot be brought back.")
-        else:
-            restore_confirm = (
-                f"Put this album back in {where}? Restore goes ahead only "
-                "while that folder holds less than the backup, and replaces "
-                "what it holds.")
-        # Remove proves every file back first, so it can only succeed where
-        # the listing could not finish its own check or found it removable.
-        # A consolidation's tracks are proved in the album it kept.
-        consolidated = backup_mod.consolidated_into(path)
-        checked = html.escape(storage._resolve_host_path(
-            str(consolidated[0]))[0]) if consolidated else where
-        if consolidated:
-            reason = f"These tracks were merged into {checked}. {reason}"
-        if by_file and not consolidated and classification.reason == "missing":
-            reason += " Restore puts it back."
-        gone = backup_mod.album_folder_gone(path)
-        if gone:
-            reason += (" It was deleted, moved or renamed, so nothing can "
-                       "check this backup against it any more. Restore puts "
-                       "the files back there; Delete anyway removes the "
-                       "backup, which may be the only copy of its files.")
-        lyrics = (
-            f" The lyrics of its {html.escape(classification.file)} are "
-            "copied onto the same track in the album first, so they are kept."
-            if classification.reason in {"lyrics", "compare"}
-            and classification.file else
-            " If a track here has lyrics the album's copy lacks, Remove "
-            "copies them onto it first, so they are kept."
-            if classification.reason == "budget" else "")
-        remove_form = (
-            f'<form hx-post="/backups/discard" hx-target="#diagnostics-list" data-busy-submit>'
-            f'<input type="hidden" name="_csrf_token" value="{tok}">'
-            f'<input type="hidden" name="backup" value="{name}">'
-            f'<button type="submit" class="ql-btn ql-btn-sm" '
-            f'data-confirm="Remove this backup? It is deleted only after '
-            f'the app checks that {checked} holds every file in it, or a '
-            f'verified copy of each track.{lyrics}" '
-            f'data-confirm-action="Remove" data-irreversible>Remove</button>'
-            f'</form>'
-        ) if classification.status != "retained" else ""
-        if gone:
-            remove_form = _album_gone_delete_form(
-                tok, name, "Delete anyway",
-                f"Delete this backup? {checked} is no longer in your library, "
-                "so this may be the only copy of its files. It cannot be "
-                "undone.")
-        rows.append(
-            f'<div class="ql-diagnostic-row" data-backup-status="{classification.status}">'
-            f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'
-            f'<div class="min-w-0"><div class="ql-diagnostic-label">'
-            f'{"Damaged tracks Repair replaced" if repaired else "Backup"}'
-            f'{f": {album}" if album else ""}{kept}{_size_note(path)}</div>'
-            f'<div class="ql-diagnostic-detail">{reason}</div>'
-            f'<div class="mt-2 flex gap-2">'
+            kept = (f", kept {when:%b} {when.day}, {when:%H:%M:%S}"
+                    f"{clock_zone()}")
+    if repaired:
+        restore_confirm = (
+            f"Put these damaged tracks back in {where}? They replace "
+            "any file of the same name there, including a replacement "
+            "Repair downloaded, and that file cannot be brought back.")
+    elif by_file:
+        # These restore file by file and the backup wins each swap.
+        restore_confirm = (
+            f"Put these files back in {where}? Any file of the same name "
+            "there is replaced and cannot be brought back.")
+    else:
+        restore_confirm = (
+            f"Put this album back in {where}? Restore goes ahead only "
+            "while that folder holds less than the backup, and replaces "
+            "what it holds.")
+    # Remove proves every file back first, so it can only succeed where
+    # the listing could not finish its own check or found it removable.
+    # A consolidation's tracks are proved in the album it kept.
+    consolidated = backup_mod.consolidated_into(path)
+    checked = html.escape(storage._resolve_host_path(
+        str(consolidated[0]))[0]) if consolidated else where
+    if consolidated:
+        reason = f"These tracks were merged into {checked}. {reason}"
+    if by_file and not consolidated and classification.reason == "missing":
+        reason += " Restore puts it back."
+    gone = backup_mod.album_folder_gone(path)
+    if gone:
+        reason += (" It was deleted, moved or renamed, so nothing can "
+                   "check this backup against it any more. Restore puts "
+                   "the files back there; Delete anyway removes the "
+                   "backup, which may be the only copy of its files.")
+    lyrics = (
+        f" The lyrics of its {html.escape(classification.file)} are "
+        "copied onto the same track in the album first, so they are kept."
+        if classification.reason in {"lyrics", "compare"}
+        and classification.file else
+        " If a track here has lyrics the album's copy lacks, Remove "
+        "copies them onto it first, so they are kept."
+        if classification.reason == "budget" else "")
+    remove_form = (
+        f'<form hx-post="/backups/discard" hx-target="#diagnostics-list" data-busy-submit>'
+        f'<input type="hidden" name="_csrf_token" value="{tok}">'
+        f'<input type="hidden" name="backup" value="{name}">'
+        f'<button type="submit" class="ql-btn ql-btn-sm" '
+        f'data-confirm="Remove this backup? It is deleted only after '
+        f'the app checks that {checked} holds every file in it, or a '
+        f'verified copy of each track.{lyrics}" '
+        f'data-confirm-action="Remove" data-irreversible>Remove</button>'
+        f'</form>'
+    ) if classification.status != "retained" else ""
+    if gone:
+        remove_form = _album_gone_delete_form(
+            tok, name, "Delete anyway",
+            f"Delete this backup? {checked} is no longer in your library, "
+            "so this may be the only copy of its files. It cannot be "
+            "undone.")
+    rows.append(
+        f'<div class="ql-diagnostic-row" data-backup-status="{classification.status}">'
+        f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'
+        f'<div class="min-w-0"><div class="ql-diagnostic-label">'
+        f'{"Damaged tracks Repair replaced" if repaired else "Backup"}'
+        f'{f": {album}" if album else ""}{kept}{_size_note(path)}</div>'
+        f'<div class="ql-diagnostic-detail">{reason}</div>'
+        f'<div class="mt-2 flex gap-2">'
+        f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
+        f'<input type="hidden" name="_csrf_token" value="{tok}">'
+        f'<input type="hidden" name="backup" value="{name}">'
+        f'<button type="submit" class="ql-btn ql-btn-sm" '
+        f'data-confirm="{restore_confirm}" '
+        f'data-confirm-action="Restore" data-irreversible>Restore</button>'
+        f'</form>'
+        f'{remove_form}'
+        f'</div></div></div>'
+    )
+
+
+def _undo_state(undo, tok, path, origin, restorable, name, dest, album):
+    if restorable:
+        detail = (
+            f'Copies of the files this album had before it was '
+            f'downsampled, so the rewrite can be undone; cleared '
+            f'automatically after '
+            f'{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, "day")}.')
+        restore_form = (
             f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
             f'<input type="hidden" name="backup" value="{name}">'
             f'<button type="submit" class="ql-btn ql-btn-sm" '
-            f'data-confirm="{restore_confirm}" '
-            f'data-confirm-action="Restore" data-irreversible>Restore</button>'
-            f'</form>'
-            f'{remove_form}'
-            f'</div></div></div>'
-        )
-    undo = report["undo"]
+            f'data-confirm="Put the hi-res originals of '
+            f'{album or dest} back? This undoes the downsample." '
+            f'data-confirm-action="Restore">Restore</button>'
+            f'</form>')
+        what = "hi-res originals"
+        delete_note = (
+            " They are the only copies left at the original quality. The "
+            "album keeps its downsampled files, and the downsample can no "
+            "longer be undone.")
+    elif _newer_downsample_first(path, origin, undo):
+        detail = (
+            "Copies of the files this album had before it was "
+            "downsampled. Downsample ran on it again later, so these "
+            "can't be put back yet. Restore the newer Downsample copy of "
+            "this album first.")
+        restore_form = ""
+        what = "hi-res originals"
+        delete_note = (
+            " Any track Downsample rewrote has no other copy at the "
+            "original quality.")
+    elif backup_mod.downsample_left_untouched(
+            backup_mod.load_backup_result(path)):
+        detail = (
+            "Copies of this album's files from a Downsample that stopped "
+            "before it changed any of them. The album still holds every "
+            "original, so these copies are not needed.")
+        restore_form = ""
+        what = "unneeded copies"
+        delete_note = ""
+    else:
+        detail = (
+            "Copies of the files this album had before it was "
+            "downsampled. The app can't confirm which files Downsample "
+            "rewrote, or the album changed since, so they can't be put "
+            "back.")
+        restore_form = ""
+        what = "hi-res originals"
+        delete_note = (
+            " Any track Downsample rewrote has no other copy at the "
+            "original quality.")
+    return detail, restore_form, what, delete_note
+
+
+def _undo_delete_form(tok, path, name, dest, album, detail, what, delete_note):
+    gone = backup_mod.album_folder_gone(path)
+    if gone:
+        detail = (
+            f"Copies of the files this album had before it was "
+            f"downsampled. {dest} is no longer in your library: it was "
+            "deleted, moved or renamed. These originals can't be put "
+            "back or cleared automatically, and they may be the only "
+            "copy of these tracks.")
+        delete_form = _album_gone_delete_form(
+            tok, name, "Delete originals",
+            f"Delete the hi-res originals of {album or dest}? Its album "
+            "folder is gone, so they may be the only copy of these "
+            "tracks. It cannot be undone.")
+    else:
+        delete_form = (
+            f'<form hx-post="/backups/release-originals" '
+            f'hx-target="#diagnostics-list" data-busy-submit>'
+            f'<input type="hidden" name="_csrf_token" value="{tok}">'
+            f'<input type="hidden" name="backup" value="{name}">'
+            f'<button type="submit" class="ql-btn ql-btn-sm" '
+            f'data-confirm="Delete the {what} of {album or dest}? They are '
+            f'deleted only after the app checks that the album still holds '
+            f'each of these tracks.{delete_note}" '
+            f'data-confirm-action="Delete originals" data-irreversible>'
+            f'Delete originals</button>'
+            f'</form>')
+    return detail, delete_form
+
+
+def _undo_rows(tok, undo):
     undo_rows = []
     for path, origin, restorable in undo:
-        name = html.escape(path.name)
-        if origin:
-            dest_display, _is_host = storage._resolve_host_path(str(origin))
-            dest = html.escape(dest_display)
-            album = html.escape(_album_name(origin))
-        else:
-            dest = "its album folder"
-            album = ""
-        if restorable:
-            detail = (
-                f'Copies of the files this album had before it was '
-                f'downsampled, so the rewrite can be undone; cleared '
-                f'automatically after '
-                f'{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, "day")}.')
-            restore_form = (
-                f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
-                f'<input type="hidden" name="_csrf_token" value="{tok}">'
-                f'<input type="hidden" name="backup" value="{name}">'
-                f'<button type="submit" class="ql-btn ql-btn-sm" '
-                f'data-confirm="Put the hi-res originals of '
-                f'{album or dest} back? This undoes the downsample." '
-                f'data-confirm-action="Restore">Restore</button>'
-                f'</form>')
-            what = "hi-res originals"
-            delete_note = (
-                " They are the only copies left at the original quality. The "
-                "album keeps its downsampled files, and the downsample can no "
-                "longer be undone.")
-        elif _newer_downsample_first(path, origin, undo):
-            detail = (
-                "Copies of the files this album had before it was "
-                "downsampled. Downsample ran on it again later, so these "
-                "can't be put back yet. Restore the newer Downsample copy of "
-                "this album first.")
-            restore_form = ""
-            what = "hi-res originals"
-            delete_note = (
-                " Any track Downsample rewrote has no other copy at the "
-                "original quality.")
-        elif backup_mod.downsample_left_untouched(
-                backup_mod.load_backup_result(path)):
-            detail = (
-                "Copies of this album's files from a Downsample that stopped "
-                "before it changed any of them. The album still holds every "
-                "original, so these copies are not needed.")
-            restore_form = ""
-            what = "unneeded copies"
-            delete_note = ""
-        else:
-            detail = (
-                "Copies of the files this album had before it was "
-                "downsampled. The app can't confirm which files Downsample "
-                "rewrote, or the album changed since, so they can't be put "
-                "back.")
-            restore_form = ""
-            what = "hi-res originals"
-            delete_note = (
-                " Any track Downsample rewrote has no other copy at the "
-                "original quality.")
-        gone = backup_mod.album_folder_gone(path)
-        if gone:
-            detail = (
-                f"Copies of the files this album had before it was "
-                f"downsampled. {dest} is no longer in your library: it was "
-                "deleted, moved or renamed. These originals can't be put "
-                "back or cleared automatically, and they may be the only "
-                "copy of these tracks.")
-            delete_form = _album_gone_delete_form(
-                tok, name, "Delete originals",
-                f"Delete the hi-res originals of {album or dest}? Its album "
-                "folder is gone, so they may be the only copy of these "
-                "tracks. It cannot be undone.")
-        else:
-            delete_form = (
-                f'<form hx-post="/backups/release-originals" '
-                f'hx-target="#diagnostics-list" data-busy-submit>'
-                f'<input type="hidden" name="_csrf_token" value="{tok}">'
-                f'<input type="hidden" name="backup" value="{name}">'
-                f'<button type="submit" class="ql-btn ql-btn-sm" '
-                f'data-confirm="Delete the {what} of {album or dest}? They are '
-                f'deleted only after the app checks that the album still holds '
-                f'each of these tracks.{delete_note}" '
-                f'data-confirm-action="Delete originals" data-irreversible>'
-                f'Delete originals</button>'
-                f'</form>')
+        name, dest, album = _backup_names(path, origin)
+        detail, restore_form, what, delete_note = _undo_state(
+            undo, tok, path, origin, restorable, name, dest, album)
+        detail, delete_form = _undo_delete_form(
+            tok, path, name, dest, album, detail, what, delete_note)
         undo_rows.append(
             f'<div class="ql-diagnostic-row">'
             f'<span class="ql-diagnostic-status" aria-hidden="true"></span>'
@@ -1056,11 +1110,10 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'{delete_form}'
             f'</div></div></div>'
         )
-    if originals_at is None:
-        rows.extend(undo_rows)
-    else:
-        rows[originals_at:originals_at] = undo_rows
-    leftovers = report["leftovers"]
+    return undo_rows
+
+
+def _leftover_rows(rows, tok, leftovers):
     for leftover in leftovers:
         detail = html.escape(leftover["reason"])
         if leftover["note"]:
@@ -1107,6 +1160,40 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             f'<div class="ql-diagnostic-detail">{detail}</div>'
             f'{action}</div></div>'
         )
+
+
+def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
+    """The diagnostics list items, plus a row per retained backup.
+
+    Shared by the Settings page render, the Recheck partial, and the restore
+    POST, which re-renders the list in place so a restored backup disappears
+    from it without a page reload."""
+    report = _fragment_report(diagnostics)
+    checks = report["checks"]
+    rows, originals_at = _check_rows(checks)
+    orphans = report["orphans"]
+    tok = html.escape(request.state.csrf_token)
+    shared = Counter(
+        (origin, backup_mod.is_repair_backup(path)) for path, origin, _ in orphans)
+    for path, origin, classification in orphans:
+        name, dest, album = _backup_names(path, origin)
+        if backup_mod.is_disposal_leftover(path):
+            _disposal_leftover_row(rows, tok, path, origin, name, dest)
+            continue
+        if (backup_mod.is_set_aside_replacement(path)
+                and origin and Path(origin).is_dir()):
+            _set_aside_row(rows, tok, path, classification, name, dest, album)
+            continue
+        _backup_row(rows, tok, shared, path, origin, classification,
+                    name, dest, album)
+    undo = report["undo"]
+    undo_rows = _undo_rows(tok, undo)
+    if originals_at is None:
+        rows.extend(undo_rows)
+    else:
+        rows[originals_at:originals_at] = undo_rows
+    leftovers = report["leftovers"]
+    _leftover_rows(rows, tok, leftovers)
     return "\n".join(rows)
 
 
