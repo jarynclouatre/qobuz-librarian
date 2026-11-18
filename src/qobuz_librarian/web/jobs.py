@@ -2276,6 +2276,222 @@ def _clear_legacy_pause(job: Job) -> bool:
     return True
 
 
+def _cut_off_download(job, status, cut_off, unsettled, journaled):
+    """What start-up did with this download's saved queue entry, or None
+    when the job is not a download a restart cut off."""
+    settled = (cut_off or {}).get(job.id)
+    if (
+        settled is None
+        and status == JobStatus.RUNNING
+        and job.kind == "download"
+        and job.album_id
+        and journaled is not None
+        and job.id not in journaled
+        and set(job.single or {}) <= {"album_id", "track_id"}
+        and not (job.execute_args or {}).get("new_edition")
+        and (job.finished_at is not None
+             or not (job.execute_args or {}).get(job_persistence.SAVED_QUEUE))
+    ):
+        # Its partial download was a run folder no saved queue claimed,
+        # which start-up has already removed, or a saved one the stop
+        # discarded itself.
+        settled = _RunningDownload(album_id=job.album_id)
+    if settled is not None and (
+        job.id in unsettled
+        or job.recoveries
+        or job.execute_args_unreadable
+        or normalise_album_id(job.album_id)
+        != normalise_album_id(settled.album_id)
+    ):
+        settled = None
+    return settled
+
+
+def _cancel_interrupted_album_run(job):
+    # Stopping folded the albums it had not finished back into the
+    # review and logged what it did last.
+    job.status = JobStatus.CANCELED
+    restart = job_persistence.RESTART_INTERRUPTED + " "
+    stopped = next((line for line in reversed(job.log_lines)
+                    if line.startswith("Stopped early. ")), "")
+    done = (job.execute_args or {}).get(job_persistence.ALBUMS_DONE)
+    if stopped:
+        job.summary = restart + stopped.removeprefix("Stopped early. ")
+        if job.execute_kind == "library":
+            job.attention = "interrupted"
+    elif done:
+        picked = (job.execute_args or {}).get(
+            job_persistence.ALBUMS_PICKED) or done + sum(
+                1 for c in job.candidates if c.get("selected"))
+        job.summary = (restart + f"{done} of "
+                       f"{plural(max(picked, done), 'album')} downloaded "
+                       "before it stopped. The rest did not finish.")
+    else:
+        job.summary = restart.rstrip()
+    job.finished_at = job.finished_at or time.time()
+
+
+def _cancel_interrupted_lyrics(job):
+    # Every lyric written stays, and the next run skips the tracks
+    # this one checked.
+    job.status = JobStatus.CANCELED
+    stopped = next((line for line in reversed(job.log_lines)
+                    if line.startswith(library_lyrics.STOPPED)), "")
+    job.summary = (
+        job_persistence.RESTART_INTERRUPTED + " "
+        + (stopped or "The lyrics it wrote are kept, and the next "
+           "run looks up the tracks it had not checked."))
+    job.finished_at = job.finished_at or time.time()
+
+
+def _fail_interrupted_run(job, *, unsettled, finished_upgrades, returns_picks):
+    """Mark a job a restart stopped as failed, saying how far it got and
+    where to start it again."""
+    job.status = JobStatus.FAILED
+    if job.execute_kind in ("upgrade", "downsample", "repair"):
+        # A run keeps its review's job, and with it the review's
+        # summary, which no longer describes this run.
+        job.summary = ""
+    # Only an album download / single-track download carries an
+    # album_id, and only those get a Retry button on the job + history
+    # pages.
+    restart = job_persistence.RESTART_INTERRUPTED + " "
+    done = (job.execute_args or {}).get(job_persistence.ALBUMS_DONE)
+    verb = _RUN_DONE_VERBS.get(job.execute_kind)
+    picked = sum(1 for c in job.candidates if c.get("selected"))
+    finished = 0
+    if job.execute_kind == "upgrade":
+        finished = sum(
+            1 for c in job.candidates if c.get("selected")
+            and (c.get("payload") or {}).get("album_dir")
+            in finished_upgrades)
+    if finished:
+        done = (done or 0) + finished
+        job.execute_args = {**(job.execute_args or {}),
+                            job_persistence.ALBUMS_DONE: done}
+    if done and verb:
+        restart += (f"{done} of {plural(max(picked, done), 'album')} "
+                    f"{verb}")
+        restart += ("; the one it was upgrading when it stopped was "
+                    "finished when the app started again. "
+                    if finished else " before it stopped. ")
+    if job.execute_args_unreadable:
+        job.error = (
+            restart
+            + "The saved details needed to retry this job couldn't "
+            "be read. Start it again from its original page."
+        )
+    elif job.id in unsettled:
+        job.error = (restart + "Its download couldn't be cleared, "
+                     "so downloads and scans are paused. "
+                     "Qobuz Librarian tries again when it restarts.")
+        job.attention = "recovery"
+    elif job.album_id:
+        job.error = restart + "Use Retry to download it again."
+    elif job.execute_kind == "lyrics":
+        job.error = restart + "Start it again from the Lyrics page."
+    elif job.execute_kind == "migration":
+        # The review's summary still described the plan; this run
+        # stopped part way, and what it had done stays done.
+        args = job.execute_args or {}
+        verb = "moved" if args.get("in_place") else "copied"
+        job.summary = (
+            "Stopped by a restart part way through. Files it had "
+            f"already {verb} are in the destination and verified; "
+            "the rest are still in the source. Start it again from "
+            "the Library migration page: it skips what is already "
+            "there."
+            + (f" The plan is saved at {args['manifest']}."
+               if args.get("manifest") else ""))
+        job.error = restart.rstrip()
+        job.attention = "failed"
+    elif job.execute_kind == "library":
+        job.error = restart + "Start the scan again from the Library page."
+    elif job.execute_kind == "downsample":
+        job.error = restart + "Start it again from Downsample."
+    elif job.execute_kind == "upgrade":
+        job.error = (restart.rstrip() if done and done >= picked
+                     else restart + "Start it again from Upgrade.")
+    elif returns_picks and job.execute_kind == "collection_restore":
+        job.error = restart.rstrip()
+    else:
+        job.error = restart + "Run it again to retry."
+    if job.recoveries:
+        job.error = (restart + "The original files were kept; check "
+                     "them before retrying.")
+    job.finished_at = job.finished_at or time.time()
+    job._cut_short_this_start = True
+
+
+def _review_restore_error(job, row, execute_registry):
+    """Bind a saved review to its executor again. Returns why it could not
+    be restored, or None."""
+    if job.recoveries:
+        # Older builds could re-park a Repair after its originals had
+        # already been retained.
+        return ("The original files were kept. Check or "
+                "restore them before retrying this repair.")
+    if row.get("candidates_unreadable"):
+        return (
+            "This saved review couldn't be restored because its choices could "
+            "not be read. Start the scan again from its original page."
+        )
+    if job.execute_args_unreadable:
+        return (
+            "The saved details needed to resume this review couldn't "
+            "be read. Start it again from its original page."
+        )
+    factory = execute_registry.get(job.execute_kind)
+    if factory is None:
+        return ("Couldn't restore this job's executor across "
+                "the restart. Re-run the original scan.")
+    try:
+        execute_fn = factory(job, job.execute_args)
+        if not callable(execute_fn):
+            raise TypeError("restored executor is not callable")
+    except Exception:
+        log.exception("couldn't restore executor for job %s", job.id)
+        return (
+            "The saved details needed to resume this review "
+            "couldn't be restored. Start it again from its "
+            "original page."
+        )
+    job._execute_fn = execute_fn
+    return None
+
+
+def _put_back_pending_reviews(pending_reviews):
+    for job in pending_reviews:
+        if not _restore_untouched_review(job, status=JobStatus.PENDING):
+            with job._lock:
+                job.status = JobStatus.FAILED
+                job.attention = "failed"
+                job.finished_at = job.finished_at or time.time()
+                job.error = (
+                    job_persistence.RESTART_INTERRUPTED + " Its picks could "
+                    "not be put back in the review. Run the scan again."
+                )
+            job_persistence.persist(job)
+
+
+def _return_cut_short_picks(cut_short, return_picks):
+    for job in cut_short:
+        try:
+            outcome = return_picks(job)
+        except Exception:
+            log.exception("couldn't return the picks of job %s", job.id)
+            continue
+        if not outcome or job.execute_kind not in (
+                "library", "new_releases", "collection_restore"):
+            continue
+        with job._lock:
+            if job.status is JobStatus.CANCELED:
+                job.summary = f"{job.summary} {outcome}"
+            else:
+                job.error = f"{job.error} {outcome}"
+        job_persistence.persist(job)
+
+
 def restore_jobs(
     execute_registry: dict,
     *,
@@ -2336,11 +2552,6 @@ def restore_jobs(
         if job.id in pending_logs:
             job.log_lines, _ = job_persistence.decode_log_lines(
                 pending_logs.pop(job.id))
-
-    unreadable_review_error = (
-        "This saved review couldn't be restored because its choices could "
-        "not be read. Start the scan again from its original page."
-    )
 
     def _persist_restored_transition(job, previous_status):
         _restore_log_lines(job)
@@ -2406,31 +2617,8 @@ def restore_jobs(
                 )
                 is True
             )
-        settled = (cut_off or {}).get(job.id)
-        if (
-            settled is None
-            and status == JobStatus.RUNNING
-            and job.kind == "download"
-            and job.album_id
-            and journaled is not None
-            and job.id not in journaled
-            and set(job.single or {}) <= {"album_id", "track_id"}
-            and not (job.execute_args or {}).get("new_edition")
-            and (job.finished_at is not None
-                 or not (job.execute_args or {}).get(job_persistence.SAVED_QUEUE))
-        ):
-            # Its partial download was a run folder no saved queue claimed,
-            # which start-up has already removed, or a saved one the stop
-            # discarded itself.
-            settled = _RunningDownload(album_id=job.album_id)
-        if settled is not None and (
-            job.id in unsettled
-            or job.recoveries
-            or job.execute_args_unreadable
-            or normalise_album_id(job.album_id)
-            != normalise_album_id(settled.album_id)
-        ):
-            settled = None
+        settled = _cut_off_download(
+            job, status, cut_off, unsettled, journaled)
         if completion_acknowledged:
             # Startup recovery proved and acknowledged this exact job
             # incarnation before retiring the queue journal.
@@ -2503,172 +2691,32 @@ def restore_jobs(
             and job.execute_kind in ("library", "new_releases")
             and job.title == RUN_TITLES[job.execute_kind]
         ):
-            # Stopping folded the albums it had not finished back into the
-            # review and logged what it did last.
-            job.status = JobStatus.CANCELED
-            restart = job_persistence.RESTART_INTERRUPTED + " "
-            stopped = next((line for line in reversed(job.log_lines)
-                            if line.startswith("Stopped early. ")), "")
-            done = (job.execute_args or {}).get(job_persistence.ALBUMS_DONE)
-            if stopped:
-                job.summary = restart + stopped.removeprefix("Stopped early. ")
-                if job.execute_kind == "library":
-                    job.attention = "interrupted"
-            elif done:
-                picked = (job.execute_args or {}).get(
-                    job_persistence.ALBUMS_PICKED) or done + sum(
-                        1 for c in job.candidates if c.get("selected"))
-                job.summary = (restart + f"{done} of "
-                               f"{plural(max(picked, done), 'album')} downloaded "
-                               "before it stopped. The rest did not finish.")
-            else:
-                job.summary = restart.rstrip()
-            job.finished_at = job.finished_at or time.time()
+            _cancel_interrupted_album_run(job)
             interrupted += 1
             _persist_restored_transition(job, previous_status)
         elif status == JobStatus.RUNNING and job.execute_kind == "lyrics":
-            # Every lyric written stays, and the next run skips the tracks
-            # this one checked.
-            job.status = JobStatus.CANCELED
-            stopped = next((line for line in reversed(job.log_lines)
-                            if line.startswith(library_lyrics.STOPPED)), "")
-            job.summary = (
-                job_persistence.RESTART_INTERRUPTED + " "
-                + (stopped or "The lyrics it wrote are kept, and the next "
-                   "run looks up the tracks it had not checked."))
-            job.finished_at = job.finished_at or time.time()
+            _cancel_interrupted_lyrics(job)
             interrupted += 1
             _persist_restored_transition(job, previous_status)
         elif status in (JobStatus.PENDING, JobStatus.RUNNING) and not pending_review:
-            job.status = JobStatus.FAILED
-            if job.execute_kind in ("upgrade", "downsample", "repair"):
-                # A run keeps its review's job, and with it the review's
-                # summary, which no longer describes this run.
-                job.summary = ""
-            # Only an album download / single-track download carries an
-            # album_id, and only those get a Retry button on the job + history
-            # pages.
-            restart = job_persistence.RESTART_INTERRUPTED + " "
-            done = (job.execute_args or {}).get(job_persistence.ALBUMS_DONE)
-            verb = _RUN_DONE_VERBS.get(job.execute_kind)
-            picked = sum(1 for c in job.candidates if c.get("selected"))
-            finished = 0
-            if job.execute_kind == "upgrade":
-                finished = sum(
-                    1 for c in job.candidates if c.get("selected")
-                    and (c.get("payload") or {}).get("album_dir")
-                    in finished_upgrades)
-            if finished:
-                done = (done or 0) + finished
-                job.execute_args = {**(job.execute_args or {}),
-                                    job_persistence.ALBUMS_DONE: done}
-            if done and verb:
-                restart += (f"{done} of {plural(max(picked, done), 'album')} "
-                            f"{verb}")
-                restart += ("; the one it was upgrading when it stopped was "
-                            "finished when the app started again. "
-                            if finished else " before it stopped. ")
-            if job.execute_args_unreadable:
-                job.error = (
-                    restart
-                    + "The saved details needed to retry this job couldn't "
-                    "be read. Start it again from its original page."
-                )
-            elif job.id in unsettled:
-                job.error = (restart + "Its download couldn't be cleared, "
-                             "so downloads and scans are paused. "
-                             "Qobuz Librarian tries again when it restarts.")
-                job.attention = "recovery"
-            elif job.album_id:
-                job.error = restart + "Use Retry to download it again."
-            elif job.execute_kind == "lyrics":
-                job.error = restart + "Start it again from the Lyrics page."
-            elif job.execute_kind == "migration":
-                # The review's summary still described the plan; this run
-                # stopped part way, and what it had done stays done.
-                args = job.execute_args or {}
-                verb = "moved" if args.get("in_place") else "copied"
-                job.summary = (
-                    "Stopped by a restart part way through. Files it had "
-                    f"already {verb} are in the destination and verified; "
-                    "the rest are still in the source. Start it again from "
-                    "the Library migration page: it skips what is already "
-                    "there."
-                    + (f" The plan is saved at {args['manifest']}."
-                       if args.get("manifest") else ""))
-                job.error = restart.rstrip()
-                job.attention = "failed"
-            elif job.execute_kind == "library":
-                job.error = restart + "Start the scan again from the Library page."
-            elif job.execute_kind == "downsample":
-                job.error = restart + "Start it again from Downsample."
-            elif job.execute_kind == "upgrade":
-                job.error = (restart.rstrip() if done and done >= picked
-                             else restart + "Start it again from Upgrade.")
-            elif returns_picks and job.execute_kind == "collection_restore":
-                job.error = restart.rstrip()
-            else:
-                job.error = restart + "Run it again to retry."
-            if job.recoveries:
-                job.error = (restart + "The original files were kept; check "
-                             "them before retrying.")
-            job.finished_at = job.finished_at or time.time()
-            job._cut_short_this_start = True
+            _fail_interrupted_run(
+                job, unsettled=unsettled,
+                finished_upgrades=finished_upgrades,
+                returns_picks=returns_picks)
             interrupted += 1
             _persist_restored_transition(job, previous_status)
         elif status == JobStatus.AWAITING_REVIEW or pending_review:
-            if job.recoveries:
-                # Older builds could re-park a Repair after its originals had
-                # already been retained.
+            error = _review_restore_error(job, row, execute_registry)
+            if error:
                 job.status = JobStatus.FAILED
-                job.error = ("The original files were kept. Check or "
-                             "restore them before retrying this repair.")
-                job.finished_at = time.time()
-                interrupted += 1
-                _persist_restored_transition(job, previous_status)
-            elif row.get("candidates_unreadable"):
-                job.status = JobStatus.FAILED
-                job.error = unreadable_review_error
-                job.finished_at = time.time()
-                interrupted += 1
-                _persist_restored_transition(job, previous_status)
-            elif job.execute_args_unreadable:
-                job.status = JobStatus.FAILED
-                job.error = (
-                    "The saved details needed to resume this review couldn't "
-                    "be read. Start it again from its original page."
-                )
-                job.finished_at = time.time()
-                interrupted += 1
-                _persist_restored_transition(job, previous_status)
-            elif (factory := execute_registry.get(job.execute_kind)) is None:
-                job.status = JobStatus.FAILED
-                job.error = ("Couldn't restore this job's executor across "
-                             "the restart. Re-run the original scan.")
+                job.error = error
                 job.finished_at = time.time()
                 interrupted += 1
                 _persist_restored_transition(job, previous_status)
             else:
-                try:
-                    execute_fn = factory(job, job.execute_args)
-                    if not callable(execute_fn):
-                        raise TypeError("restored executor is not callable")
-                except Exception:
-                    log.exception("couldn't restore executor for job %s", job.id)
-                    job.status = JobStatus.FAILED
-                    job.error = (
-                        "The saved details needed to resume this review "
-                        "couldn't be restored. Start it again from its "
-                        "original page."
-                    )
-                    job.finished_at = time.time()
-                    interrupted += 1
-                    _persist_restored_transition(job, previous_status)
-                else:
-                    job._execute_fn = execute_fn
-                    if pending_review:
-                        pending_reviews.append(job)
-                    review += 1
+                if pending_review:
+                    pending_reviews.append(job)
+                review += 1
         else:
             historical += 1
         restored.append(job)
@@ -2683,32 +2731,9 @@ def restore_jobs(
         for job in restored:
             if job.id in registry._jobs:
                 _restore_log_lines(job)
-    for job in pending_reviews:
-        if not _restore_untouched_review(job, status=JobStatus.PENDING):
-            with job._lock:
-                job.status = JobStatus.FAILED
-                job.attention = "failed"
-                job.finished_at = job.finished_at or time.time()
-                job.error = (
-                    job_persistence.RESTART_INTERRUPTED + " Its picks could "
-                    "not be put back in the review. Run the scan again."
-                )
-            job_persistence.persist(job)
-    for job in cut_short if return_picks is not None else ():
-        try:
-            outcome = return_picks(job)
-        except Exception:
-            log.exception("couldn't return the picks of job %s", job.id)
-            continue
-        if not outcome or job.execute_kind not in (
-                "library", "new_releases", "collection_restore"):
-            continue
-        with job._lock:
-            if job.status is JobStatus.CANCELED:
-                job.summary = f"{job.summary} {outcome}"
-            else:
-                job.error = f"{job.error} {outcome}"
-        job_persistence.persist(job)
+    _put_back_pending_reviews(pending_reviews)
+    if return_picks is not None:
+        _return_cut_short_picks(cut_short, return_picks)
     # Behind the same pause as any download that arrives while the library is
     # paused, and in the order they were queued.
     requeued.sort(key=lambda pair: pair[0].created_at)

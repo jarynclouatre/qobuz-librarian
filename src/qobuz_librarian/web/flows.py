@@ -2039,700 +2039,780 @@ def _scan_library_impl(
     scan_started_revision=0,
     allow_checkpoint_resume=True,
 ):
-    clear_scan_caches()
-    unreadable_artists = set()
-    local_discovery_errors = {}
+    _LibraryScan(
+        job,
+        token,
+        checkpoint=checkpoint,
+        partial_only=partial_only,
+        force_full=force_full,
+        attempt_id=attempt_id,
+        scan_started_revision=scan_started_revision,
+        allow_checkpoint_resume=allow_checkpoint_resume,
+    ).run()
 
-    def artist_read_failed(artist_dir, error):
-        local_discovery_errors[artist_dir.name] = str(error)
+
+class _LibraryScan:
+    """One Library scan. Its steps run in order and share what they read,
+    reuse and find through the instance."""
+
+    def __init__(self, job, token, *, checkpoint, partial_only, force_full,
+                 attempt_id, scan_started_revision, allow_checkpoint_resume):
+        self.job = job
+        self.token = token
+        self.checkpoint = checkpoint
+        self.partial_only = partial_only
+        self.force_full = force_full
+        self.attempt_id = attempt_id
+        self.scan_started_revision = scan_started_revision
+        self.allow_checkpoint_resume = allow_checkpoint_resume
+
+    def run(self):
+        if not self._list_artists():
+            return
+        self._load_checkpoint()
+        self._choose_refresh()
+        self._refresh_disk_views()
+        self._fingerprint_artists()
+        self._restore_checkpoint_artists()
+        self._reuse_unchanged_artists()
+        self._crawl_artists()
+        self._save_results()
+        self._write_summary()
+
+    def _list_artists(self):
+        clear_scan_caches()
+        self.unreadable_artists = set()
+        self.local_discovery_errors = {}
+
+        self.all_artists = list_library_artists(
+            on_artist_error=self._artist_read_failed)
+        # Compilations have no single artist catalogue to compare.
+        self.artists = [d for d in self.all_artists
+                        if normalize(d.name) not in VA_NORMALIZED]
+        self.discovery_errors = len(self.unreadable_artists)
+        if not self.artists and not self.discovery_errors:
+            _set_empty_library_summary(self.job)
+            if not self.partial_only:
+                generation_state.finish_attempt(
+                    self.attempt_id, "incomplete", "No library artist folders were found."
+                )
+            return False
+        self.kind = "partial" if self.partial_only else "missing"
+        return True
+
+    def _artist_read_failed(self, artist_dir, error):
+        self.local_discovery_errors[artist_dir.name] = str(error)
         if normalize(artist_dir.name) not in VA_NORMALIZED:
-            unreadable_artists.add(artist_dir.name)
+            self.unreadable_artists.add(artist_dir.name)
 
-    all_artists = list_library_artists(on_artist_error=artist_read_failed)
-    # Compilations have no single artist catalogue to compare.
-    artists = [d for d in all_artists
-               if normalize(d.name) not in VA_NORMALIZED]
-    discovery_errors = len(unreadable_artists)
-    if not artists and not discovery_errors:
-        _set_empty_library_summary(job)
-        if not partial_only:
-            generation_state.finish_attempt(
-                attempt_id, "incomplete", "No library artist folders were found."
+    def _load_checkpoint(self):
+        # Resume an interrupted scan of this kind: skip the artists already done and
+        # restore the albums they turned up, so we continue rather than restart.
+        self.cp = scan_checkpoint.load(self.kind) if self.allow_checkpoint_resume else None
+        self.quality_sig = library_scan_state.quality_signature()
+        if self.cp is not None and self.cp["meta"].get(
+                "quality_signature", self.quality_sig) != self.quality_sig:
+            # Its artists were checked under other quality or release settings.
+            log.info("The interrupted scan ran under other settings, so it "
+                     "starts again.")
+            self.cp = None
+        self.resuming = self.cp is not None
+        self.checkpoint_artists = dict(self.cp.get("artists") or {}) if self.resuming else {}
+        current_artist_names = {ad.name for ad in self.artists}
+        if self.resuming:
+            self.scanned = set()
+            self.baseline_seen = {}
+            for name in set(self.cp["scanned"]):
+                if name not in current_artist_names:
+                    continue
+                saved = self.checkpoint_artists.get(name)
+                if (
+                    not isinstance(saved, dict)
+                    or not isinstance(saved.get("catalog_ids"), list)
+                ):
+                    continue
+                self.scanned.add(name)
+                artist_id = saved.get("artist_id") or ""
+                if artist_id:
+                    self.baseline_seen[str(artist_id)] = [
+                        str(album_id) for album_id in saved["catalog_ids"]
+                        if album_id is not None
+                    ]
+        else:
+            self.scanned = set()
+            self.baseline_seen = {}
+
+    def _choose_refresh(self):
+        self.total = 0
+        # Artist folders whose finds the review had no room for, with how many
+        # each lost. They are not saved as scanned, so a later refresh checks
+        # them again.
+        self.left_out = {}
+        # Snapshot the dismissed-album memory before restoring the checkpoint so
+        # albums the user dismissed since the interruption are not re-added, and
+        # so the parallel workers below see the same consistent view.
+        self.hidden = hidden_mod.load()
+        # The review keeps every release type and bonus version and lists what
+        # the switches pick; the running count follows the list.
+        self._listed = review_listed()
+        # Dismissing and restoring deliberately do NOT bar the cheap path. The
+        # snapshot holds every candidate the last crawl found, dismissed or not, so
+        # both directions are a filter over saved data, not a reason to ask Qobuz
+        # about the whole library again.
+        def _reusable(snapshot):
+            return bool(
+                not self.force_full
+                and not self.resuming
+                and snapshot.get("complete")
+                # Saved candidates computed under a different quality policy must
+                # not carry forward, a settings change re-derives even unchanged
+                # folders.
+                and snapshot.get("quality_signature", "") == self.quality_sig
             )
-        return
-    kind = "partial" if partial_only else "missing"
-    # Resume an interrupted scan of this kind: skip the artists already done and
-    # restore the albums they turned up, so we continue rather than restart.
-    cp = scan_checkpoint.load(kind) if allow_checkpoint_resume else None
-    quality_sig = library_scan_state.quality_signature()
-    if cp is not None and cp["meta"].get(
-            "quality_signature", quality_sig) != quality_sig:
-        # Its artists were checked under other quality or release settings.
-        log.info("The interrupted scan ran under other settings, so it "
-                 "starts again.")
-        cp = None
-    resuming = cp is not None
-    checkpoint_artists = dict(cp.get("artists") or {}) if resuming else {}
-    current_artist_names = {ad.name for ad in artists}
-    if resuming:
-        scanned = set()
-        baseline_seen = {}
-        for name in set(cp["scanned"]):
-            if name not in current_artist_names:
-                continue
-            saved = checkpoint_artists.get(name)
-            if (
-                not isinstance(saved, dict)
-                or not isinstance(saved.get("catalog_ids"), list)
-            ):
-                continue
-            scanned.add(name)
-            artist_id = saved.get("artist_id") or ""
-            if artist_id:
-                baseline_seen[str(artist_id)] = [
-                    str(album_id) for album_id in saved["catalog_ids"]
-                    if album_id is not None
-                ]
-    else:
-        scanned = set()
-        baseline_seen = {}
-    total = 0
-    # Artist folders whose finds the review had no room for, with how many
-    # each lost. They are not saved as scanned, so a later refresh checks
-    # them again.
-    left_out = {}
-    # Snapshot the dismissed-album memory before restoring the checkpoint so
-    # albums the user dismissed since the interruption are not re-added, and
-    # so the parallel workers below see the same consistent view.
-    hidden = hidden_mod.load()
-    # The review keeps every release type and bonus version and lists what
-    # the switches pick; the running count follows the list.
-    _listed = review_listed()
-    # Dismissing and restoring deliberately do NOT bar the cheap path. The
-    # snapshot holds every candidate the last crawl found, dismissed or not, so
-    # both directions are a filter over saved data, not a reason to ask Qobuz
-    # about the whole library again.
-    def _reusable(snapshot):
-        return bool(
-            not force_full
-            and not resuming
-            and snapshot.get("complete")
-            # Saved candidates computed under a different quality policy must
-            # not carry forward, a settings change re-derives even unchanged
-            # folders.
-            and snapshot.get("quality_signature", "") == quality_sig
-        )
 
-    previous_scan = library_scan_state.kind_summary(kind)
-    cheap_refresh = _reusable(previous_scan)
-    if cheap_refresh:
-        # Only the cheap path reuses the saved artists; a full rescan would
-        # hold them in memory for its whole run for nothing.
-        previous_scan = library_scan_state.kind_state(kind)
-        cheap_refresh = _reusable(previous_scan)
-    if not resuming and not cheap_refresh:
-        # A refresh needs no starting checkpoint: interrupted before it
-        # saves progress, the next one reuses the saved scan again.
-        checkpoint.save(scanned, baseline_seen)
-    # The two refreshes and the fingerprint pass below run before the main
-    # artist loop, and on a first scan of a large library each takes real
-    # minutes, without progress ticks the job sits on "Waiting for output"
-    # looking hung the whole time.
-    # The upgrade pass is optional, so number the steps from the ones that
-    # will actually run rather than hard-coding four.
-    _passes = ["Reading albums on disk"]
-    if cfg.UPGRADE_SCAN_ENABLED:
-        _passes.append("Checking upgrade quality")
-    _finding = ("Finding Gap Fill candidates" if partial_only
-                else "Finding missing albums")
-    _passes += ["Checking artist folders", _finding]
+        self.previous_scan = library_scan_state.kind_summary(self.kind)
+        self.cheap_refresh = _reusable(self.previous_scan)
+        if self.cheap_refresh:
+            # Only the cheap path reuses the saved artists; a full rescan would
+            # hold them in memory for its whole run for nothing.
+            self.previous_scan = library_scan_state.kind_state(self.kind)
+            self.cheap_refresh = _reusable(self.previous_scan)
+        if not self.resuming and not self.cheap_refresh:
+            # A refresh needs no starting checkpoint: interrupted before it
+            # saves progress, the next one reuses the saved scan again.
+            self.checkpoint.save(self.scanned, self.baseline_seen)
 
-    def _step(name):
-        return f"Step {_passes.index(name) + 1} of {len(_passes)}: {name}"
+    def _step(self, name):
+        return f"Step {self._passes.index(name) + 1} of {len(self._passes)}: {name}"
 
-    downsample_refresh_started_at = time.time()
-    log.info(f"Reading albums from {plural(len(all_artists), 'artist folder')} on disk…")
-    downsample_refresh = downsample_state.refresh_for_artists(
-        all_artists,
-        hidden=hidden,
-        discovery_errors=local_discovery_errors,
-        cancel_check=lambda: bool(job.cancel_requested),
-        persist=False,
-        skip_unchanged=cheap_refresh,
-        on_artist=lambda ad, _specs, _err, done_i, total_i: job.push_progress(
-            _step("Reading albums on disk"),
-            done_i, total_i, ad.name, unit="artist"),
-    )
-    upgrade_refresh = None
-    upgrade_refresh_started_at = None
-    offered_before = _offered_upgrades()
-    if not job.cancel_requested and cfg.UPGRADE_SCAN_ENABLED:
-        upgrade_refresh_started_at = time.time()
-        # A resume carries over the upgrade pass the interrupted scan finished.
-        # Folders whose fingerprint changed since are checked again.
-        finished_upgrade = _finished_pass(cp, "upgrade") if resuming else None
-        log.info("Comparing owned albums against the editions Qobuz can serve…")
-        upgrade_refresh = upgrade_state.refresh_for_artists(
-            artists,
-            token=token,
-            args=build_args(),
-            capped=quality_decision.load_capped(),
-            hidden=hidden,
-            cancel_check=lambda: bool(job.cancel_requested),
-            workers=max(1, int(cfg.ARTIST_SCAN_WORKERS)),
-            pool_kwargs=job_mgr.pool_initializer_kwargs(),
-            skip_unchanged=cheap_refresh or finished_upgrade is not None,
-            previous=finished_upgrade,
+    def _refresh_disk_views(self):
+        # The two refreshes and the fingerprint pass below run before the main
+        # artist loop, and on a first scan of a large library each takes real
+        # minutes, without progress ticks the job sits on "Waiting for output"
+        # looking hung the whole time.
+        # The upgrade pass is optional, so number the steps from the ones that
+        # will actually run rather than hard-coding four.
+        self._passes = ["Reading albums on disk"]
+        if cfg.UPGRADE_SCAN_ENABLED:
+            self._passes.append("Checking upgrade quality")
+        self._finding = ("Finding Gap Fill candidates" if self.partial_only
+                         else "Finding missing albums")
+        self._passes += ["Checking artist folders", self._finding]
+
+        self.downsample_refresh_started_at = time.time()
+        log.info(f"Reading albums from {plural(len(self.all_artists), 'artist folder')} on disk…")
+        self.downsample_refresh = downsample_state.refresh_for_artists(
+            self.all_artists,
+            hidden=self.hidden,
+            discovery_errors=self.local_discovery_errors,
+            cancel_check=lambda: bool(self.job.cancel_requested),
             persist=False,
-            known_fingerprints=downsample_refresh.fingerprints,
-            on_artist=lambda ad, _specs, _err, done_i, total_i: job.push_progress(
-                _step("Checking upgrade quality"),
+            skip_unchanged=self.cheap_refresh,
+            on_artist=lambda ad, _specs, _err, done_i, total_i: self.job.push_progress(
+                self._step("Reading albums on disk"),
                 done_i, total_i, ad.name, unit="artist"),
         )
-        if upgrade_refresh.complete and not job.cancel_requested:
-            checkpoint.keep_pass(
-                "upgrade", upgrade_state.reusable_result(upgrade_refresh))
-    elif not cfg.UPGRADE_SCAN_ENABLED:
-        review_badges.set_ready("upgrade", False)
-    target = ("Gap Fill candidates in owned albums" if partial_only
-              else "missing albums and Gap Fill candidates")
-    log.info(f"Scanning {plural(len(artists), 'library artist')} for {target}")
-    fingerprints = {}
-    for _i, _ad in enumerate(artists, 1):
-        if job.cancel_requested:
-            break
-        try:
-            fingerprints[_ad.name] = (
-                downsample_refresh.fingerprints.get(_ad.name)
-                or artist_fingerprint(_ad))
-        except OSError as exc:
-            artist_read_failed(_ad, exc)
-            log.warning(f"Unreadable artist {_ad.name}: {exc}. Check permissions and retry.")
-        if _i % 25 == 0 or _i == len(artists):
-            job.push_progress(_step("Checking artist folders"),
-                              _i, len(artists), _ad.name, unit="folder")
-    artists = ([] if job.cancel_requested
-               else [ad for ad in artists if ad.name in fingerprints])
-    discovery_errors = len(unreadable_artists)
-    if resuming:
-        # A checkpoint says what was compared, not that the local folder is
-        # still the same. Reuse only a current matching per-artist fingerprint;
-        # removed and legacy entries fall away independently.
-        scanned = {
-            name
-            for name in scanned
-            if name in fingerprints
-            and isinstance(checkpoint_artists.get(name), dict)
-            and checkpoint_artists[name].get("fingerprint")
-            == fingerprints.get(name)
-        }
-        baseline_seen = {}
-        for name in scanned:
-            saved = checkpoint_artists[name]
-            artist_id = saved.get("artist_id") or ""
-            if artist_id:
-                baseline_seen[str(artist_id)] = list(
-                    saved.get("catalog_ids") or [])
-    previous_artists = (previous_scan.get("artists") or {}) if cheap_refresh else {}
-    state_artists: dict[str, dict] = {}
-    if resuming:
-        # Older checkpoints also list every album found outside the artists.
-        restored_by_artist: dict[str, list[dict]] = {}
-        for c in cp["candidates"]:
-            artist_key = (c.get("payload") or {}).get("_artist_dir") or c.get("artist")
-            restored_by_artist.setdefault(artist_key, []).append(c)
-        for name, saved in checkpoint_artists.items():
-            if name not in scanned:
-                continue
-            candidates = (list(saved.get("candidates") or [])
-                          or restored_by_artist.get(name, []))
-            dropped = 0
-            for c in candidates:
-                if _spec_dismissed(c, hidden):
-                    continue
-                listed = _listed(c)
-                if _add_candidate_spec(job, c, listed=listed) is None:
-                    dropped += 1
-                elif listed:
-                    total += 1
-            if dropped:
-                left_out[name] = dropped
-                continue
-            state_artists[name] = {
-                "fingerprint": saved.get("fingerprint") or fingerprints.get(name, ""),
-                "candidates": candidates,
-                "artist_id": saved.get("artist_id") or "",
-                "catalog_ids": list(saved["catalog_ids"]),
-                "owned_ids": dict(saved.get("owned_ids") or {}),
+        self.upgrade_refresh = None
+        self.upgrade_refresh_started_at = None
+        self.offered_before = _offered_upgrades()
+        if not self.job.cancel_requested and cfg.UPGRADE_SCAN_ENABLED:
+            self.upgrade_refresh_started_at = time.time()
+            # A resume carries over the upgrade pass the interrupted scan finished.
+            # Folders whose fingerprint changed since are checked again.
+            finished_upgrade = _finished_pass(self.cp, "upgrade") if self.resuming else None
+            log.info("Comparing owned albums against the editions Qobuz can serve…")
+            self.upgrade_refresh = upgrade_state.refresh_for_artists(
+                self.artists,
+                token=self.token,
+                args=build_args(),
+                capped=quality_decision.load_capped(),
+                hidden=self.hidden,
+                cancel_check=lambda: bool(self.job.cancel_requested),
+                workers=max(1, int(cfg.ARTIST_SCAN_WORKERS)),
+                pool_kwargs=job_mgr.pool_initializer_kwargs(),
+                skip_unchanged=self.cheap_refresh or finished_upgrade is not None,
+                previous=finished_upgrade,
+                persist=False,
+                known_fingerprints=self.downsample_refresh.fingerprints,
+                on_artist=lambda ad, _specs, _err, done_i, total_i: self.job.push_progress(
+                    self._step("Checking upgrade quality"),
+                    done_i, total_i, ad.name, unit="artist"),
+            )
+            if self.upgrade_refresh.complete and not self.job.cancel_requested:
+                self.checkpoint.keep_pass(
+                    "upgrade", upgrade_state.reusable_result(self.upgrade_refresh))
+        elif not cfg.UPGRADE_SCAN_ENABLED:
+            review_badges.set_ready("upgrade", False)
+
+    def _fingerprint_artists(self):
+        target = ("Gap Fill candidates in owned albums" if self.partial_only
+                  else "missing albums and Gap Fill candidates")
+        log.info(f"Scanning {plural(len(self.artists), 'library artist')} for {target}")
+        self.fingerprints = {}
+        for _i, _ad in enumerate(self.artists, 1):
+            if self.job.cancel_requested:
+                break
+            try:
+                self.fingerprints[_ad.name] = (
+                    self.downsample_refresh.fingerprints.get(_ad.name)
+                    or artist_fingerprint(_ad))
+            except OSError as exc:
+                self._artist_read_failed(_ad, exc)
+                log.warning(f"Unreadable artist {_ad.name}: {exc}. Check permissions and retry.")
+            if _i % 25 == 0 or _i == len(self.artists):
+                self.job.push_progress(self._step("Checking artist folders"),
+                                       _i, len(self.artists), _ad.name, unit="folder")
+        self.artists = ([] if self.job.cancel_requested
+                        else [ad for ad in self.artists if ad.name in self.fingerprints])
+        self.discovery_errors = len(self.unreadable_artists)
+        if self.resuming:
+            # A checkpoint says what was compared, not that the local folder is
+            # still the same. Reuse only a current matching per-artist fingerprint;
+            # removed and legacy entries fall away independently.
+            self.scanned = {
+                name
+                for name in self.scanned
+                if name in self.fingerprints
+                and isinstance(self.checkpoint_artists.get(name), dict)
+                and self.checkpoint_artists[name].get("fingerprint")
+                == self.fingerprints.get(name)
             }
-        recheck = len(artists) - len(scanned)
-        log.info(
-            f"Resuming. Reusing {plural(len(scanned), 'unchanged artist')}; "
-            f"checking {plural(recheck, 'changed or unproven artist')} again. "
-            f"{plural(total, 'album')} found so far."
-        )
-    todo = []
-    n = len(artists)
-    done = len(scanned)
-    reused = 0
-    scan_errors = discovery_errors
-    read_errors = 0
-    # Ids for the collection snapshot written when the scan finishes. An
-    # artist reused from saved state brings the ids saved with it; one saved
-    # before they were kept is carried forward from the last snapshot.
-    owned_qobuz = {}
-    snapshot_artist_ids = {}
-    on_disk_ids = set()
+            self.baseline_seen = {}
+            for name in self.scanned:
+                saved = self.checkpoint_artists[name]
+                artist_id = saved.get("artist_id") or ""
+                if artist_id:
+                    self.baseline_seen[str(artist_id)] = list(
+                        saved.get("catalog_ids") or [])
 
-    def _reuse_owned(name, entry):
-        if entry.get("owned_ids"):
-            owned_qobuz[name] = dict(entry["owned_ids"])
-        if entry.get("artist_id"):
-            snapshot_artist_ids[name] = str(entry["artist_id"])
-
-    for name, entry in state_artists.items():
-        _reuse_owned(name, entry)
-    for artist_dir in artists:
-        if artist_dir.name in scanned:
-            continue
-        saved = previous_artists.get(artist_dir.name)
-        saved_catalog_ids = saved.get("catalog_ids") if saved else None
-        if (
-            saved
-            and saved_catalog_ids is not None
-            and saved.get("fingerprint") == fingerprints.get(artist_dir.name)
-            and (saved.get("artist_id") or not saved.get("candidates"))
-            and not _read_without_release_types(saved.get("candidates") or [])
-        ):
-            candidates = list(saved.get("candidates") or [])
-            shown = dropped = 0
-            for c in candidates:
-                if _spec_dismissed(c, hidden):
+    def _restore_checkpoint_artists(self):
+        self.previous_artists = (
+            (self.previous_scan.get("artists") or {}) if self.cheap_refresh else {})
+        self.state_artists: dict[str, dict] = {}
+        if self.resuming:
+            # Older checkpoints also list every album found outside the artists.
+            restored_by_artist: dict[str, list[dict]] = {}
+            for c in self.cp["candidates"]:
+                artist_key = (c.get("payload") or {}).get("_artist_dir") or c.get("artist")
+                restored_by_artist.setdefault(artist_key, []).append(c)
+            for name, saved in self.checkpoint_artists.items():
+                if name not in self.scanned:
                     continue
-                listed = _listed(c)
-                if _add_candidate_spec(job, c, listed=listed) is None:
-                    dropped += 1
-                elif listed:
-                    shown += 1
-            total += shown
-            scanned.add(artist_dir.name)
-            done += 1
-            reused += 1
-            if saved.get("artist_id"):
-                baseline_seen[str(saved["artist_id"])] = list(saved_catalog_ids or [])
-            if dropped:
-                left_out[artist_dir.name] = dropped
-            else:
-                state_artists[artist_dir.name] = {
-                    "fingerprint": fingerprints.get(artist_dir.name, ""),
+                candidates = (list(saved.get("candidates") or [])
+                              or restored_by_artist.get(name, []))
+                dropped = 0
+                for c in candidates:
+                    if _spec_dismissed(c, self.hidden):
+                        continue
+                    listed = self._listed(c)
+                    if _add_candidate_spec(self.job, c, listed=listed) is None:
+                        dropped += 1
+                    elif listed:
+                        self.total += 1
+                if dropped:
+                    self.left_out[name] = dropped
+                    continue
+                self.state_artists[name] = {
+                    "fingerprint": saved.get("fingerprint") or self.fingerprints.get(name, ""),
                     "candidates": candidates,
                     "artist_id": saved.get("artist_id") or "",
-                    "catalog_ids": list(saved_catalog_ids or []),
+                    "catalog_ids": list(saved["catalog_ids"]),
                     "owned_ids": dict(saved.get("owned_ids") or {}),
                 }
-                _reuse_owned(artist_dir.name, state_artists[artist_dir.name])
-            hit = ({"artist": artist_dir.name, "albums": shown}
-                   if shown else None)
-            job.push_progress(_step(_finding), done, n, artist_dir.name,
-                              found=total, hit=hit, unit="artist")
-        else:
-            todo.append(artist_dir)
-    if reused:
-        log.info(f"  Reused {plural(reused, 'unchanged artist')} from the saved scan.")
-    if reused and todo:
-        # Before any artist is checked, so an interrupted refresh resumes
-        # without asking Qobuz about the artists it reused. With nothing to
-        # check there is nothing to resume.
-        checkpoint.save(scanned, baseline_seen, state_artists)
-    workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
-    # Resolve/scan artists in parallel (each worker has its own HTTP session),
-    # but collect results and write candidates on this one thread so the
-    # candidate list and progress stay single-writer.
-    missing_premises = {}
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="libscan",
-                            **job_mgr.pool_initializer_kwargs()) as ex:
-        futures = {ex.submit(_scan_library_artist, ad, token, partial_only,
-                             hidden): ad
-                   for ad in todo}
-        for fut in as_completed(list(futures)):
-            # A finished artist's result, with every album Qobuz sent for it,
-            # is let go once read rather than kept to the end of the scan.
-            ad = futures.pop(fut)
-            if job.cancel_requested:
-                for f in futures:
-                    f.cancel()
-                checkpoint.flush()
-                log.info("Cancelled. Stopping scan.")
-                break
-            done += 1
-            try:
-                (name, artist_name, gaps, artist_id, catalog_ids,
-                 owned_ids, on_disk) = fut.result()
-            except (AuthLost, QobuzUnavailable) as e:
-                # A lost token or an unreachable API isn't a per-artist
-                # hiccup, so cancel the rest and fail the scan rather than
-                # silently report a partial library as the full picture.
-                for f in futures:
-                    f.cancel()
-                checkpoint.flush()
-                if isinstance(e, QobuzUnavailable):
-                    name = ad.name
-                    log.info(f"    {name}: {e}")
-                    raise QobuzUnavailable(
-                        f"Qobuz didn't answer for {name}, so the scan "
-                        "stopped there. The next scan picks up where it "
-                        "left off.") from e
-                raise
-            except Exception as e:
-                # A per-artist failure (not auth/outage) is left unscanned so a
-                # resume retries it rather than baking in a transient miss.
-                scan_errors += 1
-                if isinstance(e, OSError):
-                    read_errors += 1
-                    unreadable_artists.add(ad.name)
-                log.info(f"    skipped {ad.name}: {e}")
-                job.push_progress(_step(_finding), done, n, ad.name,
-                                  found=total, unit="artist")
-                continue
-            scanned.add(name)
-            on_disk_ids.update(on_disk)
-            if owned_ids:
-                owned_qobuz[name] = owned_ids
-            if artist_id:
-                snapshot_artist_ids[name] = artist_id
-            if artist_id and catalog_ids is not None:
-                baseline_seen[artist_id] = catalog_ids
-            artist_candidates = []
-            shown = dropped = 0
-            for gap in gaps:
-                # Library is a discovery list, leave candidates unticked so a
-                # single click can't queue hundreds nobody reviewed.
-                spec = _gap_candidate_spec(
-                    gap, artist_name or name, selected=False, artist_key=name,
-                    missing_premises=missing_premises)
-                if _spec_dismissed(spec, hidden):
-                    # Saved but not reviewed: the snapshot is the record
-                    # Restore brings back from.
-                    artist_candidates.append(spec)
-                    continue
-                listed = _listed(spec)
-                if _add_candidate_spec(job, spec, listed=listed) is None:
-                    dropped += 1
-                    continue
-                artist_candidates.append(spec)
-                if listed:
-                    total += 1
-                    shown += 1
-            if catalog_ids is not None and dropped:
-                left_out[name] = dropped
-            elif catalog_ids is not None:
-                state_artists[name] = {
-                    "fingerprint": fingerprints.get(name, ""),
-                    "candidates": artist_candidates,
-                    "artist_id": artist_id or "",
-                    "catalog_ids": list(catalog_ids or []),
-                    "owned_ids": dict(owned_ids or {}),
-                }
-            # Add the albums before the progress tick so a hit lands the live
-            # preview the same moment the running total moves.
-            hit = ({"artist": artist_name or name, "albums": shown}
-                   if shown else None)
-            job.push_progress(_step(_finding), done, n, artist_name or name,
-                              found=total, hit=hit, unit="artist")
-            if shown:
-                # A full scan's count holds missing albums and gaps together.
-                tail = "with Gap Fill candidates" if partial_only else "to review"
-                log.info(f"  {artist_name} - {plural(shown, 'album')} {tail}")
-            checkpoint.save(scanned, baseline_seen, state_artists)
-    # Reached here only without an AuthLost/outage abort (that re-raises out
-    # above, leaving the checkpoint for resume and not seeding the baseline).
-    # job.candidates now holds everything this scan offers for these artists.
-    # A left-out artist's rows are missing from this scan for want of room,
-    # which says nothing about what it offers.
-    job.scan_coverage = (frozenset(scanned - set(left_out)), partial_only,
-                         frozenset(on_disk_ids))
-    job.scan_left_out = dict(left_out)
-    flush_resolve_cache()
-    baseline_save_failed = False
-    scan_state_save_failed = False
-    scan_state_changed = False
-    snapshot_refused = None
-    downsample_save_failed = False
-    upgrade_save_failed = False
-    catalog_complete = False
-    publication = None
-    if job.stopping_for_restart:
-        # Not a deliberate stop: the progress stays for the next start, as it
-        # would after a crash.
-        pass
-    elif job.cancel_requested:
-        # Deliberate stop, discard this kind's progress so it isn't auto-resumed.
-        if not checkpoint.clear():
-            job.push_line(
-                "The stopped scan checkpoint could not be cleared. It will be "
-                "ignored unless its artists still match."
+            recheck = len(self.artists) - len(self.scanned)
+            log.info(
+                f"Resuming. Reusing {plural(len(self.scanned), 'unchanged artist')}; "
+                f"checking {plural(recheck, 'changed or unproven artist')} again. "
+                f"{plural(self.total, 'album')} found so far."
             )
-        if not partial_only:
-            generation_state.finish_attempt(attempt_id, "cancelled")
-    else:
+
+    def _reuse_unchanged_artists(self):
+        self.todo = []
+        self.n = len(self.artists)
+        self.done = len(self.scanned)
+        reused = 0
+        self.scan_errors = self.discovery_errors
+        self.read_errors = 0
+        # Ids for the collection snapshot written when the scan finishes. An
+        # artist reused from saved state brings the ids saved with it; one saved
+        # before they were kept is carried forward from the last snapshot.
+        self.owned_qobuz = {}
+        self.snapshot_artist_ids = {}
+        self.on_disk_ids = set()
+
+        def _reuse_owned(name, entry):
+            if entry.get("owned_ids"):
+                self.owned_qobuz[name] = dict(entry["owned_ids"])
+            if entry.get("artist_id"):
+                self.snapshot_artist_ids[name] = str(entry["artist_id"])
+
+        for name, entry in self.state_artists.items():
+            _reuse_owned(name, entry)
+        for artist_dir in self.artists:
+            if artist_dir.name in self.scanned:
+                continue
+            saved = self.previous_artists.get(artist_dir.name)
+            saved_catalog_ids = saved.get("catalog_ids") if saved else None
+            if (
+                saved
+                and saved_catalog_ids is not None
+                and saved.get("fingerprint") == self.fingerprints.get(artist_dir.name)
+                and (saved.get("artist_id") or not saved.get("candidates"))
+                and not _read_without_release_types(saved.get("candidates") or [])
+            ):
+                candidates = list(saved.get("candidates") or [])
+                shown = dropped = 0
+                for c in candidates:
+                    if _spec_dismissed(c, self.hidden):
+                        continue
+                    listed = self._listed(c)
+                    if _add_candidate_spec(self.job, c, listed=listed) is None:
+                        dropped += 1
+                    elif listed:
+                        shown += 1
+                self.total += shown
+                self.scanned.add(artist_dir.name)
+                self.done += 1
+                reused += 1
+                if saved.get("artist_id"):
+                    self.baseline_seen[str(saved["artist_id"])] = list(saved_catalog_ids or [])
+                if dropped:
+                    self.left_out[artist_dir.name] = dropped
+                else:
+                    self.state_artists[artist_dir.name] = {
+                        "fingerprint": self.fingerprints.get(artist_dir.name, ""),
+                        "candidates": candidates,
+                        "artist_id": saved.get("artist_id") or "",
+                        "catalog_ids": list(saved_catalog_ids or []),
+                        "owned_ids": dict(saved.get("owned_ids") or {}),
+                    }
+                    _reuse_owned(artist_dir.name, self.state_artists[artist_dir.name])
+                hit = ({"artist": artist_dir.name, "albums": shown}
+                       if shown else None)
+                self.job.push_progress(
+                    self._step(self._finding), self.done, self.n, artist_dir.name,
+                    found=self.total, hit=hit, unit="artist")
+            else:
+                self.todo.append(artist_dir)
+        if reused:
+            log.info(f"  Reused {plural(reused, 'unchanged artist')} from the saved scan.")
+        if reused and self.todo:
+            # Before any artist is checked, so an interrupted refresh resumes
+            # without asking Qobuz about the artists it reused. With nothing to
+            # check there is nothing to resume.
+            self.checkpoint.save(self.scanned, self.baseline_seen, self.state_artists)
+
+    def _crawl_artists(self):
+        workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
+        # Resolve/scan artists in parallel (each worker has its own HTTP session),
+        # but collect results and write candidates on this one thread so the
+        # candidate list and progress stay single-writer.
+        missing_premises = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="libscan",
+                                **job_mgr.pool_initializer_kwargs()) as ex:
+            futures = {ex.submit(_scan_library_artist, ad, self.token, self.partial_only,
+                                 self.hidden): ad
+                       for ad in self.todo}
+            for fut in as_completed(list(futures)):
+                # A finished artist's result, with every album Qobuz sent for it,
+                # is let go once read rather than kept to the end of the scan.
+                ad = futures.pop(fut)
+                if self.job.cancel_requested:
+                    for f in futures:
+                        f.cancel()
+                    self.checkpoint.flush()
+                    log.info("Cancelled. Stopping scan.")
+                    break
+                self.done += 1
+                try:
+                    (name, artist_name, gaps, artist_id, catalog_ids,
+                     owned_ids, on_disk) = fut.result()
+                except (AuthLost, QobuzUnavailable) as e:
+                    # A lost token or an unreachable API isn't a per-artist
+                    # hiccup, so cancel the rest and fail the scan rather than
+                    # silently report a partial library as the full picture.
+                    for f in futures:
+                        f.cancel()
+                    self.checkpoint.flush()
+                    if isinstance(e, QobuzUnavailable):
+                        name = ad.name
+                        log.info(f"    {name}: {e}")
+                        raise QobuzUnavailable(
+                            f"Qobuz didn't answer for {name}, so the scan "
+                            "stopped there. The next scan picks up where it "
+                            "left off.") from e
+                    raise
+                except Exception as e:
+                    # A per-artist failure (not auth/outage) is left unscanned so a
+                    # resume retries it rather than baking in a transient miss.
+                    self.scan_errors += 1
+                    if isinstance(e, OSError):
+                        self.read_errors += 1
+                        self.unreadable_artists.add(ad.name)
+                    log.info(f"    skipped {ad.name}: {e}")
+                    self.job.push_progress(
+                        self._step(self._finding), self.done, self.n, ad.name,
+                        found=self.total, unit="artist")
+                    continue
+                self.scanned.add(name)
+                self.on_disk_ids.update(on_disk)
+                if owned_ids:
+                    self.owned_qobuz[name] = owned_ids
+                if artist_id:
+                    self.snapshot_artist_ids[name] = artist_id
+                if artist_id and catalog_ids is not None:
+                    self.baseline_seen[artist_id] = catalog_ids
+                artist_candidates = []
+                shown = dropped = 0
+                for gap in gaps:
+                    # Library is a discovery list, leave candidates unticked so a
+                    # single click can't queue hundreds nobody reviewed.
+                    spec = _gap_candidate_spec(
+                        gap, artist_name or name, selected=False, artist_key=name,
+                        missing_premises=missing_premises)
+                    if _spec_dismissed(spec, self.hidden):
+                        # Saved but not reviewed: the snapshot is the record
+                        # Restore brings back from.
+                        artist_candidates.append(spec)
+                        continue
+                    listed = self._listed(spec)
+                    if _add_candidate_spec(self.job, spec, listed=listed) is None:
+                        dropped += 1
+                        continue
+                    artist_candidates.append(spec)
+                    if listed:
+                        self.total += 1
+                        shown += 1
+                if catalog_ids is not None and dropped:
+                    self.left_out[name] = dropped
+                elif catalog_ids is not None:
+                    self.state_artists[name] = {
+                        "fingerprint": self.fingerprints.get(name, ""),
+                        "candidates": artist_candidates,
+                        "artist_id": artist_id or "",
+                        "catalog_ids": list(catalog_ids or []),
+                        "owned_ids": dict(owned_ids or {}),
+                    }
+                # Add the albums before the progress tick so a hit lands the live
+                # preview the same moment the running total moves.
+                hit = ({"artist": artist_name or name, "albums": shown}
+                       if shown else None)
+                self.job.push_progress(
+                    self._step(self._finding), self.done, self.n,
+                    artist_name or name,
+                    found=self.total, hit=hit, unit="artist")
+                if shown:
+                    # A full scan's count holds missing albums and gaps together.
+                    tail = "with Gap Fill candidates" if self.partial_only else "to review"
+                    log.info(f"  {artist_name} - {plural(shown, 'album')} {tail}")
+                self.checkpoint.save(self.scanned, self.baseline_seen, self.state_artists)
+
+    def _save_results(self):
+        # Reached here only without an AuthLost/outage abort (that re-raises out
+        # above, leaving the checkpoint for resume and not seeding the baseline).
+        # job.candidates now holds everything this scan offers for these artists.
+        # A left-out artist's rows are missing from this scan for want of room,
+        # which says nothing about what it offers.
+        self.job.scan_coverage = (
+            frozenset(self.scanned - set(self.left_out)), self.partial_only,
+            frozenset(self.on_disk_ids))
+        self.job.scan_left_out = dict(self.left_out)
+        flush_resolve_cache()
+        self.baseline_save_failed = False
+        self.scan_state_save_failed = False
+        self.scan_state_changed = False
+        self.snapshot_refused = None
+        self.downsample_save_failed = False
+        self.upgrade_save_failed = False
+        self.catalog_complete = False
+        self.publication = None
+        if self.job.stopping_for_restart:
+            # Not a deliberate stop: the progress stays for the next start, as it
+            # would after a crash.
+            pass
+        elif self.job.cancel_requested:
+            # Deliberate stop, discard this kind's progress so it isn't auto-resumed.
+            if not self.checkpoint.clear():
+                self.job.push_line(
+                    "The stopped scan checkpoint could not be cleared. It will be "
+                    "ignored unless its artists still match."
+                )
+            if not self.partial_only:
+                generation_state.finish_attempt(self.attempt_id, "cancelled")
+        else:
+            self._publish_catalog()
+            if self.publication is not None:
+                self._save_scan_state()
+            # Publish Upgrade/Downsample from their OWN completeness, gated only
+            # on a complete catalog crawl, NOT on library_complete.
+            if self.publication is not None and not self.scan_state_save_failed:
+                self._save_disk_views()
+            if self.publication is not None and not self.scan_state_save_failed:
+                self._finish_published_scan()
+            elif self.catalog_complete and self.scan_state_save_failed:
+                # Keep a complete resumable copy when the main review could not be
+                # saved.
+                self.checkpoint.save(self.scanned, self.baseline_seen, self.state_artists)
+            elif self.catalog_complete and self.partial_only:
+                self.checkpoint.clear()
+            elif (self.scanned or self.job.candidates or self.baseline_seen
+                    or self.unreadable_artists):
+                self.checkpoint.save(self.scanned, self.baseline_seen, self.state_artists)
+
+    def _publish_catalog(self):
         # A crawl that reached every artist it could read stamps "last
         # scanned" and seeds the new-release baseline. A folder that cannot be
         # read is left out and recorded; it has no saved state, so the next
         # refresh after it becomes readable checks it like a new artist.
-        readable_names = {ad.name for ad in artists} - unreadable_artists
-        catalog_complete = (
+        readable_names = {ad.name for ad in self.artists} - self.unreadable_artists
+        self.catalog_complete = (
             bool(readable_names)
-            and readable_names <= set(state_artists) | set(left_out)
-            and readable_names <= scanned
-            and scan_errors - discovery_errors - read_errors == 0
+            and readable_names <= set(self.state_artists) | set(self.left_out)
+            and readable_names <= self.scanned
+            and self.scan_errors - self.discovery_errors - self.read_errors == 0
         )
-        if catalog_complete and unreadable_artists and not partial_only:
-            downsample_refresh = _without_unreadable(
-                downsample_refresh, unreadable_artists)
-            upgrade_refresh = _without_unreadable(
-                upgrade_refresh, unreadable_artists)
-        if catalog_complete and kind == "missing":
-            publication = generation_state.commit_catalog_generation(
-                attempt_id,
-                limited=job.candidate_cap_hit,
-                expected_revision=scan_started_revision,
+        if self.catalog_complete and self.unreadable_artists and not self.partial_only:
+            self.downsample_refresh = _without_unreadable(
+                self.downsample_refresh, self.unreadable_artists)
+            self.upgrade_refresh = _without_unreadable(
+                self.upgrade_refresh, self.unreadable_artists)
+        if self.catalog_complete and self.kind == "missing":
+            self.publication = generation_state.commit_catalog_generation(
+                self.attempt_id,
+                limited=self.job.candidate_cap_hit,
+                expected_revision=self.scan_started_revision,
             )
-            scan_state_save_failed = publication is None
-            if publication is None:
-                scan_state_changed = (
-                    generation_state.revision() != scan_started_revision)
+            self.scan_state_save_failed = self.publication is None
+            if self.publication is None:
+                self.scan_state_changed = (
+                    generation_state.revision() != self.scan_started_revision)
                 generation_state.finish_attempt(
-                    attempt_id,
+                    self.attempt_id,
                     "incomplete",
                     "Saved Library state changed while the crawl was running.",
                 )
-        elif catalog_complete:
+        elif self.catalog_complete:
             partial_revision = generation_state.reserve_revision()
             if partial_revision is not None:
                 saved_partial = library_scan_state.save_kind(
-                    kind,
-                    artists=state_artists,
+                    self.kind,
+                    artists=self.state_artists,
                     complete=True,
-                    quality_sig=quality_sig,
+                    quality_sig=self.quality_sig,
                     revision=partial_revision,
                 )
-                scan_state_save_failed = saved_partial is None
+                self.scan_state_save_failed = saved_partial is None
             else:
-                scan_state_save_failed = True
+                self.scan_state_save_failed = True
         else:
-            if not partial_only:
+            if not self.partial_only:
                 generation_state.finish_attempt(
-                    attempt_id,
+                    self.attempt_id,
                     "incomplete",
                     "One or more artists could not be checked.",
                 )
-        if publication is not None:
-            scan_generation = int(publication["generation"])
-            changed_albums = publication.get("changed_albums") or []
-            if changed_albums:
-                state_artists = library_scan_state.without_albums(
-                    state_artists, changed_albums)
-                for album_id in changed_albums:
-                    prune_library_review_candidates({"id": album_id})
-            scan_revision = generation_state.reserve_revision()
-            scan_saved = (
-                scan_revision is not None
-                and library_scan_state.save_kind(
-                    kind,
-                    artists=state_artists,
-                    complete=True,
-                    quality_sig=quality_sig,
-                    generation=scan_generation,
-                    revision=scan_revision,
-                    limited=job.candidate_cap_hit,
-                )
-                is not None
-            )
-            scan_state_save_failed = not scan_saved
-            if scan_saved:
-                for album_id in generation_state.album_changes_since(
-                        publication["revision"]) or ():
-                    library_scan_state.remove_album(album_id)
-                job.execute_args = {
-                    **(job.execute_args or {}),
-                    "_library_review_generation": scan_generation,
-                }
-            else:
-                generation_state.abort_catalog_generation(
-                    publication,
-                    "The completed Library crawl could not publish its saved view.",
-                )
-        # Publish Upgrade/Downsample from their OWN completeness, gated only
-        # on a complete catalog crawl, NOT on library_complete.
-        if publication is not None and not scan_state_save_failed:
-            scan_generation = int(publication["generation"])
-            if downsample_refresh.complete:
-                downsample_save_failed = not downsample_state.save(
-                    downsample_refresh,
-                    preserve_concurrent=True,
-                    refresh_started_at=downsample_refresh_started_at,
-                    refresh_started_revision=scan_started_revision,
-                    generation=scan_generation,
-                )
-                if not downsample_save_failed:
-                    saved_views.sync_badge("downsample")
-            if upgrade_refresh is not None and upgrade_refresh.complete:
-                upgrade_save_failed = not upgrade_state.save(
-                    upgrade_refresh,
-                    preserve_concurrent=True,
-                    refresh_started_at=upgrade_refresh_started_at,
-                    refresh_started_revision=scan_started_revision,
-                    generation=scan_generation,
-                )
-                if not upgrade_save_failed:
-                    saved_views.sync_badge("upgrade")
-                    job.upgrade_finds = len(_offered_upgrades() - offered_before)
-                    job.upgrade_finds_first = not offered_before
-            elif upgrade_refresh is None:
-                generation_state.mark_output_status(
-                    "upgrade",
-                    "disabled",
-                    generation=scan_generation,
-                    reason="Upgrade scanning is disabled.",
-                )
-        if publication is not None and not scan_state_save_failed:
-            scan_generation = int(publication["generation"])
-            if not scan_state_save_failed and not cheap_refresh:
-                _record_last_scan()
-            # What's on disk counts the tag cache's rows, so drop the rows of
-            # files moved or deleted outside the app since they were read.
-            flac_cache.prune_missing(force=True)
-            _flag_new_since_last_scan(job, kind, found=[
-                c for entry in state_artists.values()
-                for c in entry.get("candidates") or []])
-            # The crawl reached every artist cleanly, establish the new-release
-            # baseline from the catalog snapshot and clear this kind's
-            # checkpoint. A crawl that read every catalogue counts as the last
-            # new-release check; a refresh reuses most of them.
-            baseline_save_failed = not new_releases_mod.seed_baseline(
-                baseline_seen,
+
+    def _save_scan_state(self):
+        scan_generation = int(self.publication["generation"])
+        changed_albums = self.publication.get("changed_albums") or []
+        if changed_albums:
+            self.state_artists = library_scan_state.without_albums(
+                self.state_artists, changed_albums)
+            for album_id in changed_albums:
+                prune_library_review_candidates({"id": album_id})
+        scan_revision = generation_state.reserve_revision()
+        scan_saved = (
+            scan_revision is not None
+            and library_scan_state.save_kind(
+                self.kind,
+                artists=self.state_artists,
+                complete=True,
+                quality_sig=self.quality_sig,
                 generation=scan_generation,
-                checked_at=None if cheap_refresh else time.time(),
+                revision=scan_revision,
+                limited=self.job.candidate_cap_hit,
             )
-            if not checkpoint.clear():
-                job.push_line(
-                    "The completed scan checkpoint could not be cleared. Its "
-                    "saved generation is complete, so it will not be treated "
-                    "as newer results."
-                )
-            snapshot_refused = _write_collection_snapshot(
-                job, owned_qobuz, snapshot_artist_ids)
-        elif catalog_complete and scan_state_save_failed:
-            # Keep a complete resumable copy when the main review could not be
-            # saved.
-            checkpoint.save(scanned, baseline_seen, state_artists)
-        elif catalog_complete and partial_only:
-            checkpoint.clear()
-        elif (scanned or job.candidates or baseline_seen
-                or unreadable_artists):
-            checkpoint.save(scanned, baseline_seen, state_artists)
-    if job.cancel_requested and any(
-            other.execute_kind == "library" and other is not job
-            for other in job_mgr.registry.awaiting_review()):
-        # Its count holds the rows carried over from the saved scan, and a
-        # stopped refresh folds none of it in.
-        job.summary = "Stopped early. The open Library review is unchanged."
-    elif job.cancel_requested:
-        job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
-                       if total else "Stopped before anything turned up.")
-    elif total:
-        job.summary = library_review_summary(job.candidates) + "."
-        if left_out:
-            job.summary += " " + left_out_note(left_out, job.CANDIDATE_CAP)
-    elif partial_only:
-        job.summary = "No owned albums are missing tracks."
-    else:
-        job.summary = "No missing albums found for artists in your library."
-    if getattr(job, "upgrade_finds", 0) and not job.cancel_requested:
-        job.summary += " " + upgrade_finds_note(
-            job.upgrade_finds, first=getattr(job, "upgrade_finds_first", False))
-    # Artists that errored or came back with a short catalog page aren't in
-    # state_artists; the checkpoint stays for them and the last-scan stamp is
-    # withheld.
-    unchecked = len(artists) - len(state_artists) - len(left_out) + discovery_errors
-    if not job.cancel_requested and not partial_only and publication is not None:
-        unreadable_artists_mod.record(unreadable_artists)
-    if (not job.cancel_requested and publication is not None
-            and unchecked == len(unreadable_artists) and unreadable_artists):
-        # Finished for everything readable: the rest is not a resume.
-        job.summary += (
-            f" {_left_out_note(unreadable_artists)} "
-            + ("Each is checked by itself once it can be read."
-               if cfg.AUTO_LIBRARY_SCAN
-               else "Scan again once it can be read."
-               if len(unreadable_artists) == 1
-               else "Scan again once they can be read."))
-    if (not job.cancel_requested and unchecked > 0
-            and publication is not None
-            and unchecked == len(unreadable_artists)):
-        # Left out rather than unchecked: nothing here is waiting to resume.
-        _record_unchecked_artists(job, 0)
-    elif not job.cancel_requested and unchecked > 0:
-        _record_unchecked_artists(job, unchecked)
-        job.summary += f" {plural(unchecked, 'artist')} couldn't be checked"
-        if unreadable_artists:
-            job.summary += (f" ({len(unreadable_artists)} unreadable: "
-                            f"{_first_names(unreadable_artists)})")
-        job.summary += "; scan again to resume from where it left off."
-    stale_tabs = [
-        label for label, refresh, save_failed in (
-            ("Upgrade", upgrade_refresh, upgrade_save_failed),
-            ("Downsample", downsample_refresh, downsample_save_failed),
+            is not None
         )
-        if refresh is not None and not (
-            catalog_complete
-            and refresh.complete
-            and not scan_state_save_failed
-            and not save_failed
+        self.scan_state_save_failed = not scan_saved
+        if scan_saved:
+            for album_id in generation_state.album_changes_since(
+                    self.publication["revision"]) or ():
+                library_scan_state.remove_album(album_id)
+            self.job.execute_args = {
+                **(self.job.execute_args or {}),
+                "_library_review_generation": scan_generation,
+            }
+        else:
+            generation_state.abort_catalog_generation(
+                self.publication,
+                "The completed Library crawl could not publish its saved view.",
+            )
+
+    def _save_disk_views(self):
+        scan_generation = int(self.publication["generation"])
+        if self.downsample_refresh.complete:
+            self.downsample_save_failed = not downsample_state.save(
+                self.downsample_refresh,
+                preserve_concurrent=True,
+                refresh_started_at=self.downsample_refresh_started_at,
+                refresh_started_revision=self.scan_started_revision,
+                generation=scan_generation,
+            )
+            if not self.downsample_save_failed:
+                saved_views.sync_badge("downsample")
+        if self.upgrade_refresh is not None and self.upgrade_refresh.complete:
+            self.upgrade_save_failed = not upgrade_state.save(
+                self.upgrade_refresh,
+                preserve_concurrent=True,
+                refresh_started_at=self.upgrade_refresh_started_at,
+                refresh_started_revision=self.scan_started_revision,
+                generation=scan_generation,
+            )
+            if not self.upgrade_save_failed:
+                saved_views.sync_badge("upgrade")
+                self.job.upgrade_finds = len(_offered_upgrades() - self.offered_before)
+                self.job.upgrade_finds_first = not self.offered_before
+        elif self.upgrade_refresh is None:
+            generation_state.mark_output_status(
+                "upgrade",
+                "disabled",
+                generation=scan_generation,
+                reason="Upgrade scanning is disabled.",
+            )
+
+    def _finish_published_scan(self):
+        scan_generation = int(self.publication["generation"])
+        if not self.scan_state_save_failed and not self.cheap_refresh:
+            _record_last_scan()
+        # What's on disk counts the tag cache's rows, so drop the rows of
+        # files moved or deleted outside the app since they were read.
+        flac_cache.prune_missing(force=True)
+        _flag_new_since_last_scan(self.job, self.kind, found=[
+            c for entry in self.state_artists.values()
+            for c in entry.get("candidates") or []])
+        # The crawl reached every artist cleanly, establish the new-release
+        # baseline from the catalog snapshot and clear this kind's
+        # checkpoint. A crawl that read every catalogue counts as the last
+        # new-release check; a refresh reuses most of them.
+        self.baseline_save_failed = not new_releases_mod.seed_baseline(
+            self.baseline_seen,
+            generation=scan_generation,
+            checked_at=None if self.cheap_refresh else time.time(),
         )
-    ]
-    caveats = []
-    if not job.cancel_requested and stale_tabs:
-        caveats.append(
-            f"{' and '.join(stale_tabs)} results were not updated because "
-            "this scan did not finish cleanly."
-        )
-    if not job.cancel_requested and (skipped := undecodable_named()):
-        caveats.append(undecodable_note(skipped))
-    if not job.cancel_requested and not partial_only and (
-            no_artist := new_releases_mod.unresolved_note(
-                [name for name, entry in state_artists.items()
-                 if not entry.get("artist_id")])):
-        log.info(no_artist)
-    if baseline_save_failed:
-        caveats.append("New releases could not be updated; the next "
-                       "complete scan tries again.")
-    if snapshot_refused:
-        caveats.append(snapshot_refused)
-    if scan_state_changed:
-        caveats.append("Albums changed while the refresh ran, so its "
-                       "results were not saved; refresh again to save them.")
-    elif scan_state_save_failed:
-        caveats.append("The saved scan state couldn't be written; scan again "
-                       "before restarting the app.")
-    # A refresh folded into an open review keeps these after its counts.
-    job.scan_caveats = caveats
-    if caveats:
-        job.summary += " " + " ".join(caveats)
-    # The crawl is stamped complete before its saved views are written, so a
-    # view that never lands would leave the attempt reading "complete" and the
-    # page showing a clean review. Correct the record with what is missing,
-    # which is what puts the warning on Library.
-    unsaved = list(stale_tabs)
-    if baseline_save_failed:
-        unsaved.append("New releases")
-    if (unsaved and attempt_id is not None and publication is not None
-            and not scan_state_save_failed and not job.cancel_requested):
-        named = (" and ".join(unsaved) if len(unsaved) < 3
-                 else ", ".join(unsaved[:-1]) + " and " + unsaved[-1])
-        generation_state.finish_attempt(
-            attempt_id, "incomplete", f"{named} results were not updated.")
-    log.info(job.summary)
+        if not self.checkpoint.clear():
+            self.job.push_line(
+                "The completed scan checkpoint could not be cleared. Its "
+                "saved generation is complete, so it will not be treated "
+                "as newer results."
+            )
+        self.snapshot_refused = _write_collection_snapshot(
+            self.job, self.owned_qobuz, self.snapshot_artist_ids)
+
+    def _write_summary(self):
+        if self.job.cancel_requested and any(
+                other.execute_kind == "library" and other is not self.job
+                for other in job_mgr.registry.awaiting_review()):
+            # Its count holds the rows carried over from the saved scan, and a
+            # stopped refresh folds none of it in.
+            self.job.summary = "Stopped early. The open Library review is unchanged."
+        elif self.job.cancel_requested:
+            self.job.summary = (f"Stopped early. {plural(self.total, 'album')} found so far."
+                                if self.total else "Stopped before anything turned up.")
+        elif self.total:
+            self.job.summary = library_review_summary(self.job.candidates) + "."
+            if self.left_out:
+                self.job.summary += " " + left_out_note(self.left_out, self.job.CANDIDATE_CAP)
+        elif self.partial_only:
+            self.job.summary = "No owned albums are missing tracks."
+        else:
+            self.job.summary = "No missing albums found for artists in your library."
+        if getattr(self.job, "upgrade_finds", 0) and not self.job.cancel_requested:
+            self.job.summary += " " + upgrade_finds_note(
+                self.job.upgrade_finds, first=getattr(self.job, "upgrade_finds_first", False))
+        # Artists that errored or came back with a short catalog page aren't in
+        # state_artists; the checkpoint stays for them and the last-scan stamp is
+        # withheld.
+        unchecked = (len(self.artists) - len(self.state_artists)
+                     - len(self.left_out) + self.discovery_errors)
+        if not self.job.cancel_requested and not self.partial_only and self.publication is not None:
+            unreadable_artists_mod.record(self.unreadable_artists)
+        if (not self.job.cancel_requested and self.publication is not None
+                and unchecked == len(self.unreadable_artists) and self.unreadable_artists):
+            # Finished for everything readable: the rest is not a resume.
+            self.job.summary += (
+                f" {_left_out_note(self.unreadable_artists)} "
+                + ("Each is checked by itself once it can be read."
+                   if cfg.AUTO_LIBRARY_SCAN
+                   else "Scan again once it can be read."
+                   if len(self.unreadable_artists) == 1
+                   else "Scan again once they can be read."))
+        if (not self.job.cancel_requested and unchecked > 0
+                and self.publication is not None
+                and unchecked == len(self.unreadable_artists)):
+            # Left out rather than unchecked: nothing here is waiting to resume.
+            _record_unchecked_artists(self.job, 0)
+        elif not self.job.cancel_requested and unchecked > 0:
+            _record_unchecked_artists(self.job, unchecked)
+            self.job.summary += f" {plural(unchecked, 'artist')} couldn't be checked"
+            if self.unreadable_artists:
+                self.job.summary += (f" ({len(self.unreadable_artists)} unreadable: "
+                                     f"{_first_names(self.unreadable_artists)})")
+            self.job.summary += "; scan again to resume from where it left off."
+        stale_tabs = [
+            label for label, refresh, save_failed in (
+                ("Upgrade", self.upgrade_refresh, self.upgrade_save_failed),
+                ("Downsample", self.downsample_refresh, self.downsample_save_failed),
+            )
+            if refresh is not None and not (
+                self.catalog_complete
+                and refresh.complete
+                and not self.scan_state_save_failed
+                and not save_failed
+            )
+        ]
+        caveats = []
+        if not self.job.cancel_requested and stale_tabs:
+            caveats.append(
+                f"{' and '.join(stale_tabs)} results were not updated because "
+                "this scan did not finish cleanly."
+            )
+        if not self.job.cancel_requested and (skipped := undecodable_named()):
+            caveats.append(undecodable_note(skipped))
+        if not self.job.cancel_requested and not self.partial_only and (
+                no_artist := new_releases_mod.unresolved_note(
+                    [name for name, entry in self.state_artists.items()
+                     if not entry.get("artist_id")])):
+            log.info(no_artist)
+        if self.baseline_save_failed:
+            caveats.append("New releases could not be updated; the next "
+                           "complete scan tries again.")
+        if self.snapshot_refused:
+            caveats.append(self.snapshot_refused)
+        if self.scan_state_changed:
+            caveats.append("Albums changed while the refresh ran, so its "
+                           "results were not saved; refresh again to save them.")
+        elif self.scan_state_save_failed:
+            caveats.append("The saved scan state couldn't be written; scan again "
+                           "before restarting the app.")
+        # A refresh folded into an open review keeps these after its counts.
+        self.job.scan_caveats = caveats
+        if caveats:
+            self.job.summary += " " + " ".join(caveats)
+        # The crawl is stamped complete before its saved views are written, so a
+        # view that never lands would leave the attempt reading "complete" and the
+        # page showing a clean review. Correct the record with what is missing,
+        # which is what puts the warning on Library.
+        unsaved = list(stale_tabs)
+        if self.baseline_save_failed:
+            unsaved.append("New releases")
+        if (unsaved and self.attempt_id is not None and self.publication is not None
+                and not self.scan_state_save_failed and not self.job.cancel_requested):
+            named = (" and ".join(unsaved) if len(unsaved) < 3
+                     else ", ".join(unsaved[:-1]) + " and " + unsaved[-1])
+            generation_state.finish_attempt(
+                self.attempt_id, "incomplete", f"{named} results were not updated.")
+        log.info(self.job.summary)
 
 
 def _offered_upgrades():

@@ -267,6 +267,340 @@ async def job_approve(request: Request, job_id: str):
     return response
 
 
+def _error_redirect(dest, message, suffix=""):
+    return RedirectResponse(
+        url=dest + "?error=" + rendering._notice_key(message) + suffix,
+        status_code=303,
+    )
+
+
+def _review_dest(job):
+    # Repair and Library stay on their single surfaces through the executing
+    # phase; every other kind (new-release checks included) keeps using the
+    # job page.
+    if job.execute_kind == "repair":
+        return "/repair"
+    if job.execute_kind == "library":
+        return "/library"
+    return f"/jobs/{job.id}"
+
+
+def _selected_candidates(job, tab):
+    in_tab = flows.review_tab_filter(tab)
+    with job._lock:
+        candidates = [
+            c for c in job.candidates
+            if c.get("selected") and in_tab(c)
+        ]
+        return copy.deepcopy(candidates)
+
+
+async def _stale_premise_candidates(loop, job, picked):
+    """The ticked candidates whose folders changed since the review was
+    built. A Library review forgets their artists' scan fingerprints."""
+    stale = await loop.run_in_executor(
+        None,
+        # Admission only: a fresh unshared check runs again before
+        # anything is written, so one seal per artist is enough here.
+        lambda: candidate_premise.stale_candidate_ids(
+            picked, share_artist_captures=True),
+    )
+    if stale and job.execute_kind == "library":
+        await loop.run_in_executor(
+            None, lambda: library_scan_state.forget_fingerprints(
+                (c.get("payload") or {}).get("_artist_dir")
+                or c.get("artist")
+                for c in picked
+                if c.get("cid") in stale))
+    return stale
+
+
+async def _all_stale_redirect(loop, job, dest, stale, picked):
+    stale_message = await loop.run_in_executor(
+        None, lambda: _all_stale_message_for(job, stale.counts, picked))
+    return _error_redirect(dest, stale_message)
+
+
+def _downsample_originals_answer(request, job, form, dest, picked,
+                                 selection_token):
+    """What this approval does with the originals, as (response, keep,
+    choice to save). A response ends the approval there."""
+    # current() includes a saved value waiting for another lane to
+    # finish. Bind that value to this approval below.
+    choice = rendering._downsample_originals_choice()
+    rendered_choice = (
+        form.get("downsample_policy") or ""
+    ).strip().lower()
+    current_choice = choice if choice in ("keep", "delete") else ""
+    if (
+        rendered_choice not in ("", "keep", "delete")
+        or rendered_choice != current_choice
+    ):
+        return _error_redirect(
+            dest,
+            "The keep-or-delete setting changed after this review "
+            "was shown. No music files were changed; review the "
+            "updated warning and approve again."
+        ), None, ""
+    choice_to_save = ""
+    if choice not in ("keep", "delete"):
+        choice = (form.get("keep_choice") or "").strip().lower()
+        if choice in ("keep", "delete"):
+            choice_to_save = choice
+        else:
+            return rendering._tr(request, "downsample_keep_choice.html", {
+                "job": job, "page": "downsample",
+                "picked": len(picked),
+                "picked_albums": flows.named_albums(picked),
+                "downsample_originals_choice": current_choice,
+                "review_selection_token": selection_token,
+                "backup_retention_days":
+                    cfg.UPGRADE_BACKUP_RETENTION_DAYS}), None, ""
+    return None, choice == "keep", choice_to_save
+
+
+def _recheck_selection(job, tab, selection_token, selected_ids, stale_premise,
+                       credentials):
+    """Check the ticked candidates again under the approval locks. Returns
+    the status that refuses the approval, or None, and the ticked candidates
+    whose folders changed."""
+    def all_stale(candidates):
+        return {c.get("cid") for c in candidates} <= stale_premise
+
+    current_selected = _selected_candidates(job, tab)
+    if (selection_token is not None
+            and selection_token != review_pages._selection_token(job, tab)):
+        return "review_changed", stale_premise
+    if {c.get("cid") for c in current_selected} != selected_ids:
+        return "review_changed", stale_premise
+    if job.execute_kind in _PREMISE_REVIEW_KINDS:
+        # Still admission: the worker's unshared check runs before
+        # anything is written, so one seal per artist is enough here.
+        stale_premise = candidate_premise.stale_candidate_ids(
+            current_selected, share_artist_captures=True)
+        if all_stale(current_selected):
+            return "all_candidates_stale", stale_premise
+    if (credentials is not None
+            and not qobuz_access._credential_generation_is_active(
+                credentials.generation)):
+        return "credential_changed", stale_premise
+    if (job.execute_kind in ("upgrade", "downsample")
+            and job.status == job_mgr.JobStatus.AWAITING_REVIEW):
+        synced_job = saved_reviews._sync_saved_review_before_approve(job)
+        if synced_job is not job:
+            return "review_changed", stale_premise
+        current_selected = _selected_candidates(job, tab)
+        if not current_selected:
+            return job_mgr.APPROVAL_NO_SELECTION, stale_premise
+        if job.execute_kind in _PREMISE_REVIEW_KINDS:
+            stale_premise = candidate_premise.stale_candidate_ids(
+                current_selected, share_artist_captures=True)
+            if all_stale(current_selected):
+                return "all_candidates_stale", stale_premise
+    return None, stale_premise
+
+
+def _admission_filter(job, tab, stale_owned, stale_premise,
+                      already_downloading):
+    """The filter an approval admits ticked candidates through. An album a
+    running download already covers is added to ``already_downloading``."""
+    decisions = {}
+    in_approved_tab = flows.review_tab_filter(tab)
+
+    def selection_filter(candidate):
+        key = candidate.get("cid")
+        if not isinstance(key, str) or not key:
+            return False
+        if key in decisions:
+            return decisions[key]
+        if (key in stale_owned or key in stale_premise
+                or not in_approved_tab(candidate)):
+            decisions[key] = False
+            return False
+        if job.execute_kind in (
+                "library", "new_releases", "collection_restore"):
+            album_id = completion.normalise_album_id(
+                (candidate.get("payload") or {}).get("album_id")
+            )
+            if album_id is None:
+                decisions[key] = False
+                return False
+            admitted = download_admission._duplicate_download_job(album_id) is None
+            if not admitted:
+                already_downloading.append(candidate)
+        else:
+            admitted = True
+        decisions[key] = admitted
+        return admitted
+
+    return selection_filter
+
+
+def _unapproved_review_builder(tab, selection_filter, discard_ids):
+    def split_review(review_job):
+        remnant = _build_unapproved_review(
+            review_job,
+            tab,
+            admission_filter=selection_filter,
+            discard_ids=discard_ids,
+        )
+        if remnant is not None:
+            remnant.execute_args.pop(
+                "_credential_generation", None)
+        # Whole review ticked → retire the worked-through baseline
+        # after success instead of rebuilding its old candidates.
+        if review_job.execute_kind == "library":
+            review_job._consumed_whole_review = remnant is None
+        return remnant
+
+    return split_review
+
+
+def _approve_with_run_args(job, *, credentials, downsample_keep_originals,
+                           downsample_choice_to_save,
+                           migration_allow_low_space, split_review,
+                           selection_filter):
+    """Put this approval's answers into the job's run arguments and approve
+    it. The old arguments go back unless the approval went through."""
+    previous_migration_args = None
+    previous_migration_execute = None
+    previous_downsample_args = None
+    previous_qobuz_args = None
+    previous_qobuz_execute = None
+    downsample_args_changed = False
+    qobuz_args_changed = False
+    if credentials is not None:
+        with job._lock:
+            if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
+                previous_qobuz_args = job.execute_args
+                previous_qobuz_execute = job._execute_fn
+                job.execute_args = {
+                    **(job.execute_args or {}),
+                    "_credential_generation": credentials.generation,
+                }
+                factory = job_runs._RESUME_EXECUTE.get(job.execute_kind)
+                if factory is not None:
+                    job._execute_fn = factory(job, job.execute_args)
+                qobuz_args_changed = True
+    if (
+        job.execute_kind == "downsample"
+        and downsample_keep_originals is not None
+    ):
+        with job._lock:
+            if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
+                previous_downsample_args = job.execute_args
+                job.execute_args = {
+                    **(job.execute_args or {}),
+                    "keep_originals": downsample_keep_originals,
+                }
+                job._execute_fn = job_runs._resume_downsample(
+                    job, job.execute_args)
+                downsample_args_changed = True
+    if downsample_choice_to_save:
+        saved, _warnings = settings_store.save({
+            "DOWNSAMPLE_KEEP_ORIGINALS": downsample_choice_to_save,
+        })
+        if saved is not True:
+            return "downsample_policy_failed"
+    if job.execute_kind == "migration":
+        execute_args = dict(job.execute_args or {})
+        # Old parked reviews may still carry the former launcher
+        # checkbox. Only an acknowledgement submitted beside the
+        # measured short-space review can enable the override now.
+        execute_args["allow_low_space"] = migration_allow_low_space
+        execute_fn = job_runs._resume_migration(job, execute_args)
+        with job._lock:
+            if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
+                previous_migration_args = job.execute_args
+                previous_migration_execute = job._execute_fn
+                job.execute_args = execute_args
+                job._execute_fn = execute_fn
+    approved = None
+    try:
+        approved = job_mgr.approve(
+            job,
+            None,
+            split_review=split_review,
+            selection_filter=selection_filter,
+        )
+        return approved
+    finally:
+        if downsample_args_changed and approved is not True:
+            with job._lock:
+                job.execute_args = previous_downsample_args
+                job._execute_fn = job_runs._resume_downsample(
+                    job, job.execute_args or {})
+        if qobuz_args_changed and approved is not True:
+            with job._lock:
+                job.execute_args = previous_qobuz_args
+                job._execute_fn = previous_qobuz_execute
+        if (
+            previous_migration_args is not None
+            and approved is not True
+        ):
+            with job._lock:
+                job.execute_args = previous_migration_args
+                job._execute_fn = previous_migration_execute
+
+
+_APPROVAL_REFUSALS = {
+    "review_changed":
+        "That review changed while it was being approved. Check "
+        "the selections and try again.",
+    "downsample_policy_failed":
+        "Couldn't save the keep-or-delete choice. No music files "
+        "were changed; check the data folder and try again.",
+    "sync_failed":
+        "The refreshed review could not be saved. Check the data "
+        "folder and try again.",
+}
+
+
+def _approved_redirect(dest, approved, skip_q, already_downloading,
+                       stale_premise, picked):
+    running_q = ""
+    if already_downloading:
+        names = flows.named_albums(already_downloading)
+        running_q = "&error=" + rendering._notice_key(
+            f"{names} {'is' if len(already_downloading) == 1 else 'are'} "
+            "already downloading, so "
+            f"{'it was' if len(already_downloading) == 1 else 'they were'} "
+            "not started again.")
+    if approved is job_mgr.APPROVAL_NO_SELECTION:
+        if running_q:
+            return RedirectResponse(
+                url=f"{dest}?{running_q[1:]}{skip_q}", status_code=303)
+        return RedirectResponse(url=f"{dest}?noselection=1{skip_q}",
+                                status_code=303)
+    flag = "approved=1" if approved else "stale=1"
+    local_stale = len(stale_premise)
+    local_stale_q = ""
+    if local_stale and approved:
+        skipped = [c for c in picked if c.get("cid") in stale_premise]
+        skipped_names = flows.named_albums(skipped)
+        folders = _changed_artist_folders(skipped)
+        local_stale_q = "&error=" + rendering._notice_key(
+            f"Started the rest. {folders[:1].upper()}{folders[1:]} changed on "
+            f"disk after this review was built, so {skipped_names} "
+            f"{'was' if local_stale == 1 else 'were'} skipped and left ticked."
+            if folders else
+            f"Started the rest. {skipped_names} changed on disk after this "
+            f"review was built, so "
+            f"{'it was' if local_stale == 1 else 'they were'} skipped and "
+            "left ticked."
+        )
+        # One answer, not two: the green "Queued" banner would say what this
+        # sentence opens with. Only when this click is the one that started
+        # the work; if another click got there first, that is what the page
+        # has to say instead.
+        flag = ""
+    return RedirectResponse(
+        url=f"{dest}?{flag}{skip_q}{local_stale_q or running_q}".replace(
+            "?&", "?"),
+        status_code=303,
+    )
+
+
 async def _approve(request: Request, job_id: str):
     job = job_mgr.registry.get(job_id)
     downloads = write_gate._review_downloads(job)
@@ -274,10 +608,7 @@ async def _approve(request: Request, job_id: str):
     if busy is not None:
         return busy
     if not job:
-        return RedirectResponse(
-            url="/queue?error=" + rendering._notice_key(
-                "That review is no longer open."),
-            status_code=303)
+        return _error_redirect("/queue", "That review is no longer open.")
     # A parked review can outlive its feature: Upgrade can be switched off
     # after its review parks, and the downsample engine can vanish across a
     # restart.
@@ -286,26 +617,15 @@ async def _approve(request: Request, job_id: str):
     if job.execute_kind == "downsample":
         if not downsample_engine.HAVE_DOWNSAMPLE:
             return RedirectResponse(url="/downsample", status_code=303)
-    # Repair and Library stay on their single surfaces through the executing
-    # phase; every other kind (new-release checks included) keeps using the
-    # job page.
-    if job.execute_kind == "repair":
-        dest = "/repair"
-    elif job.execute_kind == "library":
-        dest = "/library"
-    else:
-        dest = f"/jobs/{job_id}"
+    dest = _review_dest(job)
     if (job.status == job_mgr.JobStatus.AWAITING_REVIEW
             and job.execute_kind == "upgrade"
             and (job.execute_args or {}).get("quality_signature")
             != saved_reviews._effective_upgrade_quality_signature()):
-        return RedirectResponse(
-            url=f"/jobs/{job.id}?error=" + rendering._notice_key(
-                "Download quality changed since this Upgrade review was "
-                "built. Run a Library refresh before approving it."
-            ),
-            status_code=303,
-        )
+        return _error_redirect(
+            f"/jobs/{job.id}",
+            "Download quality changed since this Upgrade review was "
+            "built. Run a Library refresh before approving it.")
     # A library review approves per tab: the button acts on the tab the user
     # is looking at, and only that tab.
     form = await request.form()
@@ -322,12 +642,8 @@ async def _approve(request: Request, job_id: str):
     ):
         action = ("in-place move" if (job.execute_args or {}).get("in_place")
                   else "copy")
-        return RedirectResponse(
-            url=dest + "?error=" + rendering._notice_key(
-                f"Confirm the low-space risk before approving this {action}."
-            ),
-            status_code=303,
-        )
+        return _error_redirect(
+            dest, f"Confirm the low-space risk before approving this {action}.")
     tab = (form.get("tab") or "").strip()
     if job.execute_kind != "library" or tab not in ("missing", "gaps"):
         tab = ""
@@ -351,81 +667,32 @@ async def _approve(request: Request, job_id: str):
                 c for c in job.candidates
                 if c.get("cid") in selected_candidate_ids
             ])
-        has_pick = bool(selected_candidate_ids)
-        if not has_pick:
+        if not selected_candidate_ids:
             return RedirectResponse(url=f"{dest}?noselection=1",
                                     status_code=303)
         disk_refusal = await loop.run_in_executor(
             None, lambda: disk_support.refusal(
                 *_REVIEW_DISK_FEATURES.get(job.execute_kind, ())))
         if disk_refusal:
-            return RedirectResponse(
-                url=dest + "?error=" + rendering._notice_key(disk_refusal),
-                status_code=303,
-            )
+            return _error_redirect(dest, disk_refusal)
         if job.execute_kind in _PREMISE_REVIEW_KINDS:
-            stale_premise_candidate_ids = await loop.run_in_executor(
-                None,
-                # Admission only: a fresh unshared check runs again before
-                # anything is written, so one seal per artist is enough here.
-                lambda: candidate_premise.stale_candidate_ids(
-                    selected_candidate_snapshot, share_artist_captures=True),
-            )
-            if stale_premise_candidate_ids and job.execute_kind == "library":
-                await loop.run_in_executor(
-                    None, lambda: library_scan_state.forget_fingerprints(
-                        (c.get("payload") or {}).get("_artist_dir")
-                        or c.get("artist")
-                        for c in selected_candidate_snapshot
-                        if c.get("cid") in stale_premise_candidate_ids))
+            stale_premise_candidate_ids = await _stale_premise_candidates(
+                loop, job, selected_candidate_snapshot)
             if selected_candidate_ids <= stale_premise_candidate_ids:
-                stale_message = await loop.run_in_executor(
-                    None, lambda: _all_stale_message_for(
-                        job, stale_premise_candidate_ids.counts,
-                        selected_candidate_snapshot))
-                return RedirectResponse(
-                    url=dest + "?error=" + rendering._notice_key(stale_message),
-                    status_code=303,
-                )
+                return await _all_stale_redirect(
+                    loop, job, dest, stale_premise_candidate_ids,
+                    selected_candidate_snapshot)
         # Only now that the run is going to happen: the keep-vs-delete answer is
         # a standing policy saved to Settings, so asking and saving it before
         # anything checks that an album is ticked lets a no-op approve change
         # what every future downsample does with your originals.
         if job.execute_kind == "downsample":
-            # current() includes a saved value waiting for another lane to
-            # finish. Bind that value to this approval below.
-            choice = rendering._downsample_originals_choice()
-            rendered_choice = (
-                form.get("downsample_policy") or ""
-            ).strip().lower()
-            current_choice = choice if choice in ("keep", "delete") else ""
-            if (
-                rendered_choice not in ("", "keep", "delete")
-                or rendered_choice != current_choice
-            ):
-                return RedirectResponse(
-                    url=dest + "?error=" + rendering._notice_key(
-                        "The keep-or-delete setting changed after this review "
-                        "was shown. No music files were changed; review the "
-                        "updated warning and approve again."
-                    ),
-                    status_code=303,
-                )
-            if choice not in ("keep", "delete"):
-                choice = (form.get("keep_choice") or "").strip().lower()
-                if choice in ("keep", "delete"):
-                    downsample_choice_to_save = choice
-                else:
-                    return rendering._tr(request, "downsample_keep_choice.html", {
-                        "job": job, "page": "downsample",
-                        "picked": len(selected_candidate_snapshot),
-                        "picked_albums":
-                            flows.named_albums(selected_candidate_snapshot),
-                        "downsample_originals_choice": current_choice,
-                        "review_selection_token": selection_token,
-                        "backup_retention_days":
-                            cfg.UPGRADE_BACKUP_RETENTION_DAYS})
-            downsample_keep_originals = choice == "keep"
+            (response, downsample_keep_originals,
+             downsample_choice_to_save) = _downsample_originals_answer(
+                request, job, form, dest, selected_candidate_snapshot,
+                selection_token)
+            if response is not None:
+                return response
 
     authorized_credentials = None
     stale_owned_candidate_ids = set()
@@ -436,11 +703,8 @@ async def _approve(request: Request, job_id: str):
                 QobuzAccess.DOWNLOAD_ACTION
             )
         except qobuz_access._QOBUZ_ACTION_ERRORS as exc:
-            message = job_mgr.qobuz_action_error_message(exc)
-            return RedirectResponse(
-                url=dest + "?error=" + rendering._notice_key(message),
-                status_code=303,
-            )
+            return _error_redirect(
+                dest, job_mgr.qobuz_action_error_message(exc))
         if job.execute_kind in _LIBRARY_SURFACE_KINDS:
             stale_owned_candidate_ids = await loop.run_in_executor(
                 None,
@@ -455,6 +719,7 @@ async def _approve(request: Request, job_id: str):
             )
     skipped = len(stale_owned_candidate_ids)
     _skip_q = f"&skipped={skipped}" if skipped else ""
+
     # Selection is saved server-side as the user ticks (the paginated review
     # does not carry every checkbox in the form), so approve runs against
     # the saved flags; passing None keeps them as-is rather than reading the
@@ -481,295 +746,60 @@ async def _approve(request: Request, job_id: str):
                 return "paused"
             if job.status != job_mgr.JobStatus.AWAITING_REVIEW:
                 return False
-
-            def current_selected_candidates():
-                in_tab = flows.review_tab_filter(tab)
-                with job._lock:
-                    candidates = [
-                        c for c in job.candidates
-                        if c.get("selected") and in_tab(c)
-                    ]
-                    return copy.deepcopy(candidates)
-
-            current_selected = current_selected_candidates()
-            if (selection_token is not None
-                    and selection_token != review_pages._selection_token(job, tab)):
-                return "review_changed"
-            if {
-                c.get("cid") for c in current_selected
-            } != selected_candidate_ids:
-                return "review_changed"
-            if job.execute_kind in _PREMISE_REVIEW_KINDS:
-                # Still admission: the worker's unshared check runs before
-                # anything is written, so one seal per artist is enough here.
-                stale_premise_candidate_ids = candidate_premise.stale_candidate_ids(
-                    current_selected, share_artist_captures=True)
-                if {
-                    c.get("cid") for c in current_selected
-                } <= stale_premise_candidate_ids:
-                    return "all_candidates_stale"
-            if (authorized_credentials is not None
-                    and not qobuz_access._credential_generation_is_active(
-                        authorized_credentials.generation)):
-                return "credential_changed"
-            if (job.execute_kind in ("upgrade", "downsample")
-                    and job.status == job_mgr.JobStatus.AWAITING_REVIEW):
-                synced_job = saved_reviews._sync_saved_review_before_approve(job)
-                if synced_job is not job:
-                    return "review_changed"
-                current_selected = current_selected_candidates()
-                if not current_selected:
-                    return job_mgr.APPROVAL_NO_SELECTION
-                if job.execute_kind in _PREMISE_REVIEW_KINDS:
-                    stale_premise_candidate_ids = candidate_premise.stale_candidate_ids(
-                        current_selected, share_artist_captures=True)
-                    if {
-                        c.get("cid") for c in current_selected
-                    } <= stale_premise_candidate_ids:
-                        return "all_candidates_stale"
+            refusal, stale_premise_candidate_ids = _recheck_selection(
+                job, tab, selection_token, selected_candidate_ids,
+                stale_premise_candidate_ids, authorized_credentials)
+            if refusal is not None:
+                return refusal
             # A review action consumes only the ticked picks: park everything
             # else (plus the inactive Library tab) as its own living review so
             # one partial batch cannot eat unreviewed candidates.
-            split_review = None
-            admission_decisions = {}
             already_downloading.clear()
-            in_approved_tab = flows.review_tab_filter(tab)
-
-            def selection_filter(candidate):
-                key = candidate.get("cid")
-                if not isinstance(key, str) or not key:
-                    return False
-                if key in admission_decisions:
-                    return admission_decisions[key]
-                if key in stale_owned_candidate_ids:
-                    admission_decisions[key] = False
-                    return False
-                if key in stale_premise_candidate_ids:
-                    admission_decisions[key] = False
-                    return False
-                if not in_approved_tab(candidate):
-                    admission_decisions[key] = False
-                    return False
-                if job.execute_kind in (
-                        "library", "new_releases", "collection_restore"):
-                    album_id = completion.normalise_album_id(
-                        (candidate.get("payload") or {}).get("album_id")
-                    )
-                    if album_id is None:
-                        admission_decisions[key] = False
-                        return False
-                    admitted = download_admission._duplicate_download_job(album_id) is None
-                    if not admitted:
-                        already_downloading.append(candidate)
-                else:
-                    admitted = True
-                admission_decisions[key] = admitted
-                return admitted
-
+            selection_filter = _admission_filter(
+                job, tab, stale_owned_candidate_ids,
+                stale_premise_candidate_ids, already_downloading)
+            split_review = None
             if ((job.execute_kind in _PREMISE_REVIEW_KINDS
                     or stale_premise_candidate_ids)
                     and job.status == job_mgr.JobStatus.AWAITING_REVIEW):
-                def split_review(review_job):
-                    remnant = _build_unapproved_review(
-                        review_job,
-                        tab,
-                        admission_filter=selection_filter,
-                        discard_ids=stale_owned_candidate_ids,
-                    )
-                    if remnant is not None:
-                        remnant.execute_args.pop(
-                            "_credential_generation", None)
-                    # Whole review ticked → retire the worked-through baseline
-                    # after success instead of rebuilding its old candidates.
-                    if review_job.execute_kind == "library":
-                        review_job._consumed_whole_review = remnant is None
-                    return remnant
-
-            previous_migration_args = None
-            previous_migration_execute = None
-            previous_downsample_args = None
-            previous_qobuz_args = None
-            previous_qobuz_execute = None
-            downsample_args_changed = False
-            qobuz_args_changed = False
-            if authorized_credentials is not None:
-                with job._lock:
-                    if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
-                        previous_qobuz_args = job.execute_args
-                        previous_qobuz_execute = job._execute_fn
-                        job.execute_args = {
-                            **(job.execute_args or {}),
-                            "_credential_generation":
-                                authorized_credentials.generation,
-                        }
-                        factory = job_runs._RESUME_EXECUTE.get(job.execute_kind)
-                        if factory is not None:
-                            job._execute_fn = factory(job, job.execute_args)
-                        qobuz_args_changed = True
-            if (
-                job.execute_kind == "downsample"
-                and downsample_keep_originals is not None
-            ):
-                with job._lock:
-                    if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
-                        previous_downsample_args = job.execute_args
-                        job.execute_args = {
-                            **(job.execute_args or {}),
-                            "keep_originals": downsample_keep_originals,
-                        }
-                        job._execute_fn = job_runs._resume_downsample(
-                            job, job.execute_args)
-                        downsample_args_changed = True
-            if downsample_choice_to_save:
-                saved, _warnings = settings_store.save({
-                    "DOWNSAMPLE_KEEP_ORIGINALS": downsample_choice_to_save,
-                })
-                if saved is not True:
-                    return "downsample_policy_failed"
-            if job.execute_kind == "migration":
-                execute_args = dict(job.execute_args or {})
-                # Old parked reviews may still carry the former launcher
-                # checkbox. Only an acknowledgement submitted beside the
-                # measured short-space review can enable the override now.
-                execute_args["allow_low_space"] = bool(
+                split_review = _unapproved_review_builder(
+                    tab, selection_filter, stale_owned_candidate_ids)
+            return _approve_with_run_args(
+                job,
+                credentials=authorized_credentials,
+                downsample_keep_originals=downsample_keep_originals,
+                downsample_choice_to_save=downsample_choice_to_save,
+                migration_allow_low_space=bool(
                     migration_low_space_required
-                    and migration_low_space_accepted
-                )
-                execute_fn = job_runs._resume_migration(job, execute_args)
-                with job._lock:
-                    if job.status == job_mgr.JobStatus.AWAITING_REVIEW:
-                        previous_migration_args = job.execute_args
-                        previous_migration_execute = job._execute_fn
-                        job.execute_args = execute_args
-                        job._execute_fn = execute_fn
-            approved = None
-            try:
-                approved = job_mgr.approve(
-                    job,
-                    None,
-                    split_review=split_review,
-                    selection_filter=selection_filter,
-                )
-                return approved
-            finally:
-                if downsample_args_changed and approved is not True:
-                    with job._lock:
-                        job.execute_args = previous_downsample_args
-                        job._execute_fn = job_runs._resume_downsample(
-                            job, job.execute_args or {})
-                if qobuz_args_changed and approved is not True:
-                    with job._lock:
-                        job.execute_args = previous_qobuz_args
-                        job._execute_fn = previous_qobuz_execute
-                if (
-                    previous_migration_args is not None
-                    and approved is not True
-                ):
-                    with job._lock:
-                        job.execute_args = previous_migration_args
-                        job._execute_fn = previous_migration_execute
+                    and migration_low_space_accepted),
+                split_review=split_review,
+                selection_filter=selection_filter,
+            )
 
     approved = await loop.run_in_executor(None, _split_and_approve)
     if approved == "all_candidates_stale":
-        stale_message = await loop.run_in_executor(
-            None, lambda: _all_stale_message_for(
-                job, stale_premise_candidate_ids.counts,
-                selected_candidate_snapshot))
-        return RedirectResponse(
-            url=dest + "?error=" + rendering._notice_key(stale_message),
-            status_code=303,
-        )
+        return await _all_stale_redirect(
+            loop, job, dest, stale_premise_candidate_ids,
+            selected_candidate_snapshot)
     if (isinstance(approved, tuple)
             and len(approved) == 2
             and approved[0] == "candidate_stale"):
-        return RedirectResponse(
-            url=dest + "?error=" + rendering._notice_key(approved[1]),
-            status_code=303,
-        )
-    if approved == "review_changed":
-        return RedirectResponse(
-            url=dest + "?error=" + rendering._notice_key(
-                "That review changed while it was being approved. Check "
-                "the selections and try again."
-            ),
-            status_code=303,
-        )
-    if approved == "downsample_policy_failed":
-        return RedirectResponse(
-            url=dest + "?error=" + rendering._notice_key(
-                "Couldn't save the keep-or-delete choice. No music files "
-                "were changed; check the data folder and try again."
-            ),
-            status_code=303,
-        )
+        return _error_redirect(dest, approved[1])
+    if isinstance(approved, str) and approved in _APPROVAL_REFUSALS:
+        return _error_redirect(dest, _APPROVAL_REFUSALS[approved])
     if approved == "credential_changed":
-        message = job_mgr.qobuz_action_error_message(CredentialChanged())
-        return RedirectResponse(
-            url=dest + "?error=" + rendering._notice_key(message),
-            status_code=303,
-        )
-    if approved == "sync_failed":
-        return RedirectResponse(
-            url=dest + "?error=" + rendering._notice_key(
-                "The refreshed review could not be saved. Check the data "
-                "folder and try again."
-            ),
-            status_code=303,
-        )
+        return _error_redirect(
+            dest, job_mgr.qobuz_action_error_message(CredentialChanged()))
     if approved == "paused":
         busy = refusals._lock_busy_response(request, downloads=downloads)
         if busy is not None:
             return busy
         return RedirectResponse(url=dest, status_code=303)
     if approved is None:
-        return RedirectResponse(
-            url=dest + "?error=" + rendering._notice_key(
-                job_mgr.JOB_ADMISSION_ERROR
-            ) + _skip_q,
-            status_code=303,
-        )
-    running_q = ""
-    if already_downloading:
-        names = flows.named_albums(already_downloading)
-        running_q = "&error=" + rendering._notice_key(
-            f"{names} {'is' if len(already_downloading) == 1 else 'are'} "
-            "already downloading, so "
-            f"{'it was' if len(already_downloading) == 1 else 'they were'} "
-            "not started again.")
-    if approved is job_mgr.APPROVAL_NO_SELECTION:
-        if running_q:
-            return RedirectResponse(
-                url=f"{dest}?{running_q[1:]}{_skip_q}", status_code=303)
-        return RedirectResponse(url=f"{dest}?noselection=1{_skip_q}",
-                                status_code=303)
-    flag = "approved=1" if approved else "stale=1"
-    local_stale = len(stale_premise_candidate_ids)
-    local_stale_q = ""
-    if local_stale and approved:
-        skipped = [c for c in selected_candidate_snapshot
-                   if c.get("cid") in stale_premise_candidate_ids]
-        skipped_names = flows.named_albums(skipped)
-        folders = _changed_artist_folders(skipped)
-        local_stale_q = "&error=" + rendering._notice_key(
-            f"Started the rest. {folders[:1].upper()}{folders[1:]} changed on "
-            f"disk after this review was built, so {skipped_names} "
-            f"{'was' if local_stale == 1 else 'were'} skipped and left ticked."
-            if folders else
-            f"Started the rest. {skipped_names} changed on disk after this "
-            f"review was built, so "
-            f"{'it was' if local_stale == 1 else 'they were'} skipped and "
-            "left ticked."
-        )
-        # One answer, not two: the green "Queued" banner would say what this
-        # sentence opens with. Only when this click is the one that started
-        # the work; if another click got there first, that is what the page
-        # has to say instead.
-        flag = ""
-    return RedirectResponse(
-        url=f"{dest}?{flag}{_skip_q}{local_stale_q or running_q}".replace(
-            "?&", "?"),
-        status_code=303,
-    )
+        return _error_redirect(dest, job_mgr.JOB_ADMISSION_ERROR, _skip_q)
+    return _approved_redirect(
+        dest, approved, _skip_q, already_downloading,
+        stale_premise_candidate_ids, selected_candidate_snapshot)
 
 
 # Kinds whose review screen has server-backed per-candidate selection.

@@ -861,10 +861,9 @@ def parse_args():
     return args
 
 
-def main():
-    raise_open_file_limit()
-    # Apply the web Settings page's persisted overrides before parse_args
-    # reads cfg.* into the default flags.
+def _load_saved_settings():
+    """Apply the web Settings page's saved overrides, before parse_args reads
+    cfg.* into the default flags."""
     try:
         from qobuz_librarian.web import settings_store
         settings_store.load()
@@ -876,6 +875,481 @@ def main():
             "change download or file-handling behaviour. Fix the data-folder "
             "permissions or recover the settings file, then try again.\n",
         ), EXIT_CONFIG)
+
+
+def _preview_reset_walk_seen():
+    present = dict.fromkeys(
+        shown_path(f) for f in (cfg.WALK_SEEN_FILE, cfg.ALBUM_WALK_SEEN_FILE)
+        if f.exists())
+    if present:
+        log.info(fmt(C.GRAY, "  --dry-run: would clear the lists of artists and albums already checked:"))
+        for r in present:
+            log.info(fmt(C.GRAY, f"     {r}"))
+    else:
+        log.info(fmt(C.GRAY, "  No list of checked artists or albums to clear."))
+
+
+def _reset_walk_seen():
+    removed = []
+    for f in (cfg.WALK_SEEN_FILE, cfg.ALBUM_WALK_SEEN_FILE):
+        try:
+            f.unlink()
+            removed.append(shown_path(f))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            die(fmt(C.RED,
+                f"\n✗  Couldn't delete {f}: {e}\n"
+                "   Check the volume permissions / PUID-PGID; /data must be writable.\n"),
+                EXIT_GENERAL)
+    if removed:
+        log.info(fmt(C.GREEN, "  ✓  Cleared the lists of artists and albums already checked:"))
+        for r in dict.fromkeys(removed):
+            log.info(fmt(C.GRAY, f"     {r}"))
+    else:
+        log.info(fmt(C.GRAY, "  No list of checked artists or albums to clear."))
+
+
+class _SavedQueue:
+    """The saved download queue as start-up recovery last read it."""
+
+    def __init__(self, lockfile):
+        self._lockfile = lockfile
+        self.parked = False
+        self._set(_STARTUP_RECOVERY_RESULT)
+
+    def _set(self, result):
+        from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
+        self.saved = (
+            getattr(result, "status", None)
+            is StartupRecoveryStatus.RESUME_REQUIRED)
+        self.started = self.saved and any(
+            item.phase is not queue_state.QueuePhase.PENDING
+            for item in result.items
+        )
+
+    def refusal(self, uses_queue, other_work):
+        if self.parked and (uses_queue or other_work):
+            return fmt(
+                C.YELLOW,
+                "\n⚠  An album is waiting to be recovered.\n"
+                "   Quit and run Qobuz Librarian again; it recovers that album "
+                "before other work.\n",
+            )
+        if self.started and (uses_queue or other_work):
+            return fmt(
+                C.YELLOW,
+                "\n⚠  An interrupted download must be resumed before other work.\n"
+                "   Run Qobuz Librarian without a mode or search argument and "
+                "choose Resume when it offers the saved queue.\n",
+            )
+        if self.saved and uses_queue:
+            return fmt(
+                C.YELLOW,
+                "\n⚠  A saved download queue must be resumed or discarded before "
+                "another download.\n"
+                f"   It is in {shown_path(cfg.QUEUE_JOURNAL_DIR)}. Run Qobuz "
+                "Librarian without a mode or search argument to choose.\n",
+            )
+        return None
+
+    def read(self):
+        """Read the saved queue again: a mode run from the menu can leave one
+        behind, or an album stopped for recovery."""
+        from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
+        result = _record_startup_recovery(self._lockfile)
+        if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
+            if result.reason != "queue-item-blocked":
+                _die_unsettled_startup_recovery(self._lockfile, result)
+            self.parked = True
+            return
+        self.parked = False
+        self._set(result)
+
+    def offer(self, args, download_token):
+        """Offer the saved queue: resume, keep or discard it. None when the
+        prompt was abandoned."""
+        try:
+            choice = offer_resume_startup_recovery(
+                args,
+                download_token,
+                _STARTUP_RECOVERY_RESULT,
+            )
+        except (AuthLost, QobuzUnavailable):
+            raise
+        except Exception as exc:
+            die(fmt(
+                C.RED,
+                "\n✗  The interrupted queue could not be resumed.\n"
+                f"   {exc}\n",
+            ), EXIT_GENERAL)
+        if choice == "blocked":
+            _report_settled_downloads(
+                _record_startup_recovery(self._lockfile, settle=True))
+        self.read()
+        if self.parked:
+            log.info(self.refusal(True, True))
+        elif self.saved:
+            if self.started:
+                log.info(fmt(
+                    C.YELLOW,
+                    "  Interrupted queue kept. Other work remains paused until "
+                    "it is resumed.",
+                ))
+            else:
+                log.info(fmt(C.YELLOW, wrap(
+                    f"Queue kept in {shown_path(cfg.QUEUE_JOURNAL_DIR)}. Other "
+                    "downloads wait until it is resumed or discarded.")))
+        return choice
+
+
+class _QobuzSession:
+    """Signs in and readies the downloader the first time a mode needs them,
+    so the menu and the local tools work on a box with neither."""
+
+    def __init__(self, args):
+        self.args = args
+        self.in_menu = False
+        self._tools_ready = False
+
+    def prepare_download_stack(self):
+        if self._tools_ready:
+            return
+        check_rip()
+        check_media_tools()
+        if not self.args.no_import and not self.args.dry_run:
+            check_beets()
+        if not self.args.dry_run:
+            require_disk_support("downloads")
+        from qobuz_librarian.api.auth import (
+            check_env_credentials,
+            sweep_streamrip_run_copies,
+        )
+        sweep_streamrip_run_copies()
+        check_env_credentials()
+        cap_depth, cap_rate = streamrip_quality_cap()
+        vlog(
+            f"streamrip quality cap: {cap_depth}-bit/"
+            f"{cap_rate/1000:g}kHz"
+        )
+        self._tools_ready = True
+
+    def token(self, access):
+        try:
+            from qobuz_librarian.api.client import authorize_qobuz_action
+
+            credentials = authorize_qobuz_action(access)
+        except NoCredsError:
+            message = fmt(C.RED,
+                "\n✗  No Qobuz credentials configured.\n"
+                "   Paste your token and your email or user ID on the Settings page "
+                f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings);\n"
+                "   in terminal mode, press Resume web app there first.\n"
+                "   Or set QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID in your environment.\n")
+            if self.in_menu:
+                log.info(message)
+                raise _BackToMenu from None
+            die(message, EXIT_AUTH)
+        user_id, token = credentials.user_id, credentials.token
+        require_music_root()
+        if not HAVE_MUTAGEN:
+            _note_missing_mutagen()
+        from qobuz_librarian.api.client import bind_download_preflight
+        token = bind_download_preflight(token, self.prepare_download_stack)
+        if access is QobuzAccess.DOWNLOAD_ACTION:
+            self.prepare_download_stack()
+        vlog(f"user_id: {user_id}  •  music root: {cfg.MUSIC_ROOT}")
+        if self.args.verbose:
+            log.info(fmt(C.GRAY, f"  staging:    {cfg.STAGING_DIR}"))
+            log.info(fmt(C.GRAY, f"  lock:       {cfg.LOCK_FILE}"))
+        return token
+
+    def catalogue_token(self):
+        return self.token(QobuzAccess.CATALOGUE_ACTION)
+
+    def download_token(self):
+        return self.token(QobuzAccess.DOWNLOAD_ACTION)
+
+
+def _note_missing_mutagen():
+    log.info(fmt(C.YELLOW,
+        "  ⚠  mutagen not installed; falling back to filename-only "
+        "detection."))
+    if _in_container():
+        log.info(fmt(C.GRAY,
+            "     The bundled image installs mutagen by default. If "
+            "it's missing here, rebuild with `docker compose build "
+            "--no-cache`."))
+    else:
+        log.info(fmt(C.GRAY,
+            "     Install: `pip install mutagen` (or via pipx)."))
+
+
+def _startup_housekeeping(saved_queue):
+    _settle_interrupted_imports(saved_queue)
+    _put_back_moved_albums()
+    _prune_old_state()
+
+
+def _settle_interrupted_imports(saved_queue):
+    from qobuz_librarian import beets_db
+    from qobuz_librarian.integrations import beets as beets_mod
+    from qobuz_librarian.integrations import staging as staging_mod
+    from qobuz_librarian.modes import process as process_mode
+    try:
+        beets_db.remove_old_copies()
+        beets_mod.remove_stale_import_overrides()
+        beets_mod.remove_stale_ownership_folders()
+        process_mode.finish_interrupted_upgrades()
+        if not saved_queue:
+            staging_mod.remove_empty_retry_groups()
+        staging_mod.remove_emptied_kept_runs()
+    except Exception as e:
+        vlog(f"interrupted upgrade settle error: {e}")
+
+
+def _put_back_moved_albums():
+    from qobuz_librarian.integrations import downsample_engine
+    from qobuz_librarian.library import backup as backup_mod
+    try:
+        backup_mod.settle_interrupted_restores()
+        downsample_engine.settle_interrupted_downsample()
+        for path, origin in backup_mod.albums_left_in_backups():
+            backup = backup_mod.album_backup_to_put_back(path, origin)
+            if backup is not None and backup_mod.restore_upgrade_backup(
+                    backup, origin, replace_partial=False):
+                log.info(fmt(C.YELLOW,
+                    f"  ⟲  Put back {shown_path(origin)}, which an "
+                    "interrupted upgrade or repair had moved aside."))
+        for origin in backup_mod.put_back_interrupted_backups():
+            log.info(fmt(C.YELLOW,
+                f"  ⟲  Put back {shown_path(origin)}, which an "
+                "interrupted upgrade or repair had moved aside."))
+        for backup, origin in backup_mod.repair_backups_to_fill_in():
+            count = backup_mod.fill_in_from_repair_backup(backup, origin)
+            if count:
+                log.info(fmt(C.YELLOW,
+                    f"  ⟲  Put back {plural(count, 'track')} of "
+                    f"{shown_path(origin)}, "
+                    "which an interrupted repair had moved aside."))
+        left = backup_mod.albums_left_in_backups()
+        if left:
+            log.info(fmt(C.YELLOW, wrap(
+                f"{plural(len(left), 'album')} "
+                f"{'is' if len(left) == 1 else 'are'} in the backup "
+                "folder and missing from the library: "
+                + "; ".join(shown_path(origin) for _path, origin in left)
+                + f". Restore {'it' if len(left) == 1 else 'them'} in "
+                "Settings → Diagnostics in the web app.",
+                indent="  ", hanging="  ")))
+    except Exception as e:
+        vlog(f"album put-back error: {e}")
+
+
+def _prune_old_state():
+    # Sweep upgrade-backup dir of anything older than retention window.
+    # Cheap (just stat + rmtree on stale dirs); silent unless something happens.
+    try:
+        n_swept = cleanup_old_upgrade_backups()
+        if n_swept:
+            log.info(fmt(C.GRAY,
+                f"  ⟳  Cleaned up {plural(n_swept, 'old upgrade backup')} "
+                f"(>{cfg.UPGRADE_BACKUP_RETENTION_DAYS} days)."))
+    except Exception as e:
+        # Don't let backup-housekeeping fail the run.
+        vlog(f"upgrade-backup cleanup error: {e}")
+    # Prune orphan staging-path entries from lyric_fetch's
+    # state file (created during pre-import lyric runs).
+    try:
+        _prune_lyric_state_orphans()
+    except Exception as e:
+        vlog(f"lyric-state prune error: {e}")
+    # Drop tag-cache rows whose file has since been moved or deleted.
+    try:
+        from qobuz_librarian.library import flac_cache
+        flac_cache.prune_missing()
+    except Exception as e:
+        vlog(f"flac-cache prune error: {e}")
+    # Drop repair-cache ISRC lookups that have aged past the TTL.
+    try:
+        from qobuz_librarian.library import repair_cache
+        repair_cache.prune_expired()
+    except Exception as e:
+        vlog(f"repair-cache prune error: {e}")
+
+
+def _run_lyrics(args):
+    require_music_root()
+    if not args.dry_run:
+        require_disk_support("lyrics")
+    from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
+    return run_library_lyrics_mode(args)
+
+
+def _run_downsample(args):
+    check_media_tools()
+    require_music_root()
+    if not args.dry_run:
+        require_disk_support("downsample")
+    from qobuz_librarian.modes.downsample import run_downsample_walk_mode
+    return run_downsample_walk_mode(args)
+
+
+def _run_repair(args, session, **options):
+    if not args.dry_run:
+        require_disk_support("repair")
+    from qobuz_librarian.modes.repair import run_album_repair_mode
+    return run_album_repair_mode(args, session.catalogue_token(), **options)
+
+
+def _run_flag_mode(args, session):
+    """Run the one mode a flag or a search argument names and exit with its
+    code. Returns when none was given."""
+    # Library migration is local-only: it reorganises files on disk and never
+    # touches Qobuz.
+    if args.migrate:
+        from qobuz_librarian.modes.migrate import run_migrate_mode
+        raise SystemExit(run_migrate_mode(args))
+
+    # Lyrics backfill reads/writes library files and fetches from lyric
+    # providers; no streamrip, ffmpeg or Qobuz token involved.
+    if args.lyrics_walk:
+        raise SystemExit(_run_lyrics(args))
+
+    # Downsample walk is local-only; it reads hi-res files off disk and
+    # resamples them in place, never touching Qobuz.
+    if args.downsample_walk:
+        raise SystemExit(_run_downsample(args))
+
+    if args.artist:
+        from qobuz_librarian.modes.artist import run_artist_mode
+        raise SystemExit(
+            run_artist_mode(args.artist, args, session.catalogue_token()))
+
+    if args.library_walk:
+        from qobuz_librarian.modes.walk import run_walk_queued_mode
+        raise SystemExit(run_walk_queued_mode(args, session.catalogue_token()))
+
+    if args.album_gaps:
+        from qobuz_librarian.modes.walk import run_album_walk_mode
+        raise SystemExit(run_album_walk_mode(args, session.catalogue_token()))
+
+    if args.repair:
+        raise SystemExit(_run_repair(args, session))
+
+    if args.upgrade_walk:
+        if args.consolidate and not cfg.CONSOLIDATE:
+            # The walk switches this off: a prompt per album is too many.
+            log.info(fmt(C.GRAY,
+                "  · The upgrade walk always skips sibling-folder "
+                "consolidation; ignoring --consolidate."))
+        # AUTO_UPGRADE_ENABLED must stay False as the global default; it
+        # controls passive upgrades during ordinary gap-fill walks.
+        args.auto_upgrade = True
+        if not args.dry_run:
+            require_disk_support("upgrade")
+        from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
+        raise SystemExit(
+            run_upgrade_walk_mode(args, session.catalogue_token()))
+
+    if args.query:
+        from qobuz_librarian.modes.album import run_album_mode
+        raise SystemExit(run_album_mode(args, session.catalogue_token()))
+
+
+def _run_menu_choice(mode, args, session):
+    from qobuz_librarian.ui_cli.sentinels import Mode
+    if mode == Mode.ALBUM:
+        # Loop inside album mode so the user can search album after album
+        # without bouncing back to the top menu each time.
+        from qobuz_librarian.modes.album import run_album_mode
+        run_album_mode(
+            args, session.catalogue_token(), query_args=[], loop=True)
+    elif mode == Mode.ARTIST:
+        from qobuz_librarian.modes.artist import run_artist_mode
+        from qobuz_librarian.ui_cli.prompts import prompt_artist_name
+        while True:
+            artist = prompt_artist_name()
+            if artist is None:
+                log.info(fmt(C.GRAY, "  Cancelled."))
+                break
+            run_artist_mode(artist, args, session.catalogue_token())
+    elif mode == Mode.WALK_QUEUE:
+        from qobuz_librarian.modes.walk import run_walk_queued_mode
+        run_walk_queued_mode(args, session.catalogue_token())
+    elif mode == Mode.ALBUM_WALK:
+        from qobuz_librarian.modes.walk import run_album_walk_mode
+        run_album_walk_mode(args, session.catalogue_token())
+    elif mode == Mode.ALBUM_REPAIR:
+        _run_repair(args, session, loop=True)
+    elif mode == Mode.UPGRADE:
+        # Explicit upgrade walk: the user chose this, so enable the
+        # upgrade-replace path for its duration regardless of the
+        # AUTO_UPGRADE_ENABLED default (which only governs passive
+        # upgrades during ordinary gap-fill walks).
+        if not args.dry_run:
+            require_disk_support("upgrade")
+        from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
+        saved = getattr(args, "auto_upgrade", cfg.AUTO_UPGRADE_ENABLED)
+        args.auto_upgrade = True
+        try:
+            run_upgrade_walk_mode(args, session.catalogue_token())
+        finally:
+            args.auto_upgrade = saved
+    elif mode == Mode.MIGRATE:
+        from qobuz_librarian.modes.migrate import run_migrate_mode
+        run_migrate_mode(args)
+    elif mode == Mode.DOWNSAMPLE:
+        _run_downsample(args)
+    elif mode == Mode.LYRICS:
+        _run_lyrics(args)
+    elif mode == Mode.SETTINGS:
+        from qobuz_librarian.modes.settings_cli import run_settings_mode
+        run_settings_mode(args)
+        for flag, setting in _SETTING_FLAGS:
+            if flag not in args.settings_given:
+                setattr(args, flag, getattr(cfg, setting))
+
+
+def _menu_loop(args, session, queue):
+    """The interactive menu. The local tools remain reachable without a Qobuz
+    token or downloader; network-backed choices initialise that stack lazily."""
+    from qobuz_librarian.ui_cli.menu import interactive_session_mode
+    from qobuz_librarian.ui_cli.sentinels import Mode
+    session.in_menu = True
+    while True:
+        mode = interactive_session_mode()
+        if mode == Mode.QUIT:
+            return
+        uses = (
+            mode in (Mode.ALBUM, Mode.ARTIST, Mode.WALK_QUEUE,
+                     Mode.ALBUM_WALK, Mode.ALBUM_REPAIR),
+            mode in (Mode.UPGRADE, Mode.MIGRATE, Mode.DOWNSAMPLE, Mode.LYRICS),
+        )
+        try:
+            if any(uses):
+                queue.read()
+            if queue.parked and any(uses):
+                log.info(queue.refusal(*uses))
+                continue
+            if queue.refusal(*uses):
+                if queue.offer(args, session.download_token) is None:
+                    return
+                if queue.refusal(*uses):
+                    continue
+            _run_menu_choice(mode, args, session)
+        except _BackToMenu:
+            continue
+        except KeyboardInterrupt:
+            # Ctrl-C stops the tool, not the session; at the menu's own
+            # prompt it still quits.
+            log.info(fmt(C.GRAY, "\n  Interrupted."))
+            continue
+
+
+def main():
+    raise_open_file_limit()
+    _load_saved_settings()
 
     args = parse_args()
     set_verbose(args.verbose)
@@ -898,15 +1372,7 @@ def main():
         set_color_enabled(False)
 
     if args.reset_walk_seen and args.dry_run:
-        present = dict.fromkeys(
-            shown_path(f) for f in (cfg.WALK_SEEN_FILE, cfg.ALBUM_WALK_SEEN_FILE)
-            if f.exists())
-        if present:
-            log.info(fmt(C.GRAY, "  --dry-run: would clear the lists of artists and albums already checked:"))
-            for r in present:
-                log.info(fmt(C.GRAY, f"     {r}"))
-        else:
-            log.info(fmt(C.GRAY, "  No list of checked artists or albums to clear."))
+        _preview_reset_walk_seen()
         return
 
     # Printing the saved settings changes nothing, so it needs no run lock.
@@ -918,15 +1384,9 @@ def main():
 
     # Single-instance lock first; fail fast before doing any other work.
     # Hold the file handle for the lifetime of main() so the lock persists.
-    _lockfile = acquire_run_lock()  # noqa: F841
+    _lockfile = acquire_run_lock()
 
-    from qobuz_librarian.queue.startup_recovery import StartupRecoveryStatus
-    saved_queue = (
-        _startup_recovery_status() is StartupRecoveryStatus.RESUME_REQUIRED)
-    queue_started = saved_queue and any(
-        item.phase is not queue_state.QueuePhase.PENDING
-        for item in _STARTUP_RECOVERY_RESULT.items
-    )
+    queue = _SavedQueue(_lockfile)
     # These download through the one saved queue, so a kept queue that
     # nothing has started from holds up only them.
     queue_modes = (
@@ -943,57 +1403,13 @@ def main():
         args.downsample_walk,
         args.upgrade_walk,
     )
-    parked = False
-
-    def queue_refusal(uses_queue, other_work):
-        if parked and (uses_queue or other_work):
-            return fmt(
-                C.YELLOW,
-                "\n⚠  An album is waiting to be recovered.\n"
-                "   Quit and run Qobuz Librarian again; it recovers that album "
-                "before other work.\n",
-            )
-        if queue_started and (uses_queue or other_work):
-            return fmt(
-                C.YELLOW,
-                "\n⚠  An interrupted download must be resumed before other work.\n"
-                "   Run Qobuz Librarian without a mode or search argument and "
-                "choose Resume when it offers the saved queue.\n",
-            )
-        if saved_queue and uses_queue:
-            return fmt(
-                C.YELLOW,
-                "\n⚠  A saved download queue must be resumed or discarded before "
-                "another download.\n"
-                f"   It is in {shown_path(cfg.QUEUE_JOURNAL_DIR)}. Run Qobuz "
-                "Librarian without a mode or search argument to choose.\n",
-            )
-        return None
-
-    refusal = queue_refusal(any(queue_modes), any(other_modes))
+    refusal = queue.refusal(any(queue_modes), any(other_modes))
     if refusal:
         die(refusal, EXIT_GENERAL)
-    resume_saved_queue = saved_queue and not any(queue_modes + other_modes)
+    resume_saved_queue = queue.saved and not any(queue_modes + other_modes)
 
     if args.reset_walk_seen:
-        removed = []
-        for f in (cfg.WALK_SEEN_FILE, cfg.ALBUM_WALK_SEEN_FILE):
-            try:
-                f.unlink()
-                removed.append(shown_path(f))
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                die(fmt(C.RED,
-                    f"\n✗  Couldn't delete {f}: {e}\n"
-                    "   Check the volume permissions / PUID-PGID; /data must be writable.\n"),
-                    EXIT_GENERAL)
-        if removed:
-            log.info(fmt(C.GREEN, "  ✓  Cleared the lists of artists and albums already checked:"))
-            for r in dict.fromkeys(removed):
-                log.info(fmt(C.GRAY, f"     {r}"))
-        else:
-            log.info(fmt(C.GRAY, "  No list of checked artists or albums to clear."))
+        _reset_walk_seen()
         return
 
     # Local-only: reads/writes the same settings store the web Settings page
@@ -1002,131 +1418,7 @@ def main():
         from qobuz_librarian.modes.settings_cli import run_settings_mode
         raise SystemExit(run_settings_mode(args))
 
-    # Keep the interactive menu and saved-work choices available on a local-
-    # only box.
-    download_stack = {}
-    in_menu = []
-
-    def prepare_download_stack():
-        if download_stack.get("tools_ready"):
-            return
-        check_rip()
-        check_media_tools()
-        if not args.no_import and not args.dry_run:
-            check_beets()
-        if not args.dry_run:
-            require_disk_support("downloads")
-        from qobuz_librarian.api.auth import (
-            check_env_credentials,
-            sweep_streamrip_run_copies,
-        )
-        sweep_streamrip_run_copies()
-        check_env_credentials()
-        cap_depth, cap_rate = streamrip_quality_cap()
-        vlog(
-            f"streamrip quality cap: {cap_depth}-bit/"
-            f"{cap_rate/1000:g}kHz"
-        )
-        download_stack["tools_ready"] = True
-
-    def remote_token(access):
-        try:
-            from qobuz_librarian.api.client import authorize_qobuz_action
-
-            credentials = authorize_qobuz_action(access)
-        except NoCredsError:
-            message = fmt(C.RED,
-                "\n✗  No Qobuz credentials configured.\n"
-                "   Paste your token and your email or user ID on the Settings page "
-                f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings);\n"
-                "   in terminal mode, press Resume web app there first.\n"
-                "   Or set QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID in your environment.\n")
-            if in_menu:
-                log.info(message)
-                raise _BackToMenu from None
-            die(message, EXIT_AUTH)
-        user_id, token = credentials.user_id, credentials.token
-        require_music_root()
-        if not HAVE_MUTAGEN:
-            log.info(fmt(C.YELLOW,
-                "  ⚠  mutagen not installed; falling back to filename-only "
-                "detection."))
-            if _in_container():
-                log.info(fmt(C.GRAY,
-                    "     The bundled image installs mutagen by default. If "
-                    "it's missing here, rebuild with `docker compose build "
-                    "--no-cache`."))
-            else:
-                log.info(fmt(C.GRAY,
-                    "     Install: `pip install mutagen` (or via pipx)."))
-        from qobuz_librarian.api.client import bind_download_preflight
-        token = bind_download_preflight(token, prepare_download_stack)
-        if access is QobuzAccess.DOWNLOAD_ACTION:
-            prepare_download_stack()
-        vlog(f"user_id: {user_id}  •  music root: {cfg.MUSIC_ROOT}")
-        if args.verbose:
-            log.info(fmt(C.GRAY, f"  staging:    {cfg.STAGING_DIR}"))
-            log.info(fmt(C.GRAY, f"  lock:       {cfg.LOCK_FILE}"))
-        return token
-
-    def catalogue_token():
-        return remote_token(QobuzAccess.CATALOGUE_ACTION)
-
-    def download_token():
-        return remote_token(QobuzAccess.DOWNLOAD_ACTION)
-
-    def offer_saved_queue():
-        """Offer the saved queue: resume, keep or discard it. None when the
-        prompt was abandoned."""
-        try:
-            choice = offer_resume_startup_recovery(
-                args,
-                download_token,
-                _STARTUP_RECOVERY_RESULT,
-            )
-        except (AuthLost, QobuzUnavailable):
-            raise
-        except Exception as exc:
-            die(fmt(
-                C.RED,
-                "\n✗  The interrupted queue could not be resumed.\n"
-                f"   {exc}\n",
-            ), EXIT_GENERAL)
-        if choice == "blocked":
-            _report_settled_downloads(
-                _record_startup_recovery(_lockfile, settle=True))
-        read_saved_queue()
-        if parked:
-            log.info(queue_refusal(True, True))
-        elif saved_queue:
-            if queue_started:
-                log.info(fmt(
-                    C.YELLOW,
-                    "  Interrupted queue kept. Other work remains paused until "
-                    "it is resumed.",
-                ))
-            else:
-                log.info(fmt(C.YELLOW, wrap(
-                    f"Queue kept in {shown_path(cfg.QUEUE_JOURNAL_DIR)}. Other "
-                    "downloads wait until it is resumed or discarded.")))
-        return choice
-
-    def read_saved_queue():
-        """Read the saved queue again: a mode run from the menu can leave one
-        behind, or an album stopped for recovery."""
-        nonlocal saved_queue, queue_started, parked
-        result = _record_startup_recovery(_lockfile)
-        if result.status is StartupRecoveryStatus.ATTENTION_REQUIRED:
-            if result.reason != "queue-item-blocked":
-                _die_unsettled_startup_recovery(_lockfile, result)
-            parked = True
-            return
-        parked = False
-        saved_queue = result.status is StartupRecoveryStatus.RESUME_REQUIRED
-        queue_started = saved_queue and any(
-            item.phase is not queue_state.QueuePhase.PENDING
-            for item in result.items
-        )
+    session = _QobuzSession(args)
 
     # An album put back from a copy has new inodes; its saved rows are
     # sealed again so they are not refused for them.
@@ -1135,258 +1427,25 @@ def main():
     if backup_mod.on_restored is None:
         backup_mod.on_restored = saved_views.reseal_put_back_album
 
-    def startup_housekeeping():
-        from qobuz_librarian import beets_db
-        from qobuz_librarian.integrations import beets as beets_mod
-        from qobuz_librarian.integrations import downsample_engine
-        from qobuz_librarian.integrations import staging as staging_mod
-        from qobuz_librarian.modes import process as process_mode
-        try:
-            beets_db.remove_old_copies()
-            beets_mod.remove_stale_import_overrides()
-            beets_mod.remove_stale_ownership_folders()
-            process_mode.finish_interrupted_upgrades()
-            if not saved_queue:
-                staging_mod.remove_empty_retry_groups()
-            staging_mod.remove_emptied_kept_runs()
-        except Exception as e:
-            vlog(f"interrupted upgrade settle error: {e}")
-        try:
-            backup_mod.settle_interrupted_restores()
-            downsample_engine.settle_interrupted_downsample()
-            for path, origin in backup_mod.albums_left_in_backups():
-                backup = backup_mod.album_backup_to_put_back(path, origin)
-                if backup is not None and backup_mod.restore_upgrade_backup(
-                        backup, origin, replace_partial=False):
-                    log.info(fmt(C.YELLOW,
-                        f"  ⟲  Put back {shown_path(origin)}, which an "
-                        "interrupted upgrade or repair had moved aside."))
-            for origin in backup_mod.put_back_interrupted_backups():
-                log.info(fmt(C.YELLOW,
-                    f"  ⟲  Put back {shown_path(origin)}, which an "
-                    "interrupted upgrade or repair had moved aside."))
-            for backup, origin in backup_mod.repair_backups_to_fill_in():
-                count = backup_mod.fill_in_from_repair_backup(backup, origin)
-                if count:
-                    log.info(fmt(C.YELLOW,
-                        f"  ⟲  Put back {plural(count, 'track')} of "
-                        f"{shown_path(origin)}, "
-                        "which an interrupted repair had moved aside."))
-            left = backup_mod.albums_left_in_backups()
-            if left:
-                log.info(fmt(C.YELLOW, wrap(
-                    f"{plural(len(left), 'album')} "
-                    f"{'is' if len(left) == 1 else 'are'} in the backup "
-                    "folder and missing from the library: "
-                    + "; ".join(shown_path(origin) for _path, origin in left)
-                    + f". Restore {'it' if len(left) == 1 else 'them'} in "
-                    "Settings → Diagnostics in the web app.",
-                    indent="  ", hanging="  ")))
-        except Exception as e:
-            vlog(f"album put-back error: {e}")
-        # Sweep upgrade-backup dir of anything older than retention window.
-        # Cheap (just stat + rmtree on stale dirs); silent unless something happens.
-        try:
-            n_swept = cleanup_old_upgrade_backups()
-            if n_swept:
-                log.info(fmt(C.GRAY,
-                    f"  ⟳  Cleaned up {plural(n_swept, 'old upgrade backup')} "
-                    f"(>{cfg.UPGRADE_BACKUP_RETENTION_DAYS} days)."))
-        except Exception as e:
-            # Don't let backup-housekeeping fail the run.
-            vlog(f"upgrade-backup cleanup error: {e}")
-        # Prune orphan staging-path entries from lyric_fetch's
-        # state file (created during pre-import lyric runs).
-        try:
-            _prune_lyric_state_orphans()
-        except Exception as e:
-            vlog(f"lyric-state prune error: {e}")
-        # Drop tag-cache rows whose file has since been moved or deleted.
-        try:
-            from qobuz_librarian.library import flac_cache
-            flac_cache.prune_missing()
-        except Exception as e:
-            vlog(f"flac-cache prune error: {e}")
-        # Drop repair-cache ISRC lookups that have aged past the TTL.
-        try:
-            from qobuz_librarian.library import repair_cache
-            repair_cache.prune_expired()
-        except Exception as e:
-            vlog(f"repair-cache prune error: {e}")
-
     # Housekeeping deletes expired backups and rewrites state files, so a
     # dry run skips it. A queue that stopped part way holds all other work
     # until it is resumed, so it waits for that; one not yet started is
     # resumed onto a settled library.
-    housekept = not args.dry_run and not queue_started
+    housekept = not args.dry_run and not queue.started
     if housekept:
-        startup_housekeeping()
+        _startup_housekeeping(queue.saved)
     if resume_saved_queue:
-        recovery_choice = offer_saved_queue()
+        recovery_choice = queue.offer(args, session.download_token)
         if recovery_choice is None:
             raise SystemExit(EXIT_GENERAL)
 
-    if not args.dry_run and not queue_started and not housekept:
-        startup_housekeeping()
+    if not args.dry_run and not queue.started and not housekept:
+        _startup_housekeeping(queue.saved)
 
-    # Library migration is local-only: it reorganises files on disk and never
-    # touches Qobuz.
-    if args.migrate:
-        from qobuz_librarian.modes.migrate import run_migrate_mode
-        raise SystemExit(run_migrate_mode(args))
-
-    # Lyrics backfill reads/writes library files and fetches from lyric
-    # providers; no streamrip, ffmpeg or Qobuz token involved.
-    if args.lyrics_walk:
-        require_music_root()
-        if not args.dry_run:
-            require_disk_support("lyrics")
-        from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
-        raise SystemExit(run_library_lyrics_mode(args))
-
-    # Downsample walk is local-only; it reads hi-res files off disk and
-    # resamples them in place, never touching Qobuz.
-    if args.downsample_walk:
-        check_media_tools()
-        require_music_root()
-        if not args.dry_run:
-            require_disk_support("downsample")
-        from qobuz_librarian.modes.downsample import run_downsample_walk_mode
-        raise SystemExit(run_downsample_walk_mode(args))
-
-    # Single-shot flag paths first (each skips the menu loop), then positional
-    # args / URL → album mode, then the interactive menu. The single-shot paths
-    # still respect AuthLost / KeyboardInterrupt cleanly; all caught at the
-    # bottom by main()'s wrapper.
-    if args.artist:
-        from qobuz_librarian.modes.artist import run_artist_mode
-        raise SystemExit(run_artist_mode(args.artist, args, catalogue_token()))
-
-    if args.library_walk:
-        from qobuz_librarian.modes.walk import run_walk_queued_mode
-        raise SystemExit(run_walk_queued_mode(args, catalogue_token()))
-
-    if args.album_gaps:
-        from qobuz_librarian.modes.walk import run_album_walk_mode
-        raise SystemExit(run_album_walk_mode(args, catalogue_token()))
-
-    if args.repair:
-        if not args.dry_run:
-            require_disk_support("repair")
-        from qobuz_librarian.modes.repair import run_album_repair_mode
-        raise SystemExit(run_album_repair_mode(args, catalogue_token()))
-
-    if args.upgrade_walk:
-        if args.consolidate and not cfg.CONSOLIDATE:
-            # The walk switches this off: a prompt per album is too many.
-            log.info(fmt(C.GRAY,
-                "  · The upgrade walk always skips sibling-folder "
-                "consolidation; ignoring --consolidate."))
-        # AUTO_UPGRADE_ENABLED must stay False as the global default; it
-        # controls passive upgrades during ordinary gap-fill walks.
-        args.auto_upgrade = True
-        if not args.dry_run:
-            require_disk_support("upgrade")
-        from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
-        raise SystemExit(run_upgrade_walk_mode(args, catalogue_token()))
-
-    if args.query:
-        from qobuz_librarian.modes.album import run_album_mode
-        raise SystemExit(run_album_mode(args, catalogue_token()))
-
-    # Interactive menu loop. The local tools remain reachable without a Qobuz
-    # token or downloader; network-backed choices initialise that stack lazily.
-    from qobuz_librarian.ui_cli.menu import interactive_session_mode
-    from qobuz_librarian.ui_cli.sentinels import Mode
-    in_menu.append(True)
-    while True:
-        mode = interactive_session_mode()
-        if mode == Mode.QUIT:
-            return
-        uses = (
-            mode in (Mode.ALBUM, Mode.ARTIST, Mode.WALK_QUEUE,
-                     Mode.ALBUM_WALK, Mode.ALBUM_REPAIR),
-            mode in (Mode.UPGRADE, Mode.MIGRATE, Mode.DOWNSAMPLE, Mode.LYRICS),
-        )
-        try:
-            if any(uses):
-                read_saved_queue()
-            if parked and any(uses):
-                log.info(queue_refusal(*uses))
-                continue
-            if queue_refusal(*uses):
-                if offer_saved_queue() is None:
-                    return
-                if queue_refusal(*uses):
-                    continue
-            if mode == Mode.ALBUM:
-                # Loop inside album mode so the user can search album after album
-                # without bouncing back to the top menu each time.
-                from qobuz_librarian.modes.album import run_album_mode
-                run_album_mode(args, catalogue_token(), query_args=[], loop=True)
-            elif mode == Mode.ARTIST:
-                from qobuz_librarian.modes.artist import run_artist_mode
-                from qobuz_librarian.ui_cli.prompts import prompt_artist_name
-                while True:
-                    artist = prompt_artist_name()
-                    if artist is None:
-                        log.info(fmt(C.GRAY, "  Cancelled."))
-                        break
-                    run_artist_mode(artist, args, catalogue_token())
-            elif mode == Mode.WALK_QUEUE:
-                from qobuz_librarian.modes.walk import run_walk_queued_mode
-                run_walk_queued_mode(args, catalogue_token())
-            elif mode == Mode.ALBUM_WALK:
-                from qobuz_librarian.modes.walk import run_album_walk_mode
-                run_album_walk_mode(args, catalogue_token())
-            elif mode == Mode.ALBUM_REPAIR:
-                if not args.dry_run:
-                    require_disk_support("repair")
-                from qobuz_librarian.modes.repair import run_album_repair_mode
-                run_album_repair_mode(args, catalogue_token(), loop=True)
-            elif mode == Mode.UPGRADE:
-                # Explicit upgrade walk: the user chose this, so enable the
-                # upgrade-replace path for its duration regardless of the
-                # AUTO_UPGRADE_ENABLED default (which only governs passive
-                # upgrades during ordinary gap-fill walks).
-                if not args.dry_run:
-                    require_disk_support("upgrade")
-                from qobuz_librarian.modes.upgrade import run_upgrade_walk_mode
-                saved = getattr(args, "auto_upgrade", cfg.AUTO_UPGRADE_ENABLED)
-                args.auto_upgrade = True
-                try:
-                    run_upgrade_walk_mode(args, catalogue_token())
-                finally:
-                    args.auto_upgrade = saved
-            elif mode == Mode.MIGRATE:
-                from qobuz_librarian.modes.migrate import run_migrate_mode
-                run_migrate_mode(args)
-            elif mode == Mode.DOWNSAMPLE:
-                check_media_tools()
-                require_music_root()
-                if not args.dry_run:
-                    require_disk_support("downsample")
-                from qobuz_librarian.modes.downsample import run_downsample_walk_mode
-                run_downsample_walk_mode(args)
-            elif mode == Mode.LYRICS:
-                require_music_root()
-                if not args.dry_run:
-                    require_disk_support("lyrics")
-                from qobuz_librarian.modes.lyrics import run_library_lyrics_mode
-                run_library_lyrics_mode(args)
-            elif mode == Mode.SETTINGS:
-                from qobuz_librarian.modes.settings_cli import run_settings_mode
-                run_settings_mode(args)
-                for flag, setting in _SETTING_FLAGS:
-                    if flag not in args.settings_given:
-                        setattr(args, flag, getattr(cfg, setting))
-        except _BackToMenu:
-            continue
-        except KeyboardInterrupt:
-            # Ctrl-C stops the tool, not the session; at the menu's own
-            # prompt it still quits.
-            log.info(fmt(C.GRAY, "\n  Interrupted."))
-            continue
+    # A flag or a search argument runs one mode and exits. AuthLost and
+    # KeyboardInterrupt from it are caught by main()'s wrapper.
+    _run_flag_mode(args, session)
+    _menu_loop(args, session, queue)
 
 
 class _BackToMenu(BaseException):
