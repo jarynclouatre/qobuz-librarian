@@ -149,11 +149,10 @@ def _recover_incomplete_upgrade_backup(backup, album_dir, *, operation):
             f"{operation}."))
         return outcome
 
-    if not pin_unverified_upgrade_backup(
-            backup,
-            f"{operation} recovery kept; automatic reconciliation did not "
-            "complete"):
-        warn_pin_failed(backup)
+    _pin_or_warn(
+        backup,
+        f"{operation} recovery kept; automatic reconciliation did not "
+        "complete")
     unresolved = (
         f" ({plural(outcome.unresolved, 'original file')} still unresolved)"
         if outcome is not None else ""
@@ -777,11 +776,10 @@ def _keep_backup_for_companions(backup_path, left):
     names = ", ".join(left[:3]) + (
         f" and {len(left) - 3} more" if len(left) > 3 else "")
     one = len(left) == 1
-    if not pin_unverified_upgrade_backup(
-            backup_path,
-            f"kept for the original {names}, which the new album holds a "
-            "different file for"):
-        warn_pin_failed(backup_path)
+    _pin_or_warn(
+        backup_path,
+        f"kept for the original {names}, which the new album holds a "
+        "different file for")
     return (
         f"  ⚠  The original {names} {'differs' if one else 'differ'} from "
         f"the new album's, so the new {'one stays' if one else 'ones stay'} "
@@ -803,8 +801,7 @@ def _put_original_back(backup, album_dir):
     """
     aside = None
     if not upgrade_backup_restorable(backup, album_dir):
-        if not pin_unverified_upgrade_backup(backup):
-            warn_pin_failed(backup)
+        _pin_or_warn(backup)
         return None
     if album_dir.is_dir():
         aside = backup_album_dir(album_dir, set_aside=True)
@@ -813,8 +810,7 @@ def _put_original_back(backup, album_dir):
                 aside, album_dir, operation="move of the new download")
             aside = None
         if aside is None:
-            if not pin_unverified_upgrade_backup(backup):
-                warn_pin_failed(backup)
+            _pin_or_warn(backup)
             return None
     if restore_upgrade_backup(backup, album_dir):
         return aside or True
@@ -822,8 +818,7 @@ def _put_original_back(backup, album_dir):
         log.info(fmt(C.RED,
             f"  ✗  The new download could not be put back either; it is at "
             f"{aside}."))
-    if not pin_unverified_upgrade_backup(backup):
-        warn_pin_failed(backup)
+    _pin_or_warn(backup)
     return None
 
 
@@ -982,6 +977,11 @@ def _dispose_replaced_original(backup, **kwargs):
         return dispose_backup(backup, **kwargs)
     except KeyboardInterrupt:
         raise UpgradedThenInterrupted from None
+
+
+def _pin_or_warn(backup, note=None):
+    if not pin_unverified_upgrade_backup(backup, note):
+        warn_pin_failed(backup)
 
 
 class _AlbumRun:
@@ -1677,27 +1677,30 @@ class _AlbumRun:
         # rows in beets once the backup is restored over it.
         if ((self.auto_upgrade_active or self.use_force or self.force_tracks) and self.n_ok > 0
                 and (self.n_fail > 0 or self.n_lossy > 0) and not self.args.no_import):
-            retained = retain_download_staging(
-                self.download_result, label="incomplete-replacement")
-            disposition = (
-                "retaining it in staging recovery"
-                if retained else
-                "leaving its isolated staging run untouched for review"
-            )
-            log.info(fmt(C.YELLOW,
-                f"\n  Re-download came back incomplete; {disposition} and "
-                "keeping your original."))
-            self.early_result = {
-                "result": "partial",
-                "imported": False,
-                "n_ok": self.n_ok,
-                "n_fail": self.n_fail,
-                "n_lossy": self.n_lossy,
-                "n_broken": self.download_result.get("n_broken", 0),
-                "n_unavailable": self.download_result.get("n_unavailable", 0),
-                "upgrade_put_back": True,
-            }
-            return self.early_result
+            return self._keep_original_over_incomplete("Re-download")
+
+    def _keep_original_over_incomplete(self, attempt):
+        retained = retain_download_staging(
+            self.download_result, label="incomplete-replacement")
+        disposition = (
+            "retaining it in staging recovery"
+            if retained else
+            "leaving its isolated staging run untouched for review"
+        )
+        log.info(fmt(C.YELLOW,
+            f"\n  {attempt} came back incomplete; {disposition} and "
+            "keeping your original."))
+        self.early_result = {
+            "result": "partial",
+            "imported": False,
+            "n_ok": self.n_ok,
+            "n_fail": self.n_fail,
+            "n_lossy": self.n_lossy,
+            "n_broken": self.download_result.get("n_broken", 0),
+            "n_unavailable": self.download_result.get("n_unavailable", 0),
+            "upgrade_put_back": True,
+        }
+        return self.early_result
 
     def _check_quality(self):
         if self.n_ok > 0 and not self.args.no_import and not self.use_force:
@@ -1773,27 +1776,8 @@ class _AlbumRun:
                     self.elapsed = self.download_result.get("elapsed", self.elapsed)
                     if (self.auto_upgrade_active and self.n_ok > 0
                             and (self.n_fail > 0 or self.n_lossy > 0)):
-                        retained = retain_download_staging(
-                            self.download_result, label="incomplete-replacement")
-                        disposition = (
-                            "retaining it in staging recovery"
-                            if retained else
-                            "leaving its isolated staging run untouched for review"
-                        )
-                        log.info(fmt(C.YELLOW,
-                            "\n  Recovery re-download came back incomplete; "
-                            f"{disposition} and keeping your original."))
-                        self.early_result = {
-                            "result": "partial",
-                            "imported": False,
-                            "n_ok": self.n_ok,
-                            "n_fail": self.n_fail,
-                            "n_lossy": self.n_lossy,
-                            "n_broken": self.download_result.get("n_broken", 0),
-                            "n_unavailable": self.download_result.get("n_unavailable", 0),
-                            "upgrade_put_back": True,
-                        }
-                        return self.early_result
+                        return self._keep_original_over_incomplete(
+                            "Recovery re-download")
                 if self.quality_verdict["recovered"]:
                     log.info(fmt(C.CYAN,
                         "  ↻ recovered: re-fetched at the highest source after "
@@ -1984,11 +1968,10 @@ class _AlbumRun:
                     if not catalogue_retired:
                         self.upgrade_unverified = True
                         self.catalogue_unverified = True
-                        if not pin_unverified_upgrade_backup(
-                                self.upgrade_backup_path,
-                                "upgrade kept; the old Beets entries "
-                                "could not be removed"):
-                            warn_pin_failed(self.upgrade_backup_path)
+                        _pin_or_warn(
+                            self.upgrade_backup_path,
+                            "upgrade kept; the old Beets entries "
+                            "could not be removed")
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Upgrade landed, but its Beets catalogue "
                             "couldn't be reconciled."))
@@ -2010,11 +1993,10 @@ class _AlbumRun:
                                 "  ✓  Upgrade complete; backup cleared."))
                     else:
                         self.upgrade_unverified = True
-                        if not pin_unverified_upgrade_backup(
-                                self.upgrade_backup_path,
-                                "upgrade kept; final exact replacement proof "
-                                "did not hold"):
-                            warn_pin_failed(self.upgrade_backup_path)
+                        _pin_or_warn(
+                            self.upgrade_backup_path,
+                            "upgrade kept; final exact replacement proof "
+                            "did not hold")
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Upgrade succeeded but the exact backup "
                             "couldn't be removed."))
@@ -2023,8 +2005,7 @@ class _AlbumRun:
                             "until you reconcile it."))
                 else:
                     self.upgrade_unverified = True
-                    if not pin_unverified_upgrade_backup(self.upgrade_backup_path):
-                        warn_pin_failed(self.upgrade_backup_path)
+                    _pin_or_warn(self.upgrade_backup_path)
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Upgrade landed, but the rebuilt album or its "
                         "companions couldn't be confirmed written to disk; keeping the "
@@ -2067,11 +2048,10 @@ class _AlbumRun:
                         f"dot-files, into {self.album_dir!s}."))
             elif self.download_phase_completed and self.args.no_import:
                 self.upgrade_unverified = True
-                if not pin_unverified_upgrade_backup(
-                        self.upgrade_backup_path,
-                        "upgrade backup kept; --no-import leaves the "
-                        "replacement outside the verified library flow"):
-                    warn_pin_failed(self.upgrade_backup_path)
+                _pin_or_warn(
+                    self.upgrade_backup_path,
+                    "upgrade backup kept; --no-import leaves the "
+                    "replacement outside the verified library flow")
                 log.info(fmt(C.YELLOW,
                     f"\n  ⚠  --no-import set; cannot auto-verify upgrade. "
                     f"Backup kept at {self.upgrade_backup_path}."))
@@ -2091,11 +2071,10 @@ class _AlbumRun:
                         f"  ✓  Restored original folder to {self.album_dir}."))
                 else:
                     self.upgrade_unverified = True
-                    if not pin_unverified_upgrade_backup(
-                            self.upgrade_backup_path,
-                            "upgrade backup kept; automatic restore did not "
-                            "complete"):
-                        warn_pin_failed(self.upgrade_backup_path)
+                    _pin_or_warn(
+                        self.upgrade_backup_path,
+                        "upgrade backup kept; automatic restore did not "
+                        "complete")
                     log.info(fmt(C.RED,
                         f"  ✗  Auto-restore failed. Original folder is at: "
                         f"{self.upgrade_backup_path}"))
@@ -2147,10 +2126,9 @@ class _AlbumRun:
                 )
                 if _filled_ok and not _originals_ok:
                     self.recovery_unverified = True
-                    if not pin_unverified_upgrade_backup(
-                            gap_fill_backup_path,
-                            "replacement backup kept; original files or tags could not be verified"):
-                        warn_pin_failed(gap_fill_backup_path)
+                    _pin_or_warn(
+                        gap_fill_backup_path,
+                        "replacement backup kept; original files or tags could not be verified")
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Download landed, but the originals couldn't be verified; "
                         "keeping the backup."))
@@ -2165,11 +2143,10 @@ class _AlbumRun:
                         self._gap_fill_not_located = True
                         self.recovery_unverified = True
                         self.catalogue_unverified = True
-                        if not pin_unverified_upgrade_backup(
-                                gap_fill_backup_path,
-                                "gap-fill backup kept; the old Beets "
-                                "entries could not be removed"):
-                            warn_pin_failed(gap_fill_backup_path)
+                        _pin_or_warn(
+                            gap_fill_backup_path,
+                            "gap-fill backup kept; the old Beets "
+                            "entries could not be removed")
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Gap-fill landed, but its Beets catalogue "
                             "couldn't be reconciled; keeping the exact "
@@ -2188,21 +2165,19 @@ class _AlbumRun:
                         ),
                     ):
                         self.recovery_unverified = True
-                        if not pin_unverified_upgrade_backup(
-                                gap_fill_backup_path,
-                                "gap-fill backup kept; final exact "
-                                "replacement proof did not hold"):
-                            warn_pin_failed(gap_fill_backup_path)
+                        _pin_or_warn(
+                            gap_fill_backup_path,
+                            "gap-fill backup kept; final exact "
+                            "replacement proof did not hold")
                         log.info(fmt(C.YELLOW,
                             "  ⚠  Gap-fill complete but the exact backup "
                             "couldn't be removed."))
                 elif _filled_ok:
                     self._gap_fill_not_located = True
                     self.recovery_unverified = True
-                    if not pin_unverified_upgrade_backup(
-                            gap_fill_backup_path,
-                            "gap-fill backup kept; replacement not confirmed written to disk"):
-                        warn_pin_failed(gap_fill_backup_path)
+                    _pin_or_warn(
+                        gap_fill_backup_path,
+                        "gap-fill backup kept; replacement not confirmed written to disk")
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Gap-fill landed, but the filled album couldn't "
                         "be confirmed written to disk; keeping the backed-up tracks."))
@@ -2211,11 +2186,10 @@ class _AlbumRun:
                 else:
                     self._gap_fill_not_located = True
                     self.recovery_unverified = True
-                    if not pin_unverified_upgrade_backup(
-                            gap_fill_backup_path,
-                            "gap-fill backup kept; the complete replacement "
-                            "could not be located"):
-                        warn_pin_failed(gap_fill_backup_path)
+                    _pin_or_warn(
+                        gap_fill_backup_path,
+                        "gap-fill backup kept; the complete replacement "
+                        "could not be located")
                     log.info(fmt(C.YELLOW,
                         "  ⚠  Gap-fill imported but the filled album couldn't be "
                         f"located on disk; keeping backed-up tracks at "
@@ -2225,11 +2199,10 @@ class _AlbumRun:
                 # a crash MID-download (phase not completed) must fall through to
                 # the restore branch, not keep a backup while the album is short.
                 self.recovery_unverified = True
-                if not pin_unverified_upgrade_backup(
-                        gap_fill_backup_path,
-                        "gap-fill backup kept; --no-import leaves the "
-                        "replacement outside the verified library flow"):
-                    warn_pin_failed(gap_fill_backup_path)
+                _pin_or_warn(
+                    gap_fill_backup_path,
+                    "gap-fill backup kept; --no-import leaves the "
+                    "replacement outside the verified library flow")
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  --no-import; gap-fill backup kept at "
                     f"{gap_fill_backup_path}."))
@@ -2246,11 +2219,10 @@ class _AlbumRun:
                         f"  ✓  Restored {plural(_n_back, 'track')} to {self.album_dir}."))
                 else:
                     self.recovery_unverified = True
-                    if not pin_unverified_upgrade_backup(
-                            gap_fill_backup_path,
-                            "gap-fill backup kept; automatic restore was "
-                            "partial or failed"):
-                        warn_pin_failed(gap_fill_backup_path)
+                    _pin_or_warn(
+                        gap_fill_backup_path,
+                        "gap-fill backup kept; automatic restore was "
+                        "partial or failed")
                     log.info(fmt(C.RED,
                         f"  ✗  Restored {plural(_n_back, 'track')}; remaining originals "
                         f"preserved at {gap_fill_backup_path}; reconcile by hand."))

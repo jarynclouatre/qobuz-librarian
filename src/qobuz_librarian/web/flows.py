@@ -7,6 +7,7 @@ candidates to the job, and execution runs over the candidates the user kept.
 import argparse
 import contextlib
 import dataclasses
+import errno
 import os
 import re
 import shutil
@@ -3299,6 +3300,16 @@ def _may_hold(cand, folders):
     return found is not None and bool(present)
 
 
+def _denied_folder_cause(exc):
+    if (isinstance(exc, OSError)
+            and exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS)
+            and isinstance(exc.filename, str) and os.path.isabs(exc.filename)):
+        folder, _is_host = storage._resolve_host_path(
+            os.path.dirname(exc.filename))
+        return f"permission denied in {folder}"
+    return ""
+
+
 def execute_albums(job, chosen, token):
     """Download each selected album via the normal process_album path."""
     # The web worker runs jobs back-to-back; a directory listing cached by
@@ -3523,6 +3534,7 @@ def execute_albums(job, chosen, token):
             log.info(f"  failed: {e}")
             failed += 1
             failed_cands.append(cand)
+            failure_causes.append(_denied_folder_cause(e))
             continue
         if result and result.get("result") == "cancelled":
             # Cancelled mid-download: processed already points past this album,

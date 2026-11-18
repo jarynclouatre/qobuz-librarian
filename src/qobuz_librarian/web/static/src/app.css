@@ -3674,7 +3674,8 @@ details.ql-mobile-drawer[open]::before {
   align-items: center;
   gap: 0.85rem;
 }
-.ql-job-title {
+.ql-job-title,
+.ql-job-folder {
   overflow-wrap: anywhere;
 }
 .ql-job-finished {

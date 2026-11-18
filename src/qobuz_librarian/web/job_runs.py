@@ -294,6 +294,9 @@ def _make_download_run(
         # Claiming/completing the album the normal way graduates it out of the
         # "downloaded single" state, so the rest stops being suppressed in scans.
         if r.get("imported"):
+            if r.get("dir"):
+                folder, _is_host = storage._resolve_host_path(str(r["dir"]))
+                j.execute_args = {**(j.execute_args or {}), "folder": folder}
             flows._refresh_after_local_album_change(
                 album,
                 r,

@@ -261,6 +261,9 @@
     {% set _put_back = _summary.split('Settings → Diagnostics', 1) if job.execute_kind == 'downsample' else [_summary] %}
     <div class="ql-job-summary ql-job-summary--terminal"><span>{{ _put_back[0] }}{% if _put_back | length > 1 %}<a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>{{ _put_back[1] }}{% endif %}</span></div>
     {% endif %}
+    {% if job.execute_args.get('folder') %}
+    <p class="ql-job-finished ql-job-folder">{{ job.execute_args.folder }}</p>
+    {% endif %}
     {% if _attention == 'cancel_late' %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
       <div class="ql-notice-copy">

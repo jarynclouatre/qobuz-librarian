@@ -579,6 +579,10 @@ def create_staging_run(*, owner=None, on_created=None):
                 return run
             except FileExistsError:
                 continue
+            except OSError as exc:
+                if exc.filename == name:
+                    exc.filename = str(staging / name)
+                raise
         raise OSError("couldn't allocate a staging run directory")
     finally:
         os.close(staging_fd)

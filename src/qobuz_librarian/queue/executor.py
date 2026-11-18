@@ -989,6 +989,11 @@ def _queue_item_needs_retry(item):
     return item.get("n_ok", 0) == 0
 
 
+def _pin_or_warn(backup, note=None):
+    if not pin_unverified_upgrade_backup(backup, note):
+        warn_pin_failed(backup)
+
+
 def _resolve_queue_item(
     item,
     args,
@@ -1217,11 +1222,10 @@ def _resolve_queue_item(
                         expected_replacement_receipt=replacement_receipt,
                     )
                     if carried_receipt is None:
-                        if not pin_unverified_upgrade_backup(
-                                sibling_backup,
-                                "sibling backup kept; companion carry was "
-                                "not exact"):
-                            warn_pin_failed(sibling_backup)
+                        _pin_or_warn(
+                            sibling_backup,
+                            "sibling backup kept; companion carry was "
+                            "not exact")
                         log.info(fmt(
                             C.YELLOW,
                             f"  ⚠  Kept sibling recovery for {name} at "
@@ -1238,11 +1242,10 @@ def _resolve_queue_item(
                         post_dir,
                         replacement_receipt,
                     ):
-                        if not pin_unverified_upgrade_backup(
-                                sibling_backup,
-                                "sibling backup kept; the old Beets "
-                                "entries could not be removed"):
-                            warn_pin_failed(sibling_backup)
+                        _pin_or_warn(
+                            sibling_backup,
+                            "sibling backup kept; the old Beets "
+                            "entries could not be removed")
                         log.info(fmt(
                             C.YELLOW,
                             f"  ⚠  Kept sibling recovery for {name} at "
@@ -1263,11 +1266,10 @@ def _resolve_queue_item(
                         ),
                     )
                     if not retired:
-                        if not pin_unverified_upgrade_backup(
-                                sibling_backup,
-                                "sibling backup kept; final exact "
-                                "replacement proof did not hold"):
-                            warn_pin_failed(sibling_backup)
+                        _pin_or_warn(
+                            sibling_backup,
+                            "sibling backup kept; final exact "
+                            "replacement proof did not hold")
                         log.info(fmt(
                             C.YELLOW,
                             f"  ⚠  Kept sibling recovery for {name} at "
@@ -1351,11 +1353,10 @@ def _resolve_queue_item(
                     ):
                         item["upgrade_unverified"] = True
                         item["catalogue_unverified"] = True
-                        if not pin_unverified_upgrade_backup(
-                                bp,
-                                "upgrade kept; the old Beets entries "
-                                "could not be removed"):
-                            warn_pin_failed(bp)
+                        _pin_or_warn(
+                            bp,
+                            "upgrade kept; the old Beets entries "
+                            "could not be removed")
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  Couldn't reconcile the Beets "
                             f"catalogue for {truncate(album_dir.name, 40)}; "
@@ -1371,18 +1372,16 @@ def _resolve_queue_item(
                         replacement_validator=_upgrade_trees_verified,
                     ):
                         item["upgrade_unverified"] = True
-                        if not pin_unverified_upgrade_backup(
-                                bp,
-                                "upgrade kept; final exact replacement "
-                                "proof did not hold"):
-                            warn_pin_failed(bp)
+                        _pin_or_warn(
+                            bp,
+                            "upgrade kept; final exact replacement "
+                            "proof did not hold")
                         log.info(fmt(C.YELLOW,
                             f"  ⚠  Couldn't remove the exact backup "
                             f"for {truncate(album_dir.name, 40)}."))
                 else:
                     item["upgrade_unverified"] = True
-                    if not pin_unverified_upgrade_backup(bp):
-                        warn_pin_failed(bp)
+                    _pin_or_warn(bp)
                     log.info(fmt(C.YELLOW,
                         f"  ⚠  {truncate(album_dir.name, 40)}: upgraded, but "
                         "the rebuilt album or its companions couldn't be "
@@ -1426,11 +1425,10 @@ def _resolve_queue_item(
             # aside. Restoring it now would duplicate the content beside the
             # fresh import. Keep the backup and let the user reconcile.
             item["upgrade_unverified"] = True
-            if not pin_unverified_upgrade_backup(
-                    bp,
-                    "upgrade backup kept; the clean imported replacement "
-                    "could not be located"):
-                warn_pin_failed(bp)
+            _pin_or_warn(
+                bp,
+                "upgrade backup kept; the clean imported replacement "
+                "could not be located")
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {truncate(album_dir.name, 40)}: imported, but the new "
                 f"folder couldn't be located; keeping the backup rather than "
@@ -1440,11 +1438,10 @@ def _resolve_queue_item(
                 f"upgrade landed."))
         elif args.no_import:
             item["upgrade_unverified"] = True
-            if not pin_unverified_upgrade_backup(
-                    bp,
-                    "upgrade backup kept; --no-import leaves the replacement "
-                    "outside the verified library flow"):
-                warn_pin_failed(bp)
+            _pin_or_warn(
+                bp,
+                "upgrade backup kept; --no-import leaves the replacement "
+                "outside the verified library flow")
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {truncate(album_dir.name, 40)}: backup kept at {bp}"))
         else:
@@ -1454,11 +1451,10 @@ def _resolve_queue_item(
                 log.info(fmt(C.GREEN, f"  ✓  Restored {truncate(album_dir.name, 50)}"))
             else:
                 item["upgrade_unverified"] = True
-                if not pin_unverified_upgrade_backup(
-                        bp,
-                        "upgrade backup kept; automatic restore did not "
-                        "complete"):
-                    warn_pin_failed(bp)
+                _pin_or_warn(
+                    bp,
+                    "upgrade backup kept; automatic restore did not "
+                    "complete")
                 log.info(fmt(C.RED, f"  ✗  Auto-restore failed. Backup: {bp}"))
                 log.info(fmt(C.WHITE,
                     f"     To put it back, move anything left in {album_dir} "
@@ -1494,9 +1490,9 @@ def _resolve_queue_item(
         if (_item_strict_success and _filled_whole and _filled_receipt is not None
                 and not backup_files_preserved(post_dir, gfb)):
             item["recovery_unverified"] = True
-            if not pin_unverified_upgrade_backup(
-                    gfb, "gap-fill backup kept; original files differ from the import"):
-                warn_pin_failed(gfb)
+            _pin_or_warn(
+                gfb,
+                "gap-fill backup kept; original files differ from the import")
             log.info(fmt(C.YELLOW,
                 "  ⚠  Gap-fill landed, but the original files differ; "
                 "keeping the backup."))
@@ -1511,11 +1507,10 @@ def _resolve_queue_item(
             ):
                 item["recovery_unverified"] = True
                 item["catalogue_unverified"] = True
-                if not pin_unverified_upgrade_backup(
-                        gfb,
-                        "gap-fill backup kept; the old Beets entries "
-                        "could not be removed"):
-                    warn_pin_failed(gfb)
+                _pin_or_warn(
+                    gfb,
+                    "gap-fill backup kept; the old Beets entries "
+                    "could not be removed")
                 log.info(fmt(C.YELLOW,
                     "  ⚠  Gap-fill complete but its Beets catalogue "
                     "couldn't be reconciled; keeping the exact backup."))
@@ -1535,19 +1530,18 @@ def _resolve_queue_item(
                 ),
             ):
                 item["recovery_unverified"] = True
-                if not pin_unverified_upgrade_backup(
-                        gfb,
-                        "gap-fill backup kept; final exact replacement "
-                        "proof did not hold"):
-                    warn_pin_failed(gfb)
+                _pin_or_warn(
+                    gfb,
+                    "gap-fill backup kept; final exact replacement "
+                    "proof did not hold")
                 log.info(fmt(C.YELLOW,
                     "  ⚠  Gap-fill complete but the exact backup couldn't "
                     "be removed."))
         elif _item_strict_success and _filled_whole:
             item["recovery_unverified"] = True
-            if not pin_unverified_upgrade_backup(
-                    gfb, "gap-fill backup kept; replacement not confirmed written to disk"):
-                warn_pin_failed(gfb)
+            _pin_or_warn(
+                gfb,
+                "gap-fill backup kept; replacement not confirmed written to disk")
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {truncate(album_dir.name, 40)}: filled, but the new "
                 "folder couldn't be confirmed written to disk; keeping the backed-up "
@@ -1562,11 +1556,10 @@ def _resolve_queue_item(
             # Keep it and let the user reconcile, exactly as the upgrade
             # branch above does.
             item["recovery_unverified"] = True
-            if not pin_unverified_upgrade_backup(
-                    gfb,
-                    "gap-fill backup kept; the clean imported replacement "
-                    "could not be confirmed whole"):
-                warn_pin_failed(gfb)
+            _pin_or_warn(
+                gfb,
+                "gap-fill backup kept; the clean imported replacement "
+                "could not be confirmed whole")
             log.info(fmt(C.YELLOW,
                 f"  ⚠  {truncate(album_dir.name, 40)}: filled, but the new "
                 f"folder couldn't be confirmed whole; keeping the backed-up "
@@ -1578,11 +1571,10 @@ def _resolve_queue_item(
             _restore_target = album_dir or post_dir
             if _restore_target is None:
                 item["recovery_unverified"] = True
-                if not pin_unverified_upgrade_backup(
-                        gfb,
-                        "gap-fill backup kept; no bound album path was "
-                        "available for restore"):
-                    warn_pin_failed(gfb)
+                _pin_or_warn(
+                    gfb,
+                    "gap-fill backup kept; no bound album path was "
+                    "available for restore")
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Gap-fill failed and no album dir to restore to. "
                     f"Backed-up tracks at: {gfb}"))
