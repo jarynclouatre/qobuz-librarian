@@ -13,7 +13,6 @@ from qobuz_librarian.completion import (
     AlbumInventory,
     CompletionExpectation,
     CompletionFailure,
-    CompletionScope,
     DownloadCounts,
     DownloadCoverage,
     LandingReceipt,
@@ -117,11 +116,9 @@ def _validate_inputs(owner, expectation, download):
         or _HEX_64.fullmatch(owner.operation_id) is None
         or _HEX_64.fullmatch(owner.item_id) is None
         or type(expectation) is not CompletionExpectation
-        or expectation.scope is not CompletionScope.ALBUM
         or normalise_album_id(expectation.album_id) != expectation.album_id
         or not authoritative_slots(expectation.catalogue_slots)
         or expectation.requested_slots != expectation.catalogue_slots
-        or expectation.baseline_slots
         or type(expectation.quality_targets) is not tuple
         or not all(
             type(target) is QualityTarget
@@ -368,7 +365,6 @@ class LiveCompletionLease:
             download=self._download,
             managed=self._managed,
             landings=tuple(landings),
-            baseline=(),
             inventory=inventory,
             quality=tuple(quality),
         )

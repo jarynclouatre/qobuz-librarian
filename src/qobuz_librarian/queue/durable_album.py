@@ -9,7 +9,6 @@ from qobuz_librarian.completion import (
     CompletionExpectation,
     CompletionInput,
     CompletionOrigin,
-    CompletionScope,
     DownloadCoverage,
     QualityTarget,
     RecoveryOwner,
@@ -165,10 +164,8 @@ def plan_durable_new_album(
             return None
     expectation = CompletionExpectation(
         album_id=album_id,
-        scope=CompletionScope.ALBUM,
         catalogue_slots=slots,
         requested_slots=slots,
-        baseline_slots=(),
         quality_targets=tuple(
             QualityTarget(slot, *target) for slot, target in zip(slots, targets)
         ),

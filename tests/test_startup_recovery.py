@@ -16,7 +16,6 @@ from qobuz_librarian.completion import (
     CompletionInput,
     CompletionOrigin,
     CompletionOriginKind,
-    CompletionScope,
     DownloadCounts,
     LandingReceipt,
     ManagedMapping,
@@ -135,10 +134,8 @@ def _carrier_left_by_a_crash(tmp_path, monkeypatch, *, kind="gap-fill",
     plan = durable_album.DurableNewAlbumPlan(
         CompletionExpectation(
             album_id="1",
-            scope=CompletionScope.ALBUM,
             catalogue_slots=slots,
             requested_slots=slots,
-            baseline_slots=(),
             quality_targets=tuple(QualityTarget(slot, 24, 96000) for slot in slots),
         ),
         4,
@@ -557,7 +554,6 @@ def test_startup_recovery_is_fail_closed_and_settles_exact_work(
             origin=CompletionOrigin(CompletionOriginKind.CLI, "test-recovery"),
             expectation=CompletionExpectation(
                 album_id="1",
-                scope=CompletionScope.ALBUM,
                 catalogue_slots=(slot,),
                 requested_slots=(slot,),
                 quality_targets=(QualityTarget(slot, 16, 44_100),),
@@ -608,7 +604,6 @@ def test_startup_recovery_is_fail_closed_and_settles_exact_work(
                 ),
             ),
             landings=(landing,),
-            baseline=(),
             inventory=AlbumInventory(
                 path="Artist/Album",
                 identity=album_identity,

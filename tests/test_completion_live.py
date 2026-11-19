@@ -6,7 +6,6 @@ from qobuz_librarian import completion_live
 from qobuz_librarian import config as cfg
 from qobuz_librarian.completion import (
     CompletionExpectation,
-    CompletionScope,
     DownloadCounts,
     DownloadCoverage,
     ManagedImportEvidence,
@@ -93,7 +92,6 @@ def test_new_album_completion_revalidates_and_refuses_track_replacement(
     slots = ("qobuz:101", "qobuz:202")
     expectation = CompletionExpectation(
         album_id="303",
-        scope=CompletionScope.ALBUM,
         catalogue_slots=slots,
         requested_slots=slots,
         quality_targets=(

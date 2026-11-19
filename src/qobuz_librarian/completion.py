@@ -14,11 +14,6 @@ StagedIdentity = tuple[int, int, int, int, int, int]
 LibraryIdentity = tuple[int, int, int, int, int]
 
 
-class CompletionScope(str, Enum):
-    ALBUM = "album"
-    REQUESTED = "requested"
-
-
 class CompletionOriginKind(str, Enum):
     CLI = "cli"
     WEB_JOB = "web-job"
@@ -43,7 +38,6 @@ class CompletionFailure(str, Enum):
     SOURCE_MISMATCH = "source-mismatch"
     DESTINATION_MISMATCH = "destination-mismatch"
     INVENTORY_MISMATCH = "inventory-mismatch"
-    BASELINE_MISMATCH = "baseline-mismatch"
     QUALITY_MISMATCH = "quality-mismatch"
 
 
@@ -66,11 +60,9 @@ class QualityTarget:
 @dataclass(frozen=True, slots=True)
 class CompletionExpectation:
     album_id: str
-    scope: CompletionScope
     catalogue_slots: tuple[str, ...]
     requested_slots: tuple[str, ...]
     quality_targets: tuple[QualityTarget, ...]
-    baseline_slots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,18 +206,10 @@ class LandingReceipt:
 
 
 @dataclass(frozen=True, slots=True)
-class BaselineReceipt:
-    slot: str
-    path: str
-    identity: LibraryIdentity
-    sha256: str
-
-
-@dataclass(frozen=True, slots=True)
 class AlbumInventory:
     path: str
     identity: LibraryIdentity
-    audio: tuple[LandingReceipt | BaselineReceipt, ...]
+    audio: tuple[LandingReceipt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,8 +233,7 @@ class CompletionEvidence:
     managed_manifest_hash: str
     imports: tuple[ManagedMapping, ...]
     landings: tuple[LandingReceipt, ...]
-    baseline: tuple[BaselineReceipt, ...]
-    inventory: AlbumInventory | None
+    inventory: AlbumInventory
     quality: tuple[TrackQuality, ...]
     counts: DownloadCounts
 
@@ -431,11 +414,9 @@ def _valid_completion_origin(value) -> bool:
 def _valid_input_expectation(value) -> bool:
     if (
         type(value) is not CompletionExpectation
-        or value.scope is not CompletionScope.ALBUM
         or normalise_album_id(value.album_id) != value.album_id
         or not authoritative_slots(value.catalogue_slots)
         or value.requested_slots != value.catalogue_slots
-        or value.baseline_slots != ()
         or type(value.quality_targets) is not tuple
         or tuple(target.slot for target in value.quality_targets)
         != value.catalogue_slots
@@ -546,10 +527,10 @@ def _completion_input_record(value):
         },
         "expectation": {
             "album_id": expectation.album_id,
-            "scope": expectation.scope.value,
+            "scope": "album",
             "catalogue_slots": list(expectation.catalogue_slots),
             "requested_slots": list(expectation.requested_slots),
-            "baseline_slots": list(expectation.baseline_slots),
+            "baseline_slots": [],
             "quality_targets": [{
                 "slot": target.slot,
                 "bits": target.bits,
@@ -608,10 +589,8 @@ def parse_completion_input_record(record, *, expected_owner=None):
         )
         expectation = CompletionExpectation(
             album_id=expectation_value["album_id"],
-            scope=CompletionScope(expectation_value["scope"]),
             catalogue_slots=tuple(expectation_value["catalogue_slots"]),
             requested_slots=tuple(expectation_value["requested_slots"]),
-            baseline_slots=tuple(expectation_value["baseline_slots"]),
             quality_targets=tuple(QualityTarget(
                 target["slot"], target["bits"], target["rate"])
                 for target in expectation_value["quality_targets"]
@@ -720,17 +699,6 @@ def _mapping_record(mapping, landing):
     }
 
 
-def _baseline_record(receipt):
-    return {
-        "slot": receipt.slot,
-        "destination": {
-            "path": receipt.path,
-            "identity": _identity_record(receipt.identity),
-            "sha256": receipt.sha256,
-        },
-    }
-
-
 def _quality_record(value, target):
     return {
         "slot": value.slot,
@@ -768,11 +736,11 @@ def _completion_record(evidence):
     return {
         "version": 1,
         "owner": evidence.owner.to_record(),
-        "scope": evidence.expectation.scope.value,
+        "scope": "album",
         "album_id": evidence.expectation.album_id,
         "catalogue_slots": list(evidence.expectation.catalogue_slots),
         "requested_slots": list(evidence.expectation.requested_slots),
-        "baseline_slots": list(evidence.expectation.baseline_slots),
+        "baseline_slots": [],
         "library": {
             "root": evidence.library_root,
             "identity": _identity_record(evidence.library_root_identity),
@@ -786,14 +754,8 @@ def _completion_record(evidence):
             _mapping_record(mapping, landings[mapping.slot])
             for mapping in evidence.imports
         ],
-        "baseline": [
-            _baseline_record(receipt) for receipt in evidence.baseline
-        ],
-        "inventory": (
-            _inventory_record(evidence.inventory)
-            if evidence.inventory is not None
-            else None
-        ),
+        "baseline": [],
+        "inventory": _inventory_record(evidence.inventory),
         "quality": [
             _quality_record(value, targets[value.slot])
             for value in evidence.quality
@@ -828,7 +790,6 @@ def parse_completion_record(
         )
         expectation = CompletionExpectation(
             album_id=record["album_id"],
-            scope=CompletionScope(record["scope"]),
             catalogue_slots=tuple(record["catalogue_slots"]),
             requested_slots=tuple(record["requested_slots"]),
             quality_targets=tuple(
@@ -839,7 +800,6 @@ def parse_completion_record(
                 )
                 for value in record["quality"]
             ),
-            baseline_slots=tuple(record["baseline_slots"]),
         )
         if owner != expected_owner or expectation != expected_expectation:
             return None
@@ -881,47 +841,26 @@ def parse_completion_record(
                 identity=source_identity,
             ))
 
-        baseline = []
-        for value in record["baseline"]:
-            destination = value["destination"]
-            identity = _identity_from_record(destination["identity"])
-            if identity is None:
-                return None
-            baseline.append(BaselineReceipt(
-                slot=value["slot"],
-                path=destination["path"],
-                identity=identity,
-                sha256=destination["sha256"],
-            ))
-
-        imported_slots = {receipt.slot for receipt in landings}
         inventory_value = record["inventory"]
-        inventory = None
-        if inventory_value is not None:
-            identity = _identity_from_record(inventory_value["identity"])
-            if identity is None:
+        identity = _identity_from_record(inventory_value["identity"])
+        if identity is None:
+            return None
+        inventory_audio = []
+        for value in inventory_value["audio"]:
+            receipt_identity = _identity_from_record(value["identity"])
+            if receipt_identity is None:
                 return None
-            inventory_audio = []
-            for value in inventory_value["audio"]:
-                receipt_identity = _identity_from_record(value["identity"])
-                if receipt_identity is None:
-                    return None
-                receipt_type = (
-                    LandingReceipt
-                    if value["slot"] in imported_slots
-                    else BaselineReceipt
-                )
-                inventory_audio.append(receipt_type(
-                    slot=value["slot"],
-                    path=value["path"],
-                    identity=receipt_identity,
-                    sha256=value["sha256"],
-                ))
-            inventory = AlbumInventory(
-                path=inventory_value["path"],
-                identity=identity,
-                audio=tuple(inventory_audio),
-            )
+            inventory_audio.append(LandingReceipt(
+                slot=value["slot"],
+                path=value["path"],
+                identity=receipt_identity,
+                sha256=value["sha256"],
+            ))
+        inventory = AlbumInventory(
+            path=inventory_value["path"],
+            identity=identity,
+            audio=tuple(inventory_audio),
+        )
 
         quality = []
         for value in record["quality"]:
@@ -988,7 +927,6 @@ def parse_completion_record(
         managed=managed,
         landings=tuple(landings),
         quality=tuple(quality),
-        baseline=tuple(baseline),
         inventory=inventory,
     )
     evidence = assessment.evidence
@@ -1048,7 +986,6 @@ class _Assessment:
         managed,
         landings,
         quality,
-        baseline,
         inventory,
     ):
         self.owner = owner
@@ -1057,7 +994,6 @@ class _Assessment:
         self.managed = managed
         self.landings = landings
         self.quality = quality
-        self.baseline = baseline
         self.inventory = inventory
 
     def run(self):
@@ -1066,7 +1002,6 @@ class _Assessment:
             self._check_download,
             self._check_managed,
             self._check_landings,
-            self._check_baseline,
             self._check_inventory,
             self._check_quality,
         ):
@@ -1079,7 +1014,6 @@ class _Assessment:
         if (
             not _valid_owner(self.owner)
             or type(self.expectation) is not CompletionExpectation
-            or type(self.expectation.scope) is not CompletionScope
             or normalise_album_id(self.expectation.album_id) != self.expectation.album_id
             or type(self.expectation.quality_targets) is not tuple
             or not all(
@@ -1091,11 +1025,6 @@ class _Assessment:
         if (
             not authoritative_slots(self.expectation.catalogue_slots)
             or not authoritative_slots(self.expectation.requested_slots)
-            or type(self.expectation.baseline_slots) is not tuple
-            or (
-                self.expectation.baseline_slots
-                and not authoritative_slots(self.expectation.baseline_slots)
-            )
             or len({
                 target.slot for target in self.expectation.quality_targets
             }) != len(self.expectation.quality_targets)
@@ -1112,43 +1041,15 @@ class _Assessment:
         ):
             return _failure(CompletionFailure.MALFORMED)
 
-        self.catalogue = set(self.expectation.catalogue_slots)
-        self.requested = set(self.expectation.requested_slots)
-        self.baseline_slots = set(self.expectation.baseline_slots)
-        if (
-            not self.requested <= self.catalogue
-            or not self.baseline_slots <= self.catalogue
-            or self.requested & self.baseline_slots
-            or self.expectation.requested_slots != tuple(
-                slot for slot in self.expectation.catalogue_slots if slot in self.requested)
-            or self.expectation.baseline_slots != tuple(
-                slot
-                for slot in self.expectation.catalogue_slots
-                if slot in self.baseline_slots
-            )
-        ):
+        if self.expectation.requested_slots != self.expectation.catalogue_slots:
             return _failure(CompletionFailure.SCOPE_MISMATCH)
-        if (
-            self.expectation.scope is CompletionScope.ALBUM
-            and self.requested | self.baseline_slots != self.catalogue
-        ):
-            return _failure(CompletionFailure.SCOPE_MISMATCH)
-        self.quality_slots = (
-            self.catalogue
-            if self.expectation.scope is CompletionScope.ALBUM
-            else self.requested
-        )
+        self.slots = set(self.expectation.catalogue_slots)
         self.targets_by_slot = {
             target.slot: target for target in self.expectation.quality_targets
         }
         if (
-            set(self.targets_by_slot) != self.quality_slots
-            or tuple(target.slot for target in self.expectation.quality_targets)
-            != tuple(
-                slot
-                for slot in self.expectation.catalogue_slots
-                if slot in self.quality_slots
-            )
+            tuple(target.slot for target in self.expectation.quality_targets)
+            != self.expectation.catalogue_slots
         ):
             return _failure(CompletionFailure.QUALITY_MISMATCH)
 
@@ -1182,7 +1083,7 @@ class _Assessment:
             self.staged_by_slot[binding.slot] = binding
             staged_paths.add(binding.path)
             staged_nodes.add(binding.identity[:2])
-        if set(self.staged_by_slot) != self.requested:
+        if set(self.staged_by_slot) != self.slots:
             return _failure(CompletionFailure.DOWNLOAD_INCOMPLETE)
 
     def _check_managed(self):
@@ -1225,7 +1126,7 @@ class _Assessment:
             source_nodes.add(mapping.source_identity[:2])
             destination_paths.add(mapping.destination_path)
             destination_nodes.add(mapping.destination_identity[:2])
-        if set(self.mappings_by_slot) != self.requested:
+        if set(self.mappings_by_slot) != self.slots:
             return _failure(CompletionFailure.SOURCE_MISMATCH)
         album_parts = PurePosixPath(self.managed.album_path).parts
         if any(
@@ -1247,8 +1148,8 @@ class _Assessment:
         if type(self.landings) is not tuple:
             return _failure(CompletionFailure.DESTINATION_MISMATCH)
         self.landing_by_slot = {}
-        self.landing_paths = set()
-        self.landing_nodes = set()
+        landing_paths = set()
+        landing_nodes = set()
         for receipt in self.landings:
             if (
                 type(receipt) is not LandingReceipt
@@ -1257,14 +1158,14 @@ class _Assessment:
                 or not _valid_identity(receipt.identity, 5)
                 or not _valid_hash(receipt.sha256)
                 or receipt.slot in self.landing_by_slot
-                or receipt.path in self.landing_paths
-                or receipt.identity[:2] in self.landing_nodes
+                or receipt.path in landing_paths
+                or receipt.identity[:2] in landing_nodes
             ):
                 return _failure(CompletionFailure.DESTINATION_MISMATCH)
             self.landing_by_slot[receipt.slot] = receipt
-            self.landing_paths.add(receipt.path)
-            self.landing_nodes.add(receipt.identity[:2])
-        if set(self.landing_by_slot) != self.requested:
+            landing_paths.add(receipt.path)
+            landing_nodes.add(receipt.identity[:2])
+        if set(self.landing_by_slot) != self.slots:
             return _failure(CompletionFailure.DESTINATION_MISMATCH)
         for slot, mapping in self.mappings_by_slot.items():
             receipt = self.landing_by_slot[slot]
@@ -1274,96 +1175,51 @@ class _Assessment:
             ):
                 return _failure(CompletionFailure.DESTINATION_MISMATCH)
 
-    def _check_baseline(self):
-        if type(self.baseline) is not tuple:
-            return _failure(CompletionFailure.BASELINE_MISMATCH)
-        self.baseline_by_slot = {}
-        baseline_paths = set()
-        baseline_nodes = set()
-        for receipt in self.baseline:
+    def _check_inventory(self):
+        if (
+            type(self.inventory) is not AlbumInventory
+            or not _valid_relative_path(self.inventory.path)
+            or not _valid_identity(self.inventory.identity, 5)
+            or type(self.inventory.audio) is not tuple
+            or self.inventory.path != self.managed.album_path
+            or self.inventory.identity != self.managed.album_identity
+        ):
+            return _failure(CompletionFailure.INVENTORY_MISMATCH)
+        inventory_by_slot = {}
+        inventory_paths = set()
+        inventory_nodes = set()
+        album_parts = PurePosixPath(self.inventory.path).parts
+        for receipt in self.inventory.audio:
             if (
-                type(receipt) is not BaselineReceipt
+                type(receipt) is not LandingReceipt
                 or not authoritative_slot(receipt.slot)
                 or not _valid_relative_path(receipt.path)
                 or not _valid_identity(receipt.identity, 5)
                 or not _valid_hash(receipt.sha256)
-                or receipt.slot in self.baseline_by_slot
-                or receipt.path in baseline_paths
-                or receipt.identity[:2] in baseline_nodes
-                or receipt.path in self.landing_paths
-                or receipt.identity[:2] in self.landing_nodes
+                or receipt.slot in inventory_by_slot
+                or receipt.path in inventory_paths
+                or receipt.identity[:2] in inventory_nodes
             ):
-                return _failure(CompletionFailure.BASELINE_MISMATCH)
-            self.baseline_by_slot[receipt.slot] = receipt
-            baseline_paths.add(receipt.path)
-            baseline_nodes.add(receipt.identity[:2])
-        if set(self.baseline_by_slot) != self.baseline_slots:
-            return _failure(CompletionFailure.BASELINE_MISMATCH)
-
-    def _check_inventory(self):
-        inventory_required = (
-            self.expectation.scope is CompletionScope.ALBUM or bool(self.baseline_slots)
-        )
-        self.canonical_inventory = None
-        if self.inventory is None:
-            if inventory_required:
                 return _failure(CompletionFailure.INVENTORY_MISMATCH)
-        else:
+            receipt_parts = PurePosixPath(receipt.path).parts
             if (
-                type(self.inventory) is not AlbumInventory
-                or not _valid_relative_path(self.inventory.path)
-                or not _valid_identity(self.inventory.identity, 5)
-                or type(self.inventory.audio) is not tuple
-                or self.inventory.path != self.managed.album_path
-                or self.inventory.identity != self.managed.album_identity
+                len(receipt_parts) <= len(album_parts)
+                or receipt_parts[:len(album_parts)] != album_parts
             ):
                 return _failure(CompletionFailure.INVENTORY_MISMATCH)
-            inventory_by_slot = {}
-            inventory_paths = set()
-            inventory_nodes = set()
-            album_parts = PurePosixPath(self.inventory.path).parts
-            for receipt in self.inventory.audio:
-                if (
-                    type(receipt) not in (LandingReceipt, BaselineReceipt)
-                    or not authoritative_slot(receipt.slot)
-                    or not _valid_relative_path(receipt.path)
-                    or not _valid_identity(receipt.identity, 5)
-                    or not _valid_hash(receipt.sha256)
-                    or receipt.slot in inventory_by_slot
-                    or receipt.path in inventory_paths
-                    or receipt.identity[:2] in inventory_nodes
-                ):
-                    return _failure(CompletionFailure.INVENTORY_MISMATCH)
-                receipt_parts = PurePosixPath(receipt.path).parts
-                if (
-                    len(receipt_parts) <= len(album_parts)
-                    or receipt_parts[:len(album_parts)] != album_parts
-                ):
-                    return _failure(CompletionFailure.INVENTORY_MISMATCH)
-                inventory_by_slot[receipt.slot] = receipt
-                inventory_paths.add(receipt.path)
-                inventory_nodes.add(receipt.identity[:2])
-            expected_inventory = {**self.baseline_by_slot, **self.landing_by_slot}
-            if set(inventory_by_slot) != self.requested | self.baseline_slots:
-                return _failure(CompletionFailure.INVENTORY_MISMATCH)
-            for slot, receipt in inventory_by_slot.items():
-                expected = expected_inventory[slot]
-                if (
-                    type(receipt) is not type(expected)
-                    or receipt.path != expected.path
-                    or receipt.identity != expected.identity
-                    or receipt.sha256 != expected.sha256
-                ):
-                    return _failure(CompletionFailure.INVENTORY_MISMATCH)
-            inventory_order = [
-                slot for slot in self.expectation.catalogue_slots
-                if slot in self.requested | self.baseline_slots
-            ]
-            self.canonical_inventory = AlbumInventory(
-                path=self.inventory.path,
-                identity=self.inventory.identity,
-                audio=tuple(inventory_by_slot[slot] for slot in inventory_order),
-            )
+            inventory_by_slot[receipt.slot] = receipt
+            inventory_paths.add(receipt.path)
+            inventory_nodes.add(receipt.identity[:2])
+        if inventory_by_slot != self.landing_by_slot:
+            return _failure(CompletionFailure.INVENTORY_MISMATCH)
+        self.canonical_inventory = AlbumInventory(
+            path=self.inventory.path,
+            identity=self.inventory.identity,
+            audio=tuple(
+                inventory_by_slot[slot]
+                for slot in self.expectation.catalogue_slots
+            ),
+        )
 
     def _check_quality(self):
         if type(self.quality) is not tuple:
@@ -1387,11 +1243,10 @@ class _Assessment:
             ):
                 return _failure(CompletionFailure.QUALITY_MISMATCH)
             self.quality_by_slot[value.slot] = value
-        if set(self.quality_by_slot) != self.quality_slots:
+        if set(self.quality_by_slot) != self.slots:
             return _failure(CompletionFailure.QUALITY_MISMATCH)
-        destinations_by_slot = {**self.baseline_by_slot, **self.landing_by_slot}
         for slot, value in self.quality_by_slot.items():
-            receipt = destinations_by_slot[slot]
+            receipt = self.landing_by_slot[slot]
             if (
                 value.path != receipt.path
                 or value.identity != receipt.identity
@@ -1402,15 +1257,7 @@ class _Assessment:
                 return _failure(CompletionFailure.QUALITY_MISMATCH)
 
     def _evidence(self):
-        requested_order = [
-            slot for slot in self.expectation.catalogue_slots if slot in self.requested
-        ]
-        baseline_order = [
-            slot for slot in self.expectation.catalogue_slots if slot in self.baseline_slots
-        ]
-        quality_order = [
-            slot for slot in self.expectation.catalogue_slots if slot in self.quality_slots
-        ]
+        order = self.expectation.catalogue_slots
         evidence = CompletionEvidence(
             owner=self.owner,
             expectation=self.expectation,
@@ -1419,11 +1266,10 @@ class _Assessment:
             album_path=self.managed.album_path,
             album_identity=self.managed.album_identity,
             managed_manifest_hash=self.managed.manifest_hash,
-            imports=tuple(self.mappings_by_slot[slot] for slot in requested_order),
-            landings=tuple(self.landing_by_slot[slot] for slot in requested_order),
-            baseline=tuple(self.baseline_by_slot[slot] for slot in baseline_order),
+            imports=tuple(self.mappings_by_slot[slot] for slot in order),
+            landings=tuple(self.landing_by_slot[slot] for slot in order),
             inventory=self.canonical_inventory,
-            quality=tuple(self.quality_by_slot[slot] for slot in quality_order),
+            quality=tuple(self.quality_by_slot[slot] for slot in order),
             counts=self.download.counts,
         )
         return CompletionAssessment(evidence=evidence)
@@ -1437,8 +1283,7 @@ def assess_completion(
     managed: ManagedImportEvidence | None,
     landings: tuple[LandingReceipt, ...],
     quality: tuple[TrackQuality, ...],
-    baseline: tuple[BaselineReceipt, ...] = (),
-    inventory: AlbumInventory | None = None,
+    inventory: AlbumInventory | None,
 ) -> CompletionAssessment:
     """Combine already live-validated inputs into one exact evidence record."""
     return _Assessment(
@@ -1448,6 +1293,5 @@ def assess_completion(
         managed,
         landings,
         quality,
-        baseline,
         inventory,
     ).run()

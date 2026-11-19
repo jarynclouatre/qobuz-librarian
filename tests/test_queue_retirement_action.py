@@ -9,7 +9,6 @@ from qobuz_librarian.completion import (
     CompletionInput,
     CompletionOrigin,
     CompletionOriginKind,
-    CompletionScope,
     DownloadCounts,
     LandingReceipt,
     ManagedImportEvidence,
@@ -55,7 +54,6 @@ def _completion_input(
         origin=CompletionOrigin(origin_kind, origin_reference),
         expectation=CompletionExpectation(
             album_id="1",
-            scope=CompletionScope.ALBUM,
             catalogue_slots=(slot,),
             requested_slots=(slot,),
             quality_targets=(QualityTarget(slot, 16, 44_100),),
