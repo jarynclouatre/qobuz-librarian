@@ -2399,16 +2399,70 @@ def _recover_payload(
     *,
     handoff_matches=None,
 ) -> str:
-    _validate_payload(payload)
-    _require_authority(authority)
-    retain_completion = payload.get("retain_completion", False)
-    workspace_record = payload.get("workspace_record")
-    if not isinstance(workspace_record, dict):
-        workspace_name = _workspace_name(payload["operation_id"])
-        if not _name_missing(root_fd, workspace_name):
-            descriptor = _open_directory(workspace_name, dir_fd=root_fd)
+    return _PayloadRecovery(
+        authority,
+        root,
+        root_fd,
+        namespace_fd,
+        payload,
+        handoff_matches=handoff_matches,
+    ).run()
+
+
+class _PayloadRecovery:
+    """One journalled relocation, settled forward or rolled back."""
+
+    def __init__(
+        self,
+        authority,
+        root,
+        root_fd,
+        namespace_fd,
+        payload,
+        *,
+        handoff_matches,
+    ):
+        self.authority = authority
+        self.root = root
+        self.root_fd = root_fd
+        self.namespace_fd = namespace_fd
+        self.payload = payload
+        self.handoff_matches = handoff_matches
+
+    def run(self) -> str:
+        _validate_payload(self.payload)
+        _require_authority(self.authority)
+        self.retain_completion = self.payload.get("retain_completion", False)
+        self.workspace_record = self.payload.get("workspace_record")
+        if not isinstance(self.workspace_record, dict):
+            return self._discard_unrecorded_workspace()
+
+        workspace_name = _workspace_name(self.payload["operation_id"])
+        if _name_missing(self.root_fd, workspace_name):
+            return self._settle_without_workspace()
+
+        self.workspace_fd = _open_workspace(
+            self.root_fd, self.payload["operation_id"], self.workspace_record
+        )
+        try:
+            outcome = self._discard_unpublished()
+            if outcome is not None:
+                return outcome
+            self._read_rows()
+            self._choose_direction()
+            if self.forward:
+                return self._commit()
+            return self._roll_back()
+        finally:
+            if self.workspace_fd is not None:
+                os.close(self.workspace_fd)
+
+    def _discard_unrecorded_workspace(self) -> str:
+        workspace_name = _workspace_name(self.payload["operation_id"])
+        if not _name_missing(self.root_fd, workspace_name):
+            descriptor = _open_directory(workspace_name, dir_fd=self.root_fd)
             try:
-                if not _named_matches(root_fd, workspace_name, descriptor, directory=True):
+                if not _named_matches(self.root_fd, workspace_name, descriptor, directory=True):
                     raise PostImportRelocationAttention(
                         "an unfinished relocation workspace changed"
                     )
@@ -2416,35 +2470,34 @@ def _recover_payload(
                     raise PostImportRelocationAttention(
                         "an unfinished relocation workspace is not empty"
                     )
-                os.rmdir(workspace_name, dir_fd=root_fd)
-                os.fsync(root_fd)
+                os.rmdir(workspace_name, dir_fd=self.root_fd)
+                os.fsync(self.root_fd)
             finally:
                 os.close(descriptor)
-        _remove_created_artist_if_empty(root_fd, payload)
-        _unlink_journal(namespace_fd, payload["operation_id"])
+        _remove_created_artist_if_empty(self.root_fd, self.payload)
+        _unlink_journal(self.namespace_fd, self.payload["operation_id"])
         return "rolled-back"
 
-    workspace_name = _workspace_name(payload["operation_id"])
-    if _name_missing(root_fd, workspace_name):
+    def _settle_without_workspace(self) -> str:
         authority_matches = lambda: (
-            type(authority) is RunLockLease
-            and authority.intact() is True
-            and _root_matches(root_fd, root)
-            and _journal_matches(namespace_fd, payload)
+            type(self.authority) is RunLockLease
+            and self.authority.intact() is True
+            and _root_matches(self.root_fd, self.root)
+            and _journal_matches(self.namespace_fd, self.payload)
         )
         database_state = _database_state(
-            payload["database_capture"], authority_matches
+            self.payload["database_capture"], authority_matches
         )
-        phase = payload["phase"]
-        if retain_completion and phase in {"committed", "retained"}:
-            if not _handoff_owner_decision(payload, handoff_matches):
+        phase = self.payload["phase"]
+        if self.retain_completion and phase in {"committed", "retained"}:
+            if not _handoff_owner_decision(self.payload, self.handoff_matches):
                 raise PostImportRelocationAttention(
                     "the retained relocation owner no longer matches"
                 )
-        elif payload["await_handoff"] and phase != "committed":
-            handoff = payload["handoff"]
+        elif self.payload["await_handoff"] and phase != "committed":
+            handoff = self.payload["handoff"]
             if handoff is not None:
-                decision = _handoff_owner_decision(payload, handoff_matches)
+                decision = _handoff_owner_decision(self.payload, self.handoff_matches)
                 if decision is True:
                     raise PostImportRelocationAttention(
                         "a persisted relocation handoff lost its recovery workspace"
@@ -2455,7 +2508,10 @@ def _recover_payload(
             }:
                 raise PostImportRelocationAttention(
                     "a deferred relocation lost its private recovery workspace",
-                    paths=(root / payload["source"], root / payload["destination"]),
+                    paths=(
+                        self.root / self.payload["source"],
+                        self.root / self.payload["destination"],
+                    ),
                 )
         forward = database_state is DatabaseRowsState.NEW or (
             database_state is DatabaseRowsState.EMPTY
@@ -2465,190 +2521,193 @@ def _recover_payload(
             database_state is DatabaseRowsState.EMPTY
             and phase not in {"committed", "retained"}
         )
-        if forward and _public_snapshot_matches(root_fd, payload):
-            _cleanup_source(root_fd, None, payload)
-            if retain_completion:
+        if forward and _public_snapshot_matches(self.root_fd, self.payload):
+            _cleanup_source(self.root_fd, None, self.payload)
+            if self.retain_completion:
                 if phase != "retained":
-                    payload["phase"] = "retained"
-                    _write_journal(namespace_fd, payload)
+                    self.payload["phase"] = "retained"
+                    _write_journal(self.namespace_fd, self.payload)
                 _checkpoint("after-retained-completion")
                 return "retained"
-            _unlink_journal(namespace_fd, payload["operation_id"])
+            _unlink_journal(self.namespace_fd, self.payload["operation_id"])
             return "committed"
         if (
             rollback
-            and _source_snapshot_matches(root_fd, payload)
-            and _initial_destination_matches(root_fd, payload)
+            and _source_snapshot_matches(self.root_fd, self.payload)
+            and _initial_destination_matches(self.root_fd, self.payload)
         ):
-            _remove_created_artist_if_empty(root_fd, payload)
-            _unlink_journal(namespace_fd, payload["operation_id"])
+            _remove_created_artist_if_empty(self.root_fd, self.payload)
+            _unlink_journal(self.namespace_fd, self.payload["operation_id"])
             return "rolled-back"
         raise PostImportRelocationAttention(
             "relocation recovery evidence is incomplete after workspace cleanup",
-            paths=(root / payload["source"], root / payload["destination"]),
+            paths=(self.root / self.payload["source"], self.root / self.payload["destination"]),
         )
 
-    workspace_fd = _open_workspace(
-        root_fd, payload["operation_id"], workspace_record
-    )
-    try:
-        units = payload["plan"]["units"]
-        prepared = all("prepared_record" in unit for unit in units)
-        phase = payload["phase"]
+    def _discard_unpublished(self):
+        self.units = self.payload["plan"]["units"]
+        self.prepared = all("prepared_record" in unit for unit in self.units)
+        self.phase = self.payload["phase"]
         if (
-            phase in {"intent", "prepared"}
-            and payload.get("destination_artist_record") is None
+            self.phase in {"intent", "prepared"}
+            and self.payload.get("destination_artist_record") is None
         ):
             if any(
                 "prepared_record" in unit
                 and not _unit_matches(
-                    workspace_fd, _unit_name(unit["index"]), unit
+                    self.workspace_fd, _unit_name(unit["index"]), unit
                 )
-                for unit in units
+                for unit in self.units
             ):
                 raise PostImportRelocationAttention(
                     "an unpublished relocation copy no longer matches the move's records",
-                    paths=(root / payload["source"],),
+                    paths=(self.root / self.payload["source"],),
                 )
-            _remove_workspace(root_fd, workspace_fd, payload)
-            _unlink_journal(namespace_fd, payload["operation_id"])
+            _remove_workspace(self.root_fd, self.workspace_fd, self.payload)
+            _unlink_journal(self.namespace_fd, self.payload["operation_id"])
             return "rolled-back"
-        states = _all_unit_states(root_fd, workspace_fd, payload) if prepared else []
-        if any(state == "unknown" for state in states):
+        self.states = (
+            _all_unit_states(self.root_fd, self.workspace_fd, self.payload)
+            if self.prepared else []
+        )
+        if any(state == "unknown" for state in self.states):
             raise PostImportRelocationAttention(
                 "relocation files no longer match the move's records",
-                paths=(root / payload["source"], root / payload["destination"]),
+                paths=(self.root / self.payload["source"], self.root / self.payload["destination"]),
             )
 
-        if phase in {"intent", "prepared"} and not prepared:
-            _remove_workspace(root_fd, workspace_fd, payload)
-            _remove_created_artist_if_empty(root_fd, payload)
-            _unlink_journal(namespace_fd, payload["operation_id"])
+        if self.phase in {"intent", "prepared"} and not self.prepared:
+            _remove_workspace(self.root_fd, self.workspace_fd, self.payload)
+            _remove_created_artist_if_empty(self.root_fd, self.payload)
+            _unlink_journal(self.namespace_fd, self.payload["operation_id"])
             return "rolled-back"
 
-        if phase in {"intent", "prepared"} and all(
-            state == "private" for state in states
+        if self.phase in {"intent", "prepared"} and all(
+            state == "private" for state in self.states
         ):
-            _remove_workspace(root_fd, workspace_fd, payload)
-            _remove_created_artist_if_empty(root_fd, payload)
-            _unlink_journal(namespace_fd, payload["operation_id"])
+            _remove_workspace(self.root_fd, self.workspace_fd, self.payload)
+            _remove_created_artist_if_empty(self.root_fd, self.payload)
+            _unlink_journal(self.namespace_fd, self.payload["operation_id"])
             return "rolled-back"
 
+    def _read_rows(self):
         authority_matches = lambda: (
-            type(authority) is RunLockLease
-            and authority.intact() is True
-            and _root_matches(root_fd, root)
-            and _journal_matches(namespace_fd, payload)
+            type(self.authority) is RunLockLease
+            and self.authority.intact() is True
+            and _root_matches(self.root_fd, self.root)
+            and _journal_matches(self.namespace_fd, self.payload)
         )
-        database_state = _database_state(
-            payload["database_capture"], authority_matches
+        self.database_state = _database_state(
+            self.payload["database_capture"], authority_matches
         )
-        if database_state is DatabaseRowsState.MIXED:
+        if self.database_state is DatabaseRowsState.MIXED:
             raise PostImportRelocationAttention(
                 "Beets contains a mixture of old and new relocation paths"
             )
 
+    def _choose_direction(self):
         retained_terminal = (
-            retain_completion and phase in {"committed", "retained"}
+            self.retain_completion and self.phase in {"committed", "retained"}
         )
         deferred = (
-            payload["await_handoff"]
-            and phase not in {"committed", "retained"}
+            self.payload["await_handoff"]
+            and self.phase not in {"committed", "retained"}
         )
         if retained_terminal:
-            if not _handoff_owner_decision(payload, handoff_matches):
+            if not _handoff_owner_decision(self.payload, self.handoff_matches):
                 raise PostImportRelocationAttention(
                     "the retained relocation owner no longer matches"
                 )
-            if database_state is DatabaseRowsState.OLD:
+            if self.database_state is DatabaseRowsState.OLD:
                 raise PostImportRelocationAttention(
                     "Beets was restored behind a retained relocation"
                 )
-            forward = database_state in {
+            self.forward = self.database_state in {
                 DatabaseRowsState.NEW,
                 DatabaseRowsState.EMPTY,
             }
         elif deferred:
-            handoff = payload["handoff"]
-            if handoff is None:
-                decision = False
-            else:
-                decision = _handoff_owner_decision(payload, handoff_matches)
-            if decision is True:
-                if database_state is DatabaseRowsState.OLD:
-                    raise PostImportRelocationAttention(
-                        "Beets was restored behind a persisted relocation handoff"
-                    )
-                if units and not all(state == "public" for state in states):
-                    raise PostImportRelocationAttention(
-                        "a deferred relocation publication is incomplete"
-                    )
-                if not _publication_authority_matches(
-                    authority,
-                    root_fd,
-                    namespace_fd,
-                    payload,
-                ):
-                    raise PostImportRelocationAttention(
-                        "a deferred relocation changed while its owner was checked"
-                    )
-                payload["phase"] = "committed"
-                _write_journal(namespace_fd, payload)
-                phase = "committed"
-                forward = True
-            else:
-                if database_state in {
-                    DatabaseRowsState.NEW,
-                    DatabaseRowsState.EMPTY,
-                }:
-                    if units and not all(state == "public" for state in states):
-                        raise PostImportRelocationAttention(
-                            "a deferred relocation publication is incomplete"
-                        )
-                    rollback_authority = lambda: _publication_authority_matches(
-                        authority,
-                        root_fd,
-                        namespace_fd,
-                        payload,
-                    )
-                    database_state = _rollback_database_publication(
-                        payload, rollback_authority
-                    )
-                forward = False
-        elif database_state is DatabaseRowsState.NEW:
-            forward = True
-        elif database_state is DatabaseRowsState.EMPTY:
-            forward = phase in {"committed", "retained"}
-        elif database_state is DatabaseRowsState.OLD:
-            if phase in {"committed", "retained"}:
+            self._settle_handoff()
+        elif self.database_state is DatabaseRowsState.NEW:
+            self.forward = True
+        elif self.database_state is DatabaseRowsState.EMPTY:
+            self.forward = self.phase in {"committed", "retained"}
+        elif self.database_state is DatabaseRowsState.OLD:
+            if self.phase in {"committed", "retained"}:
                 raise PostImportRelocationAttention(
                     "the Beets database was restored behind a committed relocation"
                 )
-            forward = False
+            self.forward = False
 
-        if forward:
-            if units and not all(state == "public" for state in states):
+    def _settle_handoff(self):
+        handoff = self.payload["handoff"]
+        if handoff is None:
+            decision = False
+        else:
+            decision = _handoff_owner_decision(self.payload, self.handoff_matches)
+        if decision is True:
+            if self.database_state is DatabaseRowsState.OLD:
                 raise PostImportRelocationAttention(
-                    "Beets points to relocated files whose publication is incomplete"
+                    "Beets was restored behind a persisted relocation handoff"
                 )
-            _cleanup_source(root_fd, workspace_fd, payload)
-            _remove_workspace(root_fd, workspace_fd, payload)
-            if retain_completion:
-                payload["phase"] = "retained"
-                _write_journal(namespace_fd, payload)
-                _checkpoint("after-retained-completion")
-                return "retained"
-            _unlink_journal(namespace_fd, payload["operation_id"])
-            return "committed"
+            if self.units and not all(state == "public" for state in self.states):
+                raise PostImportRelocationAttention(
+                    "a deferred relocation publication is incomplete"
+                )
+            if not _publication_authority_matches(
+                self.authority,
+                self.root_fd,
+                self.namespace_fd,
+                self.payload,
+            ):
+                raise PostImportRelocationAttention(
+                    "a deferred relocation changed while its owner was checked"
+                )
+            self.payload["phase"] = "committed"
+            _write_journal(self.namespace_fd, self.payload)
+            self.phase = "committed"
+            self.forward = True
+        else:
+            if self.database_state in {
+                DatabaseRowsState.NEW,
+                DatabaseRowsState.EMPTY,
+            }:
+                if self.units and not all(state == "public" for state in self.states):
+                    raise PostImportRelocationAttention(
+                        "a deferred relocation publication is incomplete"
+                    )
+                rollback_authority = lambda: _publication_authority_matches(
+                    self.authority,
+                    self.root_fd,
+                    self.namespace_fd,
+                    self.payload,
+                )
+                self.database_state = _rollback_database_publication(
+                    self.payload, rollback_authority
+                )
+            self.forward = False
 
-        _rollback_units(root_fd, workspace_fd, payload)
-        _remove_workspace(root_fd, workspace_fd, payload)
-        _remove_created_artist_if_empty(root_fd, payload)
-        _unlink_journal(namespace_fd, payload["operation_id"])
+    def _commit(self) -> str:
+        if self.units and not all(state == "public" for state in self.states):
+            raise PostImportRelocationAttention(
+                "Beets points to relocated files whose publication is incomplete"
+            )
+        _cleanup_source(self.root_fd, self.workspace_fd, self.payload)
+        _remove_workspace(self.root_fd, self.workspace_fd, self.payload)
+        if self.retain_completion:
+            self.payload["phase"] = "retained"
+            _write_journal(self.namespace_fd, self.payload)
+            _checkpoint("after-retained-completion")
+            return "retained"
+        _unlink_journal(self.namespace_fd, self.payload["operation_id"])
+        return "committed"
+
+    def _roll_back(self) -> str:
+        _rollback_units(self.root_fd, self.workspace_fd, self.payload)
+        _remove_workspace(self.root_fd, self.workspace_fd, self.payload)
+        _remove_created_artist_if_empty(self.root_fd, self.payload)
+        _unlink_journal(self.namespace_fd, self.payload["operation_id"])
         return "rolled-back"
-    finally:
-        if workspace_fd is not None:
-            os.close(workspace_fd)
 
 
 def _clean_journal_temps(namespace_fd, root_fd) -> None:

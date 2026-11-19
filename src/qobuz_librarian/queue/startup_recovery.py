@@ -2114,13 +2114,66 @@ def recover_startup_state(
 def _recover_startup_state(
     authority, acknowledge_completion, settle, tried, outcomes, said,
 ) -> StartupRecoveryResult:
-    try:
-        _require_authority(authority)
+    return _StartupRecovery(
+        authority, acknowledge_completion, settle, tried, outcomes, said,
+    ).run()
+
+
+class _StartupRecovery:
+    """Start-up recovery, repeated until nothing more can be settled."""
+
+    def __init__(self, authority, acknowledge_completion, settle, tried,
+                 outcomes, said):
+        self.authority = authority
+        self.acknowledge_completion = acknowledge_completion
+        self.settle = settle
+        self.tried = tried
+        self.outcomes = outcomes
+        self.said = said
+
+    def run(self) -> StartupRecoveryResult:
+        try:
+            stopped = self._check_relocations()
+            if stopped is not None:
+                return stopped
+            while True:
+                for step in (self._load_queue, self._clear_staging,
+                             self._continue_settlement, self._hold_blocked,
+                             self._retire_carrier, self._finish_complete,
+                             self._finish_resolving, self._settle_reservations,
+                             self._conclude):
+                    outcome = step()
+                    if outcome is not None:
+                        break
+                if outcome is not True:
+                    return outcome
+        except _AuthorityLost:
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                reason="run-lock-authority-lost",
+            )
+        except (
+            IndexError,
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+            sqlite3.Error,
+            queue_state.QueueJournalError,
+        ) as exc:
+            log.error("%s: %s.", BLOCKED_DOWNLOAD_LOG_ENTRY, exc)
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                reason="startup-recovery-unsettled",
+            )
+
+    def _check_relocations(self):
+        _require_authority(self.authority)
         relocation = reconcile_post_import_relocations(
-            authority=authority,
+            authority=self.authority,
             handoff_matches=queue_state.post_import_relocation_handoff_matches,
         )
-        _require_authority(authority)
+        _require_authority(self.authority)
         if relocation.status is not RelocationRecoveryStatus.CLEAR:
             paths = "; ".join(os.fspath(path) for path in relocation.paths)
             log.error(
@@ -2134,254 +2187,247 @@ def _recover_startup_state(
                 reason="post-import-relocation-unsettled",
                 post_import_relocation=relocation,
             )
-        while True:
-            loads = _load_namespace(authority)
-            blocked = [loaded for loaded in loads
-                       if loaded.status is queue_state.QueueLoadStatus.BLOCKED]
-            if blocked:
-                log.error(
-                    "%s: %s.",
-                    UNREADABLE_QUEUE_LOG_ENTRY,
-                    "; ".join(
-                        f"{', '.join(map(os.fspath, loaded.paths)) or 'queue'}: "
-                        f"{loaded.reason or 'reason not reported'}"
-                        for loaded in blocked
-                    ),
+
+    def _load_queue(self):
+        loads = _load_namespace(self.authority)
+        blocked = [loaded for loaded in loads
+                   if loaded.status is queue_state.QueueLoadStatus.BLOCKED]
+        if blocked:
+            log.error(
+                "%s: %s.",
+                UNREADABLE_QUEUE_LOG_ENTRY,
+                "; ".join(
+                    f"{', '.join(map(os.fspath, loaded.paths)) or 'queue'}: "
+                    f"{loaded.reason or 'reason not reported'}"
+                    for loaded in blocked
+                ),
+            )
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                reason="queue-namespace-blocked",
+                paths=tuple(dict.fromkeys(
+                    Path(path) for loaded in blocked for path in loaded.paths)),
+            )
+        self.journals = _sorted_journals(loads)
+        _require_authority(self.authority)
+        if _recover_active_library_backups(self.authority, self.journals):
+            return True
+
+    def _clear_staging(self):
+        unclaimed = _unclaimed_staging_run_names(self.journals)
+        if unclaimed:
+            _require_authority(self.authority)
+            if _retain_unclaimed_staging_runs(
+                    self.authority, unclaimed, discard=self.settle):
+                return True
+            staging = Path(os.path.abspath(os.fspath(cfg.STAGING_DIR)))
+            left = [staging / name for name in unclaimed
+                    if os.path.lexists(staging / name)]
+            log.warning(
+                "%s: a download folder in staging no saved queue claims "
+                "could not be cleared: %s.%s",
+                BLOCKED_DOWNLOAD_LOG_ENTRY,
+                ", ".join(path.name for path in left),
+                _check_staged(left),
+            )
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                reason="unclaimed-staging-run",
+            )
+        _require_authority(self.authority)
+        if _recover_staging_references(self.authority, self.journals):
+            return True
+
+    def _continue_settlement(self):
+        settlement = next(
+            (
+                (journal, item)
+                for journal in self.journals
+                for item in sorted(journal.items, key=lambda value: value.item_id)
+                if (
+                    item.phase is queue_state.QueuePhase.BLOCKED
+                    and _single_reference(item, _MANAGED_SETTLEMENT_KIND) is not None
                 )
+            ),
+            None,
+        )
+        if settlement is not None:
+            settled = _continue_prelaunch_settlement(
+                self.authority,
+                *settlement,
+            )
+            if settled.status in {
+                BlockedItemSettlementStatus.RETRYABLE,
+                BlockedItemSettlementStatus.DISCARDED,
+            }:
+                return True
+            log.warning(
+                "%s: “%s”: %s",
+                BLOCKED_DOWNLOAD_LOG_ENTRY,
+                _album_label(settlement[1]),
+                settled.reason,
+            )
+            self.said.add((settlement[0].operation_id, settlement[1].item_id))
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                _classify(self.journals),
+                "prelaunch-settlement-unsettled",
+            )
+
+    def _hold_blocked(self):
+        self.classified = _classify(self.journals)
+        if any(item.phase is queue_state.QueuePhase.BLOCKED for item in self.classified):
+            if _recover_active_reservations(self.authority, self.journals):
+                loads = _load_namespace(self.authority)
+                self.journals = _sorted_journals(loads)
+                self.classified = _classify(self.journals)
+            if self.settle and _settle_next_blocked(
+                    self.authority, self.journals, self.tried, self.outcomes, self.said):
+                return True
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                self.classified,
+                "queue-item-blocked",
+            )
+
+    def _retire_carrier(self):
+        retirement = next(
+            (
+                (journal, item)
+                for journal in self.journals
+                for item in sorted(
+                    journal.retirements,
+                    key=lambda value: value.item_id,
+                )
+            ),
+            None,
+        )
+        if retirement is not None:
+            journal, item = retirement
+            if _waits_for_web_app(journal, item, self.acknowledge_completion):
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
-                    reason="queue-namespace-blocked",
-                    paths=tuple(dict.fromkeys(
-                        Path(path) for loaded in blocked for path in loaded.paths)),
+                    self.classified,
+                    "web-completion-unacknowledged",
                 )
-            journals = _sorted_journals(loads)
-            _require_authority(authority)
-            if _recover_active_library_backups(authority, journals):
-                continue
-            unclaimed = _unclaimed_staging_run_names(journals)
-            if unclaimed:
-                _require_authority(authority)
-                if _retain_unclaimed_staging_runs(
-                        authority, unclaimed, discard=settle):
-                    continue
-                staging = Path(os.path.abspath(os.fspath(cfg.STAGING_DIR)))
-                left = [staging / name for name in unclaimed
-                        if os.path.lexists(staging / name)]
+            _require_authority(self.authority)
+            _saved, _final_path, result = finalize_carrier_retirement(
+                journal,
+                item.item_id,
+                authority=self.authority,
+                acknowledge_completion=self.acknowledge_completion,
+            )
+            _require_authority(self.authority)
+            if result.outcome not in {
+                ManagedCarrierRetirementOutcome.RETIRED,
+                ManagedCarrierRetirementOutcome.ALREADY_ABSENT,
+            }:
                 log.warning(
-                    "%s: a download folder in staging no saved queue claims "
-                    "could not be cleared: %s.%s",
+                    "%s: the record of a finished Beets import could not "
+                    "be retired: %s",
                     BLOCKED_DOWNLOAD_LOG_ENTRY,
-                    ", ".join(path.name for path in left),
-                    _check_staged(left),
+                    result.reason or result.outcome.value,
                 )
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.ATTENTION_REQUIRED,
-                    reason="unclaimed-staging-run",
+                    self.classified,
+                    "carrier-retirement-unsettled",
                 )
-            _require_authority(authority)
-            if _recover_staging_references(authority, journals):
-                continue
-            settlement = next(
-                (
-                    (journal, item)
-                    for journal in journals
-                    for item in sorted(journal.items, key=lambda value: value.item_id)
-                    if (
-                        item.phase is queue_state.QueuePhase.BLOCKED
-                        and _single_reference(item, _MANAGED_SETTLEMENT_KIND) is not None
-                    )
-                ),
-                None,
-            )
-            if settlement is not None:
-                settled = _continue_prelaunch_settlement(
-                    authority,
-                    *settlement,
-                )
-                if settled.status in {
-                    BlockedItemSettlementStatus.RETRYABLE,
-                    BlockedItemSettlementStatus.DISCARDED,
-                }:
-                    continue
-                log.warning(
-                    "%s: “%s”: %s",
-                    BLOCKED_DOWNLOAD_LOG_ENTRY,
-                    _album_label(settlement[1]),
-                    settled.reason,
-                )
-                said.add((settlement[0].operation_id, settlement[1].item_id))
-                return StartupRecoveryResult(
-                    StartupRecoveryStatus.ATTENTION_REQUIRED,
-                    _classify(journals),
-                    "prelaunch-settlement-unsettled",
-                )
-            classified = _classify(journals)
-            if any(item.phase is queue_state.QueuePhase.BLOCKED for item in classified):
-                if _recover_active_reservations(authority, journals):
-                    loads = _load_namespace(authority)
-                    journals = _sorted_journals(loads)
-                    classified = _classify(journals)
-                if settle and _settle_next_blocked(
-                        authority, journals, tried, outcomes, said):
-                    continue
-                return StartupRecoveryResult(
-                    StartupRecoveryStatus.ATTENTION_REQUIRED,
-                    classified,
-                    "queue-item-blocked",
-                )
+            return True
 
-            retirement = next(
-                (
-                    (journal, item)
-                    for journal in journals
-                    for item in sorted(
-                        journal.retirements,
-                        key=lambda value: value.item_id,
-                    )
-                ),
-                None,
-            )
-            if retirement is not None:
-                journal, item = retirement
-                if _waits_for_web_app(journal, item, acknowledge_completion):
-                    return StartupRecoveryResult(
-                        StartupRecoveryStatus.ATTENTION_REQUIRED,
-                        classified,
-                        "web-completion-unacknowledged",
-                    )
-                _require_authority(authority)
-                _saved, _final_path, result = finalize_carrier_retirement(
-                    journal,
-                    item.item_id,
-                    authority=authority,
-                    acknowledge_completion=acknowledge_completion,
-                )
-                _require_authority(authority)
-                if result.outcome not in {
-                    ManagedCarrierRetirementOutcome.RETIRED,
-                    ManagedCarrierRetirementOutcome.ALREADY_ABSENT,
-                }:
-                    log.warning(
-                        "%s: the record of a finished Beets import could not "
-                        "be retired: %s",
-                        BLOCKED_DOWNLOAD_LOG_ENTRY,
-                        result.reason or result.outcome.value,
-                    )
-                    return StartupRecoveryResult(
-                        StartupRecoveryStatus.ATTENTION_REQUIRED,
-                        classified,
-                        "carrier-retirement-unsettled",
-                    )
-                continue
-
-            complete = next(
-                (
-                    (journal, item)
-                    for journal in journals
-                    for item in sorted(journal.items, key=lambda value: value.item_id)
-                    if item.phase is queue_state.QueuePhase.COMPLETE
-                ),
-                None,
-            )
-            if complete is not None:
-                if _needs_cli_completion_caller(
-                    *complete,
-                    acknowledge_completion,
-                ):
-                    return StartupRecoveryResult(
-                        StartupRecoveryStatus.RESUME_REQUIRED,
-                        _classify(journals),
-                    )
-                _recover_complete(authority, *complete)
-                continue
-
-            resolving = next(
-                (
-                    (journal, item)
-                    for journal in journals
-                    for item in sorted(journal.items, key=lambda value: value.item_id)
-                    if item.phase is queue_state.QueuePhase.RESOLVING
-                ),
-                None,
-            )
-            if resolving is not None:
-                if _needs_cli_completion_caller(
-                    *resolving,
-                    acknowledge_completion,
-                ):
-                    return StartupRecoveryResult(
-                        StartupRecoveryStatus.RESUME_REQUIRED,
-                        _classify(journals),
-                    )
-                if _recover_resolving(authority, *resolving):
-                    continue
-                key = (resolving[0].operation_id, resolving[1].item_id)
-                tried[key] = (*tried.get(key, ()), BlockedItemSettlementAction.RETRY)
-                loads = _load_namespace(authority)
-                journals = _sorted_journals(loads)
-                _recover_active_reservations(authority, journals)
-                loads = _load_namespace(authority)
-                journals = _sorted_journals(loads)
-                if settle and _settle_next_blocked(
-                        authority, journals, tried, outcomes, said):
-                    continue
-                return StartupRecoveryResult(
-                    StartupRecoveryStatus.ATTENTION_REQUIRED,
-                    _classify(journals),
-                    "queue-item-blocked",
-                )
-
-            if _recover_active_reservations(authority, journals):
-                loads = _load_namespace(authority)
-                journals = _sorted_journals(loads)
-                if settle and _settle_next_blocked(
-                        authority, journals, tried, outcomes, said):
-                    continue
-                return StartupRecoveryResult(
-                    StartupRecoveryStatus.ATTENTION_REQUIRED,
-                    _classify(journals),
-                    "queue-item-blocked",
-                )
-
-            if _block_inconsistent_active(authority, journals):
-                continue
-
-            empty = next(
-                (journal for journal in journals if not journal.items and not journal.retirements),
-                None,
-            )
-            if empty is not None:
-                _require_authority(authority)
-                queue_state.clear_queue_journal(empty.operation_id)
-                _require_authority(authority)
-                continue
-
-            if settle and _requeue_unstarted(authority, journals, outcomes):
-                continue
-
-            classified = _classify(journals)
-            if classified:
+    def _finish_complete(self):
+        complete = next(
+            (
+                (journal, item)
+                for journal in self.journals
+                for item in sorted(journal.items, key=lambda value: value.item_id)
+                if item.phase is queue_state.QueuePhase.COMPLETE
+            ),
+            None,
+        )
+        if complete is not None:
+            if _needs_cli_completion_caller(
+                *complete,
+                self.acknowledge_completion,
+            ):
                 return StartupRecoveryResult(
                     StartupRecoveryStatus.RESUME_REQUIRED,
-                    classified,
+                    _classify(self.journals),
                 )
-            return StartupRecoveryResult(StartupRecoveryStatus.CLEAR)
-    except _AuthorityLost:
-        return StartupRecoveryResult(
-            StartupRecoveryStatus.ATTENTION_REQUIRED,
-            reason="run-lock-authority-lost",
+            _recover_complete(self.authority, *complete)
+            return True
+
+    def _finish_resolving(self):
+        resolving = next(
+            (
+                (journal, item)
+                for journal in self.journals
+                for item in sorted(journal.items, key=lambda value: value.item_id)
+                if item.phase is queue_state.QueuePhase.RESOLVING
+            ),
+            None,
         )
-    except (
-        IndexError,
-        KeyError,
-        OSError,
-        TypeError,
-        ValueError,
-        sqlite3.Error,
-        queue_state.QueueJournalError,
-    ) as exc:
-        log.error("%s: %s.", BLOCKED_DOWNLOAD_LOG_ENTRY, exc)
-        return StartupRecoveryResult(
-            StartupRecoveryStatus.ATTENTION_REQUIRED,
-            reason="startup-recovery-unsettled",
+        if resolving is not None:
+            if _needs_cli_completion_caller(
+                *resolving,
+                self.acknowledge_completion,
+            ):
+                return StartupRecoveryResult(
+                    StartupRecoveryStatus.RESUME_REQUIRED,
+                    _classify(self.journals),
+                )
+            if _recover_resolving(self.authority, *resolving):
+                return True
+            key = (resolving[0].operation_id, resolving[1].item_id)
+            self.tried[key] = (*self.tried.get(key, ()), BlockedItemSettlementAction.RETRY)
+            loads = _load_namespace(self.authority)
+            self.journals = _sorted_journals(loads)
+            _recover_active_reservations(self.authority, self.journals)
+            loads = _load_namespace(self.authority)
+            self.journals = _sorted_journals(loads)
+            if self.settle and _settle_next_blocked(
+                    self.authority, self.journals, self.tried, self.outcomes, self.said):
+                return True
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                _classify(self.journals),
+                "queue-item-blocked",
+            )
+
+    def _settle_reservations(self):
+        if _recover_active_reservations(self.authority, self.journals):
+            loads = _load_namespace(self.authority)
+            self.journals = _sorted_journals(loads)
+            if self.settle and _settle_next_blocked(
+                    self.authority, self.journals, self.tried, self.outcomes, self.said):
+                return True
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.ATTENTION_REQUIRED,
+                _classify(self.journals),
+                "queue-item-blocked",
+            )
+
+    def _conclude(self):
+        if _block_inconsistent_active(self.authority, self.journals):
+            return True
+
+        empty = next(
+            (journal for journal in self.journals if not journal.items and not journal.retirements),
+            None,
         )
+        if empty is not None:
+            _require_authority(self.authority)
+            queue_state.clear_queue_journal(empty.operation_id)
+            _require_authority(self.authority)
+            return True
+
+        if self.settle and _requeue_unstarted(self.authority, self.journals, self.outcomes):
+            return True
+
+        classified = _classify(self.journals)
+        if classified:
+            return StartupRecoveryResult(
+                StartupRecoveryStatus.RESUME_REQUIRED,
+                classified,
+            )
+        return StartupRecoveryResult(StartupRecoveryStatus.CLEAR)

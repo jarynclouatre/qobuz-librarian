@@ -3904,267 +3904,311 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
                 Path(plan.source_root or "."), None, FAILED, reason))
         return _record_plan_refusal(
             result, plan, supplied_resume_entries, reason)
-    placed = plan.placed
-    retired_receipts = []
-    # Tracks still to leave each source folder, and the sealed chain of every
-    # folder a track has left, for the in-place bookkeeping below.
-    waiting = Counter()
-    folder_chains: dict = {}
+    return _PlanRun(
+        plan, result, resume_entries, entry_map, in_place=in_place,
+        cancel_check=cancel_check, progress=progress).run()
 
-    def source_folders_left():
-        root = _lexical_absolute(Path(plan.source_root))
+
+class _PlanRun:
+    """One run of a validated migration plan, placement by placement."""
+
+    def __init__(self, plan, result, resume_entries, entry_map, *, in_place,
+                 cancel_check, progress):
+        self.plan = plan
+        self.result = result
+        self.resume_entries = resume_entries
+        self.entry_map = entry_map
+        self.in_place = in_place
+        self.cancel_check = cancel_check
+        self.progress = progress
+        self.placed = plan.placed
+        self.retired_receipts = []
+        # Tracks still to leave each source folder, and the sealed chain of every
+        # folder a track has left, for the in-place bookkeeping below.
+        self.waiting = Counter()
+        self.folder_chains: dict = {}
+        self.source_root = self.destination_root = None
+
+    def source_folders_left(self):
+        root = _lexical_absolute(Path(self.plan.source_root))
         planned = set()
-        for entry in [*plan.entries, *resume_entries]:
+        for entry in [*self.plan.entries, *self.resume_entries]:
             try:
                 parts = _lexical_absolute(entry.source).relative_to(root).parts
             except ValueError:
                 continue
             planned.update(parts[:depth] for depth in range(len(parts)))
         return _source_folders_left(
-            source_root, planned,
+            self.source_root, planned,
             {source for source, _destination, status, reason
-             in result.companion_outcomes
+             in self.result.companion_outcomes
              if status == COPIED or reason == SAME_COMPANION})
 
-    source_root = destination_root = None
-    try:
-        try:
-            if (
-                plan.source_root is None
-                or not isinstance(plan.source_root_receipt, dict)
-                or not isinstance(plan.dest_root_receipt, dict)
-                or _lexical_absolute(Path(plan.source_root))
-                != _lexical_absolute(
-                    Path(plan.source_root_receipt.get("path", "")))
-                or _lexical_absolute(Path(plan.dest_root))
-                != _lexical_absolute(
-                    Path(plan.dest_root_receipt.get("path", "")))
-            ):
-                raise OSError(
-                    "migration roots do not match their preview proofs")
-            source_root = _open_root_receipt(plan.source_root_receipt)
-            destination_root = _open_root_receipt(
-                plan.dest_root_receipt, create_missing=True)
-            plan.dest_root_receipt = _refresh_root_receipt(destination_root)
-        except OSError as exc:
-            reason = str(exc)
-            return _record_plan_refusal(
-                result, plan, resume_entries, reason)
+    @staticmethod
+    def source_folder(entry):
+        return tuple((entry.source_receipt or {}).get("relative", ())[:-1])
 
+    def run(self):
+        try:
+            try:
+                self._open_roots()
+            except OSError as exc:
+                reason = str(exc)
+                return _record_plan_refusal(
+                    self.result, self.plan, self.resume_entries, reason)
+            self._gather_companions()
+            self._place_all()
+            self._carry_companions()
+            if self.in_place and not self.result.cancelled:
+                _prune_retired_source_parents(
+                    self.source_root,
+                    self.retired_receipts,
+                    result=self.result,
+                    cancel_check=self.cancel_check,
+                )
+            if self.in_place:
+                self.result.left_in_source = self.source_folders_left()
+            return self.result
+        except (KeyboardInterrupt, Exception) as exc:
+            # The run stops here, but returns its result so the report is
+            # written: originals may already have been deleted.
+            if isinstance(exc, KeyboardInterrupt):
+                self.result.interrupted = True
+            else:
+                log.exception("Migration stopped by an unexpected error")
+            self.result.cancelled = True
+            if self.in_place and self.source_root is not None:
+                try:
+                    self.result.left_in_source = self.source_folders_left()
+                except BaseException:
+                    pass
+            return self.result
+        finally:
+            if self.destination_root is not None:
+                self.destination_root.close()
+            if self.source_root is not None:
+                self.source_root.close()
+
+    def _open_roots(self):
+        if (
+            self.plan.source_root is None
+            or not isinstance(self.plan.source_root_receipt, dict)
+            or not isinstance(self.plan.dest_root_receipt, dict)
+            or _lexical_absolute(Path(self.plan.source_root))
+            != _lexical_absolute(
+                Path(self.plan.source_root_receipt.get("path", "")))
+            or _lexical_absolute(Path(self.plan.dest_root))
+            != _lexical_absolute(
+                Path(self.plan.dest_root_receipt.get("path", "")))
+        ):
+            raise OSError(
+                "migration roots do not match their preview proofs")
+        self.source_root = _open_root_receipt(self.plan.source_root_receipt)
+        self.destination_root = _open_root_receipt(
+            self.plan.dest_root_receipt, create_missing=True)
+        self.plan.dest_root_receipt = _refresh_root_receipt(self.destination_root)
+
+    def _gather_companions(self):
         # An in-place run carries a source folder's cover art and sidecars to
         # a destination folder as soon as a track lands there, and removes the
         # folders a source folder emptied once its last track has left. A run
         # stopped part way then leaves nothing behind that a later run, which
         # no longer sees the moved tracks, would miss.
-        def source_folder(entry):
-            return tuple((entry.source_receipt or {}).get("relative", ())[:-1])
-
-        companions_by_folder: dict = {}
-        for receipt in plan.companion_receipts:
-            companions_by_folder.setdefault(
+        self.companions_by_folder: dict = {}
+        for receipt in self.plan.companion_receipts:
+            self.companions_by_folder.setdefault(
                 tuple(receipt["relative"][:-1]), []).append(receipt)
-        waiting.update(
-            each for entry in placed
-            for each in companion_folders(source_folder(entry)))
-        retired_by_folder: dict = {}
-        copied_companions = set()
-        lyric_conflicts = _ambiguous_lyric_targets(plan, [*placed, *resume_entries])
-        owners = _companion_owners([*placed, *resume_entries])
+        self.waiting.update(
+            each for entry in self.placed
+            for each in companion_folders(self.source_folder(entry)))
+        self.retired_by_folder: dict = {}
+        self.copied_companions = set()
+        self.lyric_conflicts = _ambiguous_lyric_targets(
+            self.plan, [*self.placed, *self.resume_entries])
+        self.owners = _companion_owners([*self.placed, *self.resume_entries])
 
-        total = len(placed)
-        for i, entry in enumerate(placed, 1):
-            if cancel_check and cancel_check():
-                result.cancelled = True
+    def _place_all(self):
+        total = len(self.placed)
+        for i, entry in enumerate(self.placed, 1):
+            if self.cancel_check and self.cancel_check():
+                self.result.cancelled = True
                 break
             src = entry.source
-            if progress:
-                progress("Copying into the new library", i, total, src.name)
-            opened_source = None
-            published = None
-            stop_after_item = False
-            discard_publication = False
-            source_retired = False
-            moved = False
-            try:
-                if entry.source_receipt is None:
-                    raise OSError(
-                        "source was not sealed during the migration preview")
-                if entry.destination_path_receipt is None:
-                    raise OSError(
-                        "destination was not sealed during the migration preview")
-                if tuple(entry.source_receipt.get("relative") or ()) \
-                        != _relative_parts(src, source_root.path):
-                    raise OSError("source path does not match its preview proof")
-                opened_source = _open_file_receipt(
-                    source_root, entry.source_receipt)
-                published = _stream_copy_noreplace(
-                    opened_source,
-                    entry.source_receipt,
-                    destination_root,
-                    entry.dest_rel,
-                    entry.destination_path_receipt,
-                )
-                if in_place:
-                    published_identity = stat_identity(
-                        os.fstat(published[0]))
-                    if not _retire_source(
-                            opened_source,
-                            entry.source_receipt,
-                            published,
-                            published_identity):
-                        discard_publication = True
-                        raise OSError(
-                            "the original or its new copy changed during the "
-                            "move, so the original was not removed")
-                    source_retired = True
-                    retired_receipts.append(entry.source_receipt)
-                    result.copied += 1
-                    result.outcomes.append(
-                        (src, entry.dest_rel, COPIED, ""))
-                    moved = True
-                else:
-                    result.copied += 1
-                    result.outcomes.append(
-                        (src, entry.dest_rel, COPIED, ""))
-            except FileExistsError:
-                result.skipped += 1
-                result.outcomes.append((
-                    src, entry.dest_rel, SKIPPED,
-                    "destination appeared after preview",
-                ))
-            except KeyboardInterrupt:
-                discard_publication = (
-                    published is not None and not source_retired)
-                result.interrupted = True
-                result.outcomes.append((
-                    src,
-                    entry.dest_rel,
-                    INTERRUPTED,
-                    "migration was interrupted",
-                ))
-                result.cancelled = True
-                stop_after_item = True
-            except (OSError, shutil.Error) as exc:
-                discard_publication = (
-                    discard_publication
-                    or (published is not None and not source_retired)
-                )
-                result.failed += 1
-                result.outcomes.append(
-                    (src, entry.dest_rel, FAILED, str(exc)))
-                if getattr(exc, "errno", None) == errno.ENOSPC:
-                    result.cancelled = True
-                    stop_after_item = True
-            except Exception as exc:
-                log.exception("Migration stopped at %s", src)
-                discard_publication = (
-                    published is not None and not source_retired)
-                result.failed += 1
-                result.outcomes.append((
-                    src,
-                    entry.dest_rel,
-                    FAILED,
-                    str(exc) or type(exc).__name__,
-                ))
-                result.cancelled = True
-                stop_after_item = True
-            finally:
-                if (
-                    discard_publication
-                    and published is not None
-                    and not source_retired
-                    and not _take_back(
-                        published, opened_source, entry.source_receipt)
-                ):
-                    _note_kept_copy(result.outcomes, destination_root)
-                    if in_place and _named_entry_matches(
-                            opened_source.parent_fd, opened_source.name,
-                            opened_source.descriptor):
-                        result.lingered += 1
-                _close_published_file(published)
-                if opened_source is not None:
-                    opened_source.close()
+            if self.progress:
+                self.progress("Copying into the new library", i, total, src.name)
+            stop_after_item = self._place(entry, src)
             if stop_after_item:
-                result.cancelled = True
+                self.result.cancelled = True
                 break
-            if in_place:
-                folder = source_folder(entry)
-                folders = companion_folders(folder)
-                waiting.subtract(folders)
-                if moved:
-                    retired_by_folder.setdefault(folder, []).append(
-                        entry.source_receipt)
-                    for each, destination in zip(
-                            folders, _companion_destinations(entry.dest_rel)):
-                        folder_chains[each] = \
-                            entry.source_receipt["parents"][:len(each)]
-                        _copy_companions(
-                            result, companions_by_folder.get(each, ()),
-                            [destination], progress=None,
-                            cancelled=lambda: result.cancelled,
-                            source_root_binding=source_root,
-                            destination_root_binding=destination_root,
-                            lyric_destinations=_lyric_destinations([entry]),
-                            copied_companions=copied_companions,
-                            lyric_conflicts=lyric_conflicts,
-                            owners=owners)
-                if not waiting[folder] and not result.cancelled:
-                    _prune_retired_source_parents(
-                        source_root,
-                        retired_by_folder.pop(folder, ()),
-                        result=result,
-                        cancel_check=cancel_check,
-                    )
-                if result.cancelled:
+            if self.in_place:
+                self._settle_source_folder(entry)
+                if self.result.cancelled:
                     break
-        if not result.cancelled and (
-                plan.companion_receipts or (in_place and resume_entries)):
-            finished_moves = [] if in_place else None
+
+    def _place(self, entry, src):
+        self.opened_source = None
+        self.published = None
+        stop_after_item = False
+        self.discard_publication = False
+        self.source_retired = False
+        self.moved = False
+        try:
+            self._copy_entry(entry, src)
+        except FileExistsError:
+            self.result.skipped += 1
+            self.result.outcomes.append((
+                src, entry.dest_rel, SKIPPED,
+                "destination appeared after preview",
+            ))
+        except KeyboardInterrupt:
+            self.discard_publication = (
+                self.published is not None and not self.source_retired)
+            self.result.interrupted = True
+            self.result.outcomes.append((
+                src,
+                entry.dest_rel,
+                INTERRUPTED,
+                "migration was interrupted",
+            ))
+            self.result.cancelled = True
+            stop_after_item = True
+        except (OSError, shutil.Error) as exc:
+            self.discard_publication = (
+                self.discard_publication
+                or (self.published is not None and not self.source_retired)
+            )
+            self.result.failed += 1
+            self.result.outcomes.append(
+                (src, entry.dest_rel, FAILED, str(exc)))
+            if getattr(exc, "errno", None) == errno.ENOSPC:
+                self.result.cancelled = True
+                stop_after_item = True
+        except Exception as exc:
+            log.exception("Migration stopped at %s", src)
+            self.discard_publication = (
+                self.published is not None and not self.source_retired)
+            self.result.failed += 1
+            self.result.outcomes.append((
+                src,
+                entry.dest_rel,
+                FAILED,
+                str(exc) or type(exc).__name__,
+            ))
+            self.result.cancelled = True
+            stop_after_item = True
+        finally:
+            self._release(entry)
+        return stop_after_item
+
+    def _copy_entry(self, entry, src):
+        if entry.source_receipt is None:
+            raise OSError(
+                "source was not sealed during the migration preview")
+        if entry.destination_path_receipt is None:
+            raise OSError(
+                "destination was not sealed during the migration preview")
+        if tuple(entry.source_receipt.get("relative") or ()) \
+                != _relative_parts(src, self.source_root.path):
+            raise OSError("source path does not match its preview proof")
+        self.opened_source = _open_file_receipt(
+            self.source_root, entry.source_receipt)
+        self.published = _stream_copy_noreplace(
+            self.opened_source,
+            entry.source_receipt,
+            self.destination_root,
+            entry.dest_rel,
+            entry.destination_path_receipt,
+        )
+        if self.in_place:
+            published_identity = stat_identity(
+                os.fstat(self.published[0]))
+            if not _retire_source(
+                    self.opened_source,
+                    entry.source_receipt,
+                    self.published,
+                    published_identity):
+                self.discard_publication = True
+                raise OSError(
+                    "the original or its new copy changed during the "
+                    "move, so the original was not removed")
+            self.source_retired = True
+            self.retired_receipts.append(entry.source_receipt)
+            self.result.copied += 1
+            self.result.outcomes.append(
+                (src, entry.dest_rel, COPIED, ""))
+            self.moved = True
+        else:
+            self.result.copied += 1
+            self.result.outcomes.append(
+                (src, entry.dest_rel, COPIED, ""))
+
+    def _release(self, entry):
+        if (
+            self.discard_publication
+            and self.published is not None
+            and not self.source_retired
+            and not _take_back(
+                self.published, self.opened_source, entry.source_receipt)
+        ):
+            _note_kept_copy(self.result.outcomes, self.destination_root)
+            if self.in_place and _named_entry_matches(
+                    self.opened_source.parent_fd, self.opened_source.name,
+                    self.opened_source.descriptor):
+                self.result.lingered += 1
+        _close_published_file(self.published)
+        if self.opened_source is not None:
+            self.opened_source.close()
+
+    def _settle_source_folder(self, entry):
+        folder = self.source_folder(entry)
+        folders = companion_folders(folder)
+        self.waiting.subtract(folders)
+        if self.moved:
+            self.retired_by_folder.setdefault(folder, []).append(
+                entry.source_receipt)
+            for each, destination in zip(
+                    folders, _companion_destinations(entry.dest_rel)):
+                self.folder_chains[each] = \
+                    entry.source_receipt["parents"][:len(each)]
+                _copy_companions(
+                    self.result, self.companions_by_folder.get(each, ()),
+                    [destination], progress=None,
+                    cancelled=lambda: self.result.cancelled,
+                    source_root_binding=self.source_root,
+                    destination_root_binding=self.destination_root,
+                    lyric_destinations=_lyric_destinations([entry]),
+                    copied_companions=self.copied_companions,
+                    lyric_conflicts=self.lyric_conflicts,
+                    owners=self.owners)
+        if not self.waiting[folder] and not self.result.cancelled:
+            _prune_retired_source_parents(
+                self.source_root,
+                self.retired_by_folder.pop(folder, ()),
+                result=self.result,
+                cancel_check=self.cancel_check,
+            )
+
+    def _carry_companions(self):
+        if not self.result.cancelled and (
+                self.plan.companion_receipts
+                or (self.in_place and self.resume_entries)):
+            finished_moves = [] if self.in_place else None
             try:
                 _carry_companion_files(
-                    plan, result, entry_map=entry_map,
-                    resume_entries=resume_entries,
-                    progress=progress, cancel_check=cancel_check,
-                    source_root_binding=source_root,
-                    destination_root_binding=destination_root,
-                    copied_companions=copied_companions,
-                    lyric_conflicts=lyric_conflicts,
-                    owners=owners,
+                    self.plan, self.result, entry_map=self.entry_map,
+                    resume_entries=self.resume_entries,
+                    progress=self.progress, cancel_check=self.cancel_check,
+                    source_root_binding=self.source_root,
+                    destination_root_binding=self.destination_root,
+                    copied_companions=self.copied_companions,
+                    lyric_conflicts=self.lyric_conflicts,
+                    owners=self.owners,
                     retired=finished_moves)
             finally:
                 for receipt in finished_moves or ():
-                    retired_receipts.append(receipt)
+                    self.retired_receipts.append(receipt)
                     for each in companion_folders(receipt["relative"][:-1]):
-                        folder_chains[each] = receipt["parents"][:len(each)]
-        if in_place and not result.cancelled:
-            _prune_retired_source_parents(
-                source_root,
-                retired_receipts,
-                result=result,
-                cancel_check=cancel_check,
-            )
-        if in_place:
-            result.left_in_source = source_folders_left()
-        return result
-    except (KeyboardInterrupt, Exception) as exc:
-        # The run stops here, but returns its result so the report is
-        # written: originals may already have been deleted.
-        if isinstance(exc, KeyboardInterrupt):
-            result.interrupted = True
-        else:
-            log.exception("Migration stopped by an unexpected error")
-        result.cancelled = True
-        if in_place and source_root is not None:
-            try:
-                result.left_in_source = source_folders_left()
-            except BaseException:
-                pass
-        return result
-    finally:
-        if destination_root is not None:
-            destination_root.close()
-        if source_root is not None:
-            source_root.close()
+                        self.folder_chains[each] = receipt["parents"][:len(each)]
 
 
 _CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r")

@@ -626,6 +626,286 @@ def _music_root_listed():
         return False
 
 
+class _CandidateFold:
+    """One refresh's finds merged into a parked review."""
+
+    _key = staticmethod(fold_key)
+
+    def __init__(self, parked, cands, review_generation, coverage, retire):
+        self.parked = parked
+        self.cands = cands
+        self.review_generation = review_generation
+        self.coverage = coverage
+        self.retire = retire
+
+    def run(self):
+        if self.parked.status != job_mgr.JobStatus.AWAITING_REVIEW:
+            return None
+        self._read_review()
+        self._carry_rows()
+        self._drop_duplicates()
+        self._add_finds()
+        if self.review_generation is not None:
+            self.parked.execute_args = {
+                **(self.parked.execute_args or {}),
+                "_library_review_generation": int(self.review_generation),
+            }
+        counted = self._count_changes()
+        notes = self._write_notes()
+        # Saved with this change; the review's lock is already held.
+        self.parked.log_lines.extend(counted + notes)
+        self.parked._trim_log_lines_locked()
+        return (self.added, self.updated, self.removed, self.held_back,
+                self.switched_off, self.left_out, notes)
+
+    def _switched_on(self, c):
+        if is_gap_candidate(c):
+            return missing_types.gap_shown(
+                (c.get("payload") or {}).get("bonus_only"), self.included)
+        return missing_types.shown(
+            (c.get("payload") or {}).get("release_type"), self.included)
+
+    def _read_review(self):
+        # Load while the review-action lock is held. A dismissal that finishes
+        # while this fold waits must be visible before any candidate is added.
+        self.hidden = hidden_mod.load()
+        self.library = self.parked.execute_kind == "library"
+        self.included = missing_types.load()
+        self.listed = (review_listed(self.included) if self.library
+                       else review_tab_filter(""))
+        self.fresh_by_key = {}
+        for c in self.cands:
+            self.fresh_by_key.setdefault(self._key(c), c)
+        self.covered = None
+        self.on_disk = frozenset()
+        if self.coverage is not None:
+            self.covered = ({name.casefold() for name in self.coverage[0]}, self.coverage[1])
+            self.on_disk = self.coverage[2]
+        # A scan that read no artist folder says nothing about any of them,
+        # and neither does a music folder that cannot be listed now; the
+        # library may not be mounted.
+        self.drop_gone = bool(self.covered and self.covered[0]) and _music_root_listed()
+        self.updated = 0
+        self.removed = 0
+        # A ticked row stays whatever the refresh makes of it, unless the
+        # scan found the album on disk or its folder is gone. The log names
+        # the ticked ones that left, says once which ones it no longer offers
+        # (then marks them) and how many moved under a switch that is off. A
+        # kept missing album takes the seal of its artist folder as the
+        # refresh read it, so its pick is not refused for a change the
+        # refresh has already looked at.
+        self.in_library = []
+        self.gone = []
+        self.retired = []
+        self.unoffered = []
+        self.moved = {}
+        self.switched_off = {}
+        self.seals = {}
+        for c in self.cands:
+            payload = c.get("payload") or {}
+            if (candidate_premise.expected_kind(c) == "missing"
+                    and payload.get("_premise")):
+                self.seals.setdefault(payload.get("_artist_dir_path"),
+                                      payload["_premise"])
+
+    def _carry_rows(self):
+        self.keep = []
+        for c in self.parked.candidates:
+            self._carry_row(c)
+
+    def _carry_row(self, c):
+        key = self._key(c)
+        fresh = self.fresh_by_key.get(key)
+        if fresh is None and key in self.retire:
+            if self.listed(c):
+                self.removed += 1
+            self.retired.append(c)
+            return
+        if fresh is None and self.drop_gone and _folder_gone(c):
+            if self.listed(c):
+                self.removed += 1
+            if c.get("selected"):
+                self.gone.append(c)
+            return
+        if fresh is None and self.covered and _scan_would_offer(c, self.covered):
+            album_id = str((c.get("payload") or {}).get("album_id") or "")
+            if not c.get("selected") or album_id in self.on_disk:
+                if self.listed(c):
+                    self.removed += 1
+                if c.get("selected"):
+                    self.in_library.append(c)
+                return
+            self._keep_unoffered(c)
+            return
+        if fresh is None or _fold_row(fresh) == _fold_row(c):
+            self.keep.append(c)
+            return
+        self._refresh_row(c, fresh)
+
+    def _keep_unoffered(self, c):
+        payload = dict(c.get("payload") or {})
+        path = payload.get("_artist_dir_path")
+        if path and candidate_premise.expected_kind(c) == "missing":
+            if path not in self.seals:
+                self.seals[path] = candidate_premise.capture("missing", path)
+            if self.seals[path] is not None:
+                payload["_premise"] = self.seals[path]
+        if not payload.get("_unoffered"):
+            payload["_unoffered"] = True
+            self.unoffered.append(c)
+        self.keep.append({**c, "payload": payload})
+
+    def _refresh_row(self, c, fresh):
+        replacement = _fold_row(fresh)
+        if not (c.get("payload") or {}).get("is_new"):
+            # Already in the review, so not a new find.
+            replacement["payload"] = {
+                key: value for key, value in replacement["payload"].items()
+                if key != "is_new"}
+        replacement.update({
+            "cid": c.get("cid"),
+            "seq": c.get("seq"),
+            "selected": bool(c.get("selected")),
+        })
+        self.keep.append(replacement)
+        if (self.library and replacement["selected"] and self._switched_on(c)
+                and not self._switched_on(fresh)):
+            switch = switch_holding(fresh)
+            self.moved[switch] = self.moved.get(switch, 0) + 1
+        if self.listed(c) and not self.listed(replacement):
+            switch = switch_holding(replacement)
+            self.switched_off[switch] = self.switched_off.get(switch, 0) + 1
+        elif (_row_shows_change(_fold_row(fresh), _fold_row(c))
+                and (self.listed(fresh) or self.listed(c))):
+            self.updated += 1
+
+    def _drop_duplicates(self):
+        # Older builds matched rows by album id alone and could leave an
+        # album listed under two artists as two missing-album rows under one
+        # of them. Keep the first, with either row's tick.
+        first_at = {}
+        unique = []
+        for c in self.keep:
+            key = self._key(c) if self.library and not is_gap_candidate(c) else None
+            at = first_at.get(key) if key is not None else None
+            if at is None:
+                if key is not None:
+                    first_at[key] = len(unique)
+                unique.append(c)
+                continue
+            if c.get("selected") and not unique[at].get("selected"):
+                unique[at] = {**unique[at], "selected": True}
+            if self.listed(c):
+                self.removed += 1
+        self.keep = unique
+
+    def _add_finds(self):
+        self.parked.candidates = self.keep
+        seen = {self._key(c) for c in self.keep}
+        listed_rows = sum(1 for c in self.keep if self.listed(c))
+        self.added = 0
+        self.held_back = {}
+        self.left_out = {}
+        for c in self.cands:
+            key = self._key(c)
+            if key in seen:
+                continue
+            if hidden_mod.is_hidden(
+                    hidden_mod.SCOPE_MISSING, c.get("artist") or "",
+                    c.get("title") or "", self.hidden,
+                    year=(c.get("payload") or {}).get("year")):
+                continue
+            seen.add(key)
+            if self.listed(c) and listed_rows >= self.parked.CANDIDATE_CAP:
+                self.parked._candidate_cap_noted = True
+                if isinstance(self.parked.execute_args, dict):
+                    self.parked.execute_args["_candidate_cap_hit"] = True
+                folder = str((c.get("payload") or {}).get("_artist_dir")
+                             or c.get("artist") or "")
+                self.left_out[folder] = self.left_out.get(folder, 0) + 1
+                continue
+            seq = self.parked._cand_seq
+            self.parked._cand_seq += 1
+            self.parked.candidates.append({
+                "cid": f"c{seq}", "seq": seq,
+                "kind": c.get("kind", "album"),
+                "title": c.get("title") or "?",
+                "artist": c.get("artist") or "",
+                "detail": c.get("detail") or "",
+                "payload": c.get("payload") or {},
+                "selected": bool(c.get("selected")),
+            })
+            self.added += 1
+            if self.listed(c):
+                listed_rows += 1
+            else:
+                switch = switch_holding(c)
+                self.held_back[switch] = self.held_back.get(switch, 0) + 1
+
+    def _count_changes(self):
+        held = sum(self.held_back.values())
+        away = sum(self.switched_off.values())
+        counted = []
+        changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
+            ("added", self.added - held), ("updated", self.updated), ("removed", self.removed))
+            if n]
+        if self.coverage is not None and (changes or held or away):
+            # Say what the refresh changed in the list the review shows.
+            line = "A refresh "
+            if changes:
+                line += (", ".join(changes[:-1])
+                         + (" and " if len(changes) > 1 else "")
+                         + changes[-1] + ".")
+                if held:
+                    line += (f" {held} more {'is' if held == 1 else 'are'} "
+                             f"under {missing_types.named(self.held_back)}.")
+            elif held:
+                line += (f"added {plural(held, 'album')} under "
+                         f"{missing_types.named(self.held_back)}.")
+            if away:
+                moved_line = (f"moved {plural(away, 'album')} under "
+                              f"{missing_types.named(self.switched_off)}.")
+                line += (" It " if changes or held else "") + moved_line
+            counted.append(line)
+        return counted
+
+    def _write_notes(self):
+        notes = []
+        if self.in_library:
+            n = len(self.in_library)
+            notes.append(
+                f"{plural(n, 'ticked album')} {'is' if n == 1 else 'are'} "
+                f"now in the library and left the review: "
+                f"{named_albums(self.in_library)}.")
+        if self.gone:
+            n = len(self.gone)
+            notes.append(
+                f"{plural(n, 'ticked album')} left the review because "
+                f"{'its folder is' if n == 1 else 'their folders are'} no "
+                f"longer in the library: {named_albums(self.gone)}.")
+        if self.retired:
+            n = len(self.retired)
+            notes.append(
+                f"{plural(n, 'album')} left the review because "
+                f"{'its artist folder' if n == 1 else 'their artist folders'} "
+                f"changed and the check no longer offers "
+                f"{'it' if n == 1 else 'them'}: "
+                f"{named_albums(self.retired)}.")
+        if self.unoffered:
+            n = len(self.unoffered)
+            notes.append(
+                f"The refresh no longer offers {plural(n, 'ticked album')}, "
+                f"which {'stays' if n == 1 else 'stay'} ticked: "
+                f"{named_albums(self.unoffered)}.")
+        if self.moved:
+            n = sum(self.moved.values())
+            notes.append(
+                f"{plural(n, 'ticked album')} {'is' if n == 1 else 'are'} "
+                f"now under {missing_types.named(self.moved)} and "
+                f"{'stays' if n == 1 else 'stay'} listed while ticked.")
+        return notes
+
+
 def fold_new_candidates(parked, cands, *, review_generation=None,
                         coverage=None, retire=()):
     """Merge a refresh's finds into a parked review, keyed by artist and
@@ -652,247 +932,9 @@ def fold_new_candidates(parked, cands, *, review_generation=None,
     moved under them; ``left_out`` maps artist folders to the listed rows the
     review had no room for; ``notes`` are the lines the fold added to the
     review's log besides the counts, which the refresh's own summary gives."""
-    _key = fold_key
-    def _fold():
-        if parked.status != job_mgr.JobStatus.AWAITING_REVIEW:
-            return None
-        # Load while the review-action lock is held. A dismissal that finishes
-        # while this fold waits must be visible before any candidate is added.
-        hidden = hidden_mod.load()
-        library = parked.execute_kind == "library"
-        included = missing_types.load()
-        listed = (review_listed(included) if library
-                  else review_tab_filter(""))
-
-        def switched_on(c):
-            if is_gap_candidate(c):
-                return missing_types.gap_shown(
-                    (c.get("payload") or {}).get("bonus_only"), included)
-            return missing_types.shown(
-                (c.get("payload") or {}).get("release_type"), included)
-
-        fresh_by_key = {}
-        for c in cands:
-            fresh_by_key.setdefault(_key(c), c)
-        covered = None
-        on_disk = frozenset()
-        if coverage is not None:
-            covered = ({name.casefold() for name in coverage[0]}, coverage[1])
-            on_disk = coverage[2]
-        # A scan that read no artist folder says nothing about any of them,
-        # and neither does a music folder that cannot be listed now; the
-        # library may not be mounted.
-        drop_gone = bool(covered and covered[0]) and _music_root_listed()
-        updated = 0
-        removed = 0
-        # A ticked row stays whatever the refresh makes of it, unless the
-        # scan found the album on disk or its folder is gone. The log names
-        # the ticked ones that left, says once which ones it no longer offers
-        # (then marks them) and how many moved under a switch that is off. A
-        # kept missing album takes the seal of its artist folder as the
-        # refresh read it, so its pick is not refused for a change the
-        # refresh has already looked at.
-        in_library = []
-        gone = []
-        retired = []
-        unoffered = []
-        moved = {}
-        switched_off = {}
-        seals = {}
-        for c in cands:
-            payload = c.get("payload") or {}
-            if (candidate_premise.expected_kind(c) == "missing"
-                    and payload.get("_premise")):
-                seals.setdefault(payload.get("_artist_dir_path"),
-                                 payload["_premise"])
-        keep = []
-        for c in parked.candidates:
-            key = _key(c)
-            fresh = fresh_by_key.get(key)
-            if fresh is None and key in retire:
-                if listed(c):
-                    removed += 1
-                retired.append(c)
-                continue
-            if fresh is None and drop_gone and _folder_gone(c):
-                if listed(c):
-                    removed += 1
-                if c.get("selected"):
-                    gone.append(c)
-                continue
-            if fresh is None and covered and _scan_would_offer(c, covered):
-                album_id = str((c.get("payload") or {}).get("album_id") or "")
-                if not c.get("selected") or album_id in on_disk:
-                    if listed(c):
-                        removed += 1
-                    if c.get("selected"):
-                        in_library.append(c)
-                    continue
-                payload = dict(c.get("payload") or {})
-                path = payload.get("_artist_dir_path")
-                if path and candidate_premise.expected_kind(c) == "missing":
-                    if path not in seals:
-                        seals[path] = candidate_premise.capture("missing", path)
-                    if seals[path] is not None:
-                        payload["_premise"] = seals[path]
-                if not payload.get("_unoffered"):
-                    payload["_unoffered"] = True
-                    unoffered.append(c)
-                keep.append({**c, "payload": payload})
-                continue
-            if fresh is None or _fold_row(fresh) == _fold_row(c):
-                keep.append(c)
-                continue
-            replacement = _fold_row(fresh)
-            if not (c.get("payload") or {}).get("is_new"):
-                # Already in the review, so not a new find.
-                replacement["payload"] = {
-                    key: value for key, value in replacement["payload"].items()
-                    if key != "is_new"}
-            replacement.update({
-                "cid": c.get("cid"),
-                "seq": c.get("seq"),
-                "selected": bool(c.get("selected")),
-            })
-            keep.append(replacement)
-            if (library and replacement["selected"] and switched_on(c)
-                    and not switched_on(fresh)):
-                switch = switch_holding(fresh)
-                moved[switch] = moved.get(switch, 0) + 1
-            if listed(c) and not listed(replacement):
-                switch = switch_holding(replacement)
-                switched_off[switch] = switched_off.get(switch, 0) + 1
-            elif (_row_shows_change(_fold_row(fresh), _fold_row(c))
-                    and (listed(fresh) or listed(c))):
-                updated += 1
-        # Older builds matched rows by album id alone and could leave an
-        # album listed under two artists as two missing-album rows under one
-        # of them. Keep the first, with either row's tick.
-        first_at = {}
-        unique = []
-        for c in keep:
-            key = _key(c) if library and not is_gap_candidate(c) else None
-            at = first_at.get(key) if key is not None else None
-            if at is None:
-                if key is not None:
-                    first_at[key] = len(unique)
-                unique.append(c)
-                continue
-            if c.get("selected") and not unique[at].get("selected"):
-                unique[at] = {**unique[at], "selected": True}
-            if listed(c):
-                removed += 1
-        keep = unique
-        parked.candidates = keep
-        seen = {_key(c) for c in keep}
-        listed_rows = sum(1 for c in keep if listed(c))
-        added = 0
-        held_back = {}
-        left_out = {}
-        for c in cands:
-            key = _key(c)
-            if key in seen:
-                continue
-            if hidden_mod.is_hidden(
-                    hidden_mod.SCOPE_MISSING, c.get("artist") or "",
-                    c.get("title") or "", hidden,
-                    year=(c.get("payload") or {}).get("year")):
-                continue
-            seen.add(key)
-            if listed(c) and listed_rows >= parked.CANDIDATE_CAP:
-                parked._candidate_cap_noted = True
-                if isinstance(parked.execute_args, dict):
-                    parked.execute_args["_candidate_cap_hit"] = True
-                folder = str((c.get("payload") or {}).get("_artist_dir")
-                             or c.get("artist") or "")
-                left_out[folder] = left_out.get(folder, 0) + 1
-                continue
-            seq = parked._cand_seq
-            parked._cand_seq += 1
-            parked.candidates.append({
-                "cid": f"c{seq}", "seq": seq,
-                "kind": c.get("kind", "album"),
-                "title": c.get("title") or "?",
-                "artist": c.get("artist") or "",
-                "detail": c.get("detail") or "",
-                "payload": c.get("payload") or {},
-                "selected": bool(c.get("selected")),
-            })
-            added += 1
-            if listed(c):
-                listed_rows += 1
-            else:
-                switch = switch_holding(c)
-                held_back[switch] = held_back.get(switch, 0) + 1
-        if review_generation is not None:
-            parked.execute_args = {
-                **(parked.execute_args or {}),
-                "_library_review_generation": int(review_generation),
-            }
-        held = sum(held_back.values())
-        away = sum(switched_off.values())
-        counted = []
-        notes = []
-        changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
-            ("added", added - held), ("updated", updated), ("removed", removed))
-            if n]
-        if coverage is not None and (changes or held or away):
-            # Say what the refresh changed in the list the review shows.
-            line = "A refresh "
-            if changes:
-                line += (", ".join(changes[:-1])
-                         + (" and " if len(changes) > 1 else "")
-                         + changes[-1] + ".")
-                if held:
-                    line += (f" {held} more {'is' if held == 1 else 'are'} "
-                             f"under {missing_types.named(held_back)}.")
-            elif held:
-                line += (f"added {plural(held, 'album')} under "
-                         f"{missing_types.named(held_back)}.")
-            if away:
-                moved_line = (f"moved {plural(away, 'album')} under "
-                              f"{missing_types.named(switched_off)}.")
-                line += (" It " if changes or held else "") + moved_line
-            counted.append(line)
-        if in_library:
-            n = len(in_library)
-            notes.append(
-                f"{plural(n, 'ticked album')} {'is' if n == 1 else 'are'} "
-                f"now in the library and left the review: "
-                f"{named_albums(in_library)}.")
-        if gone:
-            n = len(gone)
-            notes.append(
-                f"{plural(n, 'ticked album')} left the review because "
-                f"{'its folder is' if n == 1 else 'their folders are'} no "
-                f"longer in the library: {named_albums(gone)}.")
-        if retired:
-            n = len(retired)
-            notes.append(
-                f"{plural(n, 'album')} left the review because "
-                f"{'its artist folder' if n == 1 else 'their artist folders'} "
-                f"changed and the check no longer offers "
-                f"{'it' if n == 1 else 'them'}: "
-                f"{named_albums(retired)}.")
-        if unoffered:
-            n = len(unoffered)
-            notes.append(
-                f"The refresh no longer offers {plural(n, 'ticked album')}, "
-                f"which {'stays' if n == 1 else 'stay'} ticked: "
-                f"{named_albums(unoffered)}.")
-        if moved:
-            n = sum(moved.values())
-            notes.append(
-                f"{plural(n, 'ticked album')} {'is' if n == 1 else 'are'} "
-                f"now under {missing_types.named(moved)} and "
-                f"{'stays' if n == 1 else 'stay'} listed while ticked.")
-        # Saved with this change; the review's lock is already held.
-        parked.log_lines.extend(counted + notes)
-        parked._trim_log_lines_locked()
-        return added, updated, removed, held_back, switched_off, left_out, notes
-
+    fold = _CandidateFold(parked, cands, review_generation, coverage, retire)
     with job_mgr._library_review_state_guard(parked), parked._review_action_lock:
-        saved, result = job_persistence.persist_review_mutation(parked, _fold)
+        saved, result = job_persistence.persist_review_mutation(parked, fold.run)
         if saved and result is not None and not parked.candidates:
             if job_mgr.finalize_review_if_empty(
                     parked, summary="Nothing left to review.") is None:
@@ -2920,281 +2962,325 @@ def _append_to_parked_new_release_review(job, found=0, retire=()):
 _NEW_RELEASE_LATE_LISTING = 14 * 86400
 
 
+class _NewReleasesRun:
+    """One check of the library artists' Qobuz catalogs for new releases."""
+
+    def __init__(self, job, token):
+        self.job = job
+        self.token = token
+
+    def run(self):
+        if not self._list_artists():
+            return
+        self._load_baseline()
+        self._start_check()
+        self._crawl()
+        self._save_baseline()
+        self._note_unchecked()
+        if self.job.cancel_requested:
+            self._summarize_stop()
+            return
+        self._summarize()
+        self._note_rechecked()
+        self._finish()
+
+    def _artist_read_failed(self, artist_dir, error):
+        if normalize(artist_dir.name) not in VA_NORMALIZED:
+            self.unreadable_artists[artist_dir.name] = str(error)
+
+    def _list_artists(self):
+        clear_scan_caches()
+        self.unreadable_artists = {}
+        # Same VA exclusion as scan_library: the Various-Artists folder has no single
+        # Qobuz catalog, so it can't yield meaningful "new releases".
+        self.artists = [d for d in list_library_artists(on_artist_error=self._artist_read_failed)
+                        if normalize(d.name) not in VA_NORMALIZED]
+        if not self.artists and not self.unreadable_artists:
+            _set_empty_library_summary(self.job)
+            return False
+        if not self.artists:
+            self.job.summary = (
+                f"No artist folder could be read "
+                f"({_first_names(self.unreadable_artists)}), so nothing was checked.")
+            _mark_job_failed(self.job)
+            return False
+        return True
+
+    def _load_baseline(self):
+        state = new_releases_mod.load()
+        self.seen = state.get("seen") or {}
+        self.window = int(cfg.NEW_RELEASE_MAX_AGE_DAYS)
+        self.capped_ids = frozenset(
+            artist_id for artist_id, days in (state.get("capped_recent") or {}).items()
+            if days >= self.window)
+        # A big artist's unseen release counts as new from the last check on,
+        # with slack for a release Qobuz lists some days after its date.
+        checked_at = state.get("checked_at") or (
+            time.time() - max(0, int(cfg.NEW_RELEASE_CHECK_INTERVAL)))
+        self.new_since = checked_at - _NEW_RELEASE_LATE_LISTING
+        # If the catalog fetch limit has grown since the baseline was captured,
+        # the old baseline is missing everything past the previous cap, a plain
+        # diff would dump that whole back-slice as "new".
+        self.cur_limit = int(cfg.ARTIST_CATALOG_LIMIT)
+        prev_limit = state.get("baseline_limit")
+        self.rebaseline = prev_limit is None or self.cur_limit > int(prev_limit)
+        # A waiting row that Download refuses because its artist folder changed
+        # is asked about again as if never seen: found again, it is sealed
+        # afresh and keeps its tick; not offered any more, it leaves the review.
+        self.recheck = {} if self.rebaseline else _new_release_rows_to_recheck(self.job)
+        self.asked = self.seen
+        if self.recheck:
+            self.asked = {artist_id: [a for a in ids if a not in self.recheck]
+                          for artist_id, ids in self.seen.items()}
+        self.hidden = hidden_mod.load()
+        self.single_store = self.hidden if cfg.SUPPRESS_SINGLE_TRACK_GAPS else None
+        # A new release shows only where the Missing Albums switches would list it.
+        switched_on = missing_types.load()
+        self.opts = DiscoveryOpts(
+            prefer_hires=cfg.PREFER_HIRES,
+            include_live=missing_types.LIVE in switched_on,
+            include_comps=missing_types.COMPILATION in switched_on,
+            include_singles=missing_types.EP in switched_on,
+            include_other=missing_types.OTHER in switched_on,
+        )
+
+    def _start_check(self):
+        log.info(f"Checking {plural(len(self.artists), 'artist')} for new releases…")
+        self.total = 0
+        self.done = 0
+        # Unreadable folders are left out, as a Library scan leaves them: checking
+        # again can't read them, so they don't make the check fail.
+        self.failed_count = 0
+        self.failed_names = []
+        # Folders Qobuz has no artist for at all. Kept apart from failed_count:
+        # they are a settled answer, so they must not hold the baseline back or
+        # push the user towards a retry that returns the same result.
+        self.unresolved_names = []
+        self.n = len(self.artists)
+        self.workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
+        # This run's reached artists; merged over the prior baseline at the end (so a
+        # run where some/all artists errored can't wipe their baselines and re-surface
+        # everything, only artists actually reached get their snapshot refreshed).
+        self.current_seen = {}
+        self.capped_recent = {}
+        self.missing_premises = {}
+        self.listed_ids = set()
+        self.reached = set()
+        self.refound = set()
+
+    def _crawl(self):
+        with ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="newrel",
+                                **job_mgr.pool_initializer_kwargs()) as ex:
+            futures = {ex.submit(find_new_releases_for_artist, ad.name, token=self.token,
+                                 opts=self.opts, seen_by_id=self.asked, hidden=self.hidden,
+                                 single_store=self.single_store, artist_dir=ad,
+                                 baseline_only=self.rebaseline,
+                                 capped_ids=self.capped_ids,
+                                 new_since=self.new_since): ad
+                       for ad in self.artists}
+            for fut in as_completed(list(futures)):
+                ad = futures.pop(fut)
+                if self.job.cancel_requested:
+                    for f in futures:
+                        f.cancel()
+                    log.info("Cancelled. Stopping check.")
+                    break
+                self.done += 1
+                try:
+                    result = fut.result()
+                except (AuthLost, QobuzUnavailable):
+                    for f in futures:
+                        f.cancel()
+                    raise
+                except Exception as e:
+                    self.failed_count += 1
+                    self.failed_names.append(ad.name)
+                    log.info(f"    skipped {ad.name}: {e}")
+                    self.job.push_progress("Checking for new releases", self.done, self.n,
+                                           ad.name, found=self.total, unit="artist")
+                    continue
+                self._take_result(ad, result)
+
+    def _take_result(self, ad, result):
+        if result.artist_id and not getattr(result, "fetch_failed", False):
+            self.current_seen[result.artist_id] = result.current_ids
+            self.reached.add(ad.name)
+            if getattr(result, "capped_recent", False):
+                self.capped_recent[result.artist_id] = self.window
+        elif getattr(result, "unresolved", False):
+            self.unresolved_names.append(ad.name)
+        elif not getattr(result, "by_lead", False):
+            # A short or failed catalogue fetch is unchecked, not a clean
+            # zero-release result.
+            self.failed_count += 1
+            self.failed_names.append(ad.name)
+        new_gaps = []
+        for gap in result.new_gaps:
+            # Two folders of one Qobuz artist both see its new release.
+            album_id = str(gap.qobuz_album.get("id") or "")
+            if album_id and album_id in self.listed_ids:
+                continue
+            self.listed_ids.add(album_id)
+            new_gaps.append(gap)
+        found = 0
+        for gap in new_gaps:
+            # Leave new releases UN-ticked, like the library gap list: a
+            # review is for picking, and one tap must never queue the whole
+            # list of rips. The "new" badge still flags them for the eye.
+            _add_gap_candidate(
+                self.job,
+                gap,
+                result.artist_name,
+                selected=False,
+                is_new=True,
+                artist_key=ad.name,
+                missing_premises=self.missing_premises,
+            )
+            album_id = str(gap.qobuz_album.get("id") or "")
+            if album_id in self.recheck:
+                self.refound.add(album_id)
+            else:
+                found += 1
+        self.total += found
+        hit = ({"artist": result.artist_name, "albums": found}
+               if found else None)
+        self.job.push_progress("Checking for new releases", self.done, self.n,
+                               result.artist_name or ad.name,
+                               found=self.total, hit=hit, unit="artist")
+        if found:
+            log.info(f"  {result.artist_name} - "
+                     f"{plural(found, 'new release')}")
+
+    def _save_baseline(self):
+        flush_resolve_cache()
+        self.saved = None
+        if not self.job.cancel_requested:
+            # UNION each reached artist's snapshot into the prior baseline rather
+            # than replacing it.
+            complete = self.failed_count == 0 and bool(self.current_seen)
+            self.saved = new_releases_mod.mark_run(
+                self.current_seen,
+                started_from=self.seen,
+                complete=complete,
+                baseline_limit=self.cur_limit if complete else None,
+                capped_recent=self.capped_recent,
+            )
+
+    def _note_unchecked(self):
+        if self.failed_count:
+            _record_unchecked_artists(self.job, self.failed_count)
+        shown = ", ".join(sorted(self.failed_names, key=str.casefold)[:3])
+        if len(self.failed_names) > 3:
+            shown += f" and {len(self.failed_names) - 3:,} more"
+        self.unchecked = plural(self.failed_count, "artist") + (f" ({shown})" if shown else "")
+        if no_artist := new_releases_mod.unresolved_note(self.unresolved_names):
+            log.info(no_artist)
+        self.skipped_note = ""
+        if self.unreadable_artists:
+            self.skipped_note = _left_out_note(self.unreadable_artists)
+
+    def _summarize_stop(self):
+        # A cancelled crawl only reached a fraction of the artists, so it can't
+        # claim "No new releases" or "First check recorded" definitively.
+        self.job.summary = ("Stopped early. Partial check, "
+                            f"{plural(self.total, 'new release')} found so far.")
+        if self.failed_count:
+            self.job.summary += (
+                f" {self.unchecked} couldn't be checked "
+                "before the stop."
+            )
+        if self.skipped_note:
+            self.job.summary += f" {self.skipped_note}"
+        log.info(self.job.summary)
+
+    def _summarize(self):
+        if self.rebaseline and self.seen:
+            if self.saved is False:
+                self.job.summary = ("What Qobuz has now couldn't be saved. Check "
+                                    "again to retry it.")
+                if self.failed_count:
+                    self.job.summary += (f" {self.unchecked} also "
+                                         "couldn't be checked.")
+            elif self.failed_count:
+                self.job.summary = (f"{self.unchecked} couldn't be "
+                                    "checked; check again to retry them.")
+            else:
+                self.job.summary = ("The catalogue limit changed, so this check "
+                                    "recorded what Qobuz has now. Later checks list "
+                                    "what is new.")
+        elif self.total:
+            self.job.summary = f"{plural(self.total, 'new release')} found."
+            if self.failed_count:
+                self.job.summary += (f" {self.unchecked} couldn't be "
+                                     "checked; check again for a complete result.")
+            if self.saved is False:
+                self.job.summary += (" This check couldn't be saved, so these "
+                                     "releases may appear again.")
+        elif self.failed_count:
+            self.job.summary = ("No new releases from the artists that could be checked. "
+                                f"{self.unchecked} couldn't be checked; "
+                                "check again for a complete result.")
+            if self.saved is False:
+                self.job.summary += " This check couldn't be saved."
+        elif not self.seen:
+            if self.saved is False:
+                self.job.summary = ("The current Qobuz catalogue was checked but "
+                                    "couldn't be saved. Check again.")
+            else:
+                self.job.summary = ("First check complete. Later checks list albums "
+                                    "added to Qobuz after it.")
+        elif self.saved is False:
+            self.job.summary = ("No new releases found, but this check couldn't be "
+                                "saved. Check again.")
+        else:
+            self.job.summary = "No new releases."
+
+    def _note_rechecked(self):
+        self.retire = {fold_key(c) for album_id, c in self.recheck.items()
+                       if album_id not in self.refound
+                       and ((c.get("payload") or {}).get("_artist_dir") in self.reached
+                            or _folder_gone(c))}
+        if self.refound:
+            one = len(self.refound) == 1
+            self.job.summary += (
+                f" {plural(len(self.refound), 'album')} already in the New releases "
+                f"review {'was' if one else 'were'} checked again after "
+                f"{'its artist folder' if one else 'their artist folders'} "
+                "changed.")
+        if self.retire:
+            one = len(self.retire) == 1
+            self.job.summary += (
+                f" {plural(len(self.retire), 'album')} left the New releases review "
+                f"because {'its artist folder' if one else 'their artist folders'}"
+                f" changed and this check no longer offers "
+                f"{'it' if one else 'them'}.")
+        if self.skipped_note:
+            self.job.summary += f" {self.skipped_note}"
+
+    def _finish(self):
+        if not self.total and (self.failed_count or self.saved is False):
+            # With no reviewable finds, submit_scan would otherwise replace this
+            # explicitly incomplete result with a green Done state. Keep partial
+            # success reviewable when it found albums, but never present an
+            # unchecked or unsaved zero as a completed zero. job.summary above
+            # already names the reason and the remedy; a separate job.error would
+            # only restate it, and the FAILED status carries its own marker.
+            _mark_job_failed(self.job)
+        elif self.total or self.refound or self.retire:
+            # An earlier check's list may still be parked and half-worked. Join it
+            # rather than parking a rival list beside it.
+            _append_to_parked_new_release_review(self.job, found=self.total, retire=self.retire)
+        # Not logged here: job.summary already renders on the job page, and the
+        # activity log below it would otherwise repeat the exact same sentence.
+
+
 def scan_new_releases(job, token):
     """Surface albums that appeared in library artists' Qobuz catalogs since the
     last check and that the user doesn't own or hasn't hidden, flagged as new
     for review, but left un-ticked so one click can't queue the whole list.
     Cheap (about one call per artist, no track fetches), so it's the quick
     "what's new" pass rather than the full gap scan."""
-    clear_scan_caches()
-    unreadable_artists = {}
-
-    def artist_read_failed(artist_dir, error):
-        if normalize(artist_dir.name) not in VA_NORMALIZED:
-            unreadable_artists[artist_dir.name] = str(error)
-
-    # Same VA exclusion as scan_library: the Various-Artists folder has no single
-    # Qobuz catalog, so it can't yield meaningful "new releases".
-    artists = [d for d in list_library_artists(on_artist_error=artist_read_failed)
-               if normalize(d.name) not in VA_NORMALIZED]
-    if not artists and not unreadable_artists:
-        _set_empty_library_summary(job)
-        return
-    if not artists:
-        job.summary = (
-            f"No artist folder could be read "
-            f"({_first_names(unreadable_artists)}), so nothing was checked.")
-        _mark_job_failed(job)
-        return
-    state = new_releases_mod.load()
-    seen = state.get("seen") or {}
-    window = int(cfg.NEW_RELEASE_MAX_AGE_DAYS)
-    capped_ids = frozenset(
-        artist_id for artist_id, days in (state.get("capped_recent") or {}).items()
-        if days >= window)
-    # A big artist's unseen release counts as new from the last check on,
-    # with slack for a release Qobuz lists some days after its date.
-    checked_at = state.get("checked_at") or (
-        time.time() - max(0, int(cfg.NEW_RELEASE_CHECK_INTERVAL)))
-    new_since = checked_at - _NEW_RELEASE_LATE_LISTING
-    # If the catalog fetch limit has grown since the baseline was captured,
-    # the old baseline is missing everything past the previous cap, a plain
-    # diff would dump that whole back-slice as "new".
-    cur_limit = int(cfg.ARTIST_CATALOG_LIMIT)
-    prev_limit = state.get("baseline_limit")
-    rebaseline = prev_limit is None or cur_limit > int(prev_limit)
-    # A waiting row that Download refuses because its artist folder changed
-    # is asked about again as if never seen: found again, it is sealed
-    # afresh and keeps its tick; not offered any more, it leaves the review.
-    recheck = {} if rebaseline else _new_release_rows_to_recheck(job)
-    asked = seen
-    if recheck:
-        asked = {artist_id: [a for a in ids if a not in recheck]
-                 for artist_id, ids in seen.items()}
-    hidden = hidden_mod.load()
-    single_store = hidden if cfg.SUPPRESS_SINGLE_TRACK_GAPS else None
-    # A new release shows only where the Missing Albums switches would list it.
-    switched_on = missing_types.load()
-    opts = DiscoveryOpts(
-        prefer_hires=cfg.PREFER_HIRES,
-        include_live=missing_types.LIVE in switched_on,
-        include_comps=missing_types.COMPILATION in switched_on,
-        include_singles=missing_types.EP in switched_on,
-        include_other=missing_types.OTHER in switched_on,
-    )
-    log.info(f"Checking {plural(len(artists), 'artist')} for new releases…")
-    total = 0
-    done = 0
-    # Unreadable folders are left out, as a Library scan leaves them: checking
-    # again can't read them, so they don't make the check fail.
-    failed_count = 0
-    failed_names = []
-    # Folders Qobuz has no artist for at all. Kept apart from failed_count:
-    # they are a settled answer, so they must not hold the baseline back or
-    # push the user towards a retry that returns the same result.
-    unresolved_names = []
-    n = len(artists)
-    workers = max(1, int(cfg.ARTIST_SCAN_WORKERS))
-    # This run's reached artists; merged over the prior baseline at the end (so a
-    # run where some/all artists errored can't wipe their baselines and re-surface
-    # everything, only artists actually reached get their snapshot refreshed).
-    current_seen = {}
-    capped_recent = {}
-    missing_premises = {}
-    listed_ids = set()
-    reached = set()
-    refound = set()
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newrel",
-                            **job_mgr.pool_initializer_kwargs()) as ex:
-        futures = {ex.submit(find_new_releases_for_artist, ad.name, token=token,
-                             opts=opts, seen_by_id=asked, hidden=hidden,
-                             single_store=single_store, artist_dir=ad,
-                             baseline_only=rebaseline,
-                             capped_ids=capped_ids,
-                             new_since=new_since): ad
-                   for ad in artists}
-        for fut in as_completed(list(futures)):
-            ad = futures.pop(fut)
-            if job.cancel_requested:
-                for f in futures:
-                    f.cancel()
-                log.info("Cancelled. Stopping check.")
-                break
-            done += 1
-            try:
-                result = fut.result()
-            except (AuthLost, QobuzUnavailable):
-                for f in futures:
-                    f.cancel()
-                raise
-            except Exception as e:
-                failed_count += 1
-                failed_names.append(ad.name)
-                log.info(f"    skipped {ad.name}: {e}")
-                job.push_progress("Checking for new releases", done, n,
-                                  ad.name, found=total, unit="artist")
-                continue
-            if result.artist_id and not getattr(result, "fetch_failed", False):
-                current_seen[result.artist_id] = result.current_ids
-                reached.add(ad.name)
-                if getattr(result, "capped_recent", False):
-                    capped_recent[result.artist_id] = window
-            elif getattr(result, "unresolved", False):
-                unresolved_names.append(ad.name)
-            elif not getattr(result, "by_lead", False):
-                # A short or failed catalogue fetch is unchecked, not a clean
-                # zero-release result.
-                failed_count += 1
-                failed_names.append(ad.name)
-            new_gaps = []
-            for gap in result.new_gaps:
-                # Two folders of one Qobuz artist both see its new release.
-                album_id = str(gap.qobuz_album.get("id") or "")
-                if album_id and album_id in listed_ids:
-                    continue
-                listed_ids.add(album_id)
-                new_gaps.append(gap)
-            found = 0
-            for gap in new_gaps:
-                # Leave new releases UN-ticked, like the library gap list: a
-                # review is for picking, and one tap must never queue the whole
-                # list of rips. The "new" badge still flags them for the eye.
-                _add_gap_candidate(
-                    job,
-                    gap,
-                    result.artist_name,
-                    selected=False,
-                    is_new=True,
-                    artist_key=ad.name,
-                    missing_premises=missing_premises,
-                )
-                album_id = str(gap.qobuz_album.get("id") or "")
-                if album_id in recheck:
-                    refound.add(album_id)
-                else:
-                    found += 1
-            total += found
-            hit = ({"artist": result.artist_name, "albums": found}
-                   if found else None)
-            job.push_progress("Checking for new releases", done, n,
-                              result.artist_name or ad.name,
-                              found=total, hit=hit, unit="artist")
-            if found:
-                log.info(f"  {result.artist_name} - "
-                         f"{plural(found, 'new release')}")
-    flush_resolve_cache()
-    saved = None
-    if not job.cancel_requested:
-        # UNION each reached artist's snapshot into the prior baseline rather
-        # than replacing it.
-        complete = failed_count == 0 and bool(current_seen)
-        saved = new_releases_mod.mark_run(
-            current_seen,
-            started_from=seen,
-            complete=complete,
-            baseline_limit=cur_limit if complete else None,
-            capped_recent=capped_recent,
-        )
-    if failed_count:
-        _record_unchecked_artists(job, failed_count)
-    shown = ", ".join(sorted(failed_names, key=str.casefold)[:3])
-    if len(failed_names) > 3:
-        shown += f" and {len(failed_names) - 3:,} more"
-    unchecked = plural(failed_count, "artist") + (f" ({shown})" if shown else "")
-    if no_artist := new_releases_mod.unresolved_note(unresolved_names):
-        log.info(no_artist)
-    skipped_note = ""
-    if unreadable_artists:
-        skipped_note = _left_out_note(unreadable_artists)
-    if job.cancel_requested:
-        # A cancelled crawl only reached a fraction of the artists, so it can't
-        # claim "No new releases" or "First check recorded" definitively.
-        job.summary = ("Stopped early. Partial check, "
-                       f"{plural(total, 'new release')} found so far.")
-        if failed_count:
-            job.summary += (
-                f" {unchecked} couldn't be checked "
-                "before the stop."
-            )
-        if skipped_note:
-            job.summary += f" {skipped_note}"
-        log.info(job.summary)
-        return
-
-    if rebaseline and seen:
-        if saved is False:
-            job.summary = ("What Qobuz has now couldn't be saved. Check "
-                           "again to retry it.")
-            if failed_count:
-                job.summary += (f" {unchecked} also "
-                                "couldn't be checked.")
-        elif failed_count:
-            job.summary = (f"{unchecked} couldn't be "
-                           "checked; check again to retry them.")
-        else:
-            job.summary = ("The catalogue limit changed, so this check "
-                           "recorded what Qobuz has now. Later checks list "
-                           "what is new.")
-    elif total:
-        job.summary = f"{plural(total, 'new release')} found."
-        if failed_count:
-            job.summary += (f" {unchecked} couldn't be "
-                            "checked; check again for a complete result.")
-        if saved is False:
-            job.summary += (" This check couldn't be saved, so these "
-                            "releases may appear again.")
-    elif failed_count:
-        job.summary = ("No new releases from the artists that could be checked. "
-                       f"{unchecked} couldn't be checked; "
-                       "check again for a complete result.")
-        if saved is False:
-            job.summary += " This check couldn't be saved."
-    elif not seen:
-        if saved is False:
-            job.summary = ("The current Qobuz catalogue was checked but "
-                           "couldn't be saved. Check again.")
-        else:
-            job.summary = ("First check complete. Later checks list albums "
-                           "added to Qobuz after it.")
-    elif saved is False:
-        job.summary = ("No new releases found, but this check couldn't be "
-                       "saved. Check again.")
-    else:
-        job.summary = "No new releases."
-    retire = {fold_key(c) for album_id, c in recheck.items()
-              if album_id not in refound
-              and ((c.get("payload") or {}).get("_artist_dir") in reached
-                   or _folder_gone(c))}
-    if refound:
-        one = len(refound) == 1
-        job.summary += (
-            f" {plural(len(refound), 'album')} already in the New releases "
-            f"review {'was' if one else 'were'} checked again after "
-            f"{'its artist folder' if one else 'their artist folders'} "
-            "changed.")
-    if retire:
-        one = len(retire) == 1
-        job.summary += (
-            f" {plural(len(retire), 'album')} left the New releases review "
-            f"because {'its artist folder' if one else 'their artist folders'}"
-            f" changed and this check no longer offers "
-            f"{'it' if one else 'them'}.")
-    if skipped_note:
-        job.summary += f" {skipped_note}"
-    if not total and (failed_count or saved is False):
-        # With no reviewable finds, submit_scan would otherwise replace this
-        # explicitly incomplete result with a green Done state. Keep partial
-        # success reviewable when it found albums, but never present an
-        # unchecked or unsaved zero as a completed zero. job.summary above
-        # already names the reason and the remedy; a separate job.error would
-        # only restate it, and the FAILED status carries its own marker.
-        _mark_job_failed(job)
-    elif total or refound or retire:
-        # An earlier check's list may still be parked and half-worked. Join it
-        # rather than parking a rival list beside it.
-        _append_to_parked_new_release_review(job, found=total, retire=retire)
-    # Not logged here: job.summary already renders on the job page, and the
-    # activity log below it would otherwise repeat the exact same sentence.
+    _NewReleasesRun(job, token).run()
 
 
 def _note_staging_wait(job, phase, current, total):
@@ -5240,64 +5326,94 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
     the re-download doesn't complete, the original folder is moved back so the
     user is never left worse off.
     """
-    log.info("  The damaged file can't be verified by its ID, so the whole "
-             "album is being re-downloaded fresh from Qobuz.")
-    full = get_album(payload["album_id"], token)
-    album_dir = Path(payload["album_dir"])
-    catalogue_snapshot = beets_mod.capture_beets_album_entries(album_dir) \
-        if album_dir.exists() else None
-    if album_dir.exists() and catalogue_snapshot is None:
-        log.info("  Couldn't identify this album's Beets entries; "
-                 "leaving Repair alone.")
-        return {"imported": False, "n_ok": 0,
-                "result": "catalogue_snapshot_failed"}
-    expected_generation = getattr(token, "credential_generation", "")
-    if expected_generation:
-        token = api_client.authorize_qobuz_action(
-            QobuzAccess.DOWNLOAD_ACTION,
-            expected_generation=expected_generation,
-        ).token
-    backup = None
-    if album_dir.exists():
-        backup = (
-            backup_mod.backup_album_dir(
-                album_dir,
-                expected_receipt=expected_album_receipt,
+    return _RedownloadRun(payload, token, recovery_checkpoint,
+                          expected_album_receipt).run()
+
+
+class _RedownloadRun:
+    """One whole-album Repair re-download, its original held in a backup until checked."""
+
+    def __init__(self, payload, token, recovery_checkpoint, expected_album_receipt):
+        self.payload = payload
+        self.token = token
+        self.recovery_checkpoint = recovery_checkpoint
+        self.expected_album_receipt = expected_album_receipt
+
+    def run(self):
+        refused = self._set_aside()
+        if refused is not None:
+            return refused
+        refused = self._save_backup_record()
+        if refused is not None:
+            return refused
+        self._download()
+        if self.backup:
+            try:
+                self._settle_backup()
+            except BaseException as exc:
+                self._stopped_after_landing(exc)
+                raise
+        return self.result
+
+    def _set_aside(self):
+        log.info("  The damaged file can't be verified by its ID, so the whole "
+                 "album is being re-downloaded fresh from Qobuz.")
+        self.full = get_album(self.payload["album_id"], self.token)
+        self.album_dir = Path(self.payload["album_dir"])
+        self.catalogue_snapshot = beets_mod.capture_beets_album_entries(self.album_dir) \
+            if self.album_dir.exists() else None
+        if self.album_dir.exists() and self.catalogue_snapshot is None:
+            log.info("  Couldn't identify this album's Beets entries; "
+                     "leaving Repair alone.")
+            return {"imported": False, "n_ok": 0,
+                    "result": "catalogue_snapshot_failed"}
+        expected_generation = getattr(self.token, "credential_generation", "")
+        if expected_generation:
+            self.token = api_client.authorize_qobuz_action(
+                QobuzAccess.DOWNLOAD_ACTION,
+                expected_generation=expected_generation,
+            ).token
+        self.backup = None
+        if self.album_dir.exists():
+            self.backup = (
+                backup_mod.backup_album_dir(
+                    self.album_dir,
+                    expected_receipt=self.expected_album_receipt,
+                )
+                if self.expected_album_receipt is not None
+                else backup_mod.backup_album_dir(self.album_dir)
             )
-            if expected_album_receipt is not None
-            else backup_mod.backup_album_dir(album_dir)
-        )
-    if backup is not None and not backup.complete:
-        process_mode._recover_incomplete_upgrade_backup(
-            backup, album_dir, operation="repair backup")
-        log.info("  The backup was interrupted, so the repair was stopped. "
-                 "See the recovery message above.")
-        return {"imported": False, "n_ok": 0, "result": "backup_failed"}
-    if (
-        album_dir.exists()
-        and backup is None
-    ):
-        log.info("  Couldn't move the existing folder aside; left this album "
-                 "alone. See the log above.")
-        return {"imported": False, "n_ok": 0, "result": "backup_failed"}
+        if self.backup is not None and not self.backup.complete:
+            process_mode._recover_incomplete_upgrade_backup(
+                self.backup, self.album_dir, operation="repair backup")
+            log.info("  The backup was interrupted, so the repair was stopped. "
+                     "See the recovery message above.")
+            return {"imported": False, "n_ok": 0, "result": "backup_failed"}
+        if (
+            self.album_dir.exists()
+            and self.backup is None
+        ):
+            log.info("  Couldn't move the existing folder aside; left this album "
+                     "alone. See the log above.")
+            return {"imported": False, "n_ok": 0, "result": "backup_failed"}
 
-    def pin_repair_recovery(note):
-        if (backup is not None and backup.exists()
-                and not backup_mod.pin_unverified_upgrade_backup(backup, note)):
-            backup_mod.warn_pin_failed(backup)
+    def _pin_repair_recovery(self, note):
+        if (self.backup is not None and self.backup.exists()
+                and not backup_mod.pin_unverified_upgrade_backup(self.backup, note)):
+            backup_mod.warn_pin_failed(self.backup)
 
-    def checkpoint_recovery(stage, reason, *, retained=True, required=False):
+    def _checkpoint_recovery(self, stage, reason, *, retained=True, required=False):
         recovery = RepairRecovery(
-            backup=backup,
-            album_dir=album_dir,
+            backup=self.backup,
+            album_dir=self.album_dir,
             stage=stage,
             reason=reason,
             retained=retained,
         )
-        if recovery_checkpoint is None:
+        if self.recovery_checkpoint is None:
             return recovery, True
         try:
-            persisted = recovery_checkpoint(recovery) is True
+            persisted = self.recovery_checkpoint(recovery) is True
         except Exception as exc:
             persisted = False
             log.info(f"  Couldn't save the Repair recovery record: {exc}")
@@ -5306,204 +5422,205 @@ def _redownload_damaged_album(payload, token, *, recovery_checkpoint=None,
                      "because its recovery record could not be saved.")
         return recovery, persisted
 
-    def stopped_after_landing(exc):
+    def _stopped_after_landing(self, exc):
         # A stop once the replacement reached the library: the original
         # stays in its backup until the new album is checked, and Beets
         # drops the entries the new files replaced at their paths.
-        if backup is None or not backup.exists() or not album_dir.exists():
+        if self.backup is None or not self.backup.exists() or not self.album_dir.exists():
             return
-        pin_repair_recovery("repair backup kept, re-download was interrupted")
+        self._pin_repair_recovery("repair backup kept, re-download was interrupted")
         with contextlib.suppress(KeyboardInterrupt):
-            beets_mod.forget_replaced_beets_entries(folder=album_dir)
-        recovery, _ = checkpoint_recovery(
+            beets_mod.forget_replaced_beets_entries(folder=self.album_dir)
+        recovery, _ = self._checkpoint_recovery(
             "refill",
             "Repair stopped after the replacement reached the library, "
             "before it was checked.",
         )
         raise RepairRecoveryRequired(recovery, exc) from exc
 
-    if backup is not None:
-        _recovery, recovery_saved = checkpoint_recovery(
-            "backup",
-            "The original album is held while its replacement is downloaded.",
-            required=True,
-        )
-        if not recovery_saved:
-            if backup_mod.restore_upgrade_backup(backup, album_dir):
-                checkpoint_recovery(
-                    "resolved",
-                    "The original album was restored before Repair stopped.",
-                    retained=False,
-                )
-                return {
-                    "imported": False,
-                    "n_ok": 0,
-                    "result": "recovery_record_failed",
-                }
-            pin_repair_recovery(
-                "repair backup kept, recovery record and automatic restore "
-                "did not complete")
-            recovery, _ = checkpoint_recovery(
-                "restore",
-                "The recovery record could not be saved and automatic "
-                "restoration did not complete.",
+    def _save_backup_record(self):
+        if self.backup is not None:
+            _recovery, recovery_saved = self._checkpoint_recovery(
+                "backup",
+                "The original album is held while its replacement is downloaded.",
+                required=True,
             )
-            cause = OSError("Repair recovery record could not be saved")
-            raise RepairRecoveryRequired(recovery, cause) from cause
-
-    try:
-        with job_mgr.staging_lock():
-            result = process_mode.process_album(
-                full, build_args(), allow_force=False, already_confirmed=True,
-                token=token, cover_backup=backup,
-                rebuild_dir=album_dir if backup is not None else None) or {}
-    except Exception as exc:
-        if backup:
-            if backup_mod.restore_upgrade_backup(backup, album_dir):
-                checkpoint_recovery(
-                    "resolved",
-                    "The original album was restored after the replacement "
-                    "download stopped.",
-                    retained=False,
-                )
-            else:
-                pin_repair_recovery(
-                    "repair backup kept, automatic restore after an error did "
-                    "not complete")
-                recovery, _ = checkpoint_recovery(
+            if not recovery_saved:
+                if backup_mod.restore_upgrade_backup(self.backup, self.album_dir):
+                    self._checkpoint_recovery(
+                        "resolved",
+                        "The original album was restored before Repair stopped.",
+                        retained=False,
+                    )
+                    return {
+                        "imported": False,
+                        "n_ok": 0,
+                        "result": "recovery_record_failed",
+                    }
+                self._pin_repair_recovery(
+                    "repair backup kept, recovery record and automatic restore "
+                    "did not complete")
+                recovery, _ = self._checkpoint_recovery(
                     "restore",
-                    "The replacement download stopped and automatic "
+                    "The recovery record could not be saved and automatic "
                     "restoration did not complete.",
                 )
-                raise RepairRecoveryRequired(recovery, exc) from exc
-        raise
-    except BaseException as exc:
-        stopped_after_landing(exc)
-        raise
-    imported_ok = bool(result.get("imported")) and result.get("n_ok", 0) > 0
-    if backup:
+                cause = OSError("Repair recovery record could not be saved")
+                raise RepairRecoveryRequired(recovery, cause) from cause
+
+    def _download(self):
         try:
-            damaged = payload.get("damaged") or []
-            damaged_files = [d["file"] for d in damaged]
-            if imported_ok and process_mode._upgrade_replacement_verified(
-                    full, album_dir, backup, damaged_files):
-                # Carry useful companions, then retire the original's backup when
-                # every file it holds is verifiably superseded in the new album.
-                carried = process_mode._carry_non_audio_from_backup(
-                    full, album_dir, backup, replacement_dir=album_dir,
-                    damaged=damaged_files)
-                if carried is not None:
-                    replacement_path, replacement_receipt, left = carried
-                    if not beets_mod.retire_replaced_beets_entries(
-                        catalogue_snapshot,
-                        replacement_path,
-                        process_mode._replacement_audio_paths(
-                            replacement_path,
-                            replacement_receipt,
-                        ),
-                    ):
-                        result["repair_unverified"] = True
-                        pin_repair_recovery(
-                            "repair backup kept; the old Beets entries "
-                            "could not be removed")
-                        log.info("  Re-download verified, but the old "
-                                 "Beets entries couldn't be removed; "
-                                 f"keeping the backup at {backup}.")
-                        checkpoint_recovery(
-                            "verification",
-                            "The re-download verified, but the old Beets "
-                            "entries could not be removed.",
-                        )
-                    elif left:
-                        result["companions_kept"] = left
-                        log.info(process_mode._keep_backup_for_companions(
-                            backup, left))
-                        one = len(left) == 1
-                        checkpoint_recovery(
-                            "verification",
-                            "The re-download verified. The original album's "
-                            f"{', '.join(left)} {'differs' if one else 'differ'} "
-                            "from the new album's and "
-                            f"{'is' if one else 'are'} kept here.",
-                        )
-                    elif backup_mod.retire_verified_repair_backup(backup):
-                        checkpoint_recovery(
-                            "resolved",
-                            "The re-download verified, so the original album's "
-                            "backup was removed.",
-                            retained=False,
-                        )
-                        log.info("  Re-download verified; removed the original "
-                                 "album's backup.")
-                    else:
-                        pin_repair_recovery(
-                            "repair backup kept, could not be proven redundant "
-                            "after a verified re-download")
-                        log.info("  Re-download verified, but the original "
-                                 "album's backup couldn't be proven redundant; "
-                                 f"keeping it at {backup}.")
-                        checkpoint_recovery(
-                            "verification",
-                            "The re-download verified, but the original album's "
-                            "backup could not be proven redundant.",
-                        )
-                    if not result.get("repair_unverified"):
-                        repair_log.append_repair_log([
-                            {"artist": payload["artist_name"],
-                             "album": album_dir.name, "title": d["title"]}
-                            for d in damaged])
-                else:
-                    result["repair_unverified"] = True
-                    pin_repair_recovery(
-                        "repair backup kept, replacement not confirmed written to disk")
-                    log.info("  Re-download landed, but the rebuilt album or its "
-                             "companions couldn't be confirmed written to disk; keeping your "
-                             f"backup at {backup}.")
-                    checkpoint_recovery(
-                        "verification",
-                        "The replacement landed, but its album or companion files "
-                        "could not be confirmed written to disk.",
-                    )
-            elif imported_ok:
-                # Imported, but a decode pass alone doesn't prove the re-rip kept
-                # every track, a truncated or short result could be WORSE than
-                # the damaged original it replaced.
-                result["repair_unverified"] = True
-                pin_repair_recovery(
-                    "repair backup kept, replacement could not be verified "
-                    "complete")
-                # A track the replacement lacks keeps its entry, and Restore
-                # needs it.
-                beets_mod.forget_replaced_beets_entries(folder=album_dir)
-                log.info("  Re-download landed but couldn't be verified as complete "
-                         f"as the original; keeping your backup at {backup}.")
-                checkpoint_recovery(
-                    "verification",
-                    "The replacement landed but could not be verified as complete "
-                    "as the original album.",
-                )
-            else:
-                log.info("  Re-download didn't complete. Restoring the original "
-                         "album folder.")
-                if backup_mod.restore_upgrade_backup(backup, album_dir):
-                    checkpoint_recovery(
+            with job_mgr.staging_lock():
+                self.result = process_mode.process_album(
+                    self.full, build_args(), allow_force=False, already_confirmed=True,
+                    token=self.token, cover_backup=self.backup,
+                    rebuild_dir=self.album_dir if self.backup is not None else None) or {}
+        except Exception as exc:
+            if self.backup:
+                if backup_mod.restore_upgrade_backup(self.backup, self.album_dir):
+                    self._checkpoint_recovery(
                         "resolved",
-                        "The replacement did not complete, so the original album "
-                        "was restored.",
+                        "The original album was restored after the replacement "
+                        "download stopped.",
                         retained=False,
                     )
                 else:
-                    pin_repair_recovery(
-                        "repair backup kept, automatic restore did not complete")
-                    checkpoint_recovery(
+                    self._pin_repair_recovery(
+                        "repair backup kept, automatic restore after an error did "
+                        "not complete")
+                    recovery, _ = self._checkpoint_recovery(
                         "restore",
-                        "The replacement did not complete and automatic "
-                        "restoration was incomplete.",
+                        "The replacement download stopped and automatic "
+                        "restoration did not complete.",
                     )
-        except BaseException as exc:
-            stopped_after_landing(exc)
+                    raise RepairRecoveryRequired(recovery, exc) from exc
             raise
-    return result
+        except BaseException as exc:
+            self._stopped_after_landing(exc)
+            raise
+        self.imported_ok = bool(self.result.get("imported")) and self.result.get("n_ok", 0) > 0
+
+    def _settle_backup(self):
+        damaged = self.payload.get("damaged") or []
+        damaged_files = [d["file"] for d in damaged]
+        if self.imported_ok and process_mode._upgrade_replacement_verified(
+                self.full, self.album_dir, self.backup, damaged_files):
+            # Carry useful companions, then retire the original's backup when
+            # every file it holds is verifiably superseded in the new album.
+            carried = process_mode._carry_non_audio_from_backup(
+                self.full, self.album_dir, self.backup, replacement_dir=self.album_dir,
+                damaged=damaged_files)
+            if carried is not None:
+                self._retire_original(carried, damaged)
+            else:
+                self.result["repair_unverified"] = True
+                self._pin_repair_recovery(
+                    "repair backup kept, replacement not confirmed written to disk")
+                log.info("  Re-download landed, but the rebuilt album or its "
+                         "companions couldn't be confirmed written to disk; keeping your "
+                         f"backup at {self.backup}.")
+                self._checkpoint_recovery(
+                    "verification",
+                    "The replacement landed, but its album or companion files "
+                    "could not be confirmed written to disk.",
+                )
+        elif self.imported_ok:
+            # Imported, but a decode pass alone doesn't prove the re-rip kept
+            # every track, a truncated or short result could be WORSE than
+            # the damaged original it replaced.
+            self.result["repair_unverified"] = True
+            self._pin_repair_recovery(
+                "repair backup kept, replacement could not be verified "
+                "complete")
+            # A track the replacement lacks keeps its entry, and Restore
+            # needs it.
+            beets_mod.forget_replaced_beets_entries(folder=self.album_dir)
+            log.info("  Re-download landed but couldn't be verified as complete "
+                     f"as the original; keeping your backup at {self.backup}.")
+            self._checkpoint_recovery(
+                "verification",
+                "The replacement landed but could not be verified as complete "
+                "as the original album.",
+            )
+        else:
+            log.info("  Re-download didn't complete. Restoring the original "
+                     "album folder.")
+            if backup_mod.restore_upgrade_backup(self.backup, self.album_dir):
+                self._checkpoint_recovery(
+                    "resolved",
+                    "The replacement did not complete, so the original album "
+                    "was restored.",
+                    retained=False,
+                )
+            else:
+                self._pin_repair_recovery(
+                    "repair backup kept, automatic restore did not complete")
+                self._checkpoint_recovery(
+                    "restore",
+                    "The replacement did not complete and automatic "
+                    "restoration was incomplete.",
+                )
+
+    def _retire_original(self, carried, damaged):
+        replacement_path, replacement_receipt, left = carried
+        if not beets_mod.retire_replaced_beets_entries(
+            self.catalogue_snapshot,
+            replacement_path,
+            process_mode._replacement_audio_paths(
+                replacement_path,
+                replacement_receipt,
+            ),
+        ):
+            self.result["repair_unverified"] = True
+            self._pin_repair_recovery(
+                "repair backup kept; the old Beets entries "
+                "could not be removed")
+            log.info("  Re-download verified, but the old "
+                     "Beets entries couldn't be removed; "
+                     f"keeping the backup at {self.backup}.")
+            self._checkpoint_recovery(
+                "verification",
+                "The re-download verified, but the old Beets "
+                "entries could not be removed.",
+            )
+        elif left:
+            self.result["companions_kept"] = left
+            log.info(process_mode._keep_backup_for_companions(
+                self.backup, left))
+            one = len(left) == 1
+            self._checkpoint_recovery(
+                "verification",
+                "The re-download verified. The original album's "
+                f"{', '.join(left)} {'differs' if one else 'differ'} "
+                "from the new album's and "
+                f"{'is' if one else 'are'} kept here.",
+            )
+        elif backup_mod.retire_verified_repair_backup(self.backup):
+            self._checkpoint_recovery(
+                "resolved",
+                "The re-download verified, so the original album's "
+                "backup was removed.",
+                retained=False,
+            )
+            log.info("  Re-download verified; removed the original "
+                     "album's backup.")
+        else:
+            self._pin_repair_recovery(
+                "repair backup kept, could not be proven redundant "
+                "after a verified re-download")
+            log.info("  Re-download verified, but the original "
+                     "album's backup couldn't be proven redundant; "
+                     f"keeping it at {self.backup}.")
+            self._checkpoint_recovery(
+                "verification",
+                "The re-download verified, but the original album's "
+                "backup could not be proven redundant.",
+            )
+        if not self.result.get("repair_unverified"):
+            repair_log.append_repair_log([
+                {"artist": self.payload["artist_name"],
+                 "album": self.album_dir.name, "title": d["title"]}
+                for d in damaged])
 
 
 def _checkpoint_repair_recovery(job, recovery):

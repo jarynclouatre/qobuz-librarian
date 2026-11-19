@@ -1655,6 +1655,325 @@ def _clear_after_earlier_grabs(folder, others):
             owned_paths._remove_created_folders(root, owned, None)
 
 
+class _UndoRun:
+    """One Undo of a track grab, from its saved record to the page it lands on."""
+
+    def __init__(self, request, job_id):
+        self.request = request
+        # The single payload is persisted, so Undo keeps working after the job
+        # ages out of the registry, and the file checks below already handle a track
+        # that vanished in the meantime.
+        self.job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
+        undo_uncertain = bool(
+            self.job
+            and (
+                getattr(self.job, "_preserve_persisted_single", False) is True
+                or getattr(self.job, "_single_undo_unavailable", False) is True
+            )
+        )
+        self.info = (
+            dict(self.job.single or {})
+            if self.job and not undo_uncertain
+            else {}
+        )
+        self.catalog_cleanup = self.info.get("catalog_cleanup")
+        self.cleanup_retry = (
+            type(self.catalog_cleanup) is dict
+            and self.catalog_cleanup.get("pending") is True
+            and isinstance(self.catalog_cleanup.get("path"), str)
+            and bool(self.catalog_cleanup["path"])
+        )
+        self.undo_outcome = {}
+
+    def _refuse(self):
+        if (
+            not self.job
+            or not self.info.get("dir")
+            or (self.info.get("removed") and not self.cleanup_retry)
+        ):
+            if rendering._is_htmx(self.request):
+                if self.job:
+                    return rendering._tr(self.request, "_job_body.html", {"job": self.job})
+                return HTMLResponse("", headers={"HX-Redirect": "/queue"})
+            msg = ("That job is no longer in History." if not self.job
+                   else "Nothing to undo for that job.")
+            return RedirectResponse(
+                url="/queue?error=" + rendering._notice_key(msg), status_code=303)
+        return None
+
+    def _refresh_after_undo(self):
+        artist = self.info.get("artist") or ""
+        album = {
+            "title": self.info.get("album") or "",
+            "artist": {"name": artist},
+        }
+        try:
+            flows._refresh_after_local_album_change(
+                album,
+                {"dir": self.info.get("dir") or ""},
+                fallback_artist=artist,
+                token=qobuz_access._get_optional_token(),
+                args=flows.build_args(),
+            )
+        except Exception as exc:
+            _log.info(
+                "quality state refresh after undo skipped: %s", exc)
+        # A Gap Fill row the grab left no longer matches its folder.
+        flows.prune_library_review_candidates({"id": self.info.get("album_id")})
+
+    def _clear_deliberate_single_mark(self) -> bool:
+        """Whether the exact suppression mark is gone from the saved store."""
+        if not self.info.get("marked"):
+            return True
+        if job_persistence.single_mark_still_used(self.info.get("album_id"), self.job.id):
+            self.undo_outcome["single_kept"] = True
+            return True
+        try:
+            hidden_mod.unmark_single(
+                self.info.get("artist") or "",
+                self.info.get("album") or "",
+                year=self.info.get("year"),
+                album_id=self.info.get("album_id"),
+            )
+            store = hidden_mod.load()
+            return not hidden_mod.is_single(
+                self.info.get("artist") or "",
+                self.info.get("album") or "",
+                store,
+                year=self.info.get("year"),
+                album_id=self.info.get("album_id"),
+            )
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def _reverse(self):
+        if self.cleanup_retry:
+            catalog_result = beets_mod.forget_beets_entries(
+                [Path(self.catalog_cleanup["path"])]
+            )
+            self.undo_outcome["single_mark_complete"] = (
+                self._clear_deliberate_single_mark()
+            )
+            return None, catalog_result
+        d = _undo_root(self.info)
+        if d is None:
+            return None, None
+        _keep_shared_artwork(d, self.info)
+        # Every intent and state/identity refresh reaches the durable job row
+        # while the direct-operation lock still excludes another library
+        # writer.
+        self.job.single = self.info
+
+        def _persist_progress():
+            return job_persistence.persist(self.job)
+
+        removed = owned_paths._unlink_owned_path(
+            d,
+            self.info.get("owned_path"),
+            progress=_persist_progress,
+            outcome_out=self.undo_outcome,
+        )
+        catalog_result = None
+        if removed is not None:
+            _clear_after_earlier_grabs(
+                removed.parent,
+                job_persistence.other_album_grabs(self.info.get("album_id"), self.job.id))
+            catalog_result = beets_mod.forget_beets_entries([removed])
+            self.undo_outcome["single_mark_complete"] = (
+                self._clear_deliberate_single_mark()
+            )
+        return removed, catalog_result
+
+    def _refuse_gate(self, state):
+        if state == "paused":
+            paused = refusals._lock_busy_response(self.request)
+            if paused is not None:
+                return paused
+            return rendering._tr(self.request, "lock_busy.html", {
+                "msg": "Library writes were paused before Undo could start."
+            }, status_code=503)
+        if state == "busy":
+            holder = job_mgr.staging_holder()
+            msg = (f"{holder} is using the library right now. Try Undo again "
+                   "when it finishes." if holder else
+                   "Another job is using the library right now. Try Undo again "
+                   "in a moment.")
+            if rendering._is_htmx(self.request):
+                return HTMLResponse(
+                    f'<div id="job-content">'
+                    f'{rendering._ql_notice_html("warning", html.escape(msg))}</div>')
+            return rendering._tr(self.request, "lock_busy.html", {"msg": msg}, status_code=503)
+        return None
+
+    async def run(self):
+        refused = self._refuse()
+        if refused is not None:
+            return refused
+        # Register under the same gate as the CLI handoff before taking the
+        # staging mutex.
+        self.loop = asyncio.get_running_loop()
+        state, operation_token, self.lock = await self.loop.run_in_executor(
+            None, lambda: write_gate._begin_direct_library_operation("Undo"))
+        refused = self._refuse_gate(state)
+        if refused is not None:
+            return refused
+        self.lock_held = True
+        try:
+            await self._settle()
+            return await self._finish()
+        finally:
+            if self.lock_held:
+                self.lock.release()
+            job_mgr.end_library_operation(operation_token)
+
+    async def _settle(self):
+        removed, catalog_result = await self.loop.run_in_executor(None, self._reverse)
+        catalog_complete = bool(
+            getattr(catalog_result, "complete", catalog_result)
+        )
+        single_mark_complete = self.undo_outcome.get(
+            "single_mark_complete", True
+        )
+        if removed is not None or self.cleanup_retry:
+            # The track is off the disk again, so search must stop calling it
+            # yours.
+            self.job.landed_complete = False
+        self.refresh_needed = False
+        if self.cleanup_retry:
+            self._settle_cleanup_retry(catalog_complete, single_mark_complete)
+        elif removed is not None:
+            self._settle_removed(removed, catalog_complete, single_mark_complete)
+        else:
+            await self._settle_kept()
+
+    def _settle_cleanup_retry(self, catalog_complete, single_mark_complete):
+        if catalog_complete and single_mark_complete:
+            completed = {**self.info, "removed": True}
+            completed.pop("catalog_cleanup", None)
+            self.job.single = completed
+            if self.job.attention == "catalog":
+                self.job.attention = ""
+            self.job.summary = _undone_summary(self.info, self.undo_outcome)
+        elif catalog_complete:
+            self.job.single = {**self.info, "removed": False}
+            self.job.single.pop("catalog_cleanup", None)
+            if self.job.attention == "catalog":
+                self.job.attention = ""
+            self.job.summary = (
+                f"Removed “{self.info.get('title')}”, but couldn't save the "
+                "single mark cleanup. Retry Undo."
+            )
+        else:
+            self.job.attention = "catalog"
+            self.job.summary = (
+                f"Removed “{self.info.get('title')}”, but Beets still lists it. "
+                "Retry Beets cleanup."
+            )
+
+    def _settle_removed(self, removed, catalog_complete, single_mark_complete):
+        self.refresh_needed = True
+        if catalog_complete and single_mark_complete:
+            self.job.single = {**self.info, "removed": True}
+            self.job.summary = _undone_summary(self.info, self.undo_outcome)
+        elif catalog_complete:
+            self.job.single = {**self.info, "removed": False}
+            self.job.summary = (
+                f"Removed “{self.info.get('title')}”, but couldn't save the "
+                "single mark cleanup. Retry Undo."
+            )
+        else:
+            self.job.single = {
+                **self.info,
+                "removed": True,
+                "catalog_cleanup": {
+                    "pending": True,
+                    "path": str(removed),
+                },
+            }
+            self.job.attention = "catalog"
+            self.job.summary = (
+                f"Removed “{self.info.get('title')}”, but Beets still lists it. "
+                "Retry Beets cleanup."
+            )
+
+    async def _settle_kept(self):
+        # If the whole recorded directory is gone, clearing the single
+        # mark cannot delete anything.
+        dir_gone = (
+            self.info.get("owned_root") is None
+            and not Path(self.info["dir"]).exists()
+        )
+        if dir_gone:
+            single_mark_complete = await self.loop.run_in_executor(
+                None, self._clear_deliberate_single_mark
+            )
+            self.refresh_needed = True
+            self.job.single = {
+                **self.info,
+                "removed": bool(single_mark_complete),
+            }
+            if single_mark_complete:
+                self.job.summary = (f"“{self.info.get('title')}” was already gone; "
+                                    "cleared the single mark.")
+            else:
+                self.job.summary = (
+                    f"“{self.info.get('title')}” was already gone, but couldn't "
+                    "save the single mark cleanup. Retry Undo."
+                )
+        else:
+            if self.undo_outcome.get("files_complete"):
+                self.job.summary = (
+                    f"Removed “{self.info.get('title')}”, but couldn't "
+                    "finish cleaning up its folders. Try Undo again.")
+            elif self.undo_outcome.get("removed_files"):
+                self.job.summary = (
+                    "Part of Undo completed, but couldn't finish "
+                    f"removing “{self.info.get('title')}”. Try Undo again.")
+            elif self.undo_outcome.get("held_files"):
+                self.job.summary = (
+                    "Undo set the downloaded copy of "
+                    f"“{self.info.get('title')}” aside, but couldn't finish "
+                    "removing it. Try Undo again.")
+            elif self.undo_outcome.get("undo_started"):
+                self.job.summary = (
+                    "Undo started but couldn't finish removing "
+                    f"“{self.info.get('title')}”. Try Undo again.")
+            else:
+                self.job.summary = (
+                    "Couldn't verify the downloaded copy of "
+                    f"“{self.info.get('title')}”. Nothing was removed; delete "
+                    "it manually if needed.")
+
+    async def _finish(self):
+        # Persist while the direct-operation registration still holds the web
+        # run lock; a restart must not resurrect an Undo that already removed a
+        # file or cleared its single mark.
+        saved = await self.loop.run_in_executor(
+            None, lambda: job_persistence.persist(self.job)
+        )
+        if not saved:
+            msg = (
+                "Undo changed the saved track state, but its final record "
+                "couldn't be saved. Retry Undo before clearing History."
+            )
+            self.job.single = self.info
+            self.job.summary = msg
+            if rendering._is_htmx(self.request):
+                return rendering._tr(self.request, "_job_body.html", {"job": self.job})
+            return rendering._tr(self.request, "lock_busy.html", {
+                "reason": "Undo needs attention",
+                "msg": msg,
+                "action": {"href": f"/jobs/{self.job.id}", "label": "Retry Undo"},
+            }, status_code=503)
+        self.lock.release()
+        self.lock_held = False
+        if self.refresh_needed:
+            await self.loop.run_in_executor(None, self._refresh_after_undo)
+        if rendering._is_htmx(self.request):
+            return rendering._tr(self.request, "_job_body.html", {"job": self.job})
+        return RedirectResponse(url=f"/jobs/{self.job.id}", status_code=303)
+
+
 @router.post("/jobs/{job_id}/undo")
 async def job_undo(request: Request, job_id: str):
     """Reverse a single-track download whose exact owned path is still bound."""
@@ -1668,291 +1987,7 @@ async def job_undo(request: Request, job_id: str):
             return HTMLResponse(
                 f'<div id="job-content">{busy.body.decode()}</div>')
         return busy
-    # The single payload is persisted, so Undo keeps working after the job
-    # ages out of the registry, and the file checks below already handle a track
-    # that vanished in the meantime.
-    job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
-    undo_uncertain = bool(
-        job
-        and (
-            getattr(job, "_preserve_persisted_single", False) is True
-            or getattr(job, "_single_undo_unavailable", False) is True
-        )
-    )
-    info = (
-        dict(job.single or {})
-        if job and not undo_uncertain
-        else {}
-    )
-    catalog_cleanup = info.get("catalog_cleanup")
-    cleanup_retry = (
-        type(catalog_cleanup) is dict
-        and catalog_cleanup.get("pending") is True
-        and isinstance(catalog_cleanup.get("path"), str)
-        and bool(catalog_cleanup["path"])
-    )
-    if (
-        not job
-        or not info.get("dir")
-        or (info.get("removed") and not cleanup_retry)
-    ):
-        if rendering._is_htmx(request):
-            if job:
-                return rendering._tr(request, "_job_body.html", {"job": job})
-            return HTMLResponse("", headers={"HX-Redirect": "/queue"})
-        msg = ("That job is no longer in History." if not job
-               else "Nothing to undo for that job.")
-        return RedirectResponse(
-            url="/queue?error=" + rendering._notice_key(msg), status_code=303)
-
-    def _refresh_after_undo():
-        artist = info.get("artist") or ""
-        album = {
-            "title": info.get("album") or "",
-            "artist": {"name": artist},
-        }
-        try:
-            flows._refresh_after_local_album_change(
-                album,
-                {"dir": info.get("dir") or ""},
-                fallback_artist=artist,
-                token=qobuz_access._get_optional_token(),
-                args=flows.build_args(),
-            )
-        except Exception as exc:
-            _log.info(
-                "quality state refresh after undo skipped: %s", exc)
-        # A Gap Fill row the grab left no longer matches its folder.
-        flows.prune_library_review_candidates({"id": info.get("album_id")})
-
-    undo_outcome = {}
-
-    def _clear_deliberate_single_mark() -> bool:
-        """Whether the exact suppression mark is gone from the saved store."""
-        if not info.get("marked"):
-            return True
-        if job_persistence.single_mark_still_used(info.get("album_id"), job.id):
-            undo_outcome["single_kept"] = True
-            return True
-        try:
-            hidden_mod.unmark_single(
-                info.get("artist") or "",
-                info.get("album") or "",
-                year=info.get("year"),
-                album_id=info.get("album_id"),
-            )
-            store = hidden_mod.load()
-            return not hidden_mod.is_single(
-                info.get("artist") or "",
-                info.get("album") or "",
-                store,
-                year=info.get("year"),
-                album_id=info.get("album_id"),
-            )
-        except (OSError, TypeError, ValueError):
-            return False
-
-    def _reverse():
-        if cleanup_retry:
-            catalog_result = beets_mod.forget_beets_entries(
-                [Path(catalog_cleanup["path"])]
-            )
-            undo_outcome["single_mark_complete"] = (
-                _clear_deliberate_single_mark()
-            )
-            return None, catalog_result
-        d = _undo_root(info)
-        if d is None:
-            return None, None
-        _keep_shared_artwork(d, info)
-        # Every intent and state/identity refresh reaches the durable job row
-        # while the direct-operation lock still excludes another library
-        # writer.
-        job.single = info
-
-        def _persist_progress():
-            return job_persistence.persist(job)
-
-        removed = owned_paths._unlink_owned_path(
-            d,
-            info.get("owned_path"),
-            progress=_persist_progress,
-            outcome_out=undo_outcome,
-        )
-        catalog_result = None
-        if removed is not None:
-            _clear_after_earlier_grabs(
-                removed.parent,
-                job_persistence.other_album_grabs(info.get("album_id"), job.id))
-            catalog_result = beets_mod.forget_beets_entries([removed])
-            undo_outcome["single_mark_complete"] = (
-                _clear_deliberate_single_mark()
-            )
-        return removed, catalog_result
-
-    # Register under the same gate as the CLI handoff before taking the
-    # staging mutex.
-    loop = asyncio.get_running_loop()
-    state, operation_token, lock = await loop.run_in_executor(
-        None, lambda: write_gate._begin_direct_library_operation("Undo"))
-    if state == "paused":
-        paused = refusals._lock_busy_response(request)
-        if paused is not None:
-            return paused
-        return rendering._tr(request, "lock_busy.html", {
-            "msg": "Library writes were paused before Undo could start."
-        }, status_code=503)
-    if state == "busy":
-        holder = job_mgr.staging_holder()
-        msg = (f"{holder} is using the library right now. Try Undo again "
-               "when it finishes." if holder else
-               "Another job is using the library right now. Try Undo again "
-               "in a moment.")
-        if rendering._is_htmx(request):
-            return HTMLResponse(
-                f'<div id="job-content">'
-                f'{rendering._ql_notice_html("warning", html.escape(msg))}</div>')
-        return rendering._tr(request, "lock_busy.html", {"msg": msg}, status_code=503)
-    lock_held = True
-    try:
-        removed, catalog_result = await loop.run_in_executor(None, _reverse)
-        catalog_complete = bool(
-            getattr(catalog_result, "complete", catalog_result)
-        )
-        single_mark_complete = undo_outcome.get(
-            "single_mark_complete", True
-        )
-        if removed is not None or cleanup_retry:
-            # The track is off the disk again, so search must stop calling it
-            # yours.
-            job.landed_complete = False
-        refresh_needed = False
-        if cleanup_retry:
-            if catalog_complete and single_mark_complete:
-                completed = {**info, "removed": True}
-                completed.pop("catalog_cleanup", None)
-                job.single = completed
-                if job.attention == "catalog":
-                    job.attention = ""
-                job.summary = _undone_summary(info, undo_outcome)
-            elif catalog_complete:
-                job.single = {**info, "removed": False}
-                job.single.pop("catalog_cleanup", None)
-                if job.attention == "catalog":
-                    job.attention = ""
-                job.summary = (
-                    f"Removed “{info.get('title')}”, but couldn't save the "
-                    "single mark cleanup. Retry Undo."
-                )
-            else:
-                job.attention = "catalog"
-                job.summary = (
-                    f"Removed “{info.get('title')}”, but Beets still lists it. "
-                    "Retry Beets cleanup."
-                )
-        elif removed is not None:
-            refresh_needed = True
-            if catalog_complete and single_mark_complete:
-                job.single = {**info, "removed": True}
-                job.summary = _undone_summary(info, undo_outcome)
-            elif catalog_complete:
-                job.single = {**info, "removed": False}
-                job.summary = (
-                    f"Removed “{info.get('title')}”, but couldn't save the "
-                    "single mark cleanup. Retry Undo."
-                )
-            else:
-                job.single = {
-                    **info,
-                    "removed": True,
-                    "catalog_cleanup": {
-                        "pending": True,
-                        "path": str(removed),
-                    },
-                }
-                job.attention = "catalog"
-                job.summary = (
-                    f"Removed “{info.get('title')}”, but Beets still lists it. "
-                    "Retry Beets cleanup."
-                )
-        else:
-            # If the whole recorded directory is gone, clearing the single
-            # mark cannot delete anything.
-            dir_gone = (
-                info.get("owned_root") is None
-                and not Path(info["dir"]).exists()
-            )
-            if dir_gone:
-                single_mark_complete = await loop.run_in_executor(
-                    None, _clear_deliberate_single_mark
-                )
-                refresh_needed = True
-                job.single = {
-                    **info,
-                    "removed": bool(single_mark_complete),
-                }
-                if single_mark_complete:
-                    job.summary = (f"“{info.get('title')}” was already gone; "
-                                   "cleared the single mark.")
-                else:
-                    job.summary = (
-                        f"“{info.get('title')}” was already gone, but couldn't "
-                        "save the single mark cleanup. Retry Undo."
-                    )
-            else:
-                if undo_outcome.get("files_complete"):
-                    job.summary = (
-                        f"Removed “{info.get('title')}”, but couldn't "
-                        "finish cleaning up its folders. Try Undo again.")
-                elif undo_outcome.get("removed_files"):
-                    job.summary = (
-                        "Part of Undo completed, but couldn't finish "
-                        f"removing “{info.get('title')}”. Try Undo again.")
-                elif undo_outcome.get("held_files"):
-                    job.summary = (
-                        "Undo set the downloaded copy of "
-                        f"“{info.get('title')}” aside, but couldn't finish "
-                        "removing it. Try Undo again.")
-                elif undo_outcome.get("undo_started"):
-                    job.summary = (
-                        "Undo started but couldn't finish removing "
-                        f"“{info.get('title')}”. Try Undo again.")
-                else:
-                    job.summary = (
-                        "Couldn't verify the downloaded copy of "
-                        f"“{info.get('title')}”. Nothing was removed; delete "
-                        "it manually if needed.")
-        # Persist while the direct-operation registration still holds the web
-        # run lock; a restart must not resurrect an Undo that already removed a
-        # file or cleared its single mark.
-        saved = await loop.run_in_executor(
-            None, lambda: job_persistence.persist(job)
-        )
-        if not saved:
-            msg = (
-                "Undo changed the saved track state, but its final record "
-                "couldn't be saved. Retry Undo before clearing History."
-            )
-            job.single = info
-            job.summary = msg
-            if rendering._is_htmx(request):
-                return rendering._tr(request, "_job_body.html", {"job": job})
-            return rendering._tr(request, "lock_busy.html", {
-                "reason": "Undo needs attention",
-                "msg": msg,
-                "action": {"href": f"/jobs/{job.id}", "label": "Retry Undo"},
-            }, status_code=503)
-        lock.release()
-        lock_held = False
-        if refresh_needed:
-            await loop.run_in_executor(None, _refresh_after_undo)
-        if rendering._is_htmx(request):
-            return rendering._tr(request, "_job_body.html", {"job": job})
-        return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
-    finally:
-        if lock_held:
-            lock.release()
-        job_mgr.end_library_operation(operation_token)
+    return await _UndoRun(request, job_id).run()
 
 
 @router.post("/jobs/{job_id}/cancel")

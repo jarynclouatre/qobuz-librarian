@@ -2535,26 +2535,46 @@ def restore_jobs(
     rows = job_persistence.load_all()
     if not rows:
         return
-    interrupted = 0
-    review = 0
-    historical = 0
-    restored = []
-    requeued = []
-    pending_reviews = []
-    cut_short = []
-    finished_jobs = []
-    pending_logs = {
-        row["id"]: row["log_lines_json"]
-        for row in rows if "log_lines_json" in row
-    }
+    restore = _JobsRestore(
+        rows, execute_registry, unsettled=unsettled, cut_off=cut_off,
+        requeue=requeue, finished_upgrades=finished_upgrades,
+        journaled=journaled)
+    for row in rows:
+        restore.add_row(row)
+    restore.publish(return_picks)
 
-    def _restore_log_lines(job):
-        if job.id in pending_logs:
+
+class _JobsRestore:
+    """The saved jobs one start-up puts back, row by row, then publishes."""
+
+    def __init__(self, rows, execute_registry, *, unsettled, cut_off,
+                 requeue, finished_upgrades, journaled):
+        self.execute_registry = execute_registry
+        self.unsettled = unsettled
+        self.cut_off = cut_off
+        self.requeue = requeue
+        self.finished_upgrades = finished_upgrades
+        self.journaled = journaled
+        self.interrupted = 0
+        self.review = 0
+        self.historical = 0
+        self.restored = []
+        self.requeued = []
+        self.pending_reviews = []
+        self.cut_short = []
+        self.finished_jobs = []
+        self.pending_logs = {
+            row["id"]: row["log_lines_json"]
+            for row in rows if "log_lines_json" in row
+        }
+
+    def _restore_log_lines(self, job):
+        if job.id in self.pending_logs:
             job.log_lines, _ = job_persistence.decode_log_lines(
-                pending_logs.pop(job.id))
+                self.pending_logs.pop(job.id))
 
-    def _persist_restored_transition(job, previous_status):
-        _restore_log_lines(job)
+    def _persist_restored_transition(self, job, previous_status):
+        self._restore_log_lines(job)
         if job.status == JobStatus.FAILED and not job.attention:
             job.attention = "failed"
         saved = job_persistence.persist(job)
@@ -2566,10 +2586,10 @@ def restore_jobs(
             and previous_status not in TERMINAL
             and job.status in TERMINAL
         ):
-            finished_jobs.append(job)
+            self.finished_jobs.append(job)
         return saved
 
-    for row in rows:
+    def add_row(self, row):
         unknown_recovery_status = False
         try:
             status = JobStatus(row["status"])
@@ -2580,7 +2600,7 @@ def restore_jobs(
                 # An ordinary row from an incompatible version cannot be
                 # resumed safely and carries nothing the user must recover.
                 job_persistence.delete(row["id"])
-                continue
+                return
             # A recovery carrier is different: its exact backup record is a
             # safety obligation.
             status = JobStatus.FAILED
@@ -2591,7 +2611,7 @@ def restore_jobs(
         job = _job_from_row(row, status)
         job._durability_required = True
         if status not in TERMINAL:
-            _restore_log_lines(job)
+            self._restore_log_lines(job)
         pending_review = (
             status == JobStatus.PENDING
             and job.execute_kind in job_persistence.REVIEW_PICK_KINDS
@@ -2605,7 +2625,7 @@ def restore_jobs(
         if returns_picks:
             # A stop the app saw has already dealt with the picks and saved
             # its stop time; a hard stop did neither.
-            cut_short.append(job)
+            self.cut_short.append(job)
         completion_acknowledged = False
         if job.album_id and not job.recoveries:
             completion_acknowledged = (
@@ -2618,7 +2638,19 @@ def restore_jobs(
                 is True
             )
         settled = _cut_off_download(
-            job, status, cut_off, unsettled, journaled)
+            job, status, self.cut_off, self.unsettled, self.journaled)
+        if not self._settle_recovered(
+                job, row, status, previous_status, settled,
+                completion_acknowledged, unknown_recovery_status):
+            self._settle_by_status(
+                job, row, status, previous_status, pending_review,
+                returns_picks)
+        self.restored.append(job)
+
+    def _settle_recovered(self, job, row, status, previous_status, settled,
+                          completion_acknowledged, unknown_recovery_status):
+        """Settle a job start-up recovery already decided on. Returns
+        whether it did."""
         if completion_acknowledged:
             # Startup recovery proved and acknowledged this exact job
             # incarnation before retiring the queue journal.
@@ -2629,50 +2661,56 @@ def restore_jobs(
             job.attention = ""
             job.cancel_requested = False
             job.finished_at = job.finished_at or time.time()
-            historical += 1
-            _persist_restored_transition(job, previous_status)
+            self.historical += 1
+            self._persist_restored_transition(job, previous_status)
         elif settled is not None and (
             status in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.FAILED)
         ):
-            run = (requeue(job) if requeue is not None
+            run = (self.requeue(job) if self.requeue is not None
                    and not row.get("single_unreadable") else None)
             if _settle_restarted_download(
                 job, settled, was_running=status is not JobStatus.FAILED,
                 can_requeue=run is not None,
-            ) and _persist_restored_transition(job, previous_status) is True:
-                requeued.append((job, run))
+            ) and self._persist_restored_transition(job, previous_status) is True:
+                self.requeued.append((job, run))
             else:
                 if job.status is not JobStatus.FAILED:
                     job.status = JobStatus.FAILED
                     job.error = (job_persistence.RESTART_INTERRUPTED
                                  + " Use Retry to download it again.")
                     job.finished_at = time.time()
-                interrupted += 1
-                _persist_restored_transition(job, previous_status)
+                self.interrupted += 1
+                self._persist_restored_transition(job, previous_status)
         elif (
             status == JobStatus.FAILED
-            and job.id not in unsettled
+            and job.id not in self.unsettled
             and _clear_stale_pause(job)
         ):
-            historical += 1
-            _persist_restored_transition(job, previous_status)
+            self.historical += 1
+            self._persist_restored_transition(job, previous_status)
         elif unknown_recovery_status:
             job.error = ("This saved Repair job had an unrecognised state. "
                          "The original files were kept; check them before "
                          "retrying.")
             job.attention = "recovery"
             job.finished_at = job.finished_at or time.time()
-            interrupted += 1
-            _persist_restored_transition(job, previous_status)
-        elif (
+            self.interrupted += 1
+            self._persist_restored_transition(job, previous_status)
+        else:
+            return False
+        return True
+
+    def _settle_by_status(self, job, row, status, previous_status,
+                          pending_review, returns_picks):
+        if (
             status == JobStatus.PENDING
             and not pending_review
-            and requeue is not None
+            and self.requeue is not None
             and not row.get("single_unreadable")
-            and job.id not in unsettled
-            and (run := requeue(job)) is not None
+            and job.id not in self.unsettled
+            and (run := self.requeue(job)) is not None
         ):
-            requeued.append((job, run))
+            self.requeued.append((job, run))
         elif status == JobStatus.SCANNING or (
             status == JobStatus.PENDING
             and job.kind == "scan"
@@ -2684,71 +2722,72 @@ def restore_jobs(
             job.finished_at = (job.finished_at
                                or job_persistence.previous_write_at()
                                or job.created_at)
-            interrupted += 1
-            _persist_restored_transition(job, previous_status)
+            self.interrupted += 1
+            self._persist_restored_transition(job, previous_status)
         elif (
             status == JobStatus.RUNNING
             and job.execute_kind in ("library", "new_releases")
             and job.title == RUN_TITLES[job.execute_kind]
         ):
             _cancel_interrupted_album_run(job)
-            interrupted += 1
-            _persist_restored_transition(job, previous_status)
+            self.interrupted += 1
+            self._persist_restored_transition(job, previous_status)
         elif status == JobStatus.RUNNING and job.execute_kind == "lyrics":
             _cancel_interrupted_lyrics(job)
-            interrupted += 1
-            _persist_restored_transition(job, previous_status)
+            self.interrupted += 1
+            self._persist_restored_transition(job, previous_status)
         elif status in (JobStatus.PENDING, JobStatus.RUNNING) and not pending_review:
             _fail_interrupted_run(
-                job, unsettled=unsettled,
-                finished_upgrades=finished_upgrades,
+                job, unsettled=self.unsettled,
+                finished_upgrades=self.finished_upgrades,
                 returns_picks=returns_picks)
-            interrupted += 1
-            _persist_restored_transition(job, previous_status)
+            self.interrupted += 1
+            self._persist_restored_transition(job, previous_status)
         elif status == JobStatus.AWAITING_REVIEW or pending_review:
-            error = _review_restore_error(job, row, execute_registry)
+            error = _review_restore_error(job, row, self.execute_registry)
             if error:
                 job.status = JobStatus.FAILED
                 job.error = error
                 job.finished_at = time.time()
-                interrupted += 1
-                _persist_restored_transition(job, previous_status)
+                self.interrupted += 1
+                self._persist_restored_transition(job, previous_status)
             else:
                 if pending_review:
-                    pending_reviews.append(job)
-                review += 1
+                    self.pending_reviews.append(job)
+                self.review += 1
         else:
-            historical += 1
-        restored.append(job)
-    # Insert once, then bound the in-memory finished set to MAX_FINISHED just
-    # like a live add() would. The archive on disk keeps up to PERSIST_KEEP
-    # so an evicted job still renders via /jobs/{id}.
-    with registry._lock:
-        for job in restored:
-            registry._jobs[job.id] = job
-            registry._order.append(job.id)
-        registry._prune_locked()
-        for job in restored:
-            if job.id in registry._jobs:
-                _restore_log_lines(job)
-    _put_back_pending_reviews(pending_reviews)
-    if return_picks is not None:
-        _return_cut_short_picks(cut_short, return_picks)
-    # Behind the same pause as any download that arrives while the library is
-    # paused, and in the order they were queued.
-    requeued.sort(key=lambda pair: pair[0].created_at)
-    with _held_downloads_lock:
-        _held_downloads.extend(requeued)
-    for job in finished_jobs:
-        _start_post_job_hook(_post_job_hook_payload(job))
-    if interrupted or review or requeued:
-        log.info(
-            "Restored %s / %s / %s / %s from the previous run.",
-            plural(historical, "historical job"),
-            plural(review, "review job"),
-            plural(len(requeued), "queued download"),
-            plural(interrupted, "interrupted job"),
-        )
+            self.historical += 1
+
+    def publish(self, return_picks):
+        # Insert once, then bound the in-memory finished set to MAX_FINISHED just
+        # like a live add() would. The archive on disk keeps up to PERSIST_KEEP
+        # so an evicted job still renders via /jobs/{id}.
+        with registry._lock:
+            for job in self.restored:
+                registry._jobs[job.id] = job
+                registry._order.append(job.id)
+            registry._prune_locked()
+            for job in self.restored:
+                if job.id in registry._jobs:
+                    self._restore_log_lines(job)
+        _put_back_pending_reviews(self.pending_reviews)
+        if return_picks is not None:
+            _return_cut_short_picks(self.cut_short, return_picks)
+        # Behind the same pause as any download that arrives while the library is
+        # paused, and in the order they were queued.
+        self.requeued.sort(key=lambda pair: pair[0].created_at)
+        with _held_downloads_lock:
+            _held_downloads.extend(self.requeued)
+        for job in self.finished_jobs:
+            _start_post_job_hook(_post_job_hook_payload(job))
+        if self.interrupted or self.review or self.requeued:
+            log.info(
+                "Restored %s / %s / %s / %s from the previous run.",
+                plural(self.historical, "historical job"),
+                plural(self.review, "review job"),
+                plural(len(self.requeued), "queued download"),
+                plural(self.interrupted, "interrupted job"),
+            )
 
 
 _RUN_DONE_VERBS = {

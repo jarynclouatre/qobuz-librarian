@@ -577,32 +577,9 @@ def _help_epilog():
     return "\n".join(lines)
 
 
-# Run flags whose default is a saved setting.
-_SETTING_FLAGS = (
-    ("prefer_hires", "PREFER_HIRES"),
-    ("migrate_multi_artist", "MIGRATE_MULTI_ARTIST"),
-)
-
-
-def parse_args():
-    p = _ExitOneArgParser(
-        usage="%(prog)s [options] [query ...]",
-        add_help=False,
-        description=_help_description(),
-        formatter_class=_HelpFormatter,
-        epilog=_help_epilog())
-    # Grouped so --help reads as sections instead of one wall. Grouping
-    # changes how no flag is spelled or parsed.
+def _add_mode_arguments(p):
     modes = p.add_argument_group(
         "What to run", "Pick one. With none of these, the interactive menu opens.")
-    offers = p.add_argument_group(
-        "What gets offered", "Which releases the catalogue steps suggest.")
-    getting = p.add_argument_group(
-        "Downloading and importing", "How a run behaves once it has picks.")
-    lyrics = p.add_argument_group("Lyrics", "Only with --lyrics-walk.")
-    migration = p.add_argument_group("Migration", "Only with --migrate.")
-    output = p.add_argument_group("Output and help")
-
     modes.add_argument("query", nargs="*", help="search query or Qobuz album URL")
     modes.add_argument("--artist",       metavar="NAME",
                    help="one artist: fill gaps, then offer albums you're "
@@ -644,6 +621,10 @@ def parse_args():
                    help="forget which artists and albums the walks have "
                         "already checked, and exit")
 
+
+def _add_offer_arguments(p):
+    offers = p.add_argument_group(
+        "What gets offered", "Which releases the catalogue steps suggest.")
     offers.add_argument("--no-catalog",   action="store_true",
                    help="skip missing album suggestions in Artist mode and "
                         "Library walk")
@@ -684,6 +665,10 @@ def parse_args():
                    help="list each album's highest-resolution edition first "
                         "(search order kept)")
 
+
+def _add_download_arguments(p):
+    getting = p.add_argument_group(
+        "Downloading and importing", "How a run behaves once it has picks.")
     getting.add_argument("--dry-run",      action="store_true",
                    help="show the plan and change nothing, except to clean "
                         "up a download a restart cut off")
@@ -723,11 +708,17 @@ def parse_args():
                    help="after import, re-file 'Primary, Other' and "
                         "'Other, Primary' albums under 'Primary'")
 
+
+def _add_lyrics_arguments(p):
+    lyrics = p.add_argument_group("Lyrics", "Only with --lyrics-walk.")
     lyrics.add_argument("--lyrics-rescan", action="store_true",
                    help="also look up tracks checked in the last 30 days.")
     lyrics.add_argument("--lyrics-synced-only", action="store_true",
                    help="only write timed (synced) lyrics, never plain.")
 
+
+def _add_migration_arguments(p):
+    migration = p.add_argument_group("Migration", "Only with --migrate.")
     migration.add_argument("--migrate-src", dest="migrate_src", metavar="PATH", default="",
                    help="migration source library to read (overrides MIGRATE_SRC)")
     migration.add_argument("--migrate-dest", dest="migrate_dest", metavar="PATH", default="",
@@ -740,6 +731,9 @@ def parse_args():
                    help="fingerprint files whose tags can't place them "
                         "(slower, needs network; no key required)")
 
+
+def _add_output_arguments(p):
+    output = p.add_argument_group("Output and help")
     output.add_argument("--verbose",      action="store_true", help="show detection details")
     output.add_argument("--quiet", "-q",  action="store_true",
                    help="suppress info-level console output (warnings/errors "
@@ -750,7 +744,16 @@ def parse_args():
     output.add_argument("--version", action="version", version=f"qobuz-librarian {__version__}")
     output.add_argument("-h", "--help", action="help",
                    help="show this help and exit")
-    args = p.parse_args()
+
+
+# Run flags whose default is a saved setting.
+_SETTING_FLAGS = (
+    ("prefer_hires", "PREFER_HIRES"),
+    ("migrate_multi_artist", "MIGRATE_MULTI_ARTIST"),
+)
+
+
+def _apply_setting_flags(args):
     # Unset ones follow the saved settings, also after the menu's Settings.
     args.settings_given = {
         flag for flag, _setting in _SETTING_FLAGS
@@ -760,6 +763,9 @@ def parse_args():
             setattr(args, flag, getattr(cfg, setting))
     # Per-run override of cfg.AUTO_UPGRADE_ENABLED.
     args.auto_upgrade = cfg.AUTO_UPGRADE_ENABLED
+
+
+def _reject_flags_without_their_mode(p, args):
     # The walk / migrate / reset modes are whole-library or local-only runs that
     # read none of the album- or artist-scan flags below, so naming one of those
     # flags alongside them would silently drop it.
@@ -803,6 +809,9 @@ def parse_args():
     if args.artist and args.query:
         p.error("--artist NAME scans that one artist. Drop the extra words, "
                 "or search them as an album without --artist")
+
+
+def _reject_mode_conflicts(p, args):
     # Exactly one whole-run mode executes per invocation; main() dispatches
     # the first it finds and returns, so a second would be silently dropped.
     requested = [name for name, on in (
@@ -849,6 +858,9 @@ def parse_args():
     if (args.lyrics_rescan or args.lyrics_synced_only) and not args.lyrics_walk:
         p.error("--lyrics-rescan / --lyrics-synced-only only apply with "
                 "--lyrics-walk")
+
+
+def _apply_missing_type_switches(args):
     switched_on = missing_types.load()
     for flag, release_type in (("include_live", missing_types.LIVE),
                                ("include_comps", missing_types.COMPILATION),
@@ -858,6 +870,28 @@ def parse_args():
             setattr(args, flag, release_type in switched_on)
     if args.include_bonus is None:
         args.include_bonus = missing_types.BONUS in switched_on
+
+
+def parse_args():
+    p = _ExitOneArgParser(
+        usage="%(prog)s [options] [query ...]",
+        add_help=False,
+        description=_help_description(),
+        formatter_class=_HelpFormatter,
+        epilog=_help_epilog())
+    # Grouped so --help reads as sections instead of one wall. Grouping
+    # changes how no flag is spelled or parsed.
+    _add_mode_arguments(p)
+    _add_offer_arguments(p)
+    _add_download_arguments(p)
+    _add_lyrics_arguments(p)
+    _add_migration_arguments(p)
+    _add_output_arguments(p)
+    args = p.parse_args()
+    _apply_setting_flags(args)
+    _reject_flags_without_their_mode(p, args)
+    _reject_mode_conflicts(p, args)
+    _apply_missing_type_switches(args)
     return args
 
 
