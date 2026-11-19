@@ -169,6 +169,7 @@ def run_upgrade_walk_mode(args, token):
     n_unverified_albums = 0
     n_catalogue_failed = 0
     n_failed_albums = 0
+    n_refused_albums = 0
     n_attention_albums = 0
     n_below_target = 0
     n_gone_albums = 0
@@ -356,6 +357,13 @@ def run_upgrade_walk_mode(args, token):
                             None, payload.get("album_dir"))
                     time.sleep(cfg.ARTIST_API_DELAY)
                     continue
+                if (_proc_result or {}).get("upgrade_refused"):
+                    # Another try would fetch the same copy.
+                    n_refused_albums += 1
+                    saved_views.forget_upgraded_album(
+                        None, payload.get("album_dir"))
+                    time.sleep(cfg.ARTIST_API_DELAY)
+                    continue
                 if not (_proc_result or {}).get("imported", False):
                     # Attempted (Qobuz had a higher-quality copy) but didn't
                     # land: backup failed, download failed, or import failed.
@@ -396,7 +404,8 @@ def run_upgrade_walk_mode(args, token):
     finally:
         args.consolidate = saved_consolidate
 
-    n_failed_attempts = (n_failed_albums + n_unverified_albums
+    n_failed_attempts = (n_failed_albums + n_refused_albums
+                         + n_unverified_albums
                          + n_attention_albums + n_below_target
                          + n_catalogue_failed + n_gone_albums
                          + n_stale_albums)
@@ -444,6 +453,11 @@ def run_upgrade_walk_mode(args, token):
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_below_target, 'album')} remained below the "
             "target quality."))
+    if n_refused_albums:
+        log.info(fmt(C.YELLOW,
+            f"     ⚠  {plural(n_refused_albums, 'album')} couldn't be verified "
+            "after downloading, so the original was put back. Off the "
+            "Upgrade list until its next refresh."))
     if n_failed_albums:
         log.info(fmt(C.YELLOW,
             f"     ⚠  {plural(n_failed_albums, 'album')} couldn't be upgraded "
@@ -481,6 +495,8 @@ def run_upgrade_walk_mode(args, token):
         parts = [f"{plural(n_upgraded_albums, 'album')} upgraded"]
         for count, what in (
                 (n_failed_albums, "couldn't be upgraded"),
+                (n_refused_albums, "put back after a download that couldn't "
+                                   "be verified"),
                 (n_unverified_albums, "kept a backup"),
                 (n_catalogue_failed, "couldn't be updated in Beets"),
                 (n_attention_albums, "did not finish cleanly"),

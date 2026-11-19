@@ -556,14 +556,21 @@ def _list_artist_subdirs_cached(artist_dir: Path):
         cached = _ARTIST_SUBDIRS_CACHE.get(key)
         if cached is not None and cached[0] == stamp:
             return cached[1]
-        subdirs = sorted((d for d in artist_dir.iterdir()
-                          if _is_type(d, stat.S_ISDIR) and not _undecodable(d)),
+        folders = [d for d in artist_dir.iterdir() if _is_type(d, stat.S_ISDIR)]
+        subdirs = sorted((d for d in folders if not _undecodable(d)),
                          key=lambda p: p.name.lower())
     except OSError as e:
         vlog(f"  iterdir failed for {artist_dir}: {e}")
         raise
-    _ARTIST_SUBDIRS_CACHE[key] = (stamp, subdirs)
+    _ARTIST_SUBDIRS_CACHE[key] = (stamp, subdirs, len(folders) > len(subdirs))
     return subdirs
+
+
+def has_undecodable_subdirs(artist_dir: Path) -> bool:
+    """Whether the folder holds a subfolder left out for its non-UTF-8 name."""
+    _list_artist_subdirs_cached(artist_dir)
+    cached = _ARTIST_SUBDIRS_CACHE.get(str(artist_dir))
+    return bool(cached and cached[2])
 
 
 def cache_album_tags(album_dirs):

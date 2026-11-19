@@ -35,6 +35,7 @@ from qobuz_librarian.library.scanner import (
     SYSTEM_FOLDER_NAMES,
     _has_audio_anywhere,
     _list_artist_subdirs_cached,
+    has_undecodable_subdirs,
     is_library_system_folder,
     iter_tree_no_symlinks,
     read_album_dir,
@@ -337,6 +338,47 @@ def _predicted_album_dir(qobuz_album, *, exact_edition=False, audio_only=False):
     return None
 
 
+def _artist_search_dirs(artist):
+    """The folders under the music root that may be this artist's."""
+    artist_variants = [artist]
+    if artist.lower().startswith("the "):
+        artist_variants.append(artist[4:])
+    else:
+        artist_variants.append("The " + artist)
+    if "," in artist:
+        artist_variants.append(artist.split(",")[0].strip())
+
+    search_dirs = []
+    seen_dirs: set = set()
+
+    def _push(p):
+        key = str(p)
+        if key in seen_dirs:
+            return
+        seen_dirs.add(key)
+        search_dirs.append(p)
+
+    for av in artist_variants:
+        # Folders only: a stray regular file with an artist's name would
+        # blow up the subdir listing below with NotADirectoryError.
+        ad = _listed_root_dir(beets_sanitize(av))
+        if ad is not None:
+            _push(ad)
+        for ma in _find_multi_artist_dirs(av):
+            _push(ma)
+
+    # Diacritics often differ between Qobuz and disk ('Beyoncé' vs 'Beyonce',
+    # 'Motörhead' vs 'Motorhead'); the exact .exists() checks above miss
+    # those, so also take any artist folder whose ASCII-folded name matches.
+    artist_norms = {normalize(av) for av in artist_variants if normalize(av)}
+    if artist_norms and config.MUSIC_ROOT.exists():
+        for d in _root_dirs_matching(
+                ("folded", frozenset(artist_norms)),
+                lambda name: normalize(name) in artist_norms):
+            _push(d)
+    return search_dirs
+
+
 def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
                               audio_only=False):
     """Resolve a Qobuz album dict to its on-disk directory.
@@ -376,42 +418,7 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
     if not artist:
         return None
 
-    artist_variants = [artist]
-    if artist.lower().startswith("the "):
-        artist_variants.append(artist[4:])
-    else:
-        artist_variants.append("The " + artist)
-    if "," in artist:
-        artist_variants.append(artist.split(",")[0].strip())
-
-    search_dirs = []
-    seen_dirs: set = set()
-
-    def _push(p):
-        key = str(p)
-        if key in seen_dirs:
-            return
-        seen_dirs.add(key)
-        search_dirs.append(p)
-
-    for av in artist_variants:
-        # Folders only: a stray regular file with an artist's name would
-        # blow up the subdir listing below with NotADirectoryError.
-        ad = _listed_root_dir(beets_sanitize(av))
-        if ad is not None:
-            _push(ad)
-        for ma in _find_multi_artist_dirs(av):
-            _push(ma)
-
-    # Diacritics often differ between Qobuz and disk ('Beyoncé' vs 'Beyonce',
-    # 'Motörhead' vs 'Motorhead'); the exact .exists() checks above miss
-    # those, so also take any artist folder whose ASCII-folded name matches.
-    artist_norms = {normalize(av) for av in artist_variants if normalize(av)}
-    if artist_norms and config.MUSIC_ROOT.exists():
-        for d in _root_dirs_matching(
-                ("folded", frozenset(artist_norms)),
-                lambda name: normalize(name) in artist_norms):
-            _push(d)
+    search_dirs = _artist_search_dirs(artist)
 
     global_best, global_best_score = None, 0.0
     norm_title = normalize(strip_album_decorations(title))
@@ -1196,12 +1203,17 @@ def search_result_ownership(album, fetch_album):
     Qobuz did not stream one of its tracks, since it may stream it now. An
     album the cache does not hold gets no "not on Qobuz" count. Owned needs
     the edition and all its tracks, not just the songs on another mix.
-    ``ownership_unknown`` stays set when the check could not finish.
+    ``ownership_unknown`` stays set when the check could not finish, and is
+    "names" when a folder of the artist was left out for its non-UTF-8 name.
     """
     res = {"ownership_unknown": True}
     folder = (find_album_dir_filesystem(album)
               or find_album_dir_filesystem(album, exact_edition=True))
     if folder is None:
+        artist = (album.get("artist") or {}).get("name") or ""
+        if artist and any(map(has_undecodable_subdirs, _artist_search_dirs(artist))):
+            res["ownership_unknown"] = "names"
+            return res
         res["ownership_unknown"] = False
         cached = (album_cache.get(album["id"]) or {}).get("tracks") or {}
         if any(unstreamable(t) for t in cached.get("items") or []):
