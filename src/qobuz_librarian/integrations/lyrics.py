@@ -583,289 +583,342 @@ def write_post_import_sidecars(
     their original identities still match, and their albums' other tracks
     are left alone. With ``track_signatures`` only the tracks those name
     are handled in ``album_dirs``."""
-    if not cfg.LYRICS_ENABLED or not HAVE_LYRIC_FETCH:
-        return
-    # Only mutagen is needed to read the embedded tag and write the .lrc -
-    # NOT syncedlyrics. (lyric_fetch.AVAILABLE conflates the two; gating on
-    # it here would wrongly skip sidecars whenever the provider lib is
-    # absent but mutagen is present.)
-    if getattr(lyric_fetch, "FLAC", None) is None:
-        return
-    lyr_fmt = (cfg.LYRICS_FORMAT or "embed").strip().lower()
-    if lyr_fmt not in ("sidecar", "both"):
-        return
-    strip_tag = lyr_fmt == "sidecar"
-    wanted = {tuple(sig) for sig in track_signatures or () if sig} or None
-    seen = set()
-    written = 0
-    kept = 0
-    stripped = 0
-    failed = 0
-    strip_failed = 0
-    strip_read_only = 0
-    for fp, parent_fd, parent_guard, expected_track in _iter_post_import_flacs(
-        album_dirs, owned_tracks, seen
+    return _SidecarPass(
+        album_dirs,
+        identity_changes_out=identity_changes_out,
+        created_files_out=created_files_out,
+        directory_changes_out=directory_changes_out,
+        owned_tracks=owned_tracks,
+        track_signatures=track_signatures,
+    ).run()
+
+
+_NEXT_TRACK = object()
+
+
+class _SidecarPass:
+    """One post-import sidecar pass, track by track."""
+
+    def __init__(
+        self,
+        album_dirs,
+        *,
+        identity_changes_out,
+        created_files_out,
+        directory_changes_out,
+        owned_tracks,
+        track_signatures,
     ):
-        track_fd = None
-        parent_identity = None
-        directory_mutated = False
+        self.album_dirs = album_dirs
+        self.identity_changes_out = identity_changes_out
+        self.created_files_out = created_files_out
+        self.directory_changes_out = directory_changes_out
+        self.owned_tracks = owned_tracks
+        self.track_signatures = track_signatures
+
+    def run(self):
+        if not cfg.LYRICS_ENABLED or not HAVE_LYRIC_FETCH:
+            return
+        # Only mutagen is needed to read the embedded tag and write the .lrc -
+        # NOT syncedlyrics. (lyric_fetch.AVAILABLE conflates the two; gating on
+        # it here would wrongly skip sidecars whenever the provider lib is
+        # absent but mutagen is present.)
+        if getattr(lyric_fetch, "FLAC", None) is None:
+            return
+        lyr_fmt = (cfg.LYRICS_FORMAT or "embed").strip().lower()
+        if lyr_fmt not in ("sidecar", "both"):
+            return
+        self.strip_tag = lyr_fmt == "sidecar"
+        self.wanted = {tuple(sig) for sig in self.track_signatures or () if sig} or None
+        self.seen = set()
+        self.written = 0
+        self.kept = 0
+        self.stripped = 0
+        self.failed = 0
+        self.strip_failed = 0
+        self.strip_read_only = 0
+        for track in _iter_post_import_flacs(
+            self.album_dirs, self.owned_tracks, self.seen
+        ):
+            self.fp, self.parent_fd, self.parent_guard, self.expected_track = track
+            self._handle_track()
+        self._report()
+
+    def _handle_track(self):
+        if self._open_track() is _NEXT_TRACK:
+            return
         try:
-            parent_identity = _directory_identity(os.fstat(parent_fd))
-            if parent_identity is None:
-                raise OSError("track parent is not a directory")
-            track_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-            track_fd = os.open(fp.name, track_flags, dir_fd=parent_fd)
-            track_identity = _regular_file_identity(os.fstat(track_fd))
-            if (
-                track_identity is None
-                or (expected_track is not None and track_identity != expected_track)
-                or not _held_track_is_named(fp, parent_fd, track_fd, track_identity, parent_guard)
-            ):
-                raise OSError("track identity changed")
-
-            def track_guard(
-                fp=fp,
-                parent_fd=parent_fd,
-                track_fd=track_fd,
-                track_identity=track_identity,
-                parent_guard=parent_guard,
-            ):
-                return _held_track_is_named(
-                    fp,
-                    parent_fd,
-                    track_fd,
-                    track_identity,
-                    parent_guard,
-                )
-
-            f = lyric_fetch.FLAC(f"/proc/self/fd/{track_fd}")
-        except Exception as e:
-            vlog(f"sidecar: FLAC open failed {fp}: {e}")
-            failed += 1
-            if track_fd is not None:
-                os.close(track_fd)
-            continue
-        try:
-            if (wanted is not None and expected_track is None
-                    and rip._flac_signature(f"/proc/self/fd/{track_fd}") not in wanted):
-                continue
-            content = lyric_fetch.get_existing_lyrics(f)
-            if not content or not content.strip():
-                continue
-            if not _held_track_is_named(fp, parent_fd, track_fd, track_identity, parent_guard):
-                vlog(f"sidecar: track changed before write {fp}")
-                failed += 1
-                continue
-            creation = {}
-            sidecar_identity_receipt = {}
-            sidecar_directory_mutation = {}
-            sidecar_error = None
-            try:
-                if isinstance(created_files_out, list):
-                    sidecar_written = lyric_fetch.write_sidecar(
-                        fp,
-                        content,
-                        creation_out=creation,
-                        directory_mutation_out=sidecar_directory_mutation,
-                        parent_fd=parent_fd,
-                        parent_guard=parent_guard,
-                        track_guard=track_guard,
-                        sidecar_identity_out=sidecar_identity_receipt,
-                    )
-                else:
-                    sidecar_written = lyric_fetch.write_sidecar(
-                        fp,
-                        content,
-                        parent_fd=parent_fd,
-                        parent_guard=parent_guard,
-                        track_guard=track_guard,
-                        sidecar_identity_out=sidecar_identity_receipt,
-                    )
-            except OSError as e:
-                sidecar_error = e
-            finally:
-                track_unchanged = _held_track_is_named(
-                    fp, parent_fd, track_fd, track_identity, parent_guard
-                )
-                created = _created_sidecar_receipt(fp, parent_fd, track_identity, creation)
-                if isinstance(created_files_out, list) and track_unchanged and created is not None:
-                    created_files_out.append(created)
-                    # Publication completed even if the following parent
-                    # fsync reported an error. Carry the exact directory
-                    # identity forward so Undo remains bound to the file
-                    # that actually landed.
-                    directory_mutated = True
-                if sidecar_directory_mutation.get("mutated") is True:
-                    directory_mutated = True
-            if sidecar_error is not None:
-                vlog(f"sidecar: write failed {fp}: {sidecar_error}")
-                failed += 1
-                continue
-            if not track_unchanged:
-                vlog(f"sidecar: track changed during write {fp}")
-                failed += 1
-                continue
-            if sidecar_written:
-                written += 1
-                directory_mutated = True
-            else:
-                kept += 1
-
-            if strip_tag:
-                change = {}
-                tag_directory_mutation = {}
-                sidecar_fd = None
-                try:
-                    sidecar = fp.with_suffix(".lrc")
-                    sidecar_identity = _sidecar_identity_from_receipt(
-                        fp, sidecar_identity_receipt
-                    )
-                    if sidecar_identity is None:
-                        raise OSError(
-                            f"{sidecar.name}: final sidecar identity wasn't proved"
-                        )
-                    sidecar_flags = (
-                        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-                    sidecar_fd = os.open(sidecar.name, sidecar_flags, dir_fd=parent_fd)
-                    if not _held_track_is_named(
-                        sidecar,
-                        parent_fd,
-                        sidecar_fd,
-                        sidecar_identity,
-                        parent_guard,
-                    ):
-                        raise OSError(f"{sidecar.name}: sidecar changed before tag strip")
-
-                    def sidecar_guard(
-                        sidecar=sidecar,
-                        sidecar_fd=sidecar_fd,
-                        sidecar_identity=sidecar_identity,
-                        parent_fd=parent_fd,
-                        parent_guard=parent_guard,
-                    ):
-                        return _held_track_is_named(
-                            sidecar,
-                            parent_fd,
-                            sidecar_fd,
-                            sidecar_identity,
-                            parent_guard,
-                        )
-
-                    preserved = lyric_fetch._read_bound_sidecar(
-                        fp, parent_fd, parent_guard, track_guard)
-                    if preserved is None or any(
-                            value.strip() != preserved.strip()
-                            for value in lyric_fetch.embedded_lyric_values(f)):
-                        continue
-                    had = False
-                    for _k in ("lyrics", "unsyncedlyrics"):
-                        if _k in f.tags:
-                            del f.tags[_k]
-                            had = True
-                    if had:
-                        if not _held_track_is_named(
-                            fp, parent_fd, track_fd, track_identity, parent_guard
-                        ):
-                            raise OSError("track changed before tag rewrite")
-                        if isinstance(identity_changes_out, list):
-                            lyric_fetch.save_flac_tags(
-                                f,
-                                fp,
-                                identity_change_out=change,
-                                directory_mutation_out=(tag_directory_mutation),
-                                parent_fd=parent_fd,
-                                parent_guard=parent_guard,
-                                expected_identity=track_identity,
-                                commit_guard=sidecar_guard,
-                            )
-                        else:
-                            lyric_fetch.save_flac_tags(
-                                f,
-                                fp,
-                                parent_fd=parent_fd,
-                                parent_guard=parent_guard,
-                                expected_identity=track_identity,
-                                commit_guard=sidecar_guard,
-                            )
-                        stripped += 1
-                except lyric_fetch.ReadOnlyTrack:
-                    strip_read_only += 1
-                except Exception as e:
-                    strip_failed += 1
-                    action = "wrote" if sidecar_written else "kept"
-                    log.info(
-                        fmt(
-                            C.YELLOW,
-                            f"  ⚠  lyrics: {action} "
-                            f"{fp.with_suffix('.lrc').name}, but couldn't "
-                            "remove embedded lyrics from "
-                            f"{fp.name}: {e}.",
-                        )
-                    )
-                finally:
-                    if sidecar_fd is not None:
-                        os.close(sidecar_fd)
-                    if (
-                        isinstance(identity_changes_out, list)
-                        and change.get("path") == os.path.abspath(os.fspath(fp))
-                        and _valid_file_identity(change.get("before"))
-                        and _valid_file_identity(change.get("after"))
-                        and change["before"] != change["after"]
-                    ):
-                        identity_changes_out.append(dict(change))
-                        directory_mutated = True
-                    if tag_directory_mutation.get("mutated") is True:
-                        directory_mutated = True
+            if self._write_sidecar() is _NEXT_TRACK:
+                return
+            if self.strip_tag:
+                self._strip_tag()
         finally:
             if (
-                isinstance(directory_changes_out, list)
-                and directory_mutated
-                and parent_identity is not None
+                isinstance(self.directory_changes_out, list)
+                and self.directory_mutated
+                and self.parent_identity is not None
             ):
                 try:
-                    after_parent = _directory_identity(os.fstat(parent_fd))
+                    after_parent = _directory_identity(os.fstat(self.parent_fd))
                     if (
                         after_parent is not None
-                        and parent_guard() is True
-                        and after_parent != parent_identity
+                        and self.parent_guard() is True
+                        and after_parent != self.parent_identity
                     ):
-                        directory_changes_out.append(
+                        self.directory_changes_out.append(
                             {
-                                "path": os.path.abspath(os.fspath(fp.parent)),
-                                "before": dict(parent_identity),
+                                "path": os.path.abspath(os.fspath(self.fp.parent)),
+                                "before": dict(self.parent_identity),
                                 "after": dict(after_parent),
                             }
                         )
                 except OSError:
                     pass
-            os.close(track_fd)
-    ready = written + kept
-    if ready or failed:
-        actions = []
-        if written:
-            actions.append(f"wrote {plural(written, '.lrc sidecar')}")
-        if kept:
-            actions.append(f"kept {plural(kept, 'existing .lrc sidecar')}")
-        if failed:
-            noun = "sidecar" if failed == 1 else "sidecars"
-            actions.append(f"{failed} {noun} failed")
-        suffix = ""
-        if strip_tag and ready:
-            suffix = (
-                " (embedded tags removed)"
-                if stripped == ready
-                else f" (embedded tag removal confirmed for {stripped} of {ready})"
+            os.close(self.track_fd)
+
+    def _open_track(self):
+        self.track_fd = None
+        self.parent_identity = None
+        self.directory_mutated = False
+        try:
+            self.parent_identity = _directory_identity(os.fstat(self.parent_fd))
+            if self.parent_identity is None:
+                raise OSError("track parent is not a directory")
+            track_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            self.track_fd = os.open(self.fp.name, track_flags, dir_fd=self.parent_fd)
+            self.track_identity = _regular_file_identity(os.fstat(self.track_fd))
+            if (
+                self.track_identity is None
+                or (self.expected_track is not None and self.track_identity != self.expected_track)
+                or not _held_track_is_named(
+                    self.fp, self.parent_fd, self.track_fd, self.track_identity, self.parent_guard
+                )
+            ):
+                raise OSError("track identity changed")
+            self.f = lyric_fetch.FLAC(f"/proc/self/fd/{self.track_fd}")
+        except Exception as e:
+            vlog(f"sidecar: FLAC open failed {self.fp}: {e}")
+            self.failed += 1
+            if self.track_fd is not None:
+                os.close(self.track_fd)
+            return _NEXT_TRACK
+
+    def _track_guard(self):
+        return _held_track_is_named(
+            self.fp,
+            self.parent_fd,
+            self.track_fd,
+            self.track_identity,
+            self.parent_guard,
+        )
+
+    def _write_sidecar(self):
+        if (self.wanted is not None and self.expected_track is None
+                and rip._flac_signature(f"/proc/self/fd/{self.track_fd}") not in self.wanted):
+            return _NEXT_TRACK
+        content = lyric_fetch.get_existing_lyrics(self.f)
+        if not content or not content.strip():
+            return _NEXT_TRACK
+        if not _held_track_is_named(
+            self.fp, self.parent_fd, self.track_fd, self.track_identity, self.parent_guard
+        ):
+            vlog(f"sidecar: track changed before write {self.fp}")
+            self.failed += 1
+            return _NEXT_TRACK
+        creation = {}
+        self.sidecar_identity_receipt = {}
+        sidecar_directory_mutation = {}
+        sidecar_error = None
+        try:
+            if isinstance(self.created_files_out, list):
+                self.sidecar_written = lyric_fetch.write_sidecar(
+                    self.fp,
+                    content,
+                    creation_out=creation,
+                    directory_mutation_out=sidecar_directory_mutation,
+                    parent_fd=self.parent_fd,
+                    parent_guard=self.parent_guard,
+                    track_guard=self._track_guard,
+                    sidecar_identity_out=self.sidecar_identity_receipt,
+                )
+            else:
+                self.sidecar_written = lyric_fetch.write_sidecar(
+                    self.fp,
+                    content,
+                    parent_fd=self.parent_fd,
+                    parent_guard=self.parent_guard,
+                    track_guard=self._track_guard,
+                    sidecar_identity_out=self.sidecar_identity_receipt,
+                )
+        except OSError as e:
+            sidecar_error = e
+        finally:
+            track_unchanged = _held_track_is_named(
+                self.fp, self.parent_fd, self.track_fd, self.track_identity, self.parent_guard
             )
-            if strip_failed:
-                noun = "removal" if strip_failed == 1 else "removals"
-                suffix += f"; {strip_failed} tag {noun} failed"
-            if strip_read_only:
-                suffix += (f"; {plural(strip_read_only, 'track')} read-only, "
-                           "so the lyrics stay in the tag too")
-        warning = bool(failed or strip_failed)
-        marker = "⚠" if warning else "✓"
-        colour = C.YELLOW if warning else C.GREEN
-        log.info(fmt(colour, f"  {marker}  lyrics: {'; '.join(actions)}{suffix}."))
+            created = _created_sidecar_receipt(
+                self.fp, self.parent_fd, self.track_identity, creation
+            )
+            if isinstance(self.created_files_out, list) and track_unchanged and created is not None:
+                self.created_files_out.append(created)
+                # Publication completed even if the following parent
+                # fsync reported an error. Carry the exact directory
+                # identity forward so Undo remains bound to the file
+                # that actually landed.
+                self.directory_mutated = True
+            if sidecar_directory_mutation.get("mutated") is True:
+                self.directory_mutated = True
+        if sidecar_error is not None:
+            vlog(f"sidecar: write failed {self.fp}: {sidecar_error}")
+            self.failed += 1
+            return _NEXT_TRACK
+        if not track_unchanged:
+            vlog(f"sidecar: track changed during write {self.fp}")
+            self.failed += 1
+            return _NEXT_TRACK
+        if self.sidecar_written:
+            self.written += 1
+            self.directory_mutated = True
+        else:
+            self.kept += 1
+
+    def _strip_tag(self):
+        change = {}
+        tag_directory_mutation = {}
+        self.sidecar_fd = None
+        try:
+            self._open_sidecar()
+
+            def sidecar_guard(
+                sidecar=self.sidecar,
+                sidecar_fd=self.sidecar_fd,
+                sidecar_identity=self.sidecar_identity,
+                parent_fd=self.parent_fd,
+                parent_guard=self.parent_guard,
+            ):
+                return _held_track_is_named(
+                    sidecar,
+                    parent_fd,
+                    sidecar_fd,
+                    sidecar_identity,
+                    parent_guard,
+                )
+
+            preserved = lyric_fetch._read_bound_sidecar(
+                self.fp, self.parent_fd, self.parent_guard, self._track_guard)
+            if preserved is None or any(
+                    value.strip() != preserved.strip()
+                    for value in lyric_fetch.embedded_lyric_values(self.f)):
+                return
+            had = False
+            for _k in ("lyrics", "unsyncedlyrics"):
+                if _k in self.f.tags:
+                    del self.f.tags[_k]
+                    had = True
+            if had:
+                if not _held_track_is_named(
+                    self.fp, self.parent_fd, self.track_fd, self.track_identity, self.parent_guard
+                ):
+                    raise OSError("track changed before tag rewrite")
+                if isinstance(self.identity_changes_out, list):
+                    lyric_fetch.save_flac_tags(
+                        self.f,
+                        self.fp,
+                        identity_change_out=change,
+                        directory_mutation_out=(tag_directory_mutation),
+                        parent_fd=self.parent_fd,
+                        parent_guard=self.parent_guard,
+                        expected_identity=self.track_identity,
+                        commit_guard=sidecar_guard,
+                    )
+                else:
+                    lyric_fetch.save_flac_tags(
+                        self.f,
+                        self.fp,
+                        parent_fd=self.parent_fd,
+                        parent_guard=self.parent_guard,
+                        expected_identity=self.track_identity,
+                        commit_guard=sidecar_guard,
+                    )
+                self.stripped += 1
+        except lyric_fetch.ReadOnlyTrack:
+            self.strip_read_only += 1
+        except Exception as e:
+            self.strip_failed += 1
+            action = "wrote" if self.sidecar_written else "kept"
+            log.info(
+                fmt(
+                    C.YELLOW,
+                    f"  ⚠  lyrics: {action} "
+                    f"{self.fp.with_suffix('.lrc').name}, but couldn't "
+                    "remove embedded lyrics from "
+                    f"{self.fp.name}: {e}.",
+                )
+            )
+        finally:
+            if self.sidecar_fd is not None:
+                os.close(self.sidecar_fd)
+            if (
+                isinstance(self.identity_changes_out, list)
+                and change.get("path") == os.path.abspath(os.fspath(self.fp))
+                and _valid_file_identity(change.get("before"))
+                and _valid_file_identity(change.get("after"))
+                and change["before"] != change["after"]
+            ):
+                self.identity_changes_out.append(dict(change))
+                self.directory_mutated = True
+            if tag_directory_mutation.get("mutated") is True:
+                self.directory_mutated = True
+
+    def _open_sidecar(self):
+        self.sidecar = self.fp.with_suffix(".lrc")
+        self.sidecar_identity = _sidecar_identity_from_receipt(
+            self.fp, self.sidecar_identity_receipt
+        )
+        if self.sidecar_identity is None:
+            raise OSError(
+                f"{self.sidecar.name}: final sidecar identity wasn't proved"
+            )
+        sidecar_flags = (
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        self.sidecar_fd = os.open(self.sidecar.name, sidecar_flags, dir_fd=self.parent_fd)
+        if not _held_track_is_named(
+            self.sidecar,
+            self.parent_fd,
+            self.sidecar_fd,
+            self.sidecar_identity,
+            self.parent_guard,
+        ):
+            raise OSError(f"{self.sidecar.name}: sidecar changed before tag strip")
+
+    def _report(self):
+        ready = self.written + self.kept
+        if ready or self.failed:
+            actions = []
+            if self.written:
+                actions.append(f"wrote {plural(self.written, '.lrc sidecar')}")
+            if self.kept:
+                actions.append(f"kept {plural(self.kept, 'existing .lrc sidecar')}")
+            if self.failed:
+                noun = "sidecar" if self.failed == 1 else "sidecars"
+                actions.append(f"{self.failed} {noun} failed")
+            suffix = ""
+            if self.strip_tag and ready:
+                suffix = (
+                    " (embedded tags removed)"
+                    if self.stripped == ready
+                    else f" (embedded tag removal confirmed for {self.stripped} of {ready})"
+                )
+                if self.strip_failed:
+                    noun = "removal" if self.strip_failed == 1 else "removals"
+                    suffix += f"; {self.strip_failed} tag {noun} failed"
+                if self.strip_read_only:
+                    suffix += (f"; {plural(self.strip_read_only, 'track')} read-only, "
+                               "so the lyrics stay in the tag too")
+            warning = bool(self.failed or self.strip_failed)
+            marker = "⚠" if warning else "✓"
+            colour = C.YELLOW if warning else C.GREEN
+            log.info(fmt(colour, f"  {marker}  lyrics: {'; '.join(actions)}{suffix}."))
 
 
 def _prune_lyric_state_orphans():

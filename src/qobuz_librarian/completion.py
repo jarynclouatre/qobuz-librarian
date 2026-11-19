@@ -1037,6 +1037,398 @@ def _failure(reason):
     return CompletionAssessment(failure=reason)
 
 
+class _Assessment:
+    """One completion assessment, checking each input in turn."""
+
+    def __init__(
+        self,
+        owner,
+        expectation,
+        download,
+        managed,
+        landings,
+        quality,
+        baseline,
+        inventory,
+    ):
+        self.owner = owner
+        self.expectation = expectation
+        self.download = download
+        self.managed = managed
+        self.landings = landings
+        self.quality = quality
+        self.baseline = baseline
+        self.inventory = inventory
+
+    def run(self):
+        for step in (
+            self._check_expectation,
+            self._check_download,
+            self._check_managed,
+            self._check_landings,
+            self._check_baseline,
+            self._check_inventory,
+            self._check_quality,
+        ):
+            failure = step()
+            if failure is not None:
+                return failure
+        return self._evidence()
+
+    def _check_expectation(self):
+        if (
+            not _valid_owner(self.owner)
+            or type(self.expectation) is not CompletionExpectation
+            or type(self.expectation.scope) is not CompletionScope
+            or normalise_album_id(self.expectation.album_id) != self.expectation.album_id
+            or type(self.expectation.quality_targets) is not tuple
+            or not all(
+                type(target) is QualityTarget
+                for target in self.expectation.quality_targets
+            )
+        ):
+            return _failure(CompletionFailure.MALFORMED)
+        if (
+            not authoritative_slots(self.expectation.catalogue_slots)
+            or not authoritative_slots(self.expectation.requested_slots)
+            or type(self.expectation.baseline_slots) is not tuple
+            or (
+                self.expectation.baseline_slots
+                and not authoritative_slots(self.expectation.baseline_slots)
+            )
+            or len({
+                target.slot for target in self.expectation.quality_targets
+            }) != len(self.expectation.quality_targets)
+            or not all(
+                authoritative_slot(target.slot)
+                for target in self.expectation.quality_targets
+            )
+        ):
+            return _failure(CompletionFailure.AMBIGUOUS_SLOT)
+        if any(
+            type(value) is not int or value <= 0
+            for target in self.expectation.quality_targets
+            for value in (target.bits, target.rate)
+        ):
+            return _failure(CompletionFailure.MALFORMED)
+
+        self.catalogue = set(self.expectation.catalogue_slots)
+        self.requested = set(self.expectation.requested_slots)
+        self.baseline_slots = set(self.expectation.baseline_slots)
+        if (
+            not self.requested <= self.catalogue
+            or not self.baseline_slots <= self.catalogue
+            or self.requested & self.baseline_slots
+            or self.expectation.requested_slots != tuple(
+                slot for slot in self.expectation.catalogue_slots if slot in self.requested)
+            or self.expectation.baseline_slots != tuple(
+                slot
+                for slot in self.expectation.catalogue_slots
+                if slot in self.baseline_slots
+            )
+        ):
+            return _failure(CompletionFailure.SCOPE_MISMATCH)
+        if (
+            self.expectation.scope is CompletionScope.ALBUM
+            and self.requested | self.baseline_slots != self.catalogue
+        ):
+            return _failure(CompletionFailure.SCOPE_MISMATCH)
+        self.quality_slots = (
+            self.catalogue
+            if self.expectation.scope is CompletionScope.ALBUM
+            else self.requested
+        )
+        self.targets_by_slot = {
+            target.slot: target for target in self.expectation.quality_targets
+        }
+        if (
+            set(self.targets_by_slot) != self.quality_slots
+            or tuple(target.slot for target in self.expectation.quality_targets)
+            != tuple(
+                slot
+                for slot in self.expectation.catalogue_slots
+                if slot in self.quality_slots
+            )
+        ):
+            return _failure(CompletionFailure.QUALITY_MISMATCH)
+
+    def _check_download(self):
+        if (
+            type(self.download) is not DownloadCoverage
+            or self.download.album_id != self.expectation.album_id
+            or self.download.catalogue_slots != self.expectation.catalogue_slots
+            or self.download.requested_slots != self.expectation.requested_slots
+            or type(self.download.bindings) is not tuple
+            or not _valid_counts(self.download.counts)
+        ):
+            return _failure(CompletionFailure.DOWNLOAD_INCOMPLETE)
+        if self.download.counts.any_nonzero():
+            return _failure(CompletionFailure.DOWNLOAD_REMAINDER)
+
+        self.staged_by_slot = {}
+        staged_paths = set()
+        staged_nodes = set()
+        for binding in self.download.bindings:
+            if (
+                type(binding) is not StagedBinding
+                or not authoritative_slot(binding.slot)
+                or not _valid_absolute_path(binding.path)
+                or not _valid_identity(binding.identity, 6)
+                or binding.slot in self.staged_by_slot
+                or binding.path in staged_paths
+                or binding.identity[:2] in staged_nodes
+            ):
+                return _failure(CompletionFailure.DOWNLOAD_INCOMPLETE)
+            self.staged_by_slot[binding.slot] = binding
+            staged_paths.add(binding.path)
+            staged_nodes.add(binding.identity[:2])
+        if set(self.staged_by_slot) != self.requested:
+            return _failure(CompletionFailure.DOWNLOAD_INCOMPLETE)
+
+    def _check_managed(self):
+        if type(self.managed) is not ManagedImportEvidence:
+            return _failure(CompletionFailure.MANAGED_IMPORT_REQUIRED)
+        if self.managed.owner != self.owner:
+            return _failure(CompletionFailure.OWNER_MISMATCH)
+        if (
+            not _valid_absolute_path(self.managed.library_root)
+            or not _valid_identity(self.managed.library_root_identity, 5)
+            or not _valid_relative_path(self.managed.album_path)
+            or not _valid_identity(self.managed.album_identity, 5)
+            or not _valid_hash(self.managed.manifest_hash)
+            or type(self.managed.mappings) is not tuple
+        ):
+            return _failure(CompletionFailure.MALFORMED)
+
+        self.mappings_by_slot = {}
+        source_paths = set()
+        source_nodes = set()
+        destination_paths = set()
+        destination_nodes = set()
+        for mapping in self.managed.mappings:
+            if (
+                type(mapping) is not ManagedMapping
+                or not authoritative_slot(mapping.slot)
+                or not _valid_absolute_path(mapping.source_path)
+                or not _valid_identity(mapping.source_identity, 6)
+                or not _valid_relative_path(mapping.destination_path)
+                or not _valid_identity(mapping.destination_identity, 5)
+                or mapping.slot in self.mappings_by_slot
+                or mapping.source_path in source_paths
+                or mapping.source_identity[:2] in source_nodes
+                or mapping.destination_path in destination_paths
+                or mapping.destination_identity[:2] in destination_nodes
+            ):
+                return _failure(CompletionFailure.SOURCE_MISMATCH)
+            self.mappings_by_slot[mapping.slot] = mapping
+            source_paths.add(mapping.source_path)
+            source_nodes.add(mapping.source_identity[:2])
+            destination_paths.add(mapping.destination_path)
+            destination_nodes.add(mapping.destination_identity[:2])
+        if set(self.mappings_by_slot) != self.requested:
+            return _failure(CompletionFailure.SOURCE_MISMATCH)
+        album_parts = PurePosixPath(self.managed.album_path).parts
+        if any(
+            len(parts := PurePosixPath(mapping.destination_path).parts)
+            <= len(album_parts)
+            or parts[:len(album_parts)] != album_parts
+            for mapping in self.mappings_by_slot.values()
+        ):
+            return _failure(CompletionFailure.DESTINATION_MISMATCH)
+        for slot, binding in self.staged_by_slot.items():
+            mapping = self.mappings_by_slot[slot]
+            if (
+                mapping.source_path != binding.path
+                or mapping.source_identity != binding.identity
+            ):
+                return _failure(CompletionFailure.SOURCE_MISMATCH)
+
+    def _check_landings(self):
+        if type(self.landings) is not tuple:
+            return _failure(CompletionFailure.DESTINATION_MISMATCH)
+        self.landing_by_slot = {}
+        self.landing_paths = set()
+        self.landing_nodes = set()
+        for receipt in self.landings:
+            if (
+                type(receipt) is not LandingReceipt
+                or not authoritative_slot(receipt.slot)
+                or not _valid_relative_path(receipt.path)
+                or not _valid_identity(receipt.identity, 5)
+                or not _valid_hash(receipt.sha256)
+                or receipt.slot in self.landing_by_slot
+                or receipt.path in self.landing_paths
+                or receipt.identity[:2] in self.landing_nodes
+            ):
+                return _failure(CompletionFailure.DESTINATION_MISMATCH)
+            self.landing_by_slot[receipt.slot] = receipt
+            self.landing_paths.add(receipt.path)
+            self.landing_nodes.add(receipt.identity[:2])
+        if set(self.landing_by_slot) != self.requested:
+            return _failure(CompletionFailure.DESTINATION_MISMATCH)
+        for slot, mapping in self.mappings_by_slot.items():
+            receipt = self.landing_by_slot[slot]
+            if (
+                receipt.path != mapping.destination_path
+                or receipt.identity != mapping.destination_identity
+            ):
+                return _failure(CompletionFailure.DESTINATION_MISMATCH)
+
+    def _check_baseline(self):
+        if type(self.baseline) is not tuple:
+            return _failure(CompletionFailure.BASELINE_MISMATCH)
+        self.baseline_by_slot = {}
+        baseline_paths = set()
+        baseline_nodes = set()
+        for receipt in self.baseline:
+            if (
+                type(receipt) is not BaselineReceipt
+                or not authoritative_slot(receipt.slot)
+                or not _valid_relative_path(receipt.path)
+                or not _valid_identity(receipt.identity, 5)
+                or not _valid_hash(receipt.sha256)
+                or receipt.slot in self.baseline_by_slot
+                or receipt.path in baseline_paths
+                or receipt.identity[:2] in baseline_nodes
+                or receipt.path in self.landing_paths
+                or receipt.identity[:2] in self.landing_nodes
+            ):
+                return _failure(CompletionFailure.BASELINE_MISMATCH)
+            self.baseline_by_slot[receipt.slot] = receipt
+            baseline_paths.add(receipt.path)
+            baseline_nodes.add(receipt.identity[:2])
+        if set(self.baseline_by_slot) != self.baseline_slots:
+            return _failure(CompletionFailure.BASELINE_MISMATCH)
+
+    def _check_inventory(self):
+        inventory_required = (
+            self.expectation.scope is CompletionScope.ALBUM or bool(self.baseline_slots)
+        )
+        self.canonical_inventory = None
+        if self.inventory is None:
+            if inventory_required:
+                return _failure(CompletionFailure.INVENTORY_MISMATCH)
+        else:
+            if (
+                type(self.inventory) is not AlbumInventory
+                or not _valid_relative_path(self.inventory.path)
+                or not _valid_identity(self.inventory.identity, 5)
+                or type(self.inventory.audio) is not tuple
+                or self.inventory.path != self.managed.album_path
+                or self.inventory.identity != self.managed.album_identity
+            ):
+                return _failure(CompletionFailure.INVENTORY_MISMATCH)
+            inventory_by_slot = {}
+            inventory_paths = set()
+            inventory_nodes = set()
+            album_parts = PurePosixPath(self.inventory.path).parts
+            for receipt in self.inventory.audio:
+                if (
+                    type(receipt) not in (LandingReceipt, BaselineReceipt)
+                    or not authoritative_slot(receipt.slot)
+                    or not _valid_relative_path(receipt.path)
+                    or not _valid_identity(receipt.identity, 5)
+                    or not _valid_hash(receipt.sha256)
+                    or receipt.slot in inventory_by_slot
+                    or receipt.path in inventory_paths
+                    or receipt.identity[:2] in inventory_nodes
+                ):
+                    return _failure(CompletionFailure.INVENTORY_MISMATCH)
+                receipt_parts = PurePosixPath(receipt.path).parts
+                if (
+                    len(receipt_parts) <= len(album_parts)
+                    or receipt_parts[:len(album_parts)] != album_parts
+                ):
+                    return _failure(CompletionFailure.INVENTORY_MISMATCH)
+                inventory_by_slot[receipt.slot] = receipt
+                inventory_paths.add(receipt.path)
+                inventory_nodes.add(receipt.identity[:2])
+            expected_inventory = {**self.baseline_by_slot, **self.landing_by_slot}
+            if set(inventory_by_slot) != self.requested | self.baseline_slots:
+                return _failure(CompletionFailure.INVENTORY_MISMATCH)
+            for slot, receipt in inventory_by_slot.items():
+                expected = expected_inventory[slot]
+                if (
+                    type(receipt) is not type(expected)
+                    or receipt.path != expected.path
+                    or receipt.identity != expected.identity
+                    or receipt.sha256 != expected.sha256
+                ):
+                    return _failure(CompletionFailure.INVENTORY_MISMATCH)
+            inventory_order = [
+                slot for slot in self.expectation.catalogue_slots
+                if slot in self.requested | self.baseline_slots
+            ]
+            self.canonical_inventory = AlbumInventory(
+                path=self.inventory.path,
+                identity=self.inventory.identity,
+                audio=tuple(inventory_by_slot[slot] for slot in inventory_order),
+            )
+
+    def _check_quality(self):
+        if type(self.quality) is not tuple:
+            return _failure(CompletionFailure.QUALITY_MISMATCH)
+        self.quality_by_slot = {}
+        for value in self.quality:
+            if (
+                type(value) is not TrackQuality
+                or not authoritative_slot(value.slot)
+                or value.slot in self.quality_by_slot
+                or not _valid_relative_path(value.path)
+                or not _valid_identity(value.identity, 5)
+                or not _valid_hash(value.sha256)
+                or any(
+                    type(part) is not int or part <= 0
+                    for part in (
+                        value.served_bits,
+                        value.served_rate,
+                    )
+                )
+            ):
+                return _failure(CompletionFailure.QUALITY_MISMATCH)
+            self.quality_by_slot[value.slot] = value
+        if set(self.quality_by_slot) != self.quality_slots:
+            return _failure(CompletionFailure.QUALITY_MISMATCH)
+        destinations_by_slot = {**self.baseline_by_slot, **self.landing_by_slot}
+        for slot, value in self.quality_by_slot.items():
+            receipt = destinations_by_slot[slot]
+            if (
+                value.path != receipt.path
+                or value.identity != receipt.identity
+                or value.sha256 != receipt.sha256
+                or value.served_bits < self.targets_by_slot[slot].bits
+                or value.served_rate < self.targets_by_slot[slot].rate
+            ):
+                return _failure(CompletionFailure.QUALITY_MISMATCH)
+
+    def _evidence(self):
+        requested_order = [
+            slot for slot in self.expectation.catalogue_slots if slot in self.requested
+        ]
+        baseline_order = [
+            slot for slot in self.expectation.catalogue_slots if slot in self.baseline_slots
+        ]
+        quality_order = [
+            slot for slot in self.expectation.catalogue_slots if slot in self.quality_slots
+        ]
+        evidence = CompletionEvidence(
+            owner=self.owner,
+            expectation=self.expectation,
+            library_root=self.managed.library_root,
+            library_root_identity=self.managed.library_root_identity,
+            album_path=self.managed.album_path,
+            album_identity=self.managed.album_identity,
+            managed_manifest_hash=self.managed.manifest_hash,
+            imports=tuple(self.mappings_by_slot[slot] for slot in requested_order),
+            landings=tuple(self.landing_by_slot[slot] for slot in requested_order),
+            baseline=tuple(self.baseline_by_slot[slot] for slot in baseline_order),
+            inventory=self.canonical_inventory,
+            quality=tuple(self.quality_by_slot[slot] for slot in quality_order),
+            counts=self.download.counts,
+        )
+        return CompletionAssessment(evidence=evidence)
+
+
 def assess_completion(
     *,
     owner: RecoveryOwner,
@@ -1049,346 +1441,13 @@ def assess_completion(
     inventory: AlbumInventory | None = None,
 ) -> CompletionAssessment:
     """Combine already live-validated inputs into one exact evidence record."""
-    if (
-        not _valid_owner(owner)
-        or type(expectation) is not CompletionExpectation
-        or type(expectation.scope) is not CompletionScope
-        or normalise_album_id(expectation.album_id) != expectation.album_id
-        or type(expectation.quality_targets) is not tuple
-        or not all(
-            type(target) is QualityTarget
-            for target in expectation.quality_targets
-        )
-    ):
-        return _failure(CompletionFailure.MALFORMED)
-    if (
-        not authoritative_slots(expectation.catalogue_slots)
-        or not authoritative_slots(expectation.requested_slots)
-        or type(expectation.baseline_slots) is not tuple
-        or (
-            expectation.baseline_slots
-            and not authoritative_slots(expectation.baseline_slots)
-        )
-        or len({
-            target.slot for target in expectation.quality_targets
-        }) != len(expectation.quality_targets)
-        or not all(
-            authoritative_slot(target.slot)
-            for target in expectation.quality_targets
-        )
-    ):
-        return _failure(CompletionFailure.AMBIGUOUS_SLOT)
-    if any(
-        type(value) is not int or value <= 0
-        for target in expectation.quality_targets
-        for value in (target.bits, target.rate)
-    ):
-        return _failure(CompletionFailure.MALFORMED)
-
-    catalogue = set(expectation.catalogue_slots)
-    requested = set(expectation.requested_slots)
-    baseline_slots = set(expectation.baseline_slots)
-    if (
-        not requested <= catalogue
-        or not baseline_slots <= catalogue
-        or requested & baseline_slots
-        or expectation.requested_slots != tuple(
-            slot for slot in expectation.catalogue_slots if slot in requested)
-        or expectation.baseline_slots != tuple(
-            slot
-            for slot in expectation.catalogue_slots
-            if slot in baseline_slots
-        )
-    ):
-        return _failure(CompletionFailure.SCOPE_MISMATCH)
-    if (
-        expectation.scope is CompletionScope.ALBUM
-        and requested | baseline_slots != catalogue
-    ):
-        return _failure(CompletionFailure.SCOPE_MISMATCH)
-    quality_slots = (
-        catalogue
-        if expectation.scope is CompletionScope.ALBUM
-        else requested
-    )
-    targets_by_slot = {
-        target.slot: target for target in expectation.quality_targets
-    }
-    if (
-        set(targets_by_slot) != quality_slots
-        or tuple(target.slot for target in expectation.quality_targets)
-        != tuple(
-            slot
-            for slot in expectation.catalogue_slots
-            if slot in quality_slots
-        )
-    ):
-        return _failure(CompletionFailure.QUALITY_MISMATCH)
-    if (
-        type(download) is not DownloadCoverage
-        or download.album_id != expectation.album_id
-        or download.catalogue_slots != expectation.catalogue_slots
-        or download.requested_slots != expectation.requested_slots
-        or type(download.bindings) is not tuple
-        or not _valid_counts(download.counts)
-    ):
-        return _failure(CompletionFailure.DOWNLOAD_INCOMPLETE)
-    if download.counts.any_nonzero():
-        return _failure(CompletionFailure.DOWNLOAD_REMAINDER)
-
-    staged_by_slot = {}
-    staged_paths = set()
-    staged_nodes = set()
-    for binding in download.bindings:
-        if (
-            type(binding) is not StagedBinding
-            or not authoritative_slot(binding.slot)
-            or not _valid_absolute_path(binding.path)
-            or not _valid_identity(binding.identity, 6)
-            or binding.slot in staged_by_slot
-            or binding.path in staged_paths
-            or binding.identity[:2] in staged_nodes
-        ):
-            return _failure(CompletionFailure.DOWNLOAD_INCOMPLETE)
-        staged_by_slot[binding.slot] = binding
-        staged_paths.add(binding.path)
-        staged_nodes.add(binding.identity[:2])
-    if set(staged_by_slot) != requested:
-        return _failure(CompletionFailure.DOWNLOAD_INCOMPLETE)
-
-    if type(managed) is not ManagedImportEvidence:
-        return _failure(CompletionFailure.MANAGED_IMPORT_REQUIRED)
-    if managed.owner != owner:
-        return _failure(CompletionFailure.OWNER_MISMATCH)
-    if (
-        not _valid_absolute_path(managed.library_root)
-        or not _valid_identity(managed.library_root_identity, 5)
-        or not _valid_relative_path(managed.album_path)
-        or not _valid_identity(managed.album_identity, 5)
-        or not _valid_hash(managed.manifest_hash)
-        or type(managed.mappings) is not tuple
-    ):
-        return _failure(CompletionFailure.MALFORMED)
-
-    mappings_by_slot = {}
-    source_paths = set()
-    source_nodes = set()
-    destination_paths = set()
-    destination_nodes = set()
-    for mapping in managed.mappings:
-        if (
-            type(mapping) is not ManagedMapping
-            or not authoritative_slot(mapping.slot)
-            or not _valid_absolute_path(mapping.source_path)
-            or not _valid_identity(mapping.source_identity, 6)
-            or not _valid_relative_path(mapping.destination_path)
-            or not _valid_identity(mapping.destination_identity, 5)
-            or mapping.slot in mappings_by_slot
-            or mapping.source_path in source_paths
-            or mapping.source_identity[:2] in source_nodes
-            or mapping.destination_path in destination_paths
-            or mapping.destination_identity[:2] in destination_nodes
-        ):
-            return _failure(CompletionFailure.SOURCE_MISMATCH)
-        mappings_by_slot[mapping.slot] = mapping
-        source_paths.add(mapping.source_path)
-        source_nodes.add(mapping.source_identity[:2])
-        destination_paths.add(mapping.destination_path)
-        destination_nodes.add(mapping.destination_identity[:2])
-    if set(mappings_by_slot) != requested:
-        return _failure(CompletionFailure.SOURCE_MISMATCH)
-    album_parts = PurePosixPath(managed.album_path).parts
-    if any(
-        len(parts := PurePosixPath(mapping.destination_path).parts)
-        <= len(album_parts)
-        or parts[:len(album_parts)] != album_parts
-        for mapping in mappings_by_slot.values()
-    ):
-        return _failure(CompletionFailure.DESTINATION_MISMATCH)
-    for slot, binding in staged_by_slot.items():
-        mapping = mappings_by_slot[slot]
-        if (
-            mapping.source_path != binding.path
-            or mapping.source_identity != binding.identity
-        ):
-            return _failure(CompletionFailure.SOURCE_MISMATCH)
-
-    if type(landings) is not tuple:
-        return _failure(CompletionFailure.DESTINATION_MISMATCH)
-    landing_by_slot = {}
-    landing_paths = set()
-    landing_nodes = set()
-    for receipt in landings:
-        if (
-            type(receipt) is not LandingReceipt
-            or not authoritative_slot(receipt.slot)
-            or not _valid_relative_path(receipt.path)
-            or not _valid_identity(receipt.identity, 5)
-            or not _valid_hash(receipt.sha256)
-            or receipt.slot in landing_by_slot
-            or receipt.path in landing_paths
-            or receipt.identity[:2] in landing_nodes
-        ):
-            return _failure(CompletionFailure.DESTINATION_MISMATCH)
-        landing_by_slot[receipt.slot] = receipt
-        landing_paths.add(receipt.path)
-        landing_nodes.add(receipt.identity[:2])
-    if set(landing_by_slot) != requested:
-        return _failure(CompletionFailure.DESTINATION_MISMATCH)
-    for slot, mapping in mappings_by_slot.items():
-        receipt = landing_by_slot[slot]
-        if (
-            receipt.path != mapping.destination_path
-            or receipt.identity != mapping.destination_identity
-        ):
-            return _failure(CompletionFailure.DESTINATION_MISMATCH)
-
-    if type(baseline) is not tuple:
-        return _failure(CompletionFailure.BASELINE_MISMATCH)
-    baseline_by_slot = {}
-    baseline_paths = set()
-    baseline_nodes = set()
-    for receipt in baseline:
-        if (
-            type(receipt) is not BaselineReceipt
-            or not authoritative_slot(receipt.slot)
-            or not _valid_relative_path(receipt.path)
-            or not _valid_identity(receipt.identity, 5)
-            or not _valid_hash(receipt.sha256)
-            or receipt.slot in baseline_by_slot
-            or receipt.path in baseline_paths
-            or receipt.identity[:2] in baseline_nodes
-            or receipt.path in landing_paths
-            or receipt.identity[:2] in landing_nodes
-        ):
-            return _failure(CompletionFailure.BASELINE_MISMATCH)
-        baseline_by_slot[receipt.slot] = receipt
-        baseline_paths.add(receipt.path)
-        baseline_nodes.add(receipt.identity[:2])
-    if set(baseline_by_slot) != baseline_slots:
-        return _failure(CompletionFailure.BASELINE_MISMATCH)
-
-    inventory_required = (
-        expectation.scope is CompletionScope.ALBUM or bool(baseline_slots)
-    )
-    canonical_inventory = None
-    if inventory is None:
-        if inventory_required:
-            return _failure(CompletionFailure.INVENTORY_MISMATCH)
-    else:
-        if (
-            type(inventory) is not AlbumInventory
-            or not _valid_relative_path(inventory.path)
-            or not _valid_identity(inventory.identity, 5)
-            or type(inventory.audio) is not tuple
-            or inventory.path != managed.album_path
-            or inventory.identity != managed.album_identity
-        ):
-            return _failure(CompletionFailure.INVENTORY_MISMATCH)
-        inventory_by_slot = {}
-        inventory_paths = set()
-        inventory_nodes = set()
-        album_parts = PurePosixPath(inventory.path).parts
-        for receipt in inventory.audio:
-            if (
-                type(receipt) not in (LandingReceipt, BaselineReceipt)
-                or not authoritative_slot(receipt.slot)
-                or not _valid_relative_path(receipt.path)
-                or not _valid_identity(receipt.identity, 5)
-                or not _valid_hash(receipt.sha256)
-                or receipt.slot in inventory_by_slot
-                or receipt.path in inventory_paths
-                or receipt.identity[:2] in inventory_nodes
-            ):
-                return _failure(CompletionFailure.INVENTORY_MISMATCH)
-            receipt_parts = PurePosixPath(receipt.path).parts
-            if (
-                len(receipt_parts) <= len(album_parts)
-                or receipt_parts[:len(album_parts)] != album_parts
-            ):
-                return _failure(CompletionFailure.INVENTORY_MISMATCH)
-            inventory_by_slot[receipt.slot] = receipt
-            inventory_paths.add(receipt.path)
-            inventory_nodes.add(receipt.identity[:2])
-        expected_inventory = {**baseline_by_slot, **landing_by_slot}
-        if set(inventory_by_slot) != requested | baseline_slots:
-            return _failure(CompletionFailure.INVENTORY_MISMATCH)
-        for slot, receipt in inventory_by_slot.items():
-            expected = expected_inventory[slot]
-            if (
-                type(receipt) is not type(expected)
-                or receipt.path != expected.path
-                or receipt.identity != expected.identity
-                or receipt.sha256 != expected.sha256
-            ):
-                return _failure(CompletionFailure.INVENTORY_MISMATCH)
-        inventory_order = [
-            slot for slot in expectation.catalogue_slots
-            if slot in requested | baseline_slots
-        ]
-        canonical_inventory = AlbumInventory(
-            path=inventory.path,
-            identity=inventory.identity,
-            audio=tuple(inventory_by_slot[slot] for slot in inventory_order),
-        )
-
-    if type(quality) is not tuple:
-        return _failure(CompletionFailure.QUALITY_MISMATCH)
-    quality_by_slot = {}
-    for value in quality:
-        if (
-            type(value) is not TrackQuality
-            or not authoritative_slot(value.slot)
-            or value.slot in quality_by_slot
-            or not _valid_relative_path(value.path)
-            or not _valid_identity(value.identity, 5)
-            or not _valid_hash(value.sha256)
-            or any(
-                type(part) is not int or part <= 0
-                for part in (
-                    value.served_bits,
-                    value.served_rate,
-                )
-            )
-        ):
-            return _failure(CompletionFailure.QUALITY_MISMATCH)
-        quality_by_slot[value.slot] = value
-    if set(quality_by_slot) != quality_slots:
-        return _failure(CompletionFailure.QUALITY_MISMATCH)
-    destinations_by_slot = {**baseline_by_slot, **landing_by_slot}
-    for slot, value in quality_by_slot.items():
-        receipt = destinations_by_slot[slot]
-        if (
-            value.path != receipt.path
-            or value.identity != receipt.identity
-            or value.sha256 != receipt.sha256
-            or value.served_bits < targets_by_slot[slot].bits
-            or value.served_rate < targets_by_slot[slot].rate
-        ):
-            return _failure(CompletionFailure.QUALITY_MISMATCH)
-
-    requested_order = [
-        slot for slot in expectation.catalogue_slots if slot in requested
-    ]
-    baseline_order = [
-        slot for slot in expectation.catalogue_slots if slot in baseline_slots
-    ]
-    quality_order = [
-        slot for slot in expectation.catalogue_slots if slot in quality_slots
-    ]
-    evidence = CompletionEvidence(
-        owner=owner,
-        expectation=expectation,
-        library_root=managed.library_root,
-        library_root_identity=managed.library_root_identity,
-        album_path=managed.album_path,
-        album_identity=managed.album_identity,
-        managed_manifest_hash=managed.manifest_hash,
-        imports=tuple(mappings_by_slot[slot] for slot in requested_order),
-        landings=tuple(landing_by_slot[slot] for slot in requested_order),
-        baseline=tuple(baseline_by_slot[slot] for slot in baseline_order),
-        inventory=canonical_inventory,
-        quality=tuple(quality_by_slot[slot] for slot in quality_order),
-        counts=download.counts,
-    )
-    return CompletionAssessment(evidence=evidence)
+    return _Assessment(
+        owner,
+        expectation,
+        download,
+        managed,
+        landings,
+        quality,
+        baseline,
+        inventory,
+    ).run()

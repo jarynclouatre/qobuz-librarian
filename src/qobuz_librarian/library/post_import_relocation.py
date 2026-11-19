@@ -2946,304 +2946,383 @@ def relocate_post_import_album(
     expected=None,
 ) -> RelocationResult:
     """Copy, publish, and commit one additive post-import relocation."""
-    _require_authority(authority)
-    if not isinstance(kind, RelocationKind):
-        raise ValueError("relocation kind is invalid")
-    if type(await_handoff) is not bool:
-        raise ValueError("relocation handoff mode is invalid")
-    if type(retain_completion) is not bool:
-        raise ValueError("relocation retained completion mode is invalid")
-    if retain_completion and not await_handoff:
-        raise ValueError("retained completion requires a deferred handoff")
-    root, source_path, source_parts = _absolute_album_path(source)
-    destination_root, destination_path, destination_parts = _absolute_album_path(
-        destination
-    )
-    if root != destination_root or source_path == destination_path:
-        raise ValueError("relocation source and destination are invalid")
-    canonical_expected = None
-    if expected is not None:
-        canonical_expected = canonical_post_import_relocation_expectation(
-            expected,
-            source=source_path,
-            destination=destination_path,
-        )
-        if canonical_expected is None:
-            raise ValueError("relocation expectation is invalid")
-    recovery = reconcile_post_import_relocations(authority=authority)
-    if recovery.status is not RelocationRecoveryStatus.CLEAR:
-        raise PostImportRelocationAttention(
-            recovery.reason or "a previous album relocation needs attention",
-            paths=recovery.paths,
-        )
+    return _Relocation(
+        source,
+        destination,
+        kind=kind,
+        authority=authority,
+        await_handoff=await_handoff,
+        retain_completion=retain_completion,
+        expected=expected,
+    ).run()
 
-    with _THREAD_LOCK:
-        root_fd = source_fd = destination_fd = None
-        root_owner = None
-        source_chain = destination_chain = []
+
+class _Relocation:
+    """One additive post-import relocation, phase by phase."""
+
+    def __init__(
+        self,
+        source,
+        destination,
+        *,
+        kind,
+        authority,
+        await_handoff,
+        retain_completion,
+        expected,
+    ):
+        self.source = source
+        self.destination = destination
+        self.kind = kind
+        self.authority = authority
+        self.await_handoff = await_handoff
+        self.retain_completion = retain_completion
+        self.expected = expected
+
+    def run(self):
+        self._check_arguments()
+        self._reconcile()
+
+        with _THREAD_LOCK:
+            self.root_fd = self.source_fd = self.destination_fd = None
+            self.root_owner = None
+            self.source_chain = self.destination_chain = []
+            try:
+                self._open_source()
+                self._open_destination()
+                self._check_expectation()
+                result = self._plan_relocation()
+                if result is not None:
+                    return result
+                self._prepare_payload()
+                result = self._capture_rows()
+                if result is not None:
+                    return result
+                return self._run_locked()
+            finally:
+                _close_all(self.destination_chain)
+                _close_all(self.source_chain)
+                _close_all(self.root_owner)
+                scanner.clear_scan_caches()
+
+    def _check_arguments(self):
+        _require_authority(self.authority)
+        if not isinstance(self.kind, RelocationKind):
+            raise ValueError("relocation kind is invalid")
+        if type(self.await_handoff) is not bool:
+            raise ValueError("relocation handoff mode is invalid")
+        if type(self.retain_completion) is not bool:
+            raise ValueError("relocation retained completion mode is invalid")
+        if self.retain_completion and not self.await_handoff:
+            raise ValueError("retained completion requires a deferred handoff")
+        self.root, self.source_path, self.source_parts = _absolute_album_path(self.source)
+        destination_root, self.destination_path, self.destination_parts = _absolute_album_path(
+            self.destination
+        )
+        if self.root != destination_root or self.source_path == self.destination_path:
+            raise ValueError("relocation source and destination are invalid")
+        self.canonical_expected = None
+        if self.expected is not None:
+            self.canonical_expected = canonical_post_import_relocation_expectation(
+                self.expected,
+                source=self.source_path,
+                destination=self.destination_path,
+            )
+            if self.canonical_expected is None:
+                raise ValueError("relocation expectation is invalid")
+
+    def _reconcile(self):
+        recovery = reconcile_post_import_relocations(authority=self.authority)
+        if recovery.status is not RelocationRecoveryStatus.CLEAR:
+            raise PostImportRelocationAttention(
+                recovery.reason or "a previous album relocation needs attention",
+                paths=recovery.paths,
+            )
+
+    def _open_source(self):
+        self.root_fd, self.root_owner = _open_music_root(self.root)
+        self.source_fd, self.source_chain = _open_relative_directory(
+            self.root_fd, PurePosixPath(*self.source_parts).as_posix()
+        )
+        self.source_snapshot = _snapshot_tree(self.source_fd)
+        source_artist_fd = self.source_chain[0]
+        self.source_artist_record = _stat_record(os.fstat(source_artist_fd))
+
+    def _open_destination(self):
         try:
-            root_fd, root_owner = _open_music_root(root)
-            source_fd, source_chain = _open_relative_directory(
-                root_fd, PurePosixPath(*source_parts).as_posix()
+            self.destination_fd, self.destination_chain = _open_relative_directory(
+                self.root_fd, PurePosixPath(*self.destination_parts).as_posix()
             )
-            source_snapshot = _snapshot_tree(source_fd)
-            source_artist_fd = source_chain[0]
-            source_artist_record = _stat_record(os.fstat(source_artist_fd))
+        except FileNotFoundError:
+            self.destination_fd = None
+            self.destination_snapshot = None
+            artist = self.destination_parts[0]
             try:
-                destination_fd, destination_chain = _open_relative_directory(
-                    root_fd, PurePosixPath(*destination_parts).as_posix()
-                )
+                destination_artist_fd = _open_directory(artist, dir_fd=self.root_fd)
             except FileNotFoundError:
-                destination_fd = None
-                destination_snapshot = None
-                artist = destination_parts[0]
-                try:
-                    destination_artist_fd = _open_directory(artist, dir_fd=root_fd)
-                except FileNotFoundError:
-                    destination_artist_record = None
-                else:
-                    try:
-                        if not _named_matches(
-                            root_fd, artist, destination_artist_fd, directory=True
-                        ):
-                            raise OSError(
-                                "relocation destination artist changed during preflight"
-                            )
-                        destination_artist_record = _stat_record(
-                            os.fstat(destination_artist_fd)
-                        )
-                    finally:
-                        os.close(destination_artist_fd)
+                self.destination_artist_record = None
             else:
-                if _entry_identity(os.fstat(source_fd)) == _entry_identity(
-                    os.fstat(destination_fd)
-                ):
-                    raise PostImportRelocationUnavailable(
-                        errno.EINVAL,
-                        "relocation source and destination resolve to the same album folder",
-                    )
-                destination_snapshot = _snapshot_tree(destination_fd)
-                destination_artist_fd = destination_chain[0]
-                if not _named_matches(
-                    root_fd,
-                    destination_parts[0],
-                    destination_artist_fd,
-                    directory=True,
-                ):
-                    raise OSError(
-                        "relocation destination artist changed during preflight"
-                    )
-                destination_artist_record = _stat_record(
-                    os.fstat(destination_artist_fd)
-                )
-                if os.fstat(destination_fd).st_dev != os.fstat(root_fd).st_dev:
-                    raise OSError(errno.EXDEV, "relocation destination is on another filesystem")
-            if canonical_expected is not None:
-                current_expectation = _expectation_record(
-                    root,
-                    root_fd,
-                    source_path,
-                    source_artist_record,
-                    source_snapshot,
-                    destination_path,
-                    destination_artist_record,
-                    destination_snapshot,
-                )
-                if current_expectation != canonical_expected:
-                    raise PostImportRelocationUnavailable(
-                        errno.ESTALE,
-                        "relocation inputs changed since the filing action "
-                        "was recorded",
-                    )
-            plan = _build_plan(source_snapshot, destination_snapshot)
-            if kind is RelocationKind.WHOLE_ALBUM and plan["conflicts"]:
-                return RelocationResult(
-                    source_path,
-                    0,
-                    changed=False,
-                    reason="the destination contains conflicting names",
-                )
-            if not plan["selected_files"]:
-                return RelocationResult(
-                    (
-                        source_path
-                        if kind is RelocationKind.WHOLE_ALBUM
-                        else destination_path
-                    ),
-                    0,
-                    changed=False,
-                    reason=(
-                        "all destination names already exist"
-                        if plan["conflicts"] else "there is nothing to relocate"
-                    ),
-                )
-            _forget_vanished_destination_rows(
-                root,
-                _path_mapping(
-                    root,
-                    {
-                        "source": PurePosixPath(*source_parts).as_posix(),
-                        "destination": PurePosixPath(*destination_parts).as_posix(),
-                        "plan": plan,
-                    },
-                ),
-                destination_path,
-            )
-            operation_id = secrets.token_hex(32)
-            payload = {
-                "version": _JOURNAL_VERSION,
-                "operation_id": operation_id,
-                "phase": "intent",
-                "kind": kind.value,
-                "music_root": os.fspath(root),
-                "source": PurePosixPath(*source_parts).as_posix(),
-                "destination": PurePosixPath(*destination_parts).as_posix(),
-                "source_snapshot": source_snapshot,
-                "source_artist_record": source_artist_record,
-                "destination_artist_record": destination_artist_record,
-                "destination_snapshot": destination_snapshot,
-                "plan": plan,
-                "database_capture": None,
-                "workspace_record": None,
-                "copying_index": None,
-                "created_artist": None,
-                "public_snapshot": None,
-                "ownership_receipt": None,
-                "await_handoff": await_handoff,
-                "retain_completion": retain_completion,
-                "handoff": None,
-            }
-            initial_authority = lambda: (
-                _base_authority_matches(authority, root, root_fd, payload)
-                and (
-                    canonical_expected is None
-                    or _directory_identity_matches_fd(
-                        root_fd, canonical_expected["root_identity"]
-                    )
-                )
-            )
-            try:
-                payload["database_capture"] = _capture_database(
-                    root, payload, initial_authority
-                )
-            except sqlite3.IntegrityError as exc:
-                if kind is RelocationKind.WHOLE_ALBUM:
-                    return RelocationResult(
-                        source_path,
-                        0,
-                        changed=False,
-                        reason="some of its tracks are not in Beets",
-                    )
-                raise PostImportRelocationUnavailable(errno.EEXIST, str(exc)) from exc
-            if not initial_authority():
-                raise OSError("relocation inputs changed during preflight")
-
-            with _locked_namespace(create=True) as namespace_fd:
-                _write_journal(namespace_fd, payload, initial=True)
-                workspace_name, workspace_fd, workspace_record = _create_workspace(
-                    root_fd, operation_id
-                )
-                del workspace_name
-                payload["workspace_record"] = workspace_record
-                _write_journal(namespace_fd, payload)
-                committed = False
                 try:
-                    _prepare_units(source_fd, workspace_fd, payload, namespace_fd)
-                    payload["phase"] = "prepared"
-                    _write_journal(namespace_fd, payload)
-                    if not initial_authority():
-                        raise OSError("relocation inputs changed before publication")
-                    _ensure_destination_artist(root_fd, payload, namespace_fd)
-                    if not _source_snapshot_matches(root_fd, payload):
-                        raise OSError("relocation source changed before publication")
-                    _publish_units(root_fd, workspace_fd, payload)
-                    payload["public_snapshot"] = _destination_snapshot(
-                        root_fd, payload
-                    )
-                    payload["ownership_receipt"] = _build_ownership_receipt(
-                        root_fd, payload
-                    )
-                    payload["phase"] = "published"
-                    _write_journal(namespace_fd, payload)
-                    _checkpoint("after-filesystem-publication")
-                    authority_matches = lambda: _publication_authority_matches(
-                        authority,
-                        root_fd,
-                        namespace_fd,
-                        payload,
-                    )
-                    state = publish_relocation_rows(
-                        beets_db.path(),
-                        authority_matches,
-                        payload["database_capture"],
-                    )
-                    if state not in {DatabaseRowsState.NEW, DatabaseRowsState.EMPTY}:
-                        raise OSError("Beets path publication did not complete")
-                    _checkpoint("after-database-publication")
-                    kept = (
-                        "kept " + plural(
-                            len(plan["conflicts"]), "existing destination name")
-                        if plan["conflicts"] else None
-                    )
-                    if await_handoff:
-                        payload["phase"] = "awaiting-handoff"
-                        _write_journal(namespace_fd, payload)
-                        return RelocationResult(
-                            destination_path,
-                            len(plan["selected_files"]),
-                            operation_id,
-                            payload["ownership_receipt"],
-                            True,
-                            kept,
+                    if not _named_matches(
+                        self.root_fd, artist, destination_artist_fd, directory=True
+                    ):
+                        raise OSError(
+                            "relocation destination artist changed during preflight"
                         )
-                    payload["phase"] = "committed"
-                    _write_journal(namespace_fd, payload)
-                    committed = True
-                    _cleanup_source(root_fd, workspace_fd, payload)
-                    _remove_workspace(root_fd, workspace_fd, payload)
-                    _unlink_journal(namespace_fd, operation_id)
-                    return RelocationResult(
-                        destination_path,
-                        len(plan["selected_files"]),
-                        operation_id,
-                        payload["ownership_receipt"],
-                        True,
-                        kept,
+                    self.destination_artist_record = _stat_record(
+                        os.fstat(destination_artist_fd)
                     )
-                except BaseException as exc:
-                    if workspace_fd is not None:
-                        os.close(workspace_fd)
-                        workspace_fd = None
-                    outcome = _recover_payload(
-                        authority,
-                        root,
-                        root_fd,
-                        namespace_fd,
-                        payload,
-                    )
-                    if outcome == "committed" and isinstance(exc, Exception):
-                        return RelocationResult(
-                            destination_path,
-                            len(plan["selected_files"]),
-                            operation_id,
-                            payload["ownership_receipt"],
-                            True,
-                            "the move completed during recovery",
-                        )
-                    if committed and isinstance(exc, Exception):
-                        raise PostImportRelocationAttention(
-                            "the relocation committed but cleanup needs attention",
-                            paths=(source_path, destination_path),
-                        ) from exc
-                    raise
                 finally:
-                    if workspace_fd is not None:
-                        os.close(workspace_fd)
-        finally:
-            _close_all(destination_chain)
-            _close_all(source_chain)
-            _close_all(root_owner)
-            scanner.clear_scan_caches()
+                    os.close(destination_artist_fd)
+        else:
+            if _entry_identity(os.fstat(self.source_fd)) == _entry_identity(
+                os.fstat(self.destination_fd)
+            ):
+                raise PostImportRelocationUnavailable(
+                    errno.EINVAL,
+                    "relocation source and destination resolve to the same album folder",
+                )
+            self.destination_snapshot = _snapshot_tree(self.destination_fd)
+            destination_artist_fd = self.destination_chain[0]
+            if not _named_matches(
+                self.root_fd,
+                self.destination_parts[0],
+                destination_artist_fd,
+                directory=True,
+            ):
+                raise OSError(
+                    "relocation destination artist changed during preflight"
+                )
+            self.destination_artist_record = _stat_record(
+                os.fstat(destination_artist_fd)
+            )
+            if os.fstat(self.destination_fd).st_dev != os.fstat(self.root_fd).st_dev:
+                raise OSError(errno.EXDEV, "relocation destination is on another filesystem")
+
+    def _check_expectation(self):
+        if self.canonical_expected is not None:
+            current_expectation = _expectation_record(
+                self.root,
+                self.root_fd,
+                self.source_path,
+                self.source_artist_record,
+                self.source_snapshot,
+                self.destination_path,
+                self.destination_artist_record,
+                self.destination_snapshot,
+            )
+            if current_expectation != self.canonical_expected:
+                raise PostImportRelocationUnavailable(
+                    errno.ESTALE,
+                    "relocation inputs changed since the filing action "
+                    "was recorded",
+                )
+
+    def _plan_relocation(self):
+        self.plan = _build_plan(self.source_snapshot, self.destination_snapshot)
+        if self.kind is RelocationKind.WHOLE_ALBUM and self.plan["conflicts"]:
+            return RelocationResult(
+                self.source_path,
+                0,
+                changed=False,
+                reason="the destination contains conflicting names",
+            )
+        if not self.plan["selected_files"]:
+            return RelocationResult(
+                (
+                    self.source_path
+                    if self.kind is RelocationKind.WHOLE_ALBUM
+                    else self.destination_path
+                ),
+                0,
+                changed=False,
+                reason=(
+                    "all destination names already exist"
+                    if self.plan["conflicts"] else "there is nothing to relocate"
+                ),
+            )
+
+    def _prepare_payload(self):
+        _forget_vanished_destination_rows(
+            self.root,
+            _path_mapping(
+                self.root,
+                {
+                    "source": PurePosixPath(*self.source_parts).as_posix(),
+                    "destination": PurePosixPath(*self.destination_parts).as_posix(),
+                    "plan": self.plan,
+                },
+            ),
+            self.destination_path,
+        )
+        self.operation_id = secrets.token_hex(32)
+        self.payload = {
+            "version": _JOURNAL_VERSION,
+            "operation_id": self.operation_id,
+            "phase": "intent",
+            "kind": self.kind.value,
+            "music_root": os.fspath(self.root),
+            "source": PurePosixPath(*self.source_parts).as_posix(),
+            "destination": PurePosixPath(*self.destination_parts).as_posix(),
+            "source_snapshot": self.source_snapshot,
+            "source_artist_record": self.source_artist_record,
+            "destination_artist_record": self.destination_artist_record,
+            "destination_snapshot": self.destination_snapshot,
+            "plan": self.plan,
+            "database_capture": None,
+            "workspace_record": None,
+            "copying_index": None,
+            "created_artist": None,
+            "public_snapshot": None,
+            "ownership_receipt": None,
+            "await_handoff": self.await_handoff,
+            "retain_completion": self.retain_completion,
+            "handoff": None,
+        }
+
+    def _initial_authority(self):
+        return (
+            _base_authority_matches(self.authority, self.root, self.root_fd, self.payload)
+            and (
+                self.canonical_expected is None
+                or _directory_identity_matches_fd(
+                    self.root_fd, self.canonical_expected["root_identity"]
+                )
+            )
+        )
+
+    def _capture_rows(self):
+        try:
+            self.payload["database_capture"] = _capture_database(
+                self.root, self.payload, self._initial_authority
+            )
+        except sqlite3.IntegrityError as exc:
+            if self.kind is RelocationKind.WHOLE_ALBUM:
+                return RelocationResult(
+                    self.source_path,
+                    0,
+                    changed=False,
+                    reason="some of its tracks are not in Beets",
+                )
+            raise PostImportRelocationUnavailable(errno.EEXIST, str(exc)) from exc
+        if not self._initial_authority():
+            raise OSError("relocation inputs changed during preflight")
+
+    def _run_locked(self):
+        with _locked_namespace(create=True) as self.namespace_fd:
+            _write_journal(self.namespace_fd, self.payload, initial=True)
+            workspace_name, self.workspace_fd, workspace_record = _create_workspace(
+                self.root_fd, self.operation_id
+            )
+            del workspace_name
+            self.payload["workspace_record"] = workspace_record
+            try:
+                _write_journal(self.namespace_fd, self.payload)
+            except BaseException:
+                os.close(self.workspace_fd)
+                raise
+            self.committed = False
+            try:
+                self._publish_files()
+                self._publish_rows()
+                return self._finish()
+            except BaseException as exc:
+                if self.workspace_fd is not None:
+                    os.close(self.workspace_fd)
+                    self.workspace_fd = None
+                outcome = _recover_payload(
+                    self.authority,
+                    self.root,
+                    self.root_fd,
+                    self.namespace_fd,
+                    self.payload,
+                )
+                if outcome == "committed" and isinstance(exc, Exception):
+                    return RelocationResult(
+                        self.destination_path,
+                        len(self.plan["selected_files"]),
+                        self.operation_id,
+                        self.payload["ownership_receipt"],
+                        True,
+                        "the move completed during recovery",
+                    )
+                if self.committed and isinstance(exc, Exception):
+                    raise PostImportRelocationAttention(
+                        "the relocation committed but cleanup needs attention",
+                        paths=(self.source_path, self.destination_path),
+                    ) from exc
+                raise
+            finally:
+                if self.workspace_fd is not None:
+                    os.close(self.workspace_fd)
+
+    def _publish_files(self):
+        _prepare_units(self.source_fd, self.workspace_fd, self.payload, self.namespace_fd)
+        self.payload["phase"] = "prepared"
+        _write_journal(self.namespace_fd, self.payload)
+        if not self._initial_authority():
+            raise OSError("relocation inputs changed before publication")
+        _ensure_destination_artist(self.root_fd, self.payload, self.namespace_fd)
+        if not _source_snapshot_matches(self.root_fd, self.payload):
+            raise OSError("relocation source changed before publication")
+        _publish_units(self.root_fd, self.workspace_fd, self.payload)
+        self.payload["public_snapshot"] = _destination_snapshot(
+            self.root_fd, self.payload
+        )
+        self.payload["ownership_receipt"] = _build_ownership_receipt(
+            self.root_fd, self.payload
+        )
+        self.payload["phase"] = "published"
+        _write_journal(self.namespace_fd, self.payload)
+        _checkpoint("after-filesystem-publication")
+
+    def _publish_rows(self):
+        authority_matches = lambda: _publication_authority_matches(
+            self.authority,
+            self.root_fd,
+            self.namespace_fd,
+            self.payload,
+        )
+        state = publish_relocation_rows(
+            beets_db.path(),
+            authority_matches,
+            self.payload["database_capture"],
+        )
+        if state not in {DatabaseRowsState.NEW, DatabaseRowsState.EMPTY}:
+            raise OSError("Beets path publication did not complete")
+        _checkpoint("after-database-publication")
+
+    def _finish(self):
+        kept = (
+            "kept " + plural(
+                len(self.plan["conflicts"]), "existing destination name")
+            if self.plan["conflicts"] else None
+        )
+        if self.await_handoff:
+            self.payload["phase"] = "awaiting-handoff"
+            _write_journal(self.namespace_fd, self.payload)
+            return RelocationResult(
+                self.destination_path,
+                len(self.plan["selected_files"]),
+                self.operation_id,
+                self.payload["ownership_receipt"],
+                True,
+                kept,
+            )
+        self.payload["phase"] = "committed"
+        _write_journal(self.namespace_fd, self.payload)
+        self.committed = True
+        _cleanup_source(self.root_fd, self.workspace_fd, self.payload)
+        _remove_workspace(self.root_fd, self.workspace_fd, self.payload)
+        _unlink_journal(self.namespace_fd, self.operation_id)
+        return RelocationResult(
+            self.destination_path,
+            len(self.plan["selected_files"]),
+            self.operation_id,
+            self.payload["ownership_receipt"],
+            True,
+            kept,
+        )
 
 
 __all__ = [

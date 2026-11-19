@@ -994,6 +994,701 @@ def _pin_or_warn(backup, note=None):
         warn_pin_failed(backup)
 
 
+class _ItemResolution:
+    """One finished queue item from its imported folder to its result."""
+
+    def __init__(self, item, args, imported_globally, *, authority):
+        self.item = item
+        self.args = args
+        self.imported_globally = imported_globally
+        self.authority = authority
+
+    def run(self):
+        self._start()
+        self._check_ownership()
+        self._file_multi_artist()
+        self._locate_post_dir()
+        self._settle_siblings()
+        self._settle_upgrade_backup()
+        self._settle_gap_fill_backup()
+        return self._result()
+
+    def _start(self):
+        self.item["imported"] = self.imported_globally
+        self.bp = self.item.get("backup_path")
+        self.album_dir = self.item["album_dir"]
+        self._sibs = self.item.get("siblings_to_delete", [])
+        self.item["_siblings_preserved"] = [os.fspath(path) for path in self._sibs]
+        self.item["_siblings_kept"] = []
+
+        # One strict per-album success flag covers art cleanup, sibling deletion,
+        # backup resolution, and opt-in migration must all agree. A partial result
+        # (e.g. 5/12 tracks ok) must not delete backups or siblings.
+        self._item_strict_success = (
+            self.imported_globally
+            and self.item.get("n_ok", 0) > 0
+            and self.item.get("n_fail", 0) == 0
+            and self.item.get("n_lossy", 0) == 0
+        )
+
+    def _imported_dir(self):
+        signatures = self.item.get("post_import_signatures")
+        if self.album_dir is not None:
+            # Gap Fill and Upgrade import into the album's own folder, and
+            # another copy of the album can hold tracks with the same tags.
+            found = find_album_dir_by_track_signatures(
+                signatures, expected_dir=self.album_dir)
+            if found is not None or self.item.get("exact_edition") or self.bp is not None:
+                return found
+        return find_album_dir_by_track_signatures(signatures)
+
+    def _check_ownership(self):
+        self.ownership_scope_used = False
+        self.ownership_source_dir = None
+        self.ownership_source_required = (
+            self.imported_globally
+            and self.item.get("_capture_import_ownership") is True
+        )
+        if self.ownership_source_required:
+            self.ownership_source_dir = _verified_import_album_dir(self.item)
+            self.ownership_scope_used = self.ownership_source_dir is not None
+
+    def _file_multi_artist(self):
+        # A Track download or a repair keeps its album where it is.
+        migration_requested = (
+            getattr(self.args, "migrate_multi_artist", False)
+            and self._item_strict_success
+            and not self.ownership_source_required
+        )
+        migration_source_dir = self._imported_dir() if migration_requested else None
+        if migration_source_dir is not None:
+            if self.authority is not None:
+                _require_executor_authority(self.authority)
+            _migrated = prompt_and_migrate_multi_artist_folder(
+                self.item["album"],
+                self.args,
+                authority=self.authority,
+                source_dir=migration_source_dir,
+            )
+            if self.authority is not None:
+                _require_executor_authority(self.authority)
+        else:
+            _migrated = None
+            if migration_requested:
+                log.info(fmt(
+                    C.YELLOW,
+                    "  ⚠  Multi-artist folder filing was skipped because the "
+                    "exact imported album could not be located.",
+                ))
+        self.post_dir = _migrated
+
+    def _locate_post_dir(self):
+        if self.post_dir is None and self.ownership_scope_used:
+            self.post_dir = self.ownership_source_dir
+        if (
+            self.post_dir is None
+            and self.imported_globally
+            and not self.ownership_source_required
+        ):
+            self.post_dir = self._imported_dir()
+        if self.post_dir is None and not self.ownership_source_required and not self.item.get("exact_edition"):
+            self.post_dir = find_album_dir_filesystem(self.item["album"])
+        # For brand-new albums (album_dir=None), find_album_dir_filesystem may
+        # return None if the cache hasn't refreshed. Clear and retry once.
+        if (
+            self.post_dir is None
+            and self.imported_globally
+            and not self.ownership_source_required
+            and not self.item.get("exact_edition")
+        ):
+            clear_scan_caches()
+            self.post_dir = find_album_dir_filesystem(self.item["album"])
+        if self.post_dir is None and not self.item.get("exact_edition"):
+            self.post_dir = self.album_dir
+        self.album_has_content = (
+            self.post_dir is not None and self.post_dir.exists()
+            and _count_audio_files_in(self.post_dir) > 0
+        )
+        # The post-import sidecar pass writes into this folder.
+        self.item["_resolved_post_dir"] = self.post_dir
+        self.item["_resolved_post_dir_from_import_ownership"] = (
+            self.ownership_source_required
+        )
+        self.had_any_success = (
+            self.imported_globally and self.item.get("n_ok", 0) > 0 and self.album_has_content
+        )
+
+    def _settle_siblings(self):
+        if self.had_any_success:
+            if self.post_dir:
+                if self.item.get("resampled_n", 0) > 0:
+                    mark_local_album_capped(self.post_dir, qobuz_album=self.item["album"],
+                                            origin="auto")
+            # A sibling is only eligible for retirement after a clean, complete
+            # replacement. Bind each move to its pre-download receipt, carry its
+            # unique companion files without overwrite, then retire only the exact
+            # recovery backup while the replacement is held and revalidated.
+            self._album_tracks = (
+                (self.item["album"].get("tracks") or {}).get("items") or []
+            )
+            _sibs_whole = (
+                bool(self._sibs)
+                and not self.ownership_scope_used
+                and folder_holds_all_tracks(
+                    self.post_dir, self._album_tracks, destructive=True)
+            )
+            _sibs_clean = (self.item.get("n_fail", 0) == 0
+                           and self.item.get("n_lossy", 0) == 0)
+            if _sibs_clean and _sibs_whole:
+                self._consolidate_siblings()
+            elif self._sibs and _sibs_clean:
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  Keeping {plural(len(self._sibs), 'sibling folder')}; the filled "
+                    f"folder couldn't be verified as holding every track, and a "
+                    f"sibling may hold the only copy of what's missing."))
+            elif self._sibs:
+                log.info(fmt(C.GRAY,
+                    f"  · Keeping {plural(len(self._sibs), 'sibling folder')}"
+                    f"; partial result (n_fail={self.item.get('n_fail', 0)}, "
+                    f"n_lossy={self.item.get('n_lossy', 0)})"))
+        self.item.pop("_sibling_cleanup_receipts", None)
+
+    def _consolidate_siblings(self):
+        replacement_receipt = capture_album_source_receipt(self.post_dir)
+        receipts = self.item.get("_sibling_cleanup_receipts")
+        if not isinstance(receipts, tuple) or len(receipts) != len(self._sibs):
+            receipts = (None,) * len(self._sibs)
+        if replacement_receipt is None:
+            log.info(fmt(
+                C.YELLOW,
+                f"  ⚠  Keeping {plural(len(self._sibs), 'sibling folder')}; the "
+                "replacement couldn't be held as an exact safe tree.",
+            ))
+        else:
+            for sib_dir, receipt in zip(self._sibs, receipts):
+                sibling_path = Path(sib_dir)
+                name = sibling_path.name
+                if receipt is None:
+                    log.info(fmt(
+                        C.YELLOW,
+                        f"  ⚠  Kept sibling {name}; it wasn't checked "
+                        "before the download.",
+                    ))
+                    continue
+                covered = _sibling_tracks_all_kept(sibling_path, self.post_dir)
+                if covered is False:
+                    self.item["_siblings_preserved"].remove(
+                        os.fspath(sibling_path))
+                    self.item["_siblings_kept"].append(name)
+                    log.info(fmt(
+                        C.GRAY,
+                        f"  ·  Kept {name}; not every track in it "
+                        f"matches one in {self.post_dir.name}.",
+                    ))
+                    continue
+                if covered is None:
+                    log.info(fmt(
+                        C.YELLOW,
+                        f"  ⚠  Kept sibling {name}; its tracks couldn't "
+                        f"be compared with {self.post_dir.name}.",
+                    ))
+                    continue
+                # Its own cover, log or lyrics would have to stay in
+                # the backup, away from the library, for good.
+                held = capture_album_source_receipt(sibling_path)
+                clashes = None if held is None else companions_in_the_way(
+                    held, replacement_receipt)
+                if clashes is None:
+                    log.info(fmt(
+                        C.YELLOW,
+                        f"  ⚠  Kept sibling {name}; its other files "
+                        f"couldn't be compared with {self.post_dir.name}.",
+                    ))
+                    continue
+                if clashes:
+                    self.item["_siblings_preserved"].remove(
+                        os.fspath(sibling_path))
+                    one = len(clashes) == 1
+                    log.info(fmt(
+                        C.GRAY,
+                        f"  ·  Kept {name}; its {some_names(clashes)} "
+                        f"{'differs' if one else 'differ'} from the "
+                        f"{'one' if one else 'ones'} in {self.post_dir.name}.",
+                    ))
+                    continue
+                sibling_backup = backup_album_dir(
+                    sibling_path, expected_receipt=receipt)
+                if sibling_backup is None:
+                    log.info(fmt(
+                        C.YELLOW,
+                        f"  ⚠  Kept sibling {name}; its exact tree "
+                        "changed or couldn't be moved.",
+                    ))
+                    continue
+                if sibling_backup.complete is not True:
+                    from qobuz_librarian.modes.process import (
+                        _recover_incomplete_upgrade_backup,
+                    )
+
+                    _recover_incomplete_upgrade_backup(
+                        sibling_backup,
+                        sibling_path,
+                        operation="sibling retirement backup",
+                    )
+                    log.info(fmt(
+                        C.RED,
+                        "  ✗  Sibling retirement stopped part-way; "
+                        "the original reconciliation is reported above.",
+                    ))
+                    break
+                carried_receipt = carry_backup_companions(
+                    sibling_backup,
+                    self.post_dir,
+                    expected_replacement_receipt=replacement_receipt,
+                )
+                if carried_receipt is None:
+                    _pin_or_warn(
+                        sibling_backup,
+                        "sibling backup kept; companion carry was "
+                        "not exact")
+                    log.info(fmt(
+                        C.YELLOW,
+                        f"  ⚠  Kept sibling recovery for {name} at "
+                        f"{sibling_backup.path}; its companion files "
+                        "couldn't be carried without uncertainty.",
+                    ))
+                    break
+                replacement_receipt = carried_receipt
+                # With no entries to retire, the kept album needn't be
+                # one Beets lists whole: it may know only the new tracks.
+                listed = backup_listed_in_beets(sibling_backup)
+                if listed is not False and not retire_backup_beets_entries(
+                    sibling_backup,
+                    self.post_dir,
+                    replacement_receipt,
+                ):
+                    _pin_or_warn(
+                        sibling_backup,
+                        "sibling backup kept; the old Beets "
+                        "entries could not be removed")
+                    log.info(fmt(
+                        C.YELLOW,
+                        f"  ⚠  Kept sibling recovery for {name} at "
+                        f"{sibling_backup.path}; its Beets catalogue "
+                        "couldn't be reconciled.",
+                    ))
+                    break
+                retired = dispose_backup(
+                    sibling_backup,
+                    replacement_path=self.post_dir,
+                    expected_replacement_receipt=replacement_receipt,
+                    replacement_validator=lambda replacement, held: (
+                        folder_holds_all_tracks(
+                            replacement, self._album_tracks,
+                            destructive=True)
+                        and _sibling_tracks_all_kept(
+                            held, replacement) is True
+                    ),
+                )
+                if not retired:
+                    _pin_or_warn(
+                        sibling_backup,
+                        "sibling backup kept; final exact "
+                        "replacement proof did not hold")
+                    log.info(fmt(
+                        C.YELLOW,
+                        f"  ⚠  Kept sibling recovery for {name} at "
+                        f"{sibling_backup.path}; the final exact "
+                        "replacement proof did not hold.",
+                    ))
+                    break
+                try:
+                    self.item["_siblings_preserved"].remove(
+                        os.fspath(sibling_path))
+                except ValueError:
+                    pass
+                log.info(fmt(
+                    C.GREEN,
+                    f"  ✓  Consolidated sibling {name}.",
+                ))
+
+    def _settle_upgrade_backup(self):
+        if self.bp is not None:
+            # Backup resolution uses stricter success than art/sibling cleanup.
+            # the backup is the only intact copy of pre-upgrade content, so only
+            # drop it when the new folder is whole (n_fail == 0 AND n_lossy == 0).
+            # _item_strict_success is the download-and-import-was-clean signal,
+            # independent of whether we then relocated the imported folder.
+            if (
+                self._item_strict_success
+                and self.album_has_content
+                and not self.ownership_scope_used
+            ):
+                self._verify_upgrade()
+            elif self._item_strict_success:
+                # The download and import succeeded cleanly, but the imported album
+                # couldn't be relocated (beets renamed the folder past what the
+                # matcher found), so post_dir fell back to the original we'd moved
+                # aside. Restoring it now would duplicate the content beside the
+                # fresh import. Keep the backup and let the user reconcile.
+                self.item["upgrade_unverified"] = True
+                _pin_or_warn(
+                    self.bp,
+                    "upgrade backup kept; the clean imported replacement "
+                    "could not be located")
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {truncate(self.album_dir.name, 40)}: imported, but the new "
+                    f"folder couldn't be located; keeping the backup rather than "
+                    f"restoring it as a duplicate."))
+                log.info(fmt(C.GRAY,
+                    f"     Backup at {self.bp}; remove it once you've confirmed the "
+                    f"upgrade landed."))
+            elif self.args.no_import:
+                self.item["upgrade_unverified"] = True
+                _pin_or_warn(
+                    self.bp,
+                    "upgrade backup kept; --no-import leaves the replacement "
+                    "outside the verified library flow")
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {truncate(self.album_dir.name, 40)}: backup kept at {self.bp}"))
+            else:
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {truncate(self.album_dir.name, 40)}: upgrade did not succeed; restoring..."))
+                if restore_upgrade_backup(self.bp, self.album_dir):
+                    log.info(fmt(C.GREEN, f"  ✓  Restored {truncate(self.album_dir.name, 50)}"))
+                else:
+                    self.item["upgrade_unverified"] = True
+                    _pin_or_warn(
+                        self.bp,
+                        "upgrade backup kept; automatic restore did not "
+                        "complete")
+                    log.info(fmt(C.RED, f"  ✗  Auto-restore failed. Backup: {self.bp}"))
+                    log.info(fmt(C.WHITE,
+                        f"     To put it back, move anything left in {self.album_dir} "
+                        "out of the library, then move the backup's files, not "
+                        "its dot-files, into it."))
+
+    def _verify_upgrade(self):
+        # bp is set only for an auto-upgrade, which wiped the only full copy,
+        # so clear the same bar process.py does before deleting the backup:
+        # the rebuilt folder must be verifiably at least as complete as the
+        # original (track count + playtime), not merely decode-clean. The
+        # artist/upgrade walks run their bulk upgrades through this executor,
+        # so without this they'd skip the completeness gate.
+        from qobuz_librarian.modes.process import (
+            _carry_non_audio_from_backup,
+            _keep_backup_for_companions,
+            _put_original_back,
+            _replacement_audio_paths,
+            _upgrade_replacement_verified,
+            _upgrade_trees_verified,
+        )
+        replaced_entries = self.item.get("_replaced_beets_entries")
+        if _upgrade_replacement_verified(self.item["album"], self.album_dir, self.bp):
+            # Carry non-audio companions (booklets, scans, .cue/.log,
+            # hand-placed cover art) from the backup into the rebuilt album
+            # before deleting it. The audio-only completeness gate ignores
+            # them, so they'd be lost with the backup. Mirrors the single-
+            # album CLI path in modes/process.py; the bulk artist/upgrade
+            # walks and the web Upgrade action run through this executor.
+            # A failed carry keeps the backup: it holds the only copies.
+            carried = _carry_non_audio_from_backup(
+                    self.item["album"], self.album_dir, self.bp,
+                    replacement_dir=self.post_dir)
+            if carried is not None:
+                replacement_path, replacement_receipt, left = carried
+                if not (
+                    retire_replaced_beets_entries(
+                        replaced_entries,
+                        replacement_path,
+                        _replacement_audio_paths(
+                            replacement_path, replacement_receipt),
+                    )
+                    if replaced_entries is not None
+                    else retire_backup_beets_entries(
+                        self.bp,
+                        replacement_path,
+                        replacement_receipt,
+                    )
+                ):
+                    self.item["upgrade_unverified"] = True
+                    self.item["catalogue_unverified"] = True
+                    _pin_or_warn(
+                        self.bp,
+                        "upgrade kept; the old Beets entries "
+                        "could not be removed")
+                    log.info(fmt(C.YELLOW,
+                        f"  ⚠  Couldn't reconcile the Beets "
+                        f"catalogue for {truncate(self.album_dir.name, 40)}; "
+                        "keeping the exact backup."))
+                elif left:
+                    self.item["companions_kept"] = left
+                    log.info(fmt(C.YELLOW,
+                        _keep_backup_for_companions(self.bp, left)))
+                elif not dispose_backup(
+                    self.bp,
+                    replacement_path=replacement_path,
+                    expected_replacement_receipt=replacement_receipt,
+                    replacement_validator=_upgrade_trees_verified,
+                ):
+                    self.item["upgrade_unverified"] = True
+                    _pin_or_warn(
+                        self.bp,
+                        "upgrade kept; final exact replacement "
+                        "proof did not hold")
+                    log.info(fmt(C.YELLOW,
+                        f"  ⚠  Couldn't remove the exact backup "
+                        f"for {truncate(self.album_dir.name, 40)}."))
+            else:
+                self.item["upgrade_unverified"] = True
+                _pin_or_warn(self.bp)
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {truncate(self.album_dir.name, 40)}: upgraded, but "
+                    "the rebuilt album or its companions couldn't be "
+                    "confirmed written to disk; keeping the backup."))
+                log.info(fmt(C.GRAY,
+                    f"     Backup at {self.bp}; keep it until you've confirmed "
+                    "the rebuilt album is safe."))
+        else:
+            put_back = _put_original_back(self.bp, self.album_dir)
+            if put_back is not None:
+                # The original is back and the new copy is out of the
+                # library, so nothing was upgraded and nothing waits on a
+                # backup.
+                self.item["result"] = "incomplete"
+                self.item["upgrade_put_back"] = True
+                self.imported_globally = self.item["imported"] = False
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {truncate(self.album_dir.name, 40)}: upgrade "
+                    "couldn't be verified as complete, so your original "
+                    "album was put back."))
+                if put_back is not True:
+                    log.info(fmt(C.GRAY,
+                        f"     The new download was set aside at "
+                        f"{put_back}."))
+                if replaced_entries is not None:
+                    forget_imported_beets_entries(replaced_entries, self.album_dir)
+            else:
+                # The walk still flags the album: its upgrade did not happen.
+                self.item["upgrade_unverified"] = True
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {truncate(self.album_dir.name, 40)}: upgrade "
+                    "couldn't be verified as complete, and your original "
+                    "couldn't be put back automatically."))
+                log.info(fmt(C.GRAY,
+                    f"     Original preserved at {self.bp}; it is not removed "
+                    "automatically."))
+
+    def _settle_gap_fill_backup(self):
+        # Gap-fill backup: present tracks moved to backup before rip.
+        # Drop on success; restore in place if the queue item failed.
+        self.gfb = self.item.get("gap_fill_backup_path")
+        if self.gfb is not None and self.gfb.exists():
+            # Drop the moved-aside present tracks only when the re-rip imported
+            # cleanly. _item_strict_success requires n_fail == 0 and n_lossy ==
+            # 0, so a lossy/short re-rip of a present track can't clear the
+            # original (mirrors the full-album gap-fill gate in process.py). That
+            # signal is independent of whether we then *located* the filled
+            # folder, which matters: a clean import beets filed where the matcher
+            # can't find it must NOT be treated as a failure and restored over
+            # itself.
+            _filled_whole = (
+                not self.ownership_scope_used
+                and self.album_has_content
+                and folder_holds_all_tracks(
+                    self.post_dir,
+                    (self.item["album"].get("tracks") or {}).get("items") or [],
+                    destructive=True,
+                    edition=self.item["album"] if self.item.get("exact_edition") else None,
+                )
+            )
+            self._filled_receipt = (
+                capture_album_source_receipt(self.post_dir)
+                if self._item_strict_success and _filled_whole else None
+            )
+            if (self._item_strict_success and _filled_whole and self._filled_receipt is not None
+                    and not backup_files_preserved(self.post_dir, self.gfb)):
+                self.item["recovery_unverified"] = True
+                _pin_or_warn(
+                    self.gfb,
+                    "gap-fill backup kept; original files differ from the import")
+                log.info(fmt(C.YELLOW,
+                    "  ⚠  Gap-fill landed, but the original files differ; "
+                    "keeping the backup."))
+            elif self._item_strict_success and _filled_whole and self._filled_receipt is not None:
+                self._retire_gap_fill()
+            elif self._item_strict_success and _filled_whole:
+                self.item["recovery_unverified"] = True
+                _pin_or_warn(
+                    self.gfb,
+                    "gap-fill backup kept; replacement not confirmed written to disk")
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {truncate(self.album_dir.name, 40)}: filled, but the new "
+                    "folder couldn't be confirmed written to disk; keeping the backed-up "
+                    "tracks."))
+                log.info(fmt(C.GRAY, f"     Backup at {self.gfb}."))
+            elif self._item_strict_success:
+                # Imported cleanly, but either beets filed the album where the
+                # matcher couldn't find it (renamed past the fuzzy gate, or under
+                # an unexpected albumartist) or the located folder is short of the
+                # full track count. Restoring the backed-up tracks here would
+                # strand them beside the fresh import and destroy the only backup
+                # Keep it and let the user reconcile, exactly as the upgrade
+                # branch above does.
+                self.item["recovery_unverified"] = True
+                _pin_or_warn(
+                    self.gfb,
+                    "gap-fill backup kept; the clean imported replacement "
+                    "could not be confirmed whole")
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {truncate(self.album_dir.name, 40)}: filled, but the new "
+                    f"folder couldn't be confirmed whole; keeping the backed-up "
+                    f"tracks rather than restoring them as a duplicate."))
+                log.info(fmt(C.GRAY,
+                    f"     Backup at {self.gfb}; remove it once you've confirmed the "
+                    f"fill landed."))
+            else:
+                self._restore_gap_fill()
+
+    def _retire_gap_fill(self):
+        if not retire_backup_beets_entries(
+            self.gfb,
+            self.post_dir,
+            self._filled_receipt,
+            **({"replacement_audio_paths": [t["path"] for t in edition_files(
+                self.item["album"], read_album_dir(self.post_dir), self.post_dir)]}
+               if self.item.get("exact_edition") else {}),
+        ):
+            self.item["recovery_unverified"] = True
+            self.item["catalogue_unverified"] = True
+            _pin_or_warn(
+                self.gfb,
+                "gap-fill backup kept; the old Beets entries "
+                "could not be removed")
+            log.info(fmt(C.YELLOW,
+                "  ⚠  Gap-fill complete but its Beets catalogue "
+                "couldn't be reconciled; keeping the exact backup."))
+        elif not dispose_backup(
+            self.gfb,
+            replacement_path=self.post_dir,
+            expected_replacement_receipt=self._filled_receipt,
+            replacement_validator=lambda replacement, backup: (
+                folder_holds_all_tracks(
+                    replacement,
+                    (self.item["album"].get("tracks") or {}).get("items") or [],
+                    destructive=True,
+                    edition=self.item["album"] if self.item.get("exact_edition") else None,
+                    folder_label=self.post_dir.name,
+                )
+                and backup_files_preserved(replacement, backup)
+            ),
+        ):
+            self.item["recovery_unverified"] = True
+            _pin_or_warn(
+                self.gfb,
+                "gap-fill backup kept; final exact replacement "
+                "proof did not hold")
+            log.info(fmt(C.YELLOW,
+                "  ⚠  Gap-fill complete but the exact backup couldn't "
+                "be removed."))
+
+    def _restore_gap_fill(self):
+        _restore_target = self.album_dir or self.post_dir
+        if _restore_target is None:
+            self.item["recovery_unverified"] = True
+            _pin_or_warn(
+                self.gfb,
+                "gap-fill backup kept; no bound album path was "
+                "available for restore")
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  Gap-fill failed and no album dir to restore to. "
+                f"Backed-up tracks at: {self.gfb}"))
+        else:
+            if self.args.no_import:
+                # --no-import skips beets, so the success gate is always
+                # False here even when the download landed fine. Restoring
+                # the moved-aside present tracks is right, but it's not a
+                # failure.
+                log.info(fmt(C.GRAY,
+                    f"  · {truncate(_restore_target.name, 40)}: --no-import "
+                    f"set; restoring the backed-up tracks to the library."))
+            else:
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  {truncate(_restore_target.name, 40)}: gap-fill "
+                    f"did not succeed; restoring backed-up tracks…"))
+            _n_back = restore_gap_fill_backup(self.gfb, _restore_target,
+                                              keep_larger_dst=False)
+            if _n_back and not self.gfb.exists():
+                log.info(fmt(C.GREEN,
+                    f"  ✓  Restored {plural(_n_back, 'track')} to "
+                    f"{truncate(_restore_target.name, 50)}"))
+            else:
+                self.item["recovery_unverified"] = True
+                if self.gfb.exists() and not pin_unverified_upgrade_backup(
+                        self.gfb,
+                        "gap-fill backup kept; automatic restore was "
+                        "partial or failed"):
+                    warn_pin_failed(self.gfb)
+                log.info(fmt(C.RED,
+                    f"  ✗  Restored {plural(_n_back, 'track')}; remaining originals "
+                    f"are preserved at:\n     {self.gfb}"))
+
+    def _result(self):
+        n_ok = self.item.get("n_ok", 0)
+        n_fail = self.item.get("n_fail", 0)
+        n_retryable, n_unretryable = incomplete_track_counts(self.item)
+        outcome_attention = _queue_outcome_needs_attention(self.item)
+        # A stop marker (cancel or an undeliverable album discarded the staged
+        # files; disk-full / I/O / auth stopped the batch) must keep its label.
+        # n_ok still counts the tracks that briefly landed, so the n_ok branch
+        # below would mislabel a discarded cancel as "downloaded" in its result.
+        _stop = self.item.get("result")
+        if _stop in (
+                "cancelled", "incomplete", "interrupted", "disk_full", "io_error",
+                "auth_lost", "import_failed", "upgrade_aborted_backup_failed",
+                "stale_candidate", "disk_refused", "folder_read_only"):
+            status = _stop
+        elif n_ok and (n_retryable or n_unretryable or outcome_attention):
+            status = "partial"
+        elif n_ok:
+            status = "downloaded"
+        elif n_retryable or n_unretryable:
+            status = "failed"
+        else:
+            status = "nothing_landed"
+
+        return {
+            "dir": self.album_dir,
+            "result": status,
+            "n_ok": n_ok,
+            "n_fail": n_fail,
+            "n_lossy": self.item.get("n_lossy", 0),
+            **shortfall_fields(self.item),
+            "failed_tracks": self.item.get("failed_tracks", []),
+            "lossy_tracks": self.item.get("lossy_tracks", []),
+            "broken_tracks": self.item.get("broken_tracks", []),
+            "downsample_errors": self.item.get("downsample_errors", 0),
+            "downsample_saved_bytes": self.item.get("downsample_saved_bytes", 0),
+            "downsample_flush_warnings": self.item.get(
+                "downsample_flush_warnings", 0
+            ),
+            "downsample_cancelled": bool(self.item.get("downsample_cancelled", False)),
+            "upgrade_unverified": bool(self.item.get("upgrade_unverified", False)),
+            "upgrade_put_back": bool(self.item.get("upgrade_put_back", False)),
+            "catalogue_unverified": bool(self.item.get("catalogue_unverified", False)),
+            "recovery_unverified": bool(self.item.get("recovery_unverified", False)),
+            "import_denied": self.item.get("import_denied"),
+            "folder_denied": self.item.get("folder_denied"),
+            "quality_verdict": self.item.get("quality_verdict"),
+            "siblings_preserved": self.item.get("_siblings_preserved", []),
+            "siblings_kept": self.item.get("_siblings_kept", []),
+            "imported": self.imported_globally,
+            "auto_upgrade": self.item["auto_upgrade"],
+            "elapsed_s": int(self.item.get("elapsed", 0)),
+            "album": self.item["album"],
+        }
+
+
 def _resolve_queue_item(
     item,
     args,
@@ -1008,659 +1703,8 @@ def _resolve_queue_item(
     item["_resolved_post_dir"].
     Returns a result dict in process_album's shape.
     """
-    item["imported"] = imported_globally
-    bp = item.get("backup_path")
-    album_dir = item["album_dir"]
-
-    def imported_dir():
-        signatures = item.get("post_import_signatures")
-        if album_dir is not None:
-            # Gap Fill and Upgrade import into the album's own folder, and
-            # another copy of the album can hold tracks with the same tags.
-            found = find_album_dir_by_track_signatures(
-                signatures, expected_dir=album_dir)
-            if found is not None or item.get("exact_edition") or bp is not None:
-                return found
-        return find_album_dir_by_track_signatures(signatures)
-
-    _sibs = item.get("siblings_to_delete", [])
-    item["_siblings_preserved"] = [os.fspath(path) for path in _sibs]
-    item["_siblings_kept"] = []
-
-    # One strict per-album success flag covers art cleanup, sibling deletion,
-    # backup resolution, and opt-in migration must all agree. A partial result
-    # (e.g. 5/12 tracks ok) must not delete backups or siblings.
-    _item_strict_success = (
-        imported_globally
-        and item.get("n_ok", 0) > 0
-        and item.get("n_fail", 0) == 0
-        and item.get("n_lossy", 0) == 0
-    )
-    ownership_scope_used = False
-    ownership_source_dir = None
-    ownership_source_required = (
-        imported_globally
-        and item.get("_capture_import_ownership") is True
-    )
-    if ownership_source_required:
-        ownership_source_dir = _verified_import_album_dir(item)
-        ownership_scope_used = ownership_source_dir is not None
-
-    # A Track download or a repair keeps its album where it is.
-    migration_requested = (
-        getattr(args, "migrate_multi_artist", False)
-        and _item_strict_success
-        and not ownership_source_required
-    )
-    migration_source_dir = imported_dir() if migration_requested else None
-    if migration_source_dir is not None:
-        if authority is not None:
-            _require_executor_authority(authority)
-        _migrated = prompt_and_migrate_multi_artist_folder(
-            item["album"],
-            args,
-            authority=authority,
-            source_dir=migration_source_dir,
-        )
-        if authority is not None:
-            _require_executor_authority(authority)
-    else:
-        _migrated = None
-        if migration_requested:
-            log.info(fmt(
-                C.YELLOW,
-                "  ⚠  Multi-artist folder filing was skipped because the "
-                "exact imported album could not be located.",
-            ))
-    post_dir = _migrated
-    if post_dir is None and ownership_scope_used:
-        post_dir = ownership_source_dir
-    if (
-        post_dir is None
-        and imported_globally
-        and not ownership_source_required
-    ):
-        post_dir = imported_dir()
-    if post_dir is None and not ownership_source_required and not item.get("exact_edition"):
-        post_dir = find_album_dir_filesystem(item["album"])
-    # For brand-new albums (album_dir=None), find_album_dir_filesystem may
-    # return None if the cache hasn't refreshed. Clear and retry once.
-    if (
-        post_dir is None
-        and imported_globally
-        and not ownership_source_required
-        and not item.get("exact_edition")
-    ):
-        clear_scan_caches()
-        post_dir = find_album_dir_filesystem(item["album"])
-    if post_dir is None and not item.get("exact_edition"):
-        post_dir = album_dir
-    album_has_content = (
-        post_dir is not None and post_dir.exists()
-        and _count_audio_files_in(post_dir) > 0
-    )
-    # The post-import sidecar pass writes into this folder.
-    item["_resolved_post_dir"] = post_dir
-    item["_resolved_post_dir_from_import_ownership"] = (
-        ownership_source_required
-    )
-    had_any_success = (
-        imported_globally and item.get("n_ok", 0) > 0 and album_has_content
-    )
-
-    if had_any_success:
-        if post_dir:
-            if item.get("resampled_n", 0) > 0:
-                mark_local_album_capped(post_dir, qobuz_album=item["album"],
-                                        origin="auto")
-        # A sibling is only eligible for retirement after a clean, complete
-        # replacement. Bind each move to its pre-download receipt, carry its
-        # unique companion files without overwrite, then retire only the exact
-        # recovery backup while the replacement is held and revalidated.
-        _album_tracks = (
-            (item["album"].get("tracks") or {}).get("items") or []
-        )
-        _sibs_whole = (
-            bool(_sibs)
-            and not ownership_scope_used
-            and folder_holds_all_tracks(
-                post_dir, _album_tracks, destructive=True)
-        )
-        _sibs_clean = (item.get("n_fail", 0) == 0
-                       and item.get("n_lossy", 0) == 0)
-        if _sibs_clean and _sibs_whole:
-            replacement_receipt = capture_album_source_receipt(post_dir)
-            receipts = item.get("_sibling_cleanup_receipts")
-            if not isinstance(receipts, tuple) or len(receipts) != len(_sibs):
-                receipts = (None,) * len(_sibs)
-            if replacement_receipt is None:
-                log.info(fmt(
-                    C.YELLOW,
-                    f"  ⚠  Keeping {plural(len(_sibs), 'sibling folder')}; the "
-                    "replacement couldn't be held as an exact safe tree.",
-                ))
-            else:
-                for sib_dir, receipt in zip(_sibs, receipts):
-                    sibling_path = Path(sib_dir)
-                    name = sibling_path.name
-                    if receipt is None:
-                        log.info(fmt(
-                            C.YELLOW,
-                            f"  ⚠  Kept sibling {name}; it wasn't checked "
-                            "before the download.",
-                        ))
-                        continue
-                    covered = _sibling_tracks_all_kept(sibling_path, post_dir)
-                    if covered is False:
-                        item["_siblings_preserved"].remove(
-                            os.fspath(sibling_path))
-                        item["_siblings_kept"].append(name)
-                        log.info(fmt(
-                            C.GRAY,
-                            f"  ·  Kept {name}; not every track in it "
-                            f"matches one in {post_dir.name}.",
-                        ))
-                        continue
-                    if covered is None:
-                        log.info(fmt(
-                            C.YELLOW,
-                            f"  ⚠  Kept sibling {name}; its tracks couldn't "
-                            f"be compared with {post_dir.name}.",
-                        ))
-                        continue
-                    # Its own cover, log or lyrics would have to stay in
-                    # the backup, away from the library, for good.
-                    held = capture_album_source_receipt(sibling_path)
-                    clashes = None if held is None else companions_in_the_way(
-                        held, replacement_receipt)
-                    if clashes is None:
-                        log.info(fmt(
-                            C.YELLOW,
-                            f"  ⚠  Kept sibling {name}; its other files "
-                            f"couldn't be compared with {post_dir.name}.",
-                        ))
-                        continue
-                    if clashes:
-                        item["_siblings_preserved"].remove(
-                            os.fspath(sibling_path))
-                        one = len(clashes) == 1
-                        log.info(fmt(
-                            C.GRAY,
-                            f"  ·  Kept {name}; its {some_names(clashes)} "
-                            f"{'differs' if one else 'differ'} from the "
-                            f"{'one' if one else 'ones'} in {post_dir.name}.",
-                        ))
-                        continue
-                    sibling_backup = backup_album_dir(
-                        sibling_path, expected_receipt=receipt)
-                    if sibling_backup is None:
-                        log.info(fmt(
-                            C.YELLOW,
-                            f"  ⚠  Kept sibling {name}; its exact tree "
-                            "changed or couldn't be moved.",
-                        ))
-                        continue
-                    if sibling_backup.complete is not True:
-                        from qobuz_librarian.modes.process import (
-                            _recover_incomplete_upgrade_backup,
-                        )
-
-                        _recover_incomplete_upgrade_backup(
-                            sibling_backup,
-                            sibling_path,
-                            operation="sibling retirement backup",
-                        )
-                        log.info(fmt(
-                            C.RED,
-                            "  ✗  Sibling retirement stopped part-way; "
-                            "the original reconciliation is reported above.",
-                        ))
-                        break
-                    carried_receipt = carry_backup_companions(
-                        sibling_backup,
-                        post_dir,
-                        expected_replacement_receipt=replacement_receipt,
-                    )
-                    if carried_receipt is None:
-                        _pin_or_warn(
-                            sibling_backup,
-                            "sibling backup kept; companion carry was "
-                            "not exact")
-                        log.info(fmt(
-                            C.YELLOW,
-                            f"  ⚠  Kept sibling recovery for {name} at "
-                            f"{sibling_backup.path}; its companion files "
-                            "couldn't be carried without uncertainty.",
-                        ))
-                        break
-                    replacement_receipt = carried_receipt
-                    # With no entries to retire, the kept album needn't be
-                    # one Beets lists whole: it may know only the new tracks.
-                    listed = backup_listed_in_beets(sibling_backup)
-                    if listed is not False and not retire_backup_beets_entries(
-                        sibling_backup,
-                        post_dir,
-                        replacement_receipt,
-                    ):
-                        _pin_or_warn(
-                            sibling_backup,
-                            "sibling backup kept; the old Beets "
-                            "entries could not be removed")
-                        log.info(fmt(
-                            C.YELLOW,
-                            f"  ⚠  Kept sibling recovery for {name} at "
-                            f"{sibling_backup.path}; its Beets catalogue "
-                            "couldn't be reconciled.",
-                        ))
-                        break
-                    retired = dispose_backup(
-                        sibling_backup,
-                        replacement_path=post_dir,
-                        expected_replacement_receipt=replacement_receipt,
-                        replacement_validator=lambda replacement, held: (
-                            folder_holds_all_tracks(
-                                replacement, _album_tracks,
-                                destructive=True)
-                            and _sibling_tracks_all_kept(
-                                held, replacement) is True
-                        ),
-                    )
-                    if not retired:
-                        _pin_or_warn(
-                            sibling_backup,
-                            "sibling backup kept; final exact "
-                            "replacement proof did not hold")
-                        log.info(fmt(
-                            C.YELLOW,
-                            f"  ⚠  Kept sibling recovery for {name} at "
-                            f"{sibling_backup.path}; the final exact "
-                            "replacement proof did not hold.",
-                        ))
-                        break
-                    try:
-                        item["_siblings_preserved"].remove(
-                            os.fspath(sibling_path))
-                    except ValueError:
-                        pass
-                    log.info(fmt(
-                        C.GREEN,
-                        f"  ✓  Consolidated sibling {name}.",
-                    ))
-        elif _sibs and _sibs_clean:
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  Keeping {plural(len(_sibs), 'sibling folder')}; the filled "
-                f"folder couldn't be verified as holding every track, and a "
-                f"sibling may hold the only copy of what's missing."))
-        elif _sibs:
-            log.info(fmt(C.GRAY,
-                f"  · Keeping {plural(len(_sibs), 'sibling folder')}"
-                f"; partial result (n_fail={item.get('n_fail', 0)}, "
-                f"n_lossy={item.get('n_lossy', 0)})"))
-    item.pop("_sibling_cleanup_receipts", None)
-
-    if bp is not None:
-        # Backup resolution uses stricter success than art/sibling cleanup.
-        # the backup is the only intact copy of pre-upgrade content, so only
-        # drop it when the new folder is whole (n_fail == 0 AND n_lossy == 0).
-        # _item_strict_success is the download-and-import-was-clean signal,
-        # independent of whether we then relocated the imported folder.
-        if (
-            _item_strict_success
-            and album_has_content
-            and not ownership_scope_used
-        ):
-            # bp is set only for an auto-upgrade, which wiped the only full copy,
-            # so clear the same bar process.py does before deleting the backup:
-            # the rebuilt folder must be verifiably at least as complete as the
-            # original (track count + playtime), not merely decode-clean. The
-            # artist/upgrade walks run their bulk upgrades through this executor,
-            # so without this they'd skip the completeness gate.
-            from qobuz_librarian.modes.process import (
-                _carry_non_audio_from_backup,
-                _keep_backup_for_companions,
-                _put_original_back,
-                _replacement_audio_paths,
-                _upgrade_replacement_verified,
-                _upgrade_trees_verified,
-            )
-            replaced_entries = item.get("_replaced_beets_entries")
-            if _upgrade_replacement_verified(item["album"], album_dir, bp):
-                # Carry non-audio companions (booklets, scans, .cue/.log,
-                # hand-placed cover art) from the backup into the rebuilt album
-                # before deleting it. The audio-only completeness gate ignores
-                # them, so they'd be lost with the backup. Mirrors the single-
-                # album CLI path in modes/process.py; the bulk artist/upgrade
-                # walks and the web Upgrade action run through this executor.
-                # A failed carry keeps the backup: it holds the only copies.
-                carried = _carry_non_audio_from_backup(
-                        item["album"], album_dir, bp,
-                        replacement_dir=post_dir)
-                if carried is not None:
-                    replacement_path, replacement_receipt, left = carried
-                    if not (
-                        retire_replaced_beets_entries(
-                            replaced_entries,
-                            replacement_path,
-                            _replacement_audio_paths(
-                                replacement_path, replacement_receipt),
-                        )
-                        if replaced_entries is not None
-                        else retire_backup_beets_entries(
-                            bp,
-                            replacement_path,
-                            replacement_receipt,
-                        )
-                    ):
-                        item["upgrade_unverified"] = True
-                        item["catalogue_unverified"] = True
-                        _pin_or_warn(
-                            bp,
-                            "upgrade kept; the old Beets entries "
-                            "could not be removed")
-                        log.info(fmt(C.YELLOW,
-                            f"  ⚠  Couldn't reconcile the Beets "
-                            f"catalogue for {truncate(album_dir.name, 40)}; "
-                            "keeping the exact backup."))
-                    elif left:
-                        item["companions_kept"] = left
-                        log.info(fmt(C.YELLOW,
-                            _keep_backup_for_companions(bp, left)))
-                    elif not dispose_backup(
-                        bp,
-                        replacement_path=replacement_path,
-                        expected_replacement_receipt=replacement_receipt,
-                        replacement_validator=_upgrade_trees_verified,
-                    ):
-                        item["upgrade_unverified"] = True
-                        _pin_or_warn(
-                            bp,
-                            "upgrade kept; final exact replacement "
-                            "proof did not hold")
-                        log.info(fmt(C.YELLOW,
-                            f"  ⚠  Couldn't remove the exact backup "
-                            f"for {truncate(album_dir.name, 40)}."))
-                else:
-                    item["upgrade_unverified"] = True
-                    _pin_or_warn(bp)
-                    log.info(fmt(C.YELLOW,
-                        f"  ⚠  {truncate(album_dir.name, 40)}: upgraded, but "
-                        "the rebuilt album or its companions couldn't be "
-                        "confirmed written to disk; keeping the backup."))
-                    log.info(fmt(C.GRAY,
-                        f"     Backup at {bp}; keep it until you've confirmed "
-                        "the rebuilt album is safe."))
-            else:
-                put_back = _put_original_back(bp, album_dir)
-                if put_back is not None:
-                    # The original is back and the new copy is out of the
-                    # library, so nothing was upgraded and nothing waits on a
-                    # backup.
-                    item["result"] = "incomplete"
-                    item["upgrade_put_back"] = True
-                    imported_globally = item["imported"] = False
-                    log.info(fmt(C.YELLOW,
-                        f"  ⚠  {truncate(album_dir.name, 40)}: upgrade "
-                        "couldn't be verified as complete, so your original "
-                        "album was put back."))
-                    if put_back is not True:
-                        log.info(fmt(C.GRAY,
-                            f"     The new download was set aside at "
-                            f"{put_back}."))
-                    if replaced_entries is not None:
-                        forget_imported_beets_entries(replaced_entries, album_dir)
-                else:
-                    # The walk still flags the album: its upgrade did not happen.
-                    item["upgrade_unverified"] = True
-                    log.info(fmt(C.YELLOW,
-                        f"  ⚠  {truncate(album_dir.name, 40)}: upgrade "
-                        "couldn't be verified as complete, and your original "
-                        "couldn't be put back automatically."))
-                    log.info(fmt(C.GRAY,
-                        f"     Original preserved at {bp}; it is not removed "
-                        "automatically."))
-        elif _item_strict_success:
-            # The download and import succeeded cleanly, but the imported album
-            # couldn't be relocated (beets renamed the folder past what the
-            # matcher found), so post_dir fell back to the original we'd moved
-            # aside. Restoring it now would duplicate the content beside the
-            # fresh import. Keep the backup and let the user reconcile.
-            item["upgrade_unverified"] = True
-            _pin_or_warn(
-                bp,
-                "upgrade backup kept; the clean imported replacement "
-                "could not be located")
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  {truncate(album_dir.name, 40)}: imported, but the new "
-                f"folder couldn't be located; keeping the backup rather than "
-                f"restoring it as a duplicate."))
-            log.info(fmt(C.GRAY,
-                f"     Backup at {bp}; remove it once you've confirmed the "
-                f"upgrade landed."))
-        elif args.no_import:
-            item["upgrade_unverified"] = True
-            _pin_or_warn(
-                bp,
-                "upgrade backup kept; --no-import leaves the replacement "
-                "outside the verified library flow")
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  {truncate(album_dir.name, 40)}: backup kept at {bp}"))
-        else:
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  {truncate(album_dir.name, 40)}: upgrade did not succeed; restoring..."))
-            if restore_upgrade_backup(bp, album_dir):
-                log.info(fmt(C.GREEN, f"  ✓  Restored {truncate(album_dir.name, 50)}"))
-            else:
-                item["upgrade_unverified"] = True
-                _pin_or_warn(
-                    bp,
-                    "upgrade backup kept; automatic restore did not "
-                    "complete")
-                log.info(fmt(C.RED, f"  ✗  Auto-restore failed. Backup: {bp}"))
-                log.info(fmt(C.WHITE,
-                    f"     To put it back, move anything left in {album_dir} "
-                    "out of the library, then move the backup's files, not "
-                    "its dot-files, into it."))
-
-    # Gap-fill backup: present tracks moved to backup before rip.
-    # Drop on success; restore in place if the queue item failed.
-    gfb = item.get("gap_fill_backup_path")
-    if gfb is not None and gfb.exists():
-        # Drop the moved-aside present tracks only when the re-rip imported
-        # cleanly. _item_strict_success requires n_fail == 0 and n_lossy ==
-        # 0, so a lossy/short re-rip of a present track can't clear the
-        # original (mirrors the full-album gap-fill gate in process.py). That
-        # signal is independent of whether we then *located* the filled
-        # folder, which matters: a clean import beets filed where the matcher
-        # can't find it must NOT be treated as a failure and restored over
-        # itself.
-        _filled_whole = (
-            not ownership_scope_used
-            and album_has_content
-            and folder_holds_all_tracks(
-                post_dir,
-                (item["album"].get("tracks") or {}).get("items") or [],
-                destructive=True,
-                edition=item["album"] if item.get("exact_edition") else None,
-            )
-        )
-        _filled_receipt = (
-            capture_album_source_receipt(post_dir)
-            if _item_strict_success and _filled_whole else None
-        )
-        if (_item_strict_success and _filled_whole and _filled_receipt is not None
-                and not backup_files_preserved(post_dir, gfb)):
-            item["recovery_unverified"] = True
-            _pin_or_warn(
-                gfb,
-                "gap-fill backup kept; original files differ from the import")
-            log.info(fmt(C.YELLOW,
-                "  ⚠  Gap-fill landed, but the original files differ; "
-                "keeping the backup."))
-        elif _item_strict_success and _filled_whole and _filled_receipt is not None:
-            if not retire_backup_beets_entries(
-                gfb,
-                post_dir,
-                _filled_receipt,
-                **({"replacement_audio_paths": [t["path"] for t in edition_files(
-                    item["album"], read_album_dir(post_dir), post_dir)]}
-                   if item.get("exact_edition") else {}),
-            ):
-                item["recovery_unverified"] = True
-                item["catalogue_unverified"] = True
-                _pin_or_warn(
-                    gfb,
-                    "gap-fill backup kept; the old Beets entries "
-                    "could not be removed")
-                log.info(fmt(C.YELLOW,
-                    "  ⚠  Gap-fill complete but its Beets catalogue "
-                    "couldn't be reconciled; keeping the exact backup."))
-            elif not dispose_backup(
-                gfb,
-                replacement_path=post_dir,
-                expected_replacement_receipt=_filled_receipt,
-                replacement_validator=lambda replacement, backup: (
-                    folder_holds_all_tracks(
-                        replacement,
-                        (item["album"].get("tracks") or {}).get("items") or [],
-                        destructive=True,
-                        edition=item["album"] if item.get("exact_edition") else None,
-                        folder_label=post_dir.name,
-                    )
-                    and backup_files_preserved(replacement, backup)
-                ),
-            ):
-                item["recovery_unverified"] = True
-                _pin_or_warn(
-                    gfb,
-                    "gap-fill backup kept; final exact replacement "
-                    "proof did not hold")
-                log.info(fmt(C.YELLOW,
-                    "  ⚠  Gap-fill complete but the exact backup couldn't "
-                    "be removed."))
-        elif _item_strict_success and _filled_whole:
-            item["recovery_unverified"] = True
-            _pin_or_warn(
-                gfb,
-                "gap-fill backup kept; replacement not confirmed written to disk")
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  {truncate(album_dir.name, 40)}: filled, but the new "
-                "folder couldn't be confirmed written to disk; keeping the backed-up "
-                "tracks."))
-            log.info(fmt(C.GRAY, f"     Backup at {gfb}."))
-        elif _item_strict_success:
-            # Imported cleanly, but either beets filed the album where the
-            # matcher couldn't find it (renamed past the fuzzy gate, or under
-            # an unexpected albumartist) or the located folder is short of the
-            # full track count. Restoring the backed-up tracks here would
-            # strand them beside the fresh import and destroy the only backup
-            # Keep it and let the user reconcile, exactly as the upgrade
-            # branch above does.
-            item["recovery_unverified"] = True
-            _pin_or_warn(
-                gfb,
-                "gap-fill backup kept; the clean imported replacement "
-                "could not be confirmed whole")
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  {truncate(album_dir.name, 40)}: filled, but the new "
-                f"folder couldn't be confirmed whole; keeping the backed-up "
-                f"tracks rather than restoring them as a duplicate."))
-            log.info(fmt(C.GRAY,
-                f"     Backup at {gfb}; remove it once you've confirmed the "
-                f"fill landed."))
-        else:
-            _restore_target = album_dir or post_dir
-            if _restore_target is None:
-                item["recovery_unverified"] = True
-                _pin_or_warn(
-                    gfb,
-                    "gap-fill backup kept; no bound album path was "
-                    "available for restore")
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  Gap-fill failed and no album dir to restore to. "
-                    f"Backed-up tracks at: {gfb}"))
-            else:
-                if args.no_import:
-                    # --no-import skips beets, so the success gate is always
-                    # False here even when the download landed fine. Restoring
-                    # the moved-aside present tracks is right, but it's not a
-                    # failure.
-                    log.info(fmt(C.GRAY,
-                        f"  · {truncate(_restore_target.name, 40)}: --no-import "
-                        f"set; restoring the backed-up tracks to the library."))
-                else:
-                    log.info(fmt(C.YELLOW,
-                        f"  ⚠  {truncate(_restore_target.name, 40)}: gap-fill "
-                        f"did not succeed; restoring backed-up tracks…"))
-                _n_back = restore_gap_fill_backup(gfb, _restore_target,
-                                                  keep_larger_dst=False)
-                if _n_back and not gfb.exists():
-                    log.info(fmt(C.GREEN,
-                        f"  ✓  Restored {plural(_n_back, 'track')} to "
-                        f"{truncate(_restore_target.name, 50)}"))
-                else:
-                    item["recovery_unverified"] = True
-                    if gfb.exists() and not pin_unverified_upgrade_backup(
-                            gfb,
-                            "gap-fill backup kept; automatic restore was "
-                            "partial or failed"):
-                        warn_pin_failed(gfb)
-                    log.info(fmt(C.RED,
-                        f"  ✗  Restored {plural(_n_back, 'track')}; remaining originals "
-                        f"are preserved at:\n     {gfb}"))
-
-    n_ok = item.get("n_ok", 0)
-    n_fail = item.get("n_fail", 0)
-    n_retryable, n_unretryable = incomplete_track_counts(item)
-    outcome_attention = _queue_outcome_needs_attention(item)
-    # A stop marker (cancel or an undeliverable album discarded the staged
-    # files; disk-full / I/O / auth stopped the batch) must keep its label.
-    # n_ok still counts the tracks that briefly landed, so the n_ok branch
-    # below would mislabel a discarded cancel as "downloaded" in its result.
-    _stop = item.get("result")
-    if _stop in (
-            "cancelled", "incomplete", "interrupted", "disk_full", "io_error",
-            "auth_lost", "import_failed", "upgrade_aborted_backup_failed",
-            "stale_candidate", "disk_refused", "folder_read_only"):
-        status = _stop
-    elif n_ok and (n_retryable or n_unretryable or outcome_attention):
-        status = "partial"
-    elif n_ok:
-        status = "downloaded"
-    elif n_retryable or n_unretryable:
-        status = "failed"
-    else:
-        status = "nothing_landed"
-
-    return {
-        "dir": album_dir,
-        "result": status,
-        "n_ok": n_ok,
-        "n_fail": n_fail,
-        "n_lossy": item.get("n_lossy", 0),
-        **shortfall_fields(item),
-        "failed_tracks": item.get("failed_tracks", []),
-        "lossy_tracks": item.get("lossy_tracks", []),
-        "broken_tracks": item.get("broken_tracks", []),
-        "downsample_errors": item.get("downsample_errors", 0),
-        "downsample_saved_bytes": item.get("downsample_saved_bytes", 0),
-        "downsample_flush_warnings": item.get(
-            "downsample_flush_warnings", 0
-        ),
-        "downsample_cancelled": bool(item.get("downsample_cancelled", False)),
-        "upgrade_unverified": bool(item.get("upgrade_unverified", False)),
-        "upgrade_put_back": bool(item.get("upgrade_put_back", False)),
-        "catalogue_unverified": bool(item.get("catalogue_unverified", False)),
-        "recovery_unverified": bool(item.get("recovery_unverified", False)),
-        "import_denied": item.get("import_denied"),
-        "folder_denied": item.get("folder_denied"),
-        "quality_verdict": item.get("quality_verdict"),
-        "siblings_preserved": item.get("_siblings_preserved", []),
-        "siblings_kept": item.get("_siblings_kept", []),
-        "imported": imported_globally,
-        "auto_upgrade": item["auto_upgrade"],
-        "elapsed_s": int(item.get("elapsed", 0)),
-        "album": item["album"],
-    }
+    return _ItemResolution(
+        item, args, imported_globally, authority=authority).run()
 
 
 def _sleep_unless_cancelled(seconds, cancel_check, step=0.5):

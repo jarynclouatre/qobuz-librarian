@@ -197,240 +197,274 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
     sibling folders and delete the others after a fill. Without it every
     folder is checked on its own and none is offered for deletion.
     """
-    album_dirs = list_artist_album_dirs(artist_dir)
-    if not album_dirs:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  No album folders found under {shown_path(artist_dir)}."))
-        # catalog=None, not []: the missing-albums step treats a non-None
-        # catalog as authoritative.
-        return [], {}, set(), set(), None, None
+    return _ArtistGapFill(
+        artist_name, artist_dir, args, token, shared_queue=shared_queue,
+        flush_callback=flush_callback, skip_predicate=skip_predicate,
+        save_callback=save_callback, fresh=fresh, hidden=hidden,
+        numbered=numbered, consolidate=consolidate).run()
 
-    sibling_choices = {}  # picked_dir -> [siblings to delete after fill]
 
-    # Resolve the artist + pre-fetch the catalog.
-    vlog("  Resolving artist + pre-fetching catalog …")
-    artist_search_failed = False
-    by_lead = False
-    try:
-        artist_id, resolved_name, by_lead = resolve_folder_artist(
-            artist_name, token, album_dirs)
-    except ArtistSearchUnavailable:
-        artist_id, resolved_name = None, None
-        artist_search_failed = True
-    if resolved_name:
-        artist_name = resolved_name
-    catalog = []
-    catalog_fetched = False
-    if artist_id is not None:
-        try:
-            catalog, qobuz_total = get_artist_albums(
-                artist_id, token, limit=cfg.ARTIST_CATALOG_LIMIT, fresh=fresh)
-            catalog_fetched = True
-            vlog(f"  Pre-fetched {len(catalog)} catalog entries (artist_id={artist_id}).")
-            if qobuz_total is not None and qobuz_total > len(catalog):
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  Qobuz reports {plural(qobuz_total, 'album')}; only fetched "
-                    f"{len(catalog)}. Folders past the limit will fall back to search."))
-        except QobuzError as e:
+_STOP_SCAN = object()
+
+
+class _ArtistGapFill:
+    """One artist's Gap Fill, album folder by album folder."""
+
+    def __init__(self, artist_name, artist_dir, args, token, *, shared_queue,
+                 flush_callback, skip_predicate, save_callback, fresh, hidden,
+                 numbered, consolidate):
+        self.artist_name = artist_name
+        self.artist_dir = artist_dir
+        self.args = args
+        self.token = token
+        self.shared_queue = shared_queue
+        self.flush_callback = flush_callback
+        self.skip_predicate = skip_predicate
+        self.save_callback = save_callback
+        self.fresh = fresh
+        self.hidden = hidden
+        self.numbered = numbered
+        self.consolidate = consolidate
+
+    def run(self):
+        self.album_dirs = list_artist_album_dirs(self.artist_dir)
+        if not self.album_dirs:
             log.info(fmt(C.YELLOW,
-                f"  ⚠  Couldn't fetch the artist's albums from Qobuz ({e}); "
-                "matching each folder on its own."))
-            catalog = []
-    elif artist_search_failed:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  Qobuz couldn't complete the artist lookup for "
-            f"{artist_name!r}; trying each album instead."))
-    else:
-        log.info(fmt(C.YELLOW,
-            f"  ⚠  No Qobuz artist matches {artist_name!r} closely enough; "
-            "matching each folder on its own."))
+                f"  ⚠  No album folders found under {shown_path(self.artist_dir)}."))
+            # catalog=None, not []: the missing-albums step treats a non-None
+            # catalog as authoritative.
+            return [], {}, set(), set(), None, None
 
-    skip_set = set()  # the folders not picked to keep in a duplicate group
-    no_answer = False
-    # Folder bare-titles seed the owned set the missing-albums step reads, so a
-    # catalog album already on disk isn't re-offered; a sibling set aside below
-    # is still on disk.
-    owned_titles = owned_album_titles(album_dirs)
-    # A group whose folders the walk has all settled was answered before.
-    sibling_groups = [
-        (bare, dirs) for bare, dirs in detect_sibling_album_groups(album_dirs)
-        if not all(_skipped(skip_predicate, d) for d in dirs)
-    ] if consolidate else []
-    if sibling_groups:
-        log.info(fmt(C.YELLOW,
-            f"\n  ⚠  Detected {plural(len(sibling_groups), 'sibling folder group')}:"))
-        for bare, dirs in sibling_groups:
-            print()
-            log.info(fmt(C.WHITE, f"  Group '{bare}':"))
-            for j, d in enumerate(dirs, 1):
-                n_audio = _count_audio_files_in(d)
-                log.info(f"    {fmt(C.BOLD, str(j))}. {fmt(C.WHITE, d.name)}")
-                log.info(fmt(C.GRAY, wrap(
-                    f"{plural(n_audio, 'audio file')} · "
-                    f"{_folder_quality_label(d)}", indent="       ")))
-            log.info(fmt(C.GRAY, wrap(
-                "Pick which to keep. After a successful fill, each of the "
-                "others is deleted if every track in it is also in the one "
-                "you keep.", indent="    ")))
-            log.info(fmt(C.GRAY,
-                "    Enter leaves them all, and checks each on its own."))
-            picked = None
-            yes_skip_delete = False  # --yes picks but never deletes
-            if args.yes:
-                picked = pick_canonical_sibling(dirs)
-                yes_skip_delete = True
-                log.info(fmt(C.GRAY,
-                    f"    --yes: picking {picked.name} "
-                    f"(siblings preserved; deletion needs interactive confirm)"))
-            else:
-                while True:
-                    rr = ask(f"    Pick [1-{len(dirs)}, Enter = leave all]: ",
-                             lower=False)
-                    if rr is None:
-                        no_answer = True
-                    if not rr:
-                        break
-                    if rr.isdigit() and 1 <= int(rr) <= len(dirs):
-                        picked = dirs[int(rr) - 1]
-                        break
-                    log.info(fmt(C.GRAY,
-                        f"    Enter 1-{len(dirs)}, or blank to leave them all."))
-            if no_answer:
+        self.sibling_choices = {}  # picked_dir -> [siblings to delete after fill]
+
+        self._fetch_catalog()
+        self._pick_siblings()
+        self._start_scan()
+        self._open_queue()
+
+        for i, ad in enumerate(self.album_dirs, 1):
+            if self.stopped_early:
                 break
-            if picked is None:
-                log.info(fmt(C.GRAY, "    Left as they are."))
+
+            if _skipped(self.skip_predicate, ad):
                 continue
-            others = [d for d in dirs if d is not picked]
-            # Under --yes, pick but DO NOT enqueue siblings for delete-after-fill;
-            # matches the docstring's --yes contract.
-            sibling_choices[picked] = [] if yes_skip_delete else others
-            for d in others:
-                skip_set.add(d)
-        if skip_set:
-            album_dirs = [d for d in album_dirs if d not in skip_set]
-            log.info(fmt(C.GRAY,
-                f"  → {plural(len(album_dirs), 'folder')} to scan."))
 
-    handled_ids = set()     # Qobuz ids matched here; the missing step skips them
-    resolved_dirs = set()   # folders matched here, so a different edition of the
-                            # same album doesn't re-surface them as missing
+            if self._check_album(i, ad) is _STOP_SCAN:
+                break
 
-    heading = f"Gap Fill ({plural(len(album_dirs), 'album')} by {artist_name})"
-    section(f"Step 1: {heading}" if numbered else heading)
-    # Asking for one artist by name shows the whole catalogue, dismissals
-    # included. Read the store anyway so each one can say why it is here.
-    shown_dismissed = hidden_mod.load() if hidden is None else None
-    vlog("  For each, querying Qobuz and offering to fill missing tracks.")
-    vlog("  Press 's' at any prompt to stop the scan.")
+        self._finish_queue()
 
-    results = []
-    # Folders set aside while picking among duplicate sibling groups are
-    # removed from album_dirs above, so the main loop never records a decision
-    # for them.
-    for d in sorted(skip_set, key=lambda p: p.name):
-        results.append({"dir": d, "result": "sibling_skipped"})
-    # A closed input answered nothing, so nothing is recorded as decided.
-    if no_answer:
-        results.append({"dir": artist_dir, "result": "no_answer"})
-    stopped_early = no_answer
-    # 'a' at any gap-fill prompt auto-confirms the rest of THIS artist's albums.
-    # Scoped local; it doesn't bleed into step 2 or the next artist in a walk.
-    auto_yes_rest = False
-    # In shared_queue mode, append decisions STRAIGHT into shared_queue (not a
-    # local list): a Ctrl-C mid-loop then leaves the current artist's
-    # approvals in the caller's queue (which the walk persists on interrupt)
-    # instead of dropping them, and the 'd' flush can act on them mid-artist.
-    queue = shared_queue if shared_queue is not None else []
-    # On its own, Artist mode saves each approval as it is made, so a Ctrl-C
-    # at a later prompt leaves the queue to resume. Albums an earlier Artist
-    # mode run left in the queue stay there, ahead of this run's; a queue
-    # from another mode is left as it is.
-    save_own_queue = None
-    earlier = []
-    if shared_queue is None:
-        loaded = load_queue_journal()
-        kept, kept_mode = loaded.pending_items()
-        if loaded.status is QueueLoadStatus.ABSENT or kept_mode == "artist":
-            earlier = kept
-            save_queue = queue_saver("artist", dry_run=args.dry_run)
+        if self.pending_stop is not None:
+            if self.save_own_queue is not None and (self.earlier or self.queue):
+                log.info(kept_queue_note(self.earlier + self.queue))
+            raise self.pending_stop
 
-            def save_own_queue(items):
-                approved = {_queue_album_key(item) for item in items}
-                earlier[:] = [item for item in earlier
-                              if _queue_album_key(item) not in approved]
-                save_queue(earlier + items)
-    # AuthLost / QobuzUnavailable mid-loop: stash it, finish the hand-off so
-    # the artist's queue reaches shared_queue, then re-raise.
-    pending_stop = None
+        # catalog is None when the pre-fetch didn't land (no artist match, or a
+        # failed fetch) so the missing-albums step re-fetches instead of trusting
+        # an empty list as "nothing on Qobuz". A folder its first-named artist
+        # stands in for holds a few of that artist's albums and lists nothing
+        # missing.
+        if self.by_lead:
+            self.catalog = []
+        return (self.results, self.owned_titles, self.handled_ids, self.resolved_dirs, self.artist_id,
+                self.catalog if self.catalog_fetched else None)
 
-    for i, ad in enumerate(album_dirs, 1):
-        if stopped_early:
-            break
+    def _fetch_catalog(self):
+        # Resolve the artist + pre-fetch the catalog.
+        vlog("  Resolving artist + pre-fetching catalog …")
+        artist_search_failed = False
+        self.by_lead = False
+        try:
+            self.artist_id, resolved_name, self.by_lead = resolve_folder_artist(
+                self.artist_name, self.token, self.album_dirs)
+        except ArtistSearchUnavailable:
+            self.artist_id, resolved_name = None, None
+            artist_search_failed = True
+        if resolved_name:
+            self.artist_name = resolved_name
+        self.catalog = []
+        self.catalog_fetched = False
+        if self.artist_id is not None:
+            try:
+                self.catalog, qobuz_total = get_artist_albums(
+                    self.artist_id, self.token, limit=cfg.ARTIST_CATALOG_LIMIT, fresh=self.fresh)
+                self.catalog_fetched = True
+                vlog(f"  Pre-fetched {len(self.catalog)} catalog entries (artist_id={self.artist_id}).")
+                if qobuz_total is not None and qobuz_total > len(self.catalog):
+                    log.info(fmt(C.YELLOW,
+                        f"  ⚠  Qobuz reports {plural(qobuz_total, 'album')}; only fetched "
+                        f"{len(self.catalog)}. Folders past the limit will fall back to search."))
+            except QobuzError as e:
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  Couldn't fetch the artist's albums from Qobuz ({e}); "
+                    "matching each folder on its own."))
+                self.catalog = []
+        elif artist_search_failed:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  Qobuz couldn't complete the artist lookup for "
+                f"{self.artist_name!r}; trying each album instead."))
+        else:
+            log.info(fmt(C.YELLOW,
+                f"  ⚠  No Qobuz artist matches {self.artist_name!r} closely enough; "
+                "matching each folder on its own."))
 
-        if _skipped(skip_predicate, ad):
-            continue
+    def _pick_siblings(self):
+        self.skip_set = set()  # the folders not picked to keep in a duplicate group
+        self.no_answer = False
+        # Folder bare-titles seed the owned set the missing-albums step reads, so a
+        # catalog album already on disk isn't re-offered; a sibling set aside below
+        # is still on disk.
+        self.owned_titles = owned_album_titles(self.album_dirs)
+        # A group whose folders the walk has all settled was answered before.
+        sibling_groups = [
+            (bare, dirs) for bare, dirs in detect_sibling_album_groups(self.album_dirs)
+            if not all(_skipped(self.skip_predicate, d) for d in dirs)
+        ] if self.consolidate else []
+        if sibling_groups:
+            log.info(fmt(C.YELLOW,
+                f"\n  ⚠  Detected {plural(len(sibling_groups), 'sibling folder group')}:"))
+            for bare, dirs in sibling_groups:
+                print()
+                log.info(fmt(C.WHITE, f"  Group '{bare}':"))
+                for j, d in enumerate(dirs, 1):
+                    n_audio = _count_audio_files_in(d)
+                    log.info(f"    {fmt(C.BOLD, str(j))}. {fmt(C.WHITE, d.name)}")
+                    log.info(fmt(C.GRAY, wrap(
+                        f"{plural(n_audio, 'audio file')} · "
+                        f"{_folder_quality_label(d)}", indent="       ")))
+                log.info(fmt(C.GRAY, wrap(
+                    "Pick which to keep. After a successful fill, each of the "
+                    "others is deleted if every track in it is also in the one "
+                    "you keep.", indent="    ")))
+                log.info(fmt(C.GRAY,
+                    "    Enter leaves them all, and checks each on its own."))
+                picked = None
+                yes_skip_delete = False  # --yes picks but never deletes
+                if self.args.yes:
+                    picked = pick_canonical_sibling(dirs)
+                    yes_skip_delete = True
+                    log.info(fmt(C.GRAY,
+                        f"    --yes: picking {picked.name} "
+                        f"(siblings preserved; deletion needs interactive confirm)"))
+                else:
+                    while True:
+                        rr = ask(f"    Pick [1-{len(dirs)}, Enter = leave all]: ",
+                                 lower=False)
+                        if rr is None:
+                            self.no_answer = True
+                        if not rr:
+                            break
+                        if rr.isdigit() and 1 <= int(rr) <= len(dirs):
+                            picked = dirs[int(rr) - 1]
+                            break
+                        log.info(fmt(C.GRAY,
+                            f"    Enter 1-{len(dirs)}, or blank to leave them all."))
+                if self.no_answer:
+                    break
+                if picked is None:
+                    log.info(fmt(C.GRAY, "    Left as they are."))
+                    continue
+                others = [d for d in dirs if d is not picked]
+                # Under --yes, pick but DO NOT enqueue siblings for delete-after-fill;
+                # matches the docstring's --yes contract.
+                self.sibling_choices[picked] = [] if yes_skip_delete else others
+                for d in others:
+                    self.skip_set.add(d)
+            if self.skip_set:
+                self.album_dirs = [d for d in self.album_dirs if d not in self.skip_set]
+                log.info(fmt(C.GRAY,
+                    f"  → {plural(len(self.album_dirs), 'folder')} to scan."))
 
-        label = f"[{i}/{len(album_dirs)}]"
+    def _start_scan(self):
+        self.handled_ids = set()     # Qobuz ids matched here; the missing step skips them
+        self.resolved_dirs = set()   # folders matched here, so a different edition of the
+                                     # same album doesn't re-surface them as missing
+
+        heading = f"Gap Fill ({plural(len(self.album_dirs), 'album')} by {self.artist_name})"
+        section(f"Step 1: {heading}" if self.numbered else heading)
+        # Asking for one artist by name shows the whole catalogue, dismissals
+        # included. Read the store anyway so each one can say why it is here.
+        self.shown_dismissed = hidden_mod.load() if self.hidden is None else None
+        vlog("  For each, querying Qobuz and offering to fill missing tracks.")
+        vlog("  Press 's' at any prompt to stop the scan.")
+
+        self.results = []
+        # Folders set aside while picking among duplicate sibling groups are
+        # removed from album_dirs above, so the main loop never records a decision
+        # for them.
+        for d in sorted(self.skip_set, key=lambda p: p.name):
+            self.results.append({"dir": d, "result": "sibling_skipped"})
+        # A closed input answered nothing, so nothing is recorded as decided.
+        if self.no_answer:
+            self.results.append({"dir": self.artist_dir, "result": "no_answer"})
+        self.stopped_early = self.no_answer
+        # 'a' at any gap-fill prompt auto-confirms the rest of THIS artist's albums.
+        # Scoped local; it doesn't bleed into step 2 or the next artist in a walk.
+        self.auto_yes_rest = False
+
+    def _open_queue(self):
+        # In shared_queue mode, append decisions STRAIGHT into shared_queue (not a
+        # local list): a Ctrl-C mid-loop then leaves the current artist's
+        # approvals in the caller's queue (which the walk persists on interrupt)
+        # instead of dropping them, and the 'd' flush can act on them mid-artist.
+        self.queue = self.shared_queue if self.shared_queue is not None else []
+        # On its own, Artist mode saves each approval as it is made, so a Ctrl-C
+        # at a later prompt leaves the queue to resume. Albums an earlier Artist
+        # mode run left in the queue stay there, ahead of this run's; a queue
+        # from another mode is left as it is.
+        self.save_own_queue = None
+        self.earlier = []
+        if self.shared_queue is None:
+            loaded = load_queue_journal()
+            kept, kept_mode = loaded.pending_items()
+            if loaded.status is QueueLoadStatus.ABSENT or kept_mode == "artist":
+                self.earlier = kept
+                self.save_queue = queue_saver("artist", dry_run=self.args.dry_run)
+                self.save_own_queue = self._save_own_queue
+        # AuthLost / QobuzUnavailable mid-loop: stash it, finish the hand-off so
+        # the artist's queue reaches shared_queue, then re-raise.
+        self.pending_stop = None
+
+    def _save_own_queue(self, items):
+        approved = {_queue_album_key(item) for item in items}
+        self.earlier[:] = [item for item in self.earlier
+                           if _queue_album_key(item) not in approved]
+        self.save_queue(self.earlier + items)
+
+    def _check_album(self, i, ad):
+        label = f"[{i}/{len(self.album_dirs)}]"
         print()
         log.info(fmt(C.BOLD + C.WHITE, f"  {label} {truncate(ad.name, 55)}"))
 
         try:
-            m = match_album_dir(ad, artist_name, token,
-                                catalog=catalog, prefer_hires=args.prefer_hires)
+            m = match_album_dir(ad, self.artist_name, self.token,
+                                catalog=self.catalog, prefer_hires=self.args.prefer_hires)
         except (AuthLost, QobuzUnavailable) as _e_stop:
-            pending_stop = _e_stop
-            break
+            self.pending_stop = _e_stop
+            return _STOP_SCAN
         time.sleep(cfg.ARTIST_API_DELAY)
 
         # Sibling-pick fallback. The picked folder failed to match, so offer each
         # alternate from its group in turn.
-        if m.status == "no_match" and ad in sibling_choices:
-            log.info(fmt(C.YELLOW, f"    ⚠  No Qobuz match for {ad.name}."))
-            fallback_queue = list(sibling_choices[ad])
-            original_ad = ad
-            while fallback_queue:
-                next_try = fallback_queue.pop(0)
-                if not confirm(f"    Try sibling {next_try.name} instead?",
-                               default_yes=True, auto_yes=args.yes):
-                    log.info(fmt(C.GRAY, "    Skipping the rest of this group."))
-                    break
-                log.info(fmt(C.GRAY, f"    Trying {next_try.name} …"))
-                try:
-                    m = match_album_dir(next_try, artist_name, token,
-                                        catalog=catalog, prefer_hires=args.prefer_hires)
-                except (AuthLost, QobuzUnavailable) as _e_stop_sib:
-                    pending_stop = _e_stop_sib
-                    m = None
-                    break
-                time.sleep(cfg.ARTIST_API_DELAY)
-                if m.status != "no_match":
-                    # The folder the user chose to keep stays on disk.
-                    sibling_choices[next_try] = [
-                        d for d in sibling_choices[original_ad]
-                        if d is not next_try]
-                    sibling_choices.pop(original_ad, None)
-                    ad = next_try
-                    log.info(fmt(C.GREEN, f"    ✓  Switched to {ad.name}."))
-                    break
-                log.info(fmt(C.YELLOW,
-                    f"    ⚠  No Qobuz match for {next_try.name} either."))
+        if m.status == "no_match" and ad in self.sibling_choices:
+            ad, m = self._try_siblings(ad, m)
 
-        if pending_stop is not None:
-            break
+        if self.pending_stop is not None:
+            return _STOP_SCAN
 
         if m is None or m.status == "no_match":
             log.info(fmt(C.YELLOW, "    ⚠  No confident Qobuz match for this folder. Skipping."))
-            results.append({"dir": ad, "result": "no_qobuz_match"})
-            continue
+            self.results.append({"dir": ad, "result": "no_qobuz_match"})
+            return
 
         if m.status == "predicted_path_mismatch":
             pred = (m.qobuz_album or {}).get("title") or "?"
             log.info(fmt(C.YELLOW,
                 f"    ⚠  The Qobuz match ({pred}) would be filed in a different "
                 "folder. Skipping, to avoid a duplicate album."))
-            results.append({"dir": ad, "result": "predicted_path_mismatch",
-                            "qobuz_title": pred})
-            continue
+            self.results.append({"dir": ad, "result": "predicted_path_mismatch",
+                                 "qobuz_title": pred})
+            return
 
         if m.status == "low_overlap":
             # A different, similarly-named album fuzz-matched this folder.
@@ -438,129 +472,169 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             log.info(fmt(C.YELLOW,
                 f"    ⚠  The closest Qobuz album ({pred}) shares few tracks "
                 "with this folder and may be a different album. Skipping."))
-            results.append({"dir": ad, "result": "low_overlap",
-                            "qobuz_title": pred})
-            continue
+            self.results.append({"dir": ad, "result": "low_overlap",
+                                 "qobuz_title": pred})
+            return
 
         album = m.qobuz_album
         qobuz_tracks = (album.get("tracks") or {}).get("items") or []
         n_total = len(qobuz_tracks)
 
         if m.status == "false_match":
+            none_match = ("The 1 track in this folder is not"
+                          if len(m.existing) == 1 else
+                          f"None of the {plural(len(m.existing), 'track')} "
+                          "in this folder is")
             log.info(fmt(C.YELLOW,
-                f"    ⚠  None of the {plural(len(m.existing), 'track')} in this "
-                f"folder is on the Qobuz match ({album.get('title') or '?'}), "
+                f"    ⚠  {none_match} on the Qobuz match ({album.get('title') or '?'}), "
                 "so it is likely a different album. Skipping."))
-            results.append({"dir": ad, "result": "false_match",
-                            "qobuz_title": album.get("title") or "?",
-                            "n_existing": len(m.existing), "n_qobuz": n_total})
-            continue
+            self.results.append({"dir": ad, "result": "false_match",
+                                 "qobuz_title": album.get("title") or "?",
+                                 "n_existing": len(m.existing), "n_qobuz": n_total})
+            return
 
         if album.get("id") is not None:
-            handled_ids.add(album["id"])
-        resolved_dirs.add(str(ad))
+            self.handled_ids.add(album["id"])
+        self.resolved_dirs.add(str(ad))
 
         if m.status == "no_tracks":
             log.info(fmt(C.YELLOW, "    ⚠  Qobuz returned no tracks. Skipping."))
-            results.append({"dir": ad, "result": "no_tracks"})
-            continue
+            self.results.append({"dir": ad, "result": "no_tracks"})
+            return
 
         if m.status == "other_edition":
             log.info(fmt(C.YELLOW,
                 "    ⚠  This folder doesn't hold a single version of the album "
                 f"that Qobuz lists (closest: {_release_title(album)}), so "
                 "filling it would mix versions. Skipping."))
-            results.append({"dir": ad, "result": "other_edition",
-                            "qobuz_title": album.get("title") or "?"})
-            continue
+            self.results.append({"dir": ad, "result": "other_edition",
+                                 "qobuz_title": album.get("title") or "?"})
+            return
 
         if m.status == "unchecked":
             log.info(fmt(C.YELLOW,
                 "    ⚠  Qobuz didn't return every version of this album, so "
                 "this folder's version couldn't be checked. Skipping for now."))
-            results.append({"dir": ad, "result": "unchecked",
-                            "qobuz_title": album.get("title") or "?"})
-            continue
+            self.results.append({"dir": ad, "result": "unchecked",
+                                 "qobuz_title": album.get("title") or "?"})
+            return
 
         existing, missing, present = m.existing, m.missing, m.present
 
         # Artist mode: complete is complete.
         if m.status == "complete":
-            has_extras = False
-            # --dry-run is preview-only: skip the interactive expanded-edition
-            # pick entirely; it prompts and would queue and persist an item, both
-            # of which a dry run must not do.
-            if (existing and not getattr(args, "no_upgrade", False)
-                    and not getattr(args, "dry_run", False)):
-                qual = compare_album_quality(existing, album)
-                if qual["classification"] in ("all_lower", "mixed_below"):
-                    extra_albums = find_extras_in_existing(qobuz_tracks, existing)
-                    has_extras = bool(extra_albums)
-            if has_extras:
-                try:
-                    _cands = find_expanded_edition(album, ad, existing, token, args)
-                except (AuthLost, QobuzUnavailable) as _e_stop_exp:
-                    pending_stop = _e_stop_exp
-                    break
-                _exp, _exp_extras = prompt_edition_pick(
-                    album, len(extra_albums), _cands, existing, args, label_prefix="    ")
-                if _exp is not None:
-                    candidate = _build_queue_item(
-                        album=_exp, album_dir=ad, label=label,
-                        missing=list((_exp.get("tracks") or {}).get("items") or []),
-                        present=[], upgrade_only=False, auto_upgrade=True,
-                        siblings_to_delete=sibling_choices.get(ad, []),
-                    )
-                    try:
-                        _admit_new_queue_items([candidate], token)
-                    except CandidateStale as exc:
-                        log.info(fmt(C.YELLOW, f"    ⚠  {exc}"))
-                        results.append({"dir": ad, "result": "stale_candidate"})
-                        continue
-                    log.info(fmt(C.MAGENTA,
-                        f"    ↑  Switching to {_exp.get('title') or '?'!r} at "
-                        f"{album_quality_label(_exp)}; queued for batch upgrade"))
-                    queue.append(candidate)
-                    if save_own_queue is not None:
-                        save_own_queue(queue)
-                    continue
-                log.info(fmt(C.GRAY,
-                    f"    ✓  {_all_present(n_total)} "
-                    f"(Qobuz higher-quality but you have bonus tracks; preserving)"))
-            else:
-                log.info(fmt(C.GREEN, f"    ✓  {_all_present(n_total)}"))
-            results.append({"dir": ad, "result": "already_complete", "n_total": n_total})
-            # Don't delete the picked album's siblings here: the sibling-group
-            # prompt offers deletion "on successful fill", and this branch
-            # downloads nothing (the folder is already complete).
-            continue
+            return self._complete(ad, label, album, qobuz_tracks, n_total, existing)
 
+        return self._fill_gap(ad, label, album, n_total, missing, present)
+
+    def _try_siblings(self, ad, m):
+        log.info(fmt(C.YELLOW, f"    ⚠  No Qobuz match for {ad.name}."))
+        fallback_queue = list(self.sibling_choices[ad])
+        original_ad = ad
+        while fallback_queue:
+            next_try = fallback_queue.pop(0)
+            if not confirm(f"    Try sibling {next_try.name} instead?",
+                           default_yes=True, auto_yes=self.args.yes):
+                log.info(fmt(C.GRAY, "    Skipping the rest of this group."))
+                break
+            log.info(fmt(C.GRAY, f"    Trying {next_try.name} …"))
+            try:
+                m = match_album_dir(next_try, self.artist_name, self.token,
+                                    catalog=self.catalog, prefer_hires=self.args.prefer_hires)
+            except (AuthLost, QobuzUnavailable) as _e_stop_sib:
+                self.pending_stop = _e_stop_sib
+                m = None
+                break
+            time.sleep(cfg.ARTIST_API_DELAY)
+            if m.status != "no_match":
+                # The folder the user chose to keep stays on disk.
+                self.sibling_choices[next_try] = [
+                    d for d in self.sibling_choices[original_ad]
+                    if d is not next_try]
+                self.sibling_choices.pop(original_ad, None)
+                ad = next_try
+                log.info(fmt(C.GREEN, f"    ✓  Switched to {ad.name}."))
+                break
+            log.info(fmt(C.YELLOW,
+                f"    ⚠  No Qobuz match for {next_try.name} either."))
+        return ad, m
+
+    def _complete(self, ad, label, album, qobuz_tracks, n_total, existing):
+        has_extras = False
+        # --dry-run is preview-only: skip the interactive expanded-edition
+        # pick entirely; it prompts and would queue and persist an item, both
+        # of which a dry run must not do.
+        if (existing and not getattr(self.args, "no_upgrade", False)
+                and not getattr(self.args, "dry_run", False)):
+            qual = compare_album_quality(existing, album)
+            if qual["classification"] in ("all_lower", "mixed_below"):
+                extra_albums = find_extras_in_existing(qobuz_tracks, existing)
+                has_extras = bool(extra_albums)
+        if has_extras:
+            try:
+                _cands = find_expanded_edition(album, ad, existing, self.token, self.args)
+            except (AuthLost, QobuzUnavailable) as _e_stop_exp:
+                self.pending_stop = _e_stop_exp
+                return _STOP_SCAN
+            _exp, _exp_extras = prompt_edition_pick(
+                album, len(extra_albums), _cands, existing, self.args, label_prefix="    ")
+            if _exp is not None:
+                candidate = _build_queue_item(
+                    album=_exp, album_dir=ad, label=label,
+                    missing=list((_exp.get("tracks") or {}).get("items") or []),
+                    present=[], upgrade_only=False, auto_upgrade=True,
+                    siblings_to_delete=self.sibling_choices.get(ad, []),
+                )
+                try:
+                    _admit_new_queue_items([candidate], self.token)
+                except CandidateStale as exc:
+                    log.info(fmt(C.YELLOW, f"    ⚠  {exc}"))
+                    self.results.append({"dir": ad, "result": "stale_candidate"})
+                    return
+                log.info(fmt(C.MAGENTA,
+                    f"    ↑  Switching to {_exp.get('title') or '?'!r} at "
+                    f"{album_quality_label(_exp)}; queued for batch upgrade"))
+                self.queue.append(candidate)
+                if self.save_own_queue is not None:
+                    self.save_own_queue(self.queue)
+                return
+            log.info(fmt(C.GRAY,
+                f"    ✓  {_all_present(n_total)} "
+                f"(Qobuz higher-quality but you have bonus tracks; preserving)"))
+        else:
+            log.info(fmt(C.GREEN, f"    ✓  {_all_present(n_total)}"))
+        self.results.append({"dir": ad, "result": "already_complete", "n_total": n_total})
+        # Don't delete the picked album's siblings here: the sibling-group
+        # prompt offers deletion "on successful fill", and this branch
+        # downloads nothing (the folder is already complete).
+
+    def _fill_gap(self, ad, label, album, n_total, missing, present):
         bonus = bonus_versions(missing, present)
-        if len(bonus) == len(missing) and not getattr(args, "include_bonus", False):
+        if len(bonus) == len(missing) and not getattr(self.args, "include_bonus", False):
             log.info(fmt(C.GREEN,
                 f"    ✓  All songs present; {plural(len(bonus), 'bonus version')} "
                 "not filled (--include-bonus)"))
-            results.append({"dir": ad, "result": "already_complete",
-                            "n_total": n_total, "n_bonus": len(bonus)})
-            continue
+            self.results.append({"dir": ad, "result": "already_complete",
+                                 "n_total": n_total, "n_bonus": len(bonus)})
+            return
         if all(unstreamable(t) for t in missing):
             log.info(fmt(C.GREEN,
                 f"    ✓  Every track Qobuz streams is present; "
                 f"{plural(len(missing), 'track')} not available on Qobuz"))
-            results.append({"dir": ad, "result": "already_complete",
-                            "n_total": n_total, "n_unavailable": len(missing)})
-            continue
+            self.results.append({"dir": ad, "result": "already_complete",
+                                 "n_total": n_total, "n_unavailable": len(missing)})
+            return
 
         # Partial: offer to fill the gap, unless the web review already got a
         # no for this album. Both of its tabs write the same dismissal scope.
-        store = hidden if hidden is not None else shown_dismissed
+        store = self.hidden if self.hidden is not None else self.shown_dismissed
         dismissed = hidden_mod.is_hidden(
-            hidden_mod.SCOPE_MISSING, artist_name,
+            hidden_mod.SCOPE_MISSING, self.artist_name,
             album.get("title") or "", store, year=album_year(album))
-        if dismissed and hidden is not None:
+        if dismissed and self.hidden is not None:
             log.info(fmt(C.GRAY, "    Dismissed in the Library review; skipping."))
-            results.append({"dir": ad, "result": "dismissed"})
-            continue
+            self.results.append({"dir": ad, "result": "dismissed"})
+            return
         if dismissed:
             log.info(fmt(C.GRAY,
                 "    Dismissed in the Library review; offered because you "
@@ -579,33 +653,64 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
             f"    Qobuz: {album_year(album) or '?'} • {album_quality_label(album)}"
             f"{_downsample_note(album)}"))
 
-        if args.dry_run:
+        if self.args.dry_run:
             log.info(fmt(C.GRAY, "    --dry-run: would prompt to download here"))
-            results.append({"dir": ad, "result": "dry_run", "n_missing": len(missing)})
-            continue
+            self.results.append({"dir": ad, "result": "dry_run", "n_missing": len(missing)})
+            return
 
-        if args.yes or auto_yes_rest:
+        answer = self._ask_download(missing)
+
+        if answer is None:
+            self.results.append({"dir": ad, "result": "no_answer"})
+            return _STOP_SCAN
+        if answer == "s":
+            log.info(fmt(C.GRAY, "    Stopping artist scan."))
+            self.stopped_early = True
+            self.results.append({"dir": ad, "result": "user_stopped"})
+            return _STOP_SCAN
+        if answer not in ("y", "yes"):
+            self.results.append({"dir": ad, "result": "user_skipped", "n_missing": len(missing)})
+            return
+
+        candidate = _build_queue_item(
+            album=album, album_dir=ad, label=label,
+            missing=list(missing), present=list(present),
+            upgrade_only=False, auto_upgrade=False,
+            siblings_to_delete=self.sibling_choices.get(ad, []),
+        )
+        try:
+            _admit_new_queue_items([candidate], self.token)
+        except CandidateStale as exc:
+            log.info(fmt(C.YELLOW, f"    ⚠  {exc}"))
+            self.results.append({"dir": ad, "result": "stale_candidate"})
+            return
+        self.queue.append(candidate)
+        if self.save_own_queue is not None:
+            self.save_own_queue(self.queue)
+
+    def _ask_download(self, missing):
+        if self.args.yes or self.auto_yes_rest:
             answer = "y"
         else:
             while True:
                 _flush_hint = (
-                    f"/d=download queue ({len(shared_queue) if shared_queue else 0})"
-                ) if (flush_callback is not None and shared_queue is not None) else ""
+                    f"/d=download queue ({len(self.shared_queue) if self.shared_queue else 0})"
+                ) if (self.flush_callback is not None and self.shared_queue is not None) else ""
                 _q = (f"    Download {plural(len(missing), 'missing track')}? "
                       f"[y/N/a=yes-rest{_flush_hint}/s=stop]: ")
                 _flush_stdin()
                 answer = ask(_q)
                 if answer is None:
                     break
-                if answer == "d" and flush_callback is not None:
+                if answer == "d" and self.flush_callback is not None:
                     try:
-                        flush_callback()
+                        self.flush_callback()
                     except KeyboardInterrupt:
                         log.info(fmt(C.GRAY,
                             "\n    Flush interrupted; back to the prompt."))
                     continue
                 if answer == "a":
-                    auto_yes_rest = True
+                    self.auto_yes_rest = True
                     answer = "y"
                     log.info(fmt(C.GRAY,
                         "    Auto-yes for the rest of this artist's albums."))
@@ -613,81 +718,40 @@ def run_artist_gap_fill(artist_name, artist_dir, args, token, *,
                     break
                 log.info(fmt(C.YELLOW, "    Answer y, n, a"
                              + (", d" if _flush_hint else "") + " or s."))
+        return answer
 
-        if answer is None:
-            results.append({"dir": ad, "result": "no_answer"})
-            break
-        if answer == "s":
-            log.info(fmt(C.GRAY, "    Stopping artist scan."))
-            stopped_early = True
-            results.append({"dir": ad, "result": "user_stopped"})
-            break
-        if answer not in ("y", "yes"):
-            results.append({"dir": ad, "result": "user_skipped", "n_missing": len(missing)})
-            continue
-
-        candidate = _build_queue_item(
-            album=album, album_dir=ad, label=label,
-            missing=list(missing), present=list(present),
-            upgrade_only=False, auto_upgrade=False,
-            siblings_to_delete=sibling_choices.get(ad, []),
-        )
-        try:
-            _admit_new_queue_items([candidate], token)
-        except CandidateStale as exc:
-            log.info(fmt(C.YELLOW, f"    ⚠  {exc}"))
-            results.append({"dir": ad, "result": "stale_candidate"})
-            continue
-        queue.append(candidate)
-        if save_own_queue is not None:
-            save_own_queue(queue)
-
-    # Shared_queue mode: decisions already went straight into shared_queue
-    # (see above), so just persist; no extend (that would double every item).
-    if shared_queue is not None:
-        if save_callback is not None and queue:
-            try:
-                save_callback()
-            except Exception as _sce:
-                vlog(f"  save_callback raised: {_sce}")
-    elif queue and pending_stop is None:
-        # The executor deletes each item's chosen siblings itself once the fill
-        # lands cleanly, so there's nothing to clean up here.
-        queue_results, drained = _execute_download_queue(
-            queue, args, token, refresh_review=True,
-            on_progress=(None if save_own_queue is None
-                         else lambda: save_own_queue(queue)))
-        results.extend(queue_results)
-        if drained and save_own_queue is not None:
-            if earlier:
-                save_own_queue(queue)
-            else:
-                clear_queue_journal()
-        elif not drained and (earlier or queue):
-            if save_own_queue is not None and queue_parked():
-                log.info(parked_queue_note())
-            elif save_own_queue is not None:
-                log.info(fmt(C.YELLOW, "  ⚠  Some albums couldn't be downloaded."))
-                log.info(kept_queue_note(earlier + queue))
-            else:
-                log.info(fmt(C.YELLOW,
-                    "  ⚠  Some albums couldn't be downloaded. They were kept "
-                    "for retry; rerun to try them again."))
-
-    if pending_stop is not None:
-        if save_own_queue is not None and (earlier or queue):
-            log.info(kept_queue_note(earlier + queue))
-        raise pending_stop
-
-    # catalog is None when the pre-fetch didn't land (no artist match, or a
-    # failed fetch) so the missing-albums step re-fetches instead of trusting
-    # an empty list as "nothing on Qobuz". A folder its first-named artist
-    # stands in for holds a few of that artist's albums and lists nothing
-    # missing.
-    if by_lead:
-        catalog = []
-    return (results, owned_titles, handled_ids, resolved_dirs, artist_id,
-            catalog if catalog_fetched else None)
+    def _finish_queue(self):
+        # Shared_queue mode: decisions already went straight into shared_queue
+        # (see above), so just persist; no extend (that would double every item).
+        if self.shared_queue is not None:
+            if self.save_callback is not None and self.queue:
+                try:
+                    self.save_callback()
+                except Exception as _sce:
+                    vlog(f"  save_callback raised: {_sce}")
+        elif self.queue and self.pending_stop is None:
+            # The executor deletes each item's chosen siblings itself once the fill
+            # lands cleanly, so there's nothing to clean up here.
+            queue_results, drained = _execute_download_queue(
+                self.queue, self.args, self.token, refresh_review=True,
+                on_progress=(None if self.save_own_queue is None
+                             else lambda: self.save_own_queue(self.queue)))
+            self.results.extend(queue_results)
+            if drained and self.save_own_queue is not None:
+                if self.earlier:
+                    self.save_own_queue(self.queue)
+                else:
+                    clear_queue_journal()
+            elif not drained and (self.earlier or self.queue):
+                if self.save_own_queue is not None and queue_parked():
+                    log.info(parked_queue_note())
+                elif self.save_own_queue is not None:
+                    log.info(fmt(C.YELLOW, "  ⚠  Some albums couldn't be downloaded."))
+                    log.info(kept_queue_note(self.earlier + self.queue))
+                else:
+                    log.info(fmt(C.YELLOW,
+                        "  ⚠  Some albums couldn't be downloaded. They were kept "
+                        "for retry; rerun to try them again."))
 
 
 _ATTENTION_BUCKETS = {
