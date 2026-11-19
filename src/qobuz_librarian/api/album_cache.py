@@ -1,15 +1,9 @@
-"""Persistent cache of ``get_album`` responses, keyed on album id.
+"""Persistent cache of ``get_album`` responses, keyed on album id, and of
+artist catalogues, which expire.
 
-A Qobuz album's metadata and track list don't change, so a fetched album is safe
-to keep indefinitely. Library scans call ``get_album`` once per owned album to
-materialise its track list (``get_artist_albums`` returns counts, not items), and
-that per-album call is the dominant API cost of a scan. Serving it from a local
-SQLite lookup turns a re-scan of an unchanged library from minutes of round-trips
-into milliseconds.
-
-SQLite (not one big JSON) so a few thousand albums are written incrementally and
-read by id without rewriting the whole file, and so a scan's parallel workers can
-each hold their own connection. Delete the db file to force a full refresh.
+A fetched album is kept indefinitely, though ``get_album`` asks Qobuz again for
+one whose track list is short or holds a track Qobuz did not stream. Delete the
+db file to force a full refresh.
 """
 import json
 import sqlite3

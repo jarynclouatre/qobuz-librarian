@@ -1010,6 +1010,7 @@ class _ItemResolution:
         self._locate_post_dir()
         self._settle_siblings()
         self._settle_upgrade_backup()
+        self._mark_downsampled()
         self._settle_gap_fill_backup()
         return self._result()
 
@@ -1120,10 +1121,6 @@ class _ItemResolution:
 
     def _settle_siblings(self):
         if self.had_any_success:
-            if self.post_dir:
-                if self.item.get("resampled_n", 0) > 0:
-                    mark_local_album_capped(self.post_dir, qobuz_album=self.item["album"],
-                                            origin="auto")
             # A sibling is only eligible for retirement after a clean, complete
             # replacement. Bind each move to its pre-download receipt, carry its
             # unique companion files without overwrite, then retire only the exact
@@ -1466,8 +1463,11 @@ class _ItemResolution:
                     log.info(fmt(C.GRAY,
                         f"     The new download was set aside at "
                         f"{put_back}."))
-                if replaced_entries is not None:
-                    forget_imported_beets_entries(replaced_entries, self.album_dir)
+                if replaced_entries is not None and not forget_imported_beets_entries(
+                        replaced_entries, self.album_dir):
+                    log.info(fmt(C.GRAY,
+                        "     If beets still lists the new download, run "
+                        "`beet update`."))
             else:
                 # The walk still flags the album: its upgrade did not happen.
                 self.item["upgrade_unverified"] = True
@@ -1478,6 +1478,12 @@ class _ItemResolution:
                 log.info(fmt(C.GRAY,
                     f"     Original preserved at {self.bp}; it is not removed "
                     "automatically."))
+
+    def _mark_downsampled(self):
+        if (self.had_any_success and self.imported_globally and self.post_dir
+                and self.item.get("resampled_n", 0) > 0):
+            mark_local_album_capped(self.post_dir, qobuz_album=self.item["album"],
+                                    origin="auto")
 
     def _settle_gap_fill_backup(self):
         # Gap-fill backup: present tracks moved to backup before rip.
@@ -1622,16 +1628,21 @@ class _ItemResolution:
                 log.info(fmt(C.GREEN,
                     f"  ✓  Restored {plural(_n_back, 'track')} to "
                     f"{truncate(_restore_target.name, 50)}"))
+            elif not self.gfb.exists():
+                self.item["recovery_unverified"] = True
+                log.info(fmt(C.RED,
+                    "  ✗  No tracks were restored, and the backup is no "
+                    f"longer at:\n     {self.gfb}"))
             else:
                 self.item["recovery_unverified"] = True
-                if self.gfb.exists() and not pin_unverified_upgrade_backup(
+                if not pin_unverified_upgrade_backup(
                         self.gfb,
                         "gap-fill backup kept; automatic restore was "
                         "partial or failed"):
                     warn_pin_failed(self.gfb)
                 log.info(fmt(C.RED,
-                    f"  ✗  Restored {plural(_n_back, 'track')}; remaining originals "
-                    f"are preserved at:\n     {self.gfb}"))
+                    f"  ✗  Restored {plural(_n_back, 'track')}; the backup is "
+                    f"kept at:\n     {self.gfb}"))
 
     def _result(self):
         n_ok = self.item.get("n_ok", 0)

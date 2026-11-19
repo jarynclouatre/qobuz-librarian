@@ -976,14 +976,12 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True,
 
 def _park_library_failures(failed_cands, execute_kind="library",
                            ticked=True, summary=None, execute_args=None):
-    """After a whole-review download (every candidate ticked) finishes, retire
-    empties the living review, so the albums that FAILED to download would
-    vanish until the next scan. Re-park them as a fresh living review of
-    ``execute_kind``, ticked, so they come back ready to retry (mirrors the
-    split-off review left by a partial approval). Persisted so a restart
-    keeps them even though the retired baseline no longer rebuilds. Also the
-    park half of the unticked instant Gap Fill fold, via ``ticked``/
-    ``summary``. Returns the parked job, or None when nothing failed."""
+    """Park the albums a whole-review download (every candidate ticked)
+    failed to download as a fresh saved review of ``execute_kind``, ticked
+    and ready to retry, as a partial approval leaves its unpicked ones.
+    Also the park half of the unticked instant Gap Fill fold, via
+    ``ticked``/``summary``. Returns the parked job, None when nothing
+    failed, or False when the review could not be saved."""
     if not failed_cands:
         return None
     if execute_kind == "new_releases":

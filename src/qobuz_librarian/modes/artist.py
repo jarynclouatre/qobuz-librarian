@@ -236,6 +236,7 @@ class _ArtistGapFill:
             return [], {}, set(), set(), None, None
 
         self.sibling_choices = {}  # picked_dir -> [siblings to delete after fill]
+        self.sibling_fallbacks = {}  # picked_dir -> [siblings to try if it has no match]
 
         self._fetch_catalog()
         self._pick_siblings()
@@ -365,9 +366,9 @@ class _ArtistGapFill:
                     log.info(fmt(C.GRAY, "    Left as they are."))
                     continue
                 others = [d for d in dirs if d is not picked]
-                # Under --yes, pick but DO NOT enqueue siblings for delete-after-fill;
-                # matches the docstring's --yes contract.
+                # --yes picks a folder but never deletes the others.
                 self.sibling_choices[picked] = [] if yes_skip_delete else others
+                self.sibling_fallbacks[picked] = others
                 for d in others:
                     self.skip_set.add(d)
             if self.skip_set:
@@ -446,7 +447,7 @@ class _ArtistGapFill:
 
         # Sibling-pick fallback. The picked folder failed to match, so offer each
         # alternate from its group in turn.
-        if m.status == "no_match" and ad in self.sibling_choices:
+        if m.status == "no_match" and ad in self.sibling_fallbacks:
             ad, m = self._try_siblings(ad, m)
 
         if self.pending_stop is not None:
@@ -529,7 +530,7 @@ class _ArtistGapFill:
 
     def _try_siblings(self, ad, m):
         log.info(fmt(C.YELLOW, f"    ⚠  No Qobuz match for {ad.name}."))
-        fallback_queue = list(self.sibling_choices[ad])
+        fallback_queue = list(self.sibling_fallbacks[ad])
         original_ad = ad
         while fallback_queue:
             next_try = fallback_queue.pop(0)
@@ -549,9 +550,11 @@ class _ArtistGapFill:
             if m.status != "no_match":
                 # The folder the user chose to keep stays on disk.
                 self.sibling_choices[next_try] = [
-                    d for d in self.sibling_choices[original_ad]
+                    d for d in self.sibling_choices.pop(original_ad)
                     if d is not next_try]
-                self.sibling_choices.pop(original_ad, None)
+                for result in self.results:
+                    if result["dir"] == next_try:
+                        result["dir"] = original_ad
                 ad = next_try
                 log.info(fmt(C.GREEN, f"    ✓  Switched to {ad.name}."))
                 break
@@ -743,15 +746,16 @@ class _ArtistGapFill:
                 else:
                     clear_queue_journal()
             elif not drained and (self.earlier or self.queue):
-                if self.save_own_queue is not None and queue_parked():
+                if queue_parked():
                     log.info(parked_queue_note())
                 elif self.save_own_queue is not None:
                     log.info(fmt(C.YELLOW, "  ⚠  Some albums couldn't be downloaded."))
                     log.info(kept_queue_note(self.earlier + self.queue))
                 else:
-                    log.info(fmt(C.YELLOW,
-                        "  ⚠  Some albums couldn't be downloaded. They were kept "
-                        "for retry; rerun to try them again."))
+                    log.info(fmt(C.YELLOW, wrap(
+                        "Some albums couldn't be downloaded. Run Artist mode "
+                        f"for {self.artist_name} again to retry them.",
+                        indent="  ⚠  ", hanging="     ")))
 
 
 _ATTENTION_BUCKETS = {

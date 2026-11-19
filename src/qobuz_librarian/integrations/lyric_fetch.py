@@ -1851,8 +1851,8 @@ def _query_provider(query: str, prov: str, log: logging.Logger,
     Wrap syncedlyrics.search() for a single provider. Provider errors come
     through Python's logging module; _ChatterCapture buffers them per-thread
     for the circuit breaker. After PROVIDER_FAIL_THRESHOLD
-    strikes the provider is skipped for the rest of this run; any successful
-    result clears strikes.
+    strikes the provider is skipped for PROVIDER_COOLDOWN_SECONDS; any
+    successful result clears strikes.
 
     Returns (result, failed_hard). failed_hard means the provider raised or
     logged a warning or error - the query never got an answer, which is not

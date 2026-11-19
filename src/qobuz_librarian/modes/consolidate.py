@@ -1048,8 +1048,8 @@ def _name_leftovers(album, removed):
 
 def execute_consolidation(summary):
     """Move the overlapping sibling tracks to a recoverable backup instead of
-    hard-deleting them, then return (removed_paths, n_failed) so the caller can
-    drop exactly those files from the beets DB.
+    hard-deleting them, drop their Beets entries in the same step, and return
+    (removed_paths, n_failed).
 
     Consolidation is the one destructive mode whose duplicate match can rest on a
     title+disc+(track)+duration-within-2s heuristic when neither side carries an

@@ -86,8 +86,8 @@ _TAG_DENYLIST = frozenset({
 
 
 class Library:
-    """The owned artists, in the three forms the rest of the module needs:
-    normalized keys to exclude against, raw names for the exclusion cases that
+    """The owned artists as the rest of the module needs them: normalized
+    keys to exclude against, raw names for the exclusion cases that
     can't be normalized, seeds to ask Last.fm about, and a signature that
     changes when its artist folders do."""
 

@@ -637,6 +637,7 @@ class _SidecarPass:
         self.failed = 0
         self.strip_failed = 0
         self.strip_read_only = 0
+        self.strip_skipped = 0
         for track in _iter_post_import_flacs(
             self.album_dirs, self.owned_tracks, self.seen
         ):
@@ -809,6 +810,7 @@ class _SidecarPass:
             if preserved is None or any(
                     value.strip() != preserved.strip()
                     for value in lyric_fetch.embedded_lyric_values(self.f)):
+                self.strip_skipped += 1
                 return
             had = False
             for _k in ("lyrics", "unsyncedlyrics"):
@@ -899,26 +901,29 @@ class _SidecarPass:
                 actions.append(f"wrote {plural(self.written, '.lrc sidecar')}")
             if self.kept:
                 actions.append(f"kept {plural(self.kept, 'existing .lrc sidecar')}")
-            if self.failed:
-                noun = "sidecar" if self.failed == 1 else "sidecars"
-                actions.append(f"{self.failed} {noun} failed")
-            suffix = ""
             if self.strip_tag and ready:
-                suffix = (
+                actions[-1] += (
                     " (embedded tags removed)"
                     if self.stripped == ready
                     else f" (embedded tag removal confirmed for {self.stripped} of {ready})"
                 )
+            if self.failed:
+                noun = "sidecar" if self.failed == 1 else "sidecars"
+                actions.append(f"{self.failed} {noun} failed")
+            if self.strip_tag and ready:
                 if self.strip_failed:
                     noun = "removal" if self.strip_failed == 1 else "removals"
-                    suffix += f"; {self.strip_failed} tag {noun} failed"
+                    actions.append(f"{self.strip_failed} tag {noun} failed")
                 if self.strip_read_only:
-                    suffix += (f"; {plural(self.strip_read_only, 'track')} read-only, "
-                               "so the lyrics stay in the tag too")
+                    actions.append(f"{plural(self.strip_read_only, 'track')} read-only, "
+                                   "so the lyrics stay in the tag too")
+                if self.strip_skipped:
+                    actions.append(f"{plural(self.strip_skipped, 'track')} with a "
+                                   "different .lrc, so the lyrics stay in the tag too")
             warning = bool(self.failed or self.strip_failed)
             marker = "⚠" if warning else "✓"
             colour = C.YELLOW if warning else C.GREEN
-            log.info(fmt(colour, f"  {marker}  lyrics: {'; '.join(actions)}{suffix}."))
+            log.info(fmt(colour, f"  {marker}  lyrics: {'; '.join(actions)}."))
 
 
 def _prune_lyric_state_orphans():

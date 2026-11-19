@@ -2411,8 +2411,8 @@ def find_expanded_edition(album, album_dir, existing, token, _args=None):
     new_extras first (zero is best - covers all local tracks), then by quality
     descending ('quality is king'), then by track count descending.
 
-    Limits to 3 full get_album() calls to keep API usage sane. Returns []
-    (empty list) if nothing viable is found.
+    Makes at most EDITION_SEARCH_API_BUDGET get_album() calls, failed ones
+    included. Returns [] if nothing viable is found.
     """
     if not token or album_dir is None:
         return []

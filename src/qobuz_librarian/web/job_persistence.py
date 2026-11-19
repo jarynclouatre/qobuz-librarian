@@ -3,15 +3,16 @@ in ``jobs.py`` are otherwise in memory only.
 
 * Job state is mirrored into ``DATA_DIR/jobs.db`` on every meaningful
   transition (add, RUNNING start, AWAITING_REVIEW, approve, terminal).
-* On startup, ``restore`` reloads the rows into the registry:
+* On startup, ``jobs.restore_jobs`` reloads the rows into the registry:
   - DONE / FAILED / CANCELED come back as historical entries browsable
     in the History view (see ``history_page`` / ``history_count``).
   - AWAITING_REVIEW comes back with candidates intact so the user can
     still approve. The execute function is resolved from ``execute_kind``
     via a lookup table the caller provides; closures aren't serialisable.
-  - PENDING / RUNNING from the prior session are marked
-    FAILED("interrupted on restart; submit again") so the user sees
-    them rather than them silently vanishing.
+  - PENDING / RUNNING from the prior session are marked canceled or failed
+    with a summary that starts "Interrupted by a restart." and says what
+    the restart did with them. A pending job that never started can wait in
+    the queue again.
 
 Terminal log lines are persisted with the finished job. Live progress is not:
 it changes too often and cannot be resumed after a process restart.

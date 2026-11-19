@@ -7628,12 +7628,10 @@ def _adopt_added_album_entries(connection, album_ids, columns, last_old_id):
     """Move the tracks an import just added to an album's folder, which beets
     files as an album of their own, into the entry the album had before.
 
-    The fold refuses them when the album holds fields the added tracks' tags
-    don't carry, such as ReplayGain album gain or an ASIN. The tracks take the
-    album's values for every field albums and tracks share; the album keeps
-    its own and takes the new entry's cover and other fields when it has
-    none. Only one older entry with the same album and album artist is
-    joined."""
+    Only one older entry with the same album and album artist is joined. The
+    tracks take the album's values for every field albums and tracks share;
+    the album keeps its own and takes the new entry's cover and other fields
+    when it has none."""
     album_columns, item_columns = columns[:2]
     rows = _consolidation_rows_for_ids(connection, "albums", album_columns, "id", album_ids)
     index = {column: n for n, column in enumerate(album_columns)}
@@ -7681,14 +7679,15 @@ def _consolidate_duplicate_albums(protected_paths=None, folders=None,
                                   last_old_id=None):
     """Fold provably identical album rows in one rollback-safe DB transaction.
 
-    The fold updates only ``items.album_id`` and removes redundant album rows
-    whose fixed fields and flexible metadata are already represented verbatim
-    by the oldest row, which takes their art when it has none. It never
-    invokes the importer, plugins, tag writers, or filesystem mutation APIs.
-    Any uncertainty leaves the duplicates intact. ``folders`` limits the fold
-    to those album folders. With ``last_old_id``, the newest album id before
-    an import into one of them, the entries it made there join the album
-    entry that was there before even when their album fields differ.
+    The fold moves tracks to the oldest album row and removes redundant rows
+    whose fixed fields and flexible metadata that row already holds
+    verbatim; the oldest takes their art when it has none. It changes only
+    the database, never files, and never runs the importer or plugins. Any
+    uncertainty leaves the duplicates intact. ``folders`` limits the fold to
+    those album folders. With ``last_old_id``, the newest album id before an
+    import into one of them, the entries it made there join the album entry
+    that was there before even when their album fields differ, and their
+    tracks take that entry's shared fields.
     """
     try:
         database = Path(os.fspath(cfg.BEETS_DB_PATH))

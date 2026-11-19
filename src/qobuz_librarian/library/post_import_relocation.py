@@ -1631,10 +1631,12 @@ def _read_database(inspect, authority_matches=None):
     if database is None or not database.is_file():
         raise OSError("an existing Beets database is required for album relocation")
     if authority_matches is not None and not authority_matches():
-        raise OSError("relocation authority changed before the Beets database was read")
+        raise OSError("the relocation's lock, journal or files changed before the Beets "
+                      "database was read")
     result = beets_db.read(database, inspect)
     if authority_matches is not None and not authority_matches():
-        raise OSError("relocation authority changed while the Beets database was read")
+        raise OSError("the relocation's lock, journal or files changed while the Beets "
+                      "database was read")
     return result
 
 
@@ -2505,7 +2507,7 @@ def _recover_payload(
                 for unit in units
             ):
                 raise PostImportRelocationAttention(
-                    "an unpublished relocation copy changed while the app was stopped",
+                    "an unpublished relocation copy no longer matches the move's records",
                     paths=(root / payload["source"],),
                 )
             _remove_workspace(root_fd, workspace_fd, payload)
@@ -2514,7 +2516,7 @@ def _recover_payload(
         states = _all_unit_states(root_fd, workspace_fd, payload) if prepared else []
         if any(state == "unknown" for state in states):
             raise PostImportRelocationAttention(
-                "relocation files changed while the app was stopped",
+                "relocation files no longer match the move's records",
                 paths=(root / payload["source"], root / payload["destination"]),
             )
 
@@ -2723,7 +2725,7 @@ def reconcile_post_import_relocations(
     except PostImportRelocationAttention as exc:
         return RelocationRecoveryResult(
             RelocationRecoveryStatus.ATTENTION_REQUIRED,
-            str(exc),
+            exc.strerror,
             exc.paths,
         )
     except (OSError, sqlite3.Error, ValueError) as exc:

@@ -1137,8 +1137,7 @@ def _keeps_own_ctime(descriptor) -> bool:
 
 
 def _file_digest(path: Path) -> str:
-    """sha256 hex of a file's bytes, read in chunks so a large FLAC isn't loaded
-    into memory all at once."""
+    """sha256 hex of a file's bytes."""
     with open(path, "rb") as fh:
         return _file_digest_fd(fh.fileno())
 
@@ -4110,7 +4109,7 @@ def note_downsample_running(backup) -> None:
 def record_interrupted_downsample():
     """Record what the album holds for the undo copy of a Downsample that
     did not finish, so Restore can put its originals back. Returns the
-    album's folder when that copy holds its originals, else None."""
+    album's folder, or None when there is no such copy."""
     try:
         path = Path(_downsample_running_note().read_text(encoding="utf-8"))
     except (OSError, UnicodeError):

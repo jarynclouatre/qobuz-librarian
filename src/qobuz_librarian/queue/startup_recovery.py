@@ -1579,19 +1579,25 @@ def _backup_only_files(backup, album):
     return " and ".join(filter(None, (", ".join(left[:-1]), left[-1])))
 
 
-def _retire_partly_replaced_album(authority, backup, snapshot):
-    """Retire the Beets entries of the album an upgrade replaced, as its
-    backup holds them, for the folder Beets moved tracks to before it
-    stopped."""
+def _partly_filed_album(snapshot):
+    """The folder Beets moved tracks to before it stopped, or None."""
     try:
         folder = os.path.commonpath([
             os.path.dirname(mapping["destination"]["path"])
             for mapping in snapshot["mappings"]])
     except (KeyError, TypeError, ValueError):
-        return False
+        return None
     if folder in ("", "."):
+        return None
+    return Path(snapshot["root"]) / folder
+
+
+def _retire_partly_replaced_album(authority, backup, album):
+    """Retire the Beets entries of the album an upgrade replaced, as its
+    backup holds them, for the folder Beets moved tracks to before it
+    stopped."""
+    if album is None:
         return False
-    album = Path(snapshot["root"]) / folder
     receipt = capture_album_source_receipt(album)
     _require_authority(authority)
     return receipt is not None and retire_backup_beets_entries(
@@ -1699,8 +1705,14 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
     if backup is not None and backup.receipt.get("kind") == "upgrade":
         only = _backup_only_files(backup, Path(backup.receipt["origin"]))
         reason += f" The album it replaced is {_upgrade_backup_kept(only)}"
-        if not _retire_partly_replaced_album(authority, backup, snapshot):
-            reason += _BEETS_MAY_LIST.format(" beside the new copy" if moved else "")
+        album = _partly_filed_album(snapshot)
+        if not _retire_partly_replaced_album(authority, backup, album):
+            reason += (
+                " Beets may still list the replaced album in the same "
+                "folder as the new copy."
+                if album == Path(backup.receipt["origin"]) else
+                _BEETS_MAY_LIST.format(" beside the new copy" if moved else "")
+            )
     elif backup is not None:
         reason += _backup_sentence(backup)
     return BlockedItemSettlementResult(BlockedItemSettlementStatus.DISCARDED, reason)

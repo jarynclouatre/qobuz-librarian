@@ -31,9 +31,7 @@ def iter_library_flacs(*, artist_dirs=None, on_artist_error=None):
     """Yield ``(path, mtime, size)`` for every FLAC under the given artist dirs.
 
     Walks artists then albums via the same listing the rest of the app uses,
-    so the dot-folder, staging-dir and empty-folder skips all apply. The
-    stat is taken once here and handed to both the index and fetch passes so
-    neither has to re-stat the file.
+    so the dot-folder, staging-dir and empty-folder skips all apply.
 
     ``artist_dirs=None`` walks every artist under MUSIC_ROOT (the whole-library
     backfill). Pass a list to walk only those artists.

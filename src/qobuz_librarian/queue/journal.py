@@ -3263,7 +3263,8 @@ def acknowledge_carrier_retirement_completion(
 
 
 def post_import_relocation_handoff_matches(operation_id, handoff):
-    """Check whether one relocation handoff is still owned by queue state."""
+    """Whether queue state still owns one relocation handoff, or None when
+    that can't be told."""
     try:
         operation_id = _validate_id(
             operation_id, "post-import relocation operation_id"

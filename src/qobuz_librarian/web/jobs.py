@@ -2172,7 +2172,7 @@ def cancel_review(job: Job) -> Optional[bool]:
 # on its own before it waits for Retry.
 RESTART_REQUEUE_LIMIT = 2
 
-_LEGACY_PAUSE_TEXT = (
+_PAUSE_TEXT = (
     "downloads and scans are paused",
     "downloads are paused",
     "downloads and scans stay paused",
@@ -2252,12 +2252,13 @@ def settle_restarted_downloads(cut_off: dict) -> None:
         job_persistence.persist(job)
 
 
-def _clear_legacy_pause(job: Job) -> bool:
+def _clear_stale_pause(job: Job) -> bool:
     """Rewrite a download's saved pause notice once nothing holds it.
 
-    Earlier versions saved "downloads are paused" text, and a recovery
-    attention, with the job; once its saved queue entry is gone neither is
-    true, and the job can simply be retried.
+    A download whose saved queue entry a restart could not clear is saved
+    saying downloads and scans are paused, with a recovery attention, as
+    some earlier versions also did; once the entry is gone neither is true,
+    and the job can simply be retried.
     """
     error = (job.error or "").lower()
     if (
@@ -2265,7 +2266,7 @@ def _clear_legacy_pause(job: Job) -> bool:
         or not job.album_id
         or job.recoveries
         or (job.attention != "recovery"
-            and not any(text in error for text in _LEGACY_PAUSE_TEXT))
+            and not any(text in error for text in _PAUSE_TEXT))
     ):
         return False
     restart = job_persistence.RESTART_INTERRUPTED
@@ -2517,9 +2518,8 @@ def restore_jobs(
         unknown (registry change between releases), the job is rebadged
         FAILED with a hint to re-run the original scan.
       * PENDING / RUNNING / SCANNING: the closures that drove them are
-        gone, so they're rebadged FAILED("interrupted on restart; submit
-        again") and saved back. The user sees them rather than them
-        silently vanishing. The exception is a PENDING job ``requeue``
+        gone, so they're marked canceled or failed, each kind with its own
+        summary, and saved back. The exception is a PENDING job ``requeue``
         returns a run function for: it never started, so it waits in the
         queue again, in the order it was first queued. ``cut_off`` maps
         a download job's id to what start-up did with its saved queue entry
@@ -2652,7 +2652,7 @@ def restore_jobs(
         elif (
             status == JobStatus.FAILED
             and job.id not in unsettled
-            and _clear_legacy_pause(job)
+            and _clear_stale_pause(job)
         ):
             historical += 1
             _persist_restored_transition(job, previous_status)
@@ -2880,8 +2880,8 @@ def request_cancel(job: Job) -> bool:
       stopped without restarting the container)
     - pending          → canceled or returned to review
 
-    Returns False if the job is finished or is already putting an album into
-    the library.
+    Returns False if the job is finished, is already putting an album into
+    the library, or its cancel or returned review could not be saved.
     """
     if job.status == JobStatus.AWAITING_REVIEW:
         review_canceled = cancel_review(job)

@@ -1,8 +1,5 @@
-"""String sentinels used to communicate intent across prompt boundaries.
-
-The picker prompts and the top-level menu return these so callers can branch
-without comparing magic literals scattered through every consumer file.
-"""
+"""What the top-level menu and the picker prompts return: a ``Mode``, or one
+of the string sentinels below."""
 from enum import Enum
 
 
