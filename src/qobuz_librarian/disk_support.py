@@ -10,11 +10,13 @@ nothing.
 from __future__ import annotations
 
 import errno
+import functools
 import os
 import secrets
 import stat
 import threading
 import time
+from pathlib import Path
 from typing import NamedTuple
 
 from qobuz_librarian import config as cfg
@@ -270,6 +272,45 @@ def destination_refusal(path, sample=None) -> str | None:
     if not lacks:
         return None
     return f"Migrate needs a destination on a local Linux disk: {path} {_joined(lacks)}."
+
+
+@functools.lru_cache(maxsize=8)
+def _non_utf8_mount_point(path) -> str | None:
+    from qobuz_librarian.library.migrate import _decode_mountinfo_path
+
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    found = None
+    for line in lines:
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+            point = _decode_mountinfo_path(fields[4])
+            options = fields[separator + 3].split(",")
+        except (IndexError, ValueError):
+            continue
+        if path != point and not path.startswith(point.rstrip("/") + "/"):
+            continue
+        if found is None or len(point) >= len(found[0]):
+            found = (point, options)
+    if found is None:
+        return None
+    point, options = found
+    charset = next((option.partition("=")[2] for option in options
+                    if option.startswith("iocharset=")), "")
+    if not charset or charset.lower() in ("utf8", "utf-8") or "utf8" in options:
+        return None
+    return point
+
+
+def non_utf8_mount(path) -> str | None:
+    """The mount point holding ``path`` when that disk is mounted with a
+    character set other than UTF-8, such as a FAT disk mounted without the
+    utf8 option, or None."""
+    return _non_utf8_mount_point(os.path.abspath(os.fspath(path)))
 
 
 def report(display=str) -> list[tuple[str, bool, str]]:

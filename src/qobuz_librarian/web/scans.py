@@ -364,10 +364,13 @@ def _fold_into_parked_library_review(job):
                     f"{under}.")
     if not parked.candidates:
         bits.append("Nothing left to review.")
-    elif updated or removed:
-        changes = [f"{verb} {plural(n, 'album')}" for verb, n in (
-            ("updated", updated), ("removed", removed)) if n]
-        bits.append(f"{' and '.join(changes).capitalize()}.")
+    elif updated and removed:
+        bits.append(f"Updated {plural(updated, 'album')} in the review and "
+                    f"removed {removed:,}.")
+    elif updated:
+        bits.append(f"Updated {plural(updated, 'album')} in the review.")
+    elif removed:
+        bits.append(f"Removed {plural(removed, 'album')} from the review.")
     if switched_off:
         bits.append(f"Moved {plural(sum(switched_off.values()), 'album')} "
                     f"under {missing_types.named(switched_off)}.")

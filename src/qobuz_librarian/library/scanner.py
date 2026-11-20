@@ -23,7 +23,7 @@ import stat
 import threading
 from pathlib import Path
 
-from qobuz_librarian import config
+from qobuz_librarian import config, disk_support
 from qobuz_librarian.library import flac_cache
 from qobuz_librarian.library.tags import normalize
 from qobuz_librarian.ui_cli.errors import plural
@@ -190,6 +190,18 @@ def undecodable_named() -> list[str]:
                   for shown in skipped)
 
 
+def undecodable_cause(path, them="it") -> tuple[str, str]:
+    """Why a name under ``path`` is not valid UTF-8, and the sentence that
+    says how to fix it: mount the disk with utf8 when it uses another
+    character set, otherwise rename."""
+    mount = disk_support.non_utf8_mount(path)
+    if mount is None:
+        return "", f"Rename {them} so scans include {them}."
+    shown = config.host_path(mount)[0]
+    return (f" because {shown} is mounted without the utf8 option",
+            f"Mount it with utf8 so scans include {them}.")
+
+
 def _undecodable(path) -> bool:
     """True, naming the path once per scan, when a name in it is not UTF-8:
     one written in an old codepage, or read through a share mounted with
@@ -203,8 +215,9 @@ def _undecodable(path) -> bool:
             _SKIPPED_SINCE_SCAN.add(shown)
         if shown not in _UNDECODABLE_NAMED:
             _UNDECODABLE_NAMED.add(shown)
-            log.info(f"  ⚠  Skipped {shown}: its name is not valid UTF-8. "
-                     "Rename it so scans include it.")
+            cause, fix = undecodable_cause(path)
+            log.info(f"  ⚠  Skipped {shown}: its name is not valid UTF-8"
+                     f"{cause}. {fix}")
         return True
     return False
 

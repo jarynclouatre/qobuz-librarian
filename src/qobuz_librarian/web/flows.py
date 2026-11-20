@@ -70,6 +70,7 @@ from qobuz_librarian.library.scanner import (
     list_artist_album_dirs,
     list_library_artists,
     start_skip_record,
+    undecodable_cause,
     undecodable_named,
 )
 from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
@@ -2867,10 +2868,10 @@ def undecodable_note(paths):
     one = len(paths) == 1
     names = ", ".join(paths[:3]) + (f" and {len(paths) - 3} more"
                                     if len(paths) > 3 else "")
+    cause, fix = undecodable_cause(cfg.MUSIC_ROOT, "it" if one else "them")
     return (f"Skipped {names}: {'its name is' if one else 'their names are'} "
-            f"not valid UTF-8, so {'it reads' if one else 'they read'} as "
-            f"missing. Rename {'it' if one else 'them'} so scans include "
-            f"{'it' if one else 'them'}.")
+            f"not valid UTF-8{cause}, so {'it reads' if one else 'they read'} "
+            f"as missing. {fix}")
 
 
 def upgrade_finds_note(n, first=False):
