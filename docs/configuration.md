@@ -13,7 +13,7 @@ Use the **Settings** page for day-to-day behaviour:
 - beets folder layout
 - scan cadence
 
-These settings apply to new jobs. A field you change on the Settings page wins over `.env` for that field; fields you never change there keep following `.env`. The Qobuz token is the other way round: one set in the environment wins over one saved on Settings. Timeouts, worker counts, cache and pacing tunables, `WEB_AUTH*`, host bind, and `LOG_LEVEL` stay in `.env` or `compose.yaml` and may need a restart.
+These settings apply to new jobs. A field you change on the Settings page wins over `.env` for that field; fields you never change there keep following `.env`. The Qobuz token is the other way round: one set in the environment wins over one saved on Settings. Timeouts, worker counts, pacing tunables, `WEB_AUTH*`, host bind, and `LOG_LEVEL` stay in `.env` or `compose.yaml` and may need a restart.
 
 ## Host paths
 
@@ -56,15 +56,15 @@ Library review picks up the new path.
 | `PREFER_HIRES` | `true` | When a release has several versions, pick the hi-res master rather than the original edition. Upgrade only offers the edition you have. |
 | `LYRICS_ENABLED` | `true` | Fetch lyrics on import |
 | `LYRICS_FORMAT` | `embed` | `embed` (FLAC tag), `sidecar` (.lrc), or `both` |
-| `LYRICS_PROVIDERS` | unset | Ordered comma list of `Lrclib`, `NetEase`, `Megalobiz`, `Musixmatch` and `Genius`; unset tries `Lrclib` and `Musixmatch`, in that order. NetEase is asked at most 15 times a minute, so a pass over a large library takes hours with it. Other names are ignored with a warning at startup |
+| `LYRICS_PROVIDERS` | unset | Ordered comma list of `Lrclib`, `NetEase`, `Megalobiz`, `Musixmatch` and `Genius`; unset tries `Lrclib` and `Musixmatch`, in that order. NetEase is asked at most 15 times a minute, so a pass over a large library takes hours with it. Other names are ignored with a warning at startup; with no known name, no lyrics are fetched |
 | `LYRICS_PROVIDER_TIMEOUT` | `30` | Maximum seconds for one provider lookup before its circuit-breaker records a failure |
 | `ARTWORK` | `both` | Cover art: `sidecar`, `embed`, or `both` |
-| `COLLECTION_BACKUP_DIR` | `/collection_backups` in Compose; app data otherwise | Container path for collection backups from completed Library scans |
+| `COLLECTION_BACKUP_DIR` | `/collection_backups` in Compose; app data otherwise | Container path for collection backups from completed Library scans and terminal Library walks and Gap Fill runs |
 | `LASTFM_API_KEY` | unset | Enables the Discover tab; without it the tab does not appear. Also settable on the Settings page, and `LASTFM_API_KEY_FILE` reads it from a file |
 | `AUTO_LIBRARY_SCAN` | `true` | Offer the first Library scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
-| `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases; daily (also on Settings) |
+| `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases, at least 900; daily (also on Settings) |
 | `NEW_RELEASE_MAX_AGE_DAYS` | `365` | Only flag albums released within this many days as new (`0` = any catalogue newcomer counts, including older releases Qobuz recently added) |
-| `ARTIST_CATALOG_CACHE_TTL` | `604800` | How long (seconds) artist album-lists stay cached; 7 days |
+| `ARTIST_CATALOG_CACHE_TTL` | `604800` | How long (seconds) artist album-lists stay cached; 7 days (also on Settings) |
 | `REPAIR_CACHE_ENABLED` | `true` | Cache the repair scan's Qobuz ISRC lookups (files are still decode-tested fresh every scan) |
 | `REPAIR_CACHE_TTL_DAYS` | `30` | How long a cached ISRC lookup is reused before re-verifying (`0` = keep until the db is deleted) |
 | `UPGRADE_SCAN_ENABLED` | `true` | Show Upgrade and include the quality-upgrade pass in Library scans (`false` hides Upgrade and skips that pass) |
@@ -76,7 +76,7 @@ Library review picks up the new path.
 | `EXCLUDE_LIVE_ALBUMS` | `false` | Count a release whose title marks it live, on tour, a session or acoustic as a live release in Missing Albums even when Qobuz files it as an album or compilation, so it shows only with **Live** switched on; a studio album whose real title merely contains "Live" is never matched |
 | `CONSOLIDATE` | `false` | Merge sibling/duplicate album folders (CLI-only) |
 
-`MIGRATE_MULTI_ARTIST` affects new imports only, including a gap fill or upgrade of an album already in a combined folder; a Search **Track** download stays in its album's folder. It never replaces a name that already exists under the primary artist; conflicting files stay in their original folder for review.
+`MIGRATE_MULTI_ARTIST` affects new imports only, including a gap fill or upgrade of an album already in a combined folder; a Search **Track** download stays in its album's folder. It never replaces a name that already exists under the primary artist; an album with such a name stays in the combined folder.
 
 `DOWNSAMPLE_HIRES_ENABLED` only touches new downloads (88.2 / 176.4 / 352.8 kHz → 44.1; 96 / 192 / 384 → 48; bit depth preserved). To downsample hi-res already in your library, use **Downsample** instead. While it is on, Upgrade compares your files with what a download keeps once downsampled, so a downsampled album is not offered its hi-res master again.
 
@@ -116,7 +116,7 @@ The bundled tools' full config files live in the persistent `config` volume. The
 - `…/beets/config.yaml`: tagging, paths, plugins ([beets docs](https://beets.readthedocs.io/))
 - `…/streamrip/config.toml`: downloader settings ([streamrip docs](https://github.com/nathom/streamrip))
 
-Each download runs streamrip with a private copy of its config. The copy holds the Qobuz credentials in use and sets the staging folder, `Disc N` folders, each single in its own folder, no booklets, no downloads database and no update check. Downloads never change the streamrip config itself; only saving credentials on **Settings** writes to it.
+Each download runs streamrip with a private copy of its config. The copy holds the Qobuz credentials in use and sets the staging folder, `Disc N` folders, each single in its own folder, no booklets, no downloads database and no update check. Downloads never change the streamrip config itself; each container start sets the options the app needs in it, and saving credentials on **Settings** writes them to it.
 
 Keep the beets database on a local filesystem, such as the default Compose `/config` named volume or a local bind mount. NFS, SMB/CIFS, and other network filesystems are not supported for the database; the music library itself may still live on network storage, within the limits under [Permissions](#permissions-nas-and-shared-storage).
 
@@ -126,7 +126,7 @@ Set folder and file naming with `BEETS_PATH_DEFAULT` and `BEETS_PATH_COMP` on th
 BEETS_PATH_DEFAULT='$albumartist/$album ($year)/$track - $title'
 ```
 
-Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian, and may name your own plugins in the folders `config.yaml` lists under `pluginpath`. The app then adds `inline` for its multi-disc folder field and its internal import guards. Plugin settings, such as the replaygain backend, go in `config.yaml`. Extra plugins may need dependencies not bundled in the image; [lastgenre](https://beets.readthedocs.io/en/stable/plugins/lastgenre.html), for example, needs `beets[lastgenre]==2.14.1` installed in the same Python environment. Docker users need a custom image for those additions.
+Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian, and may name your own plugins in the folders `config.yaml` lists under `pluginpath`. The app then adds `inline` for its multi-disc folder field, its internal import guards, and `fetchart` unless `ARTWORK` is `embed`, which leaves it out. Plugin settings, such as the replaygain backend, go in `config.yaml`. Extra plugins may need dependencies not bundled in the image; [lastgenre](https://beets.readthedocs.io/en/stable/plugins/lastgenre.html), for example, needs `beets[lastgenre]==2.14.1` installed in the same Python environment. Docker users need a custom image for those additions.
 
 For a `pip` or `pipx` installation, install beets 2.14.1 in the same environment. Qobuz Librarian normally finds that environment from the `beet` launcher. If the launcher is an unusual wrapper, set `BEETS_PYTHON` to the absolute path of the Python executable in that environment. Other beets versions are refused.
 
@@ -168,8 +168,8 @@ Operations that replace or remove an existing library file also require the shar
 The app tries the disk under the music, staging and upgrade backup folders once, while it holds the library, and **Settings → Diagnostics** says what each one can't do. A feature whose folder can't do what it needs stops before it starts and names the folder:
 
 - Downloads need a staging folder that can rename a file without replacing one already there and swap a file for its new copy in one step.
-- A new or whole lossless album downloaded while import-time Downsample is off also needs a music folder that can rename without replacing. Elsewhere that album is left out before it downloads; single tracks, partial albums, MP3 and albums downloaded with Downsample on still go ahead.
-- Upgrade, Gap Fill, Repair, Re-download and Consolidation move the tracks they replace to a backup and put them back if the step fails, which needs music and upgrade backup folders that can rename without replacing. Upgrade also needs a music folder that can swap files, and Repair one whose disk records when folders were created.
+- A new or whole lossless album downloaded while import-time Downsample is off also needs a music folder that can rename without replacing. Elsewhere that album is left out before it downloads; single tracks, partial albums and albums downloaded with Downsample on still go ahead.
+- Upgrade, Gap Fill, Repair, Re-download and Consolidation move the tracks they replace to a backup and put them back if the step fails, which needs music and upgrade backup folders that can rename without replacing. Upgrade also needs a music folder that can swap files, and Upgrade and Repair one whose disk records when folders were created.
 - Lyrics needs a music folder that can rename without replacing, and with `LYRICS_FORMAT` set to `embed` or `both` one that can swap files too.
 - Downsample needs a music folder that can swap files.
 - Albums picked from a Library, Upgrade, Downsample or Repair scan, and album downloads that fill gaps in an album already in the library, need a music folder whose disk records when folders were created.
@@ -200,7 +200,7 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 **Host names.** With `WEB_AUTH=none`, and on the first-visit setup screen, the web UI answers only to an IP address, `localhost`, a single-label name such as `nas`, a name ending in `.local`, `.lan`, `.home`, `.home.arpa`, `.internal`, `.localdomain` or `.fritz.box`, or a name listed in `WEB_ALLOWED_HOSTS` (comma-separated, without scheme or port). Any other name gets a plain 400 page naming that setting. Requests from a proxy named in `FORWARDED_ALLOW_IPS` are not checked. State-changing requests the browser reports as coming from another site are refused with a 403, CSRF token or not.
 
-**Container probes.** `/healthz` is a process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory or Queue/History database is unavailable, the run lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`. Both routes are available without signing in and return only category names, never paths or credentials.
+**Container probes.** `/healthz` is a process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory or Queue/History database is unavailable, saved jobs could not be restored, the run lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`. Both routes are available without signing in and return only category names, never paths or credentials.
 
 **Behind a reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the address the app sees the proxy connect from: in Docker, the network's gateway (often `172.18.0.1`) for a proxy on the host, or the proxy container's address on a shared network; with host networking or outside Docker, `127.0.0.1` for a proxy on the same machine (add `::1` if `WEB_HOST` is `::`). Ranges such as `172.18.0.0/16` work for a proxy container whose address changes. Trusting the gateway also trusts anything that reaches the published port through the host, so pair it with `WEB_BIND=127.0.0.1`. It decides three things: the failed-login throttle counts attempts per real client rather than per the shared proxy IP, a request the proxy received over HTTPS is recognised as such, which is what marks the session cookie `Secure`, and the proxy's requests skip the host-name check above. Point it at your proxy, not `*`. By default no proxy is trusted, so leaving it unset behind a proxy throttles every visitor as one.
 
@@ -212,7 +212,7 @@ The web UI needs its own host name or port; it can't be served under a path such
 
 ## Notifications
 
-`POST_JOB_HOOK` runs a command of your choice every time a background job finishes (downloads, scans, repairs, all of it) and when a scan parks results for you to review. The command runs inside the container, which bundles `curl` and Python. Its environment is the app's without `WEB_AUTH_PASSWORD`, `QOBUZ_USER_AUTH_TOKEN`, `LASTFM_API_KEY` or their `_FILE` forms. `POST_JOB_HOOK_TIMEOUT` (default 10s) caps a slow endpoint, and a command that cannot start, times out, or exits nonzero is recorded in the application log.
+`POST_JOB_HOOK` runs a command of your choice every time a background job finishes and when a scan parks results for you to review. The command runs inside the container, which bundles `curl` and Python. Its environment is the app's without `WEB_AUTH_PASSWORD`, `QOBUZ_USER_AUTH_TOKEN`, `LASTFM_API_KEY` or their `_FILE` forms. `POST_JOB_HOOK_TIMEOUT` (default 10s) caps a slow endpoint, and a command that cannot start, times out, or exits nonzero is recorded in the application log.
 
 The job's state arrives as JSON on stdin (`id`, `status`, `title`, `edition`, `display_title`, `artist`, `error`, `tracks_missing`, `finished_at`, `kind`, `summary`, `review_items`). `status` is `done`, `failed` or `canceled` for a finished job; `awaiting_review` when a Library scan, new-release check, or Upgrade, Downsample or Repair scan has results waiting, with `review_items` saying how many; and `interrupted` for a job a restart cut short. `kind` names the work (`download`, `library`, `new_releases`, `upgrade`, `downsample`, `repair`, `lyrics`, `migration`, `collection_snapshot`, `collection_restore`), and `summary` is the one-line result shown in History. An album that imported with tracks still missing finishes as `done` with `tracks_missing` above 0. Terminal runs report their album downloads and their Upgrade, Repair and Downsample runs; terminal Lyrics and Library migration runs are not reported.
 
@@ -263,4 +263,4 @@ On first run the Search page offers a first Library scan (`AUTO_LIBRARY_SCAN`). 
 - **Consolidation** (`CONSOLIDATE`, off) merges duplicate folders, CLI-only (it needs per-folder confirmation). It offers only a folder whose tracks are all in the album just downloaded. The duplicate tracks it takes out wait in the backup area and are cleared after `UPGRADE_BACKUP_RETENTION_DAYS`, as long as the album kept in their place still holds a playable track at least as long for each.
 - **`MIGRATE_MULTI_ARTIST`** (on) re-files `A, B/Album` or `B, A/Album` under `A/Album` after import.
 - **Repair** backs up what it replaces. A verified replacement lets that backup be removed, and a failed refill may put the originals back on its own. If the app or a terminal run is stopped hard while replacements download, the next start puts the originals into the places still empty; a replacement that arrived stays. Any backup still waiting is listed in Settings → Diagnostics.
-- **Collection backup**: after a completed Library scan, a JSON list of every artist, album and track, with the Qobuz ids the app has resolved, goes to `COLLECTION_BACKUP_DIR`. Five dated copies are kept. A backup that comes back empty or much smaller than the last one is held until you confirm it. Upload a backup on Settings to be offered the missing albums it can match on Qobuz; unmatched entries are named in the job log.
+- **Collection backup**: after a completed Library scan, terminal Library walk or Gap Fill run, a JSON list of every artist, album and track, with the Qobuz ids the app has resolved, goes to `COLLECTION_BACKUP_DIR`. Five dated copies are kept. A backup that comes back empty or much smaller than the last one is held until you confirm it. Upload a backup on Settings to be offered the missing albums it can match on Qobuz; unmatched entries are named in the job log.

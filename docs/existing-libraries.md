@@ -2,7 +2,7 @@
 
 [← README](../README.md)
 
-The defaults assume a fresh library. This covers the layout the scanner expects, and how to bring an existing collection in.
+The layout the scanner expects, and how to bring an existing collection in.
 
 ## Folder layout
 
@@ -21,13 +21,11 @@ The scanner expects a two-level tree under your music library. In Docker, this i
         └── 01 - Track.flac
 ```
 
-The album folder name is flexible: `Album`, `Album (2017)`, `Album [2017]`, `2017 - Album`, `Album - 2017` and `Artist - Album (2017)` all work, and a format tag at the end such as `[FLAC]`, `[WEB FLAC]` or `[24-96]` is ignored. The year is optional. A file with the same recording ID (ISRC) as a Qobuz track is that track, whatever mix or remaster label either side carries. Without a recording ID, mix and remaster labels in tags and folder names distinguish editions, while deluxe, expanded and other packaging labels do not. Per-disc subdirs (`CD1/`, `CD2/`) are recursed into; hidden directories, the staging dir, and the recycle bins and system folders NAS boxes and Windows keep (`#recycle`, `@Recycle`, `#snapshot`, `@Recently-Snapshot`, `@eaDir`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`) are skipped. Flat (`/music/<track>.flac`) and extra-nested (`/music/<Genre>/<Artist>/...`) layouts are not detected, so point `QL_MUSIC_DIR` at the folder that contains the artist folders.
-
-A remaster or new mix released under the same recording IDs counts as the copy you already have.
+The album folder name is flexible: `Album`, `Album (2017)`, `Album [2017]`, `2017 - Album`, `Album - 2017` and `Artist - Album (2017)` all work, and a format tag at the end such as `[FLAC]`, `[WEB FLAC]` or `[24-96]` is ignored. The year is optional. A file with the same recording ID (ISRC) as a Qobuz track is that track, whatever mix or remaster label either side carries. Without a recording ID, mix and remaster labels in tags and folder names distinguish editions, while deluxe, expanded and other packaging labels do not. Per-disc subdirs (`CD1/`, `CD2/`) are recursed into; hidden directories, the staging dir, and the recycle bins and system folders NAS boxes and Windows keep (`#recycle`, `@Recycle`, `#snapshot`, `@Recently-Snapshot`, `@eaDir`, `$RECYCLE.BIN`, `System Volume Information`, `lost+found`) are skipped, as is any folder or file whose name is not valid UTF-8, which the scan names. Flat (`/music/<track>.flac`) and extra-nested (`/music/<Genre>/<Artist>/...`) layouts are not detected, so point `QL_MUSIC_DIR` at the folder that contains the artist folders.
 
 ## Migrating into the layout
 
-If your library is not already organised as artist folders with album folders inside them, the **Library migration** tool can build the expected structure. It is a one-time local-library preparation step.
+If your library is not already organised as artist folders with album folders inside them, the **Library migration** tool can build the expected structure.
 
 It places each file by its tags (album artist, album, title, track, disc). For files whose tags are not enough to place them, an optional AcoustID fingerprint pass identifies them by sound (slower, needs network, off by default; no API key required).
 
@@ -53,11 +51,11 @@ services:
 Then either:
 
 - **Web:** open **Library migration** from **Settings**, optionally tick *Fingerprint unclear files*, click **Preview migration**, review the per-artist list, then **Copy N selected** (reads **Move N selected** in move mode).
-- **CLI:** `docker compose run --rm qobuz-librarian cli --migrate`. Add `--acoustid` for fingerprinting, `--in-place` to move instead of copy, or `--dry-run` to preview. Source and destination come from the env vars above or `--migrate-src` / `--migrate-dest`.
+- **CLI:** switch to terminal mode from **Settings → Mode** ([the run lock](cli.md#the-run-lock)), then `docker compose run --rm qobuz-librarian cli --migrate`. Add `--acoustid` for fingerprinting, `--in-place` to move instead of copy, or `--dry-run` to preview. Source and destination come from the env vars above or `--migrate-src` / `--migrate-dest`.
 
 After migration finishes, point `QL_MUSIC_DIR` at the new destination and run a Library scan.
 
-Review AcoustID matches before using the migrated library; fingerprint matches are probabilistic. A compilation with no signal at all (no compilation flag, no "Various Artists" album artist, no disc numbers) cannot be recognised as one, so each track lands under its own track artist. In the tags-only pass, the year comes from tags, so a file tagged without one, or with a placeholder year such as 1900, lands in `Artist/Album/` rather than `Artist/Album (Year)/`. In copy mode, spot-check the destination before switching `QL_MUSIC_DIR` to it. In move mode, review the preview carefully before confirming.
+Review AcoustID matches before using the migrated library; fingerprint matches are probabilistic. A compilation with no signal at all (no compilation flag, no "Various Artists" album artist) cannot be recognised as one, so each track lands under its own track artist. In the tags-only pass, the folder year is the one most of an album's tracks carry, so an album mostly tagged without one, or with a placeholder year such as 1900, lands in `Artist/Album/` rather than `Artist/Album (Year)/`.
 
 ## Bringing an existing beets database
 
@@ -100,7 +98,7 @@ Other pressings fold under the **versions** control. **Download** adds an editio
 
 ## The first scan on a big library
 
-A library-wide scan fetches artist matches, catalogue pages and owned-album tracklists from Qobuz, with caches reducing repeat requests. It scans a few artists at once (`ARTIST_SCAN_WORKERS`, default 4). Qobuz rate limits are handled by automatic retry and back-off. After the first scan, use the Library refresh for music added outside the app. Missing Albums lists the releases Qobuz files as each artist's albums, plus releases of four or more tracks credited to the artist that Qobuz files as download-only. The review's **Live**, **Compilations**, **EPs & singles** and **Other releases** switches add those lists without a new scan. Other releases are the artist's releases of four or more tracks that Qobuz files under other: mostly label reissues and collections, sometimes an album of its own. The CLI's `--include-live`, `--include-comps`, `--include-singles` and `--include-other` add them for one run (each defaults to its switch). An owned album whose only missing tracks are other versions of songs in its folder (a remix, a live take, a demo, an edit, an instrumental, a mono, stereo or single version) counts as complete; Gap Fill lists it only with the **Bonus versions** switch on, and the CLI's `--include-bonus` does the same for one run. A remaster or a dated mix of the same song, such as "2009 Remaster", "2017 Mix" or "Stereo Mix 2015", is not such a version; a remastered mono or stereo version, such as "Mono Remastered", is. An album or compilation credited first to another artist counts as a compilation, and a release shorter than `MISSING_ALBUMS_MIN_TRACKS` tracks (default 4) as an EP or single.
+A library-wide scan fetches artist matches, catalogue pages and owned-album tracklists from Qobuz, with caches reducing repeat requests. It scans a few artists at once (`ARTIST_SCAN_WORKERS`, default 4). Qobuz rate limits are handled by automatic retry and back-off. After the first scan, use the Library refresh for music added outside the app. Missing Albums lists the releases Qobuz files as each artist's albums, plus releases of `MISSING_ALBUMS_MIN_TRACKS` or more tracks (default 4) credited to the artist that Qobuz files as download-only. The review's **Live**, **Compilations**, **EPs & singles** and **Other releases** switches add those lists without a new scan. Other releases are the artist's releases of that length that Qobuz files under other: mostly label reissues and collections, sometimes an album of its own. The CLI's `--include-live`, `--include-comps`, `--include-singles` and `--include-other` add them for one run (each defaults to its switch). An owned album whose only missing tracks are other versions of songs in its folder (a remix, a live take, a demo, an edit, an instrumental, a mono, stereo or single version) counts as complete; Gap Fill lists it only with the **Bonus versions** switch on, and the CLI's `--include-bonus` does the same for one run. A remaster or a dated mix of the same song, such as "2009 Remaster", "2017 Mix" or "Stereo Mix 2015", is not such a version; a remastered mono or stereo version, such as "Mono Remastered", is. An album or compilation credited first to another artist counts as a compilation, and a release shorter than `MISSING_ALBUMS_MIN_TRACKS` tracks (default 4) as an EP or single.
 
 Review choices are remembered, so a large library can be handled over several sessions. Library dismissals hide missing-album suggestions, Upgrade dismissals hide skipped upgrades, and Downsample remembers albums you keep hi-res. Restore them from each page's **Dismissed** view (Downsample calls it **Kept hi-res**). Saved choices are per album, so a new release by an already-reviewed artist still surfaces. Explicit single-artist CLI scans do not use the hidden list.
 

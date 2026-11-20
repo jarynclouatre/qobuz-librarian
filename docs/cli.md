@@ -18,7 +18,7 @@ docker compose run --rm -it qobuz-librarian cli
 
 Ctrl-C inside a menu tool stops it and returns to the menu; at the menu itself it quits.
 
-Every menu mode has a flag that jumps straight to it; `--help` lists them all. The walks below stay interactive (they confirm per artist or prompt for one), so keep `-it`:
+Every menu mode but Search has a flag that jumps straight to it; `--help` lists them all. The walks below stay interactive (they confirm per artist or prompt for one), so keep `-it`:
 
 ```bash
 # The artist walk over every artist, queueing as you go
@@ -31,9 +31,9 @@ docker compose run --rm -it qobuz-librarian cli --gap-fill
 docker compose run --rm -it qobuz-librarian cli --repair
 ```
 
-The walks remember what you answered, yes or no, and leave it out next time:
-the Library walk those artists, and Gap Fill those albums along with the ones
-it found complete, could not match, or had nothing on Qobuz to fill from, until
+The walks remember what you answered and leave it out next time: the Library
+walk the artists you answered, and Gap Fill the albums you said no to along
+with the ones it found complete, could not match, or had nothing on Qobuz to fill from, until
 the album's folder gains or loses tracks. Each says how many it left out.
 `--reset-walk-seen` brings them all back.
 
@@ -85,7 +85,7 @@ docker compose run --rm qobuz-librarian cli --downsample-walk --dry-run
 # tracks checked recently too)
 docker compose run --rm qobuz-librarian cli --lyrics-walk
 
-# Start the next walk fresh, revisiting artists already reviewed
+# Start the next walk fresh, revisiting artists and albums already reviewed
 docker compose run --rm qobuz-librarian cli --reset-walk-seen
 
 # Full flag reference
@@ -129,7 +129,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--force` | Download every track of the album again (search or album URL only) |
 | `--yes` | Answer yes to the confirmations; choices still ask |
 | `--auto-safe` | With `--upgrade-walk`, confirm only the upgrades it can classify as safe |
-| `--no-import` | Download without importing; the download stays in staging for the `beet import -m` command `--help` and the end of the run print, to run with Qobuz Librarian stopped (the web app too), and other downloads, in the terminal or the web app, go ahead beside it and leave it there |
+| `--no-import` | Download without importing. The download stays in staging for the `beet import -m` command that `--help` and the end of the run print, to run with Qobuz Librarian and the web app stopped. Other downloads go ahead beside it and leave it in place |
 | `--no-upgrade` | Turn off quality upgrades for this run |
 | `--no-downsample` | Skip downsampling new downloads for this run |
 | `--[no-]consolidate` | After import, look at sibling folders and offer to merge them; in Artist mode, the Library walk and Gap Fill, offer first to keep one folder of each group of siblings |

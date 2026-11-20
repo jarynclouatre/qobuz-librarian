@@ -1,5 +1,4 @@
 <!--
-Thanks! A few things make review faster:
 - Tie this back to an issue if one exists.
 - Note behavioural changes explicitly; see CONTRIBUTING.md.
 - Run `python -m pytest -q` and `ruff check src tests` locally.

@@ -1,7 +1,5 @@
 # Contributing
 
-This file covers filing bugs, suggesting features, and submitting PRs.
-
 ## Reporting bugs
 
 Open an issue with:
@@ -24,7 +22,7 @@ A short issue describing the workflow you want is preferred. The project is focu
 3. Add or update tests. They run with `python -m pytest -q` and do not touch the network, beets, or streamrip; external services are mocked.
 4. Run `ruff check src tests --fix` before pushing. The `[test]` extras bundle it.
 5. If templates or styles changed, run `npm ci && npm run build` and commit the rebuilt `src/qobuz_librarian/web/static/dist/app.css`.
-6. CI (`.github/workflows/test.yml`) runs the same checks on push/PR.
+6. CI (`.github/workflows/test.yml`) runs the same checks on pull requests and pushes to `main`.
 
 ## Dev notes
 
@@ -34,24 +32,19 @@ A short issue describing the workflow you want is preferred. The project is focu
 docker compose -f compose.yaml -f compose.dev.yaml up -d --build
 ```
 
-On M-series Macs add `--platform linux/amd64` if you want the same image as CI (the arm64 path is slower to build and may expose platform-specific surprises):
 
-```bash
-docker buildx build --platform linux/amd64 -t qobuz-librarian:dev .
-```
-
-**Smoke test.** `scripts/smoke_test.sh` builds the image, boots the container, and checks the web routes respond and the bundled tools are present; no credentials needed (override the test port with `PORT=...`). It verifies that the release image starts and serves expected routes; it is not an end-to-end download test.
+**Smoke test.** `scripts/smoke_test.sh` builds the image, boots the container, and checks the web routes respond and the bundled tools are present; no credentials needed (override the test port with `PORT=...`).
 
 **Logo.** The logo artwork lives in `assets/` as `logo-dark.png` and `logo-light.png`; the README serves whichever matches the viewer's colour scheme.
 
 ## Behavioural changes
 
-If your change touches how albums are matched, how upgrades are gated, or how files are moved, write a paragraph in the PR describing the old vs new behaviour with at least one concrete example. The match/upgrade/move logic has historically caused the worst real-world surprises and is worth explaining out loud.
+If your change touches how albums are matched, how upgrades are gated, or how files are moved, write a paragraph in the PR describing the old vs new behaviour with at least one concrete example.
 
 ## Style
 
-- Black-compatible formatting. Black is not run in CI, but submitted code should follow the same style.
-- Comments explain *why*, not *what*. The code can usually speak for itself.
+- Match the surrounding code's style.
+- Comments explain *why*, not *what*.
 - No new top-level dependencies without a clear maintenance or runtime benefit.
 
 ## Releases

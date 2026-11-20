@@ -26,7 +26,7 @@ It has a web UI and a CLI.
 
 - **Missing albums.** A Library scan lists albums you don't have by artists you do. Live releases, compilations, EPs and singles, and what Qobuz files under other (mostly label reissues) can be switched on in the review.
 - **Gap Fill.** Finds albums you own that are missing tracks and downloads just those tracks, from the same edition you have.
-- **Editions.** Search marks the editions you own as **In library** by matching recording IDs; remasters and different mixes count as separate releases. [How matching works](docs/existing-libraries.md#how-editions-are-matched).
+- **Editions.** Search marks the editions you own as **In library** by matching recording IDs; a remaster or mix with its own recording IDs counts as a separate release. [How matching works](docs/existing-libraries.md#how-editions-are-matched).
 - **Single tracks.** Switch Search to **Track** to download one song into its album's folder.
 - **Upgrades.** Finds albums Qobuz now has in higher quality and replaces them, keeping a backup until the new files check out.
 - **Downsample.** Converts FLACs above 48 kHz to 44.1 or 48 kHz, on demand or for every new download.
@@ -129,4 +129,4 @@ Lyrics come from [LRCLIB](https://lrclib.net/) and via [syncedlyrics](https://gi
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The Docker image includes the tools above under their own licences: streamrip (GPL-3.0) runs as a separate program and mutagen (GPL-2.0-or-later) is imported as a library.
+MIT; see [LICENSE](LICENSE). The Docker image includes the tools above under their own licences: streamrip (GPL-3.0) runs in a separate process the app starts and mutagen (GPL-2.0-or-later) is imported as a library.

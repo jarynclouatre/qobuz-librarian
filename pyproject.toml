@@ -72,7 +72,7 @@ line-length = 100
 # focused on correctness and maintainability.
 select = ["E", "F", "W", "I"]
 ignore = [
-    "E501",  # line length, handled by the formatter rather than lint
+    "E501",  # line length
     "E701",  # multi-statement on one line (used for terse if-guards)
     "E731",  # lambda assignment
     "E741",  # ambiguous variable name (e.g. `l` in tight one-liners)

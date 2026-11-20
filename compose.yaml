@@ -46,8 +46,8 @@ services:
       # putting PUID/PGID in .env. PUID=0 PGID=0 runs as root if you need it.
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
-      # Writable home for tools when the root filesystem is read-only.
-      # Keep /tmp unless the matching tmpfs mount is changed too.
+      # Writable home for tools when the root filesystem is read-only. With
+      # read_only, mount a tmpfs at this path.
       APP_HOME: "${APP_HOME:-/tmp}"
       # Timezone for timestamps in History and the job pages ("2 hr ago"
       # stays right either way; exact times follow this). IANA name, e.g.
@@ -122,7 +122,7 @@ services:
       # behind your own authenticating reverse proxy.
       WEB_AUTH: "${WEB_AUTH:-}"
       # Optionally seed the login from .env instead of the first-visit setup
-      # screen; provide BOTH (they also act as a password reset on restart).
+      # screen; provide BOTH. Changing either and restarting resets the login.
       # Passwords need at least 15 characters; common values are refused.
       # Empty = use the setup screen. An env value is visible to `docker inspect`.
       WEB_AUTH_USER:     "${WEB_AUTH_USER:-}"
@@ -192,7 +192,8 @@ services:
       # ── New releases ──────────────────────────────────────────────────────
       # First launch offers a Library scan, which lists missing albums and gives
       # New releases its starting point (resuming if interrupted). "false"
-      # skips the offer; a Library scan started by hand does the same.
+      # skips the offer and the resume; a Library scan started by hand also
+      # gives New releases its starting point.
       AUTO_LIBRARY_SCAN: "${AUTO_LIBRARY_SCAN:-true}"
       # Check for new releases by your library's artists this often (seconds),
       # after the first full Library scan; results appear as a New releases
