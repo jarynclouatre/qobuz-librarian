@@ -112,7 +112,7 @@ def _require_authority(authority: RunLockLease) -> None:
         authority,
         PostImportRelocationUnavailable(
             errno.EBUSY,
-            "the shared run lock was lost before the folder move",
+            "the shared run lock was lost",
         ),
     )
 
@@ -2790,7 +2790,8 @@ def reconcile_post_import_relocations(
     except (OSError, sqlite3.Error, ValueError) as exc:
         return RelocationRecoveryResult(
             RelocationRecoveryStatus.ATTENTION_REQUIRED,
-            str(exc),
+            exc.strerror if isinstance(exc, PostImportRelocationUnavailable)
+            else str(exc),
             (_namespace_path(),),
         )
 

@@ -2899,10 +2899,9 @@ class _QueueFlush:
         if outcome.status is DurableAlbumStatus.RETRY:
             # Nothing was imported and nothing waits on recovery, so the
             # album stays queued for another try and the rest carry on.
-            log.info(fmt(C.YELLOW, wrap(
-                "Qobuz couldn't deliver the whole album. Nothing was "
-                "imported; it stays queued for another try.",
-                indent="    ⚠  ", hanging="       ")))
+            log.info(fmt(C.YELLOW,
+                "    ⚠  Qobuz couldn't deliver the whole album. Nothing was "
+                "imported."))
             self.results.append(_resolve_queue_item(
                 self.item, self.args, False, authority=self.authority))
             return _NEXT_ALBUM

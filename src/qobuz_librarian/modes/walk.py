@@ -513,7 +513,7 @@ class _AlbumWalk:
             elif _result == "other_edition":
                 self.n_albums_unavailable += 1
                 self.unavailable_names.append(_ad.name)
-            elif _result == "unchecked":
+            elif _result in ("unchecked", "stale_candidate"):
                 self.n_albums_unchecked += 1
                 self.unchecked_names.append(_ad.name)
             else:

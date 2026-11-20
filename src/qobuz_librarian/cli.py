@@ -776,8 +776,7 @@ def _reject_flags_without_their_mode(p, args):
     # Reject flag/mode combinations that would otherwise be silently dropped
     # or accepted.
     if args.force and not args.query:
-        p.error("--force only applies to a search or an album URL, not "
-                "--artist or a walk or migrate mode")
+        p.error("--force only applies to a search or an album URL")
     # --migrate's extra options mean nothing without it.
     if (args.in_place or args.acoustid or args.migrate_src or args.migrate_dest) \
             and not args.migrate:

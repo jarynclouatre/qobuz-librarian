@@ -719,7 +719,7 @@ class _CandidateFold:
         if fresh is None and key in self.retire:
             if self.listed(c):
                 self.removed += 1
-            self.retired.append(c)
+                self.retired.append(c)
             return
         if fresh is None and self.drop_gone and _folder_gone(c):
             if self.listed(c):
@@ -3203,7 +3203,7 @@ class _NewReleasesRun:
                                          "couldn't be checked.")
             elif self.failed_count:
                 self.job.summary = (f"{self.unchecked} couldn't be "
-                                    "checked; check again to retry them.")
+                                    "checked; check again to retry.")
             else:
                 self.job.summary = ("The catalogue limit changed, so this check "
                                     "recorded what Qobuz has now. Later checks list "
@@ -3240,14 +3240,15 @@ class _NewReleasesRun:
                        if album_id not in self.refound
                        and ((c.get("payload") or {}).get("_artist_dir") in self.reached
                             or _folder_gone(c))}
-        if self.refound:
+        changed = not self._failed_empty()
+        if changed and self.refound:
             one = len(self.refound) == 1
             self.job.summary += (
                 f" {plural(len(self.refound), 'album')} already in the New releases "
                 f"review {'was' if one else 'were'} checked again after "
                 f"{'its artist folder' if one else 'their artist folders'} "
                 "changed.")
-        if self.retire:
+        if changed and self.retire:
             one = len(self.retire) == 1
             self.job.summary += (
                 f" {plural(len(self.retire), 'album')} left the New releases review "
@@ -3257,8 +3258,11 @@ class _NewReleasesRun:
         if self.skipped_note:
             self.job.summary += f" {self.skipped_note}"
 
+    def _failed_empty(self):
+        return not self.total and (self.failed_count or self.saved is False)
+
     def _finish(self):
-        if not self.total and (self.failed_count or self.saved is False):
+        if self._failed_empty():
             # With no reviewable finds, submit_scan would otherwise replace this
             # explicitly incomplete result with a green Done state. Keep partial
             # success reviewable when it found albums, but never present an

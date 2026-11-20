@@ -2224,10 +2224,11 @@ class _StartupRecovery:
             left = [staging / name for name in unclaimed
                     if os.path.lexists(staging / name)]
             log.warning(
-                "%s: a download folder in staging no saved queue claims "
-                "could not be cleared: %s.%s",
+                "%s: %s in staging no saved queue claims could not be "
+                "cleared%s.%s",
                 BLOCKED_DOWNLOAD_LOG_ENTRY,
-                ", ".join(path.name for path in left),
+                "download folders" if len(left) > 1 else "a download folder",
+                f": {', '.join(path.name for path in left)}" if left else "",
                 _check_staged(left),
             )
             return StartupRecoveryResult(

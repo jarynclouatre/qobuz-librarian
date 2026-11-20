@@ -105,7 +105,7 @@ def _print_preview(plan, verbose: bool, in_place: bool,
                "cover art and sidecars can be resumed")))
     if s["unplaceable"]:
         log.info(fmt(C.YELLOW,
-            f"    {s['unplaceable']} couldn't be identified; left where they are"))
+            f"    {plural(s['unplaceable'], 'file')} couldn't be identified; left in place"))
     unsafe_collisions = s["collision"] - len(resume_entries)
     if unsafe_collisions:
         log.info(fmt(C.YELLOW,

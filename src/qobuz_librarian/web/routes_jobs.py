@@ -1912,7 +1912,10 @@ class _UndoRun:
                 **self.info,
                 "removed": bool(single_mark_complete),
             }
-            if single_mark_complete:
+            if single_mark_complete and (not self.info.get("marked")
+                                         or self.undo_outcome.get("single_kept")):
+                self.job.summary = f"“{self.info.get('title')}” was already gone."
+            elif single_mark_complete:
                 self.job.summary = (f"“{self.info.get('title')}” was already gone; "
                                     "cleared the single mark.")
             else:

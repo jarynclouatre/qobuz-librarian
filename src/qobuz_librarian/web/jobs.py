@@ -2461,9 +2461,12 @@ def _review_restore_error(job, row, execute_registry):
     return None
 
 
-def _put_back_pending_reviews(pending_reviews):
+def _put_back_pending_reviews(pending_reviews) -> int:
+    """Put saved reviews back; returns how many could not be."""
+    failed = 0
     for job in pending_reviews:
         if not _restore_untouched_review(job, status=JobStatus.PENDING):
+            failed += 1
             with job._lock:
                 job.status = JobStatus.FAILED
                 job.attention = "failed"
@@ -2473,6 +2476,7 @@ def _put_back_pending_reviews(pending_reviews):
                     "not be put back in the review. Run the scan again."
                 )
             job_persistence.persist(job)
+    return failed
 
 
 def _return_cut_short_picks(cut_short, return_picks):
@@ -2668,13 +2672,15 @@ class _JobsRestore:
         ):
             run = (self.requeue(job) if self.requeue is not None
                    and not row.get("single_unreadable") else None)
-            if _settle_restarted_download(
+            requeued = _settle_restarted_download(
                 job, settled, was_running=status is not JobStatus.FAILED,
                 can_requeue=run is not None,
-            ) and self._persist_restored_transition(job, previous_status) is True:
+            )
+            if requeued and self._persist_restored_transition(
+                    job, previous_status) is True:
                 self.requeued.append((job, run))
             else:
-                if job.status is not JobStatus.FAILED:
+                if requeued or job.status is not JobStatus.FAILED:
                     job.status = JobStatus.FAILED
                     job.error = (job_persistence.RESTART_INTERRUPTED
                                  + " Use Retry to download it again.")
@@ -2770,7 +2776,9 @@ class _JobsRestore:
             for job in self.restored:
                 if job.id in registry._jobs:
                     self._restore_log_lines(job)
-        _put_back_pending_reviews(self.pending_reviews)
+        failed = _put_back_pending_reviews(self.pending_reviews)
+        self.review -= failed
+        self.interrupted += failed
         if return_picks is not None:
             _return_cut_short_picks(self.cut_short, return_picks)
         # Behind the same pause as any download that arrives while the library is
