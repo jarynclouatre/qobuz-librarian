@@ -169,6 +169,22 @@ def test_downloads_run_on_a_copy_and_leave_the_users_config_as_it_is(
     assert (qobuz["password_or_token"], qobuz["use_auth_token"]) == ("tok-saved", True)
 
 
+def test_saving_a_token_keeps_a_streamrip_config_that_does_not_parse(
+        tmp_path, monkeypatch):
+    from qobuz_librarian import config
+
+    cfg_path = tmp_path / "streamrip" / "config.toml"
+    cfg_path.parent.mkdir()
+    broken = '[downloads]\nfolder = "/my/staging\n'
+    cfg_path.write_text(broken, encoding="utf-8")
+    monkeypatch.setattr(config, "STREAMRIP_CONFIG", cfg_path)
+
+    assert write_streamrip_creds("user", "token") is True
+    assert (cfg_path.parent / "config.toml.corrupt").read_text(
+        encoding="utf-8") == broken
+    assert 'password_or_token = "token"' in cfg_path.read_text(encoding="utf-8")
+
+
 def test_failed_streamrip_credential_publish_keeps_the_prior_file(
         tmp_path, monkeypatch):
     import os

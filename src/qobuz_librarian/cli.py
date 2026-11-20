@@ -1072,9 +1072,12 @@ class _QobuzSession:
             from qobuz_librarian.api.client import authorize_qobuz_action
 
             credentials = authorize_qobuz_action(access)
-        except NoCredsError:
+        except NoCredsError as exc:
+            headline = (
+                f"Couldn't read {cfg.STREAMRIP_CONFIG}: {exc.__cause__}"
+                if exc.__cause__ else "No Qobuz credentials configured.")
             message = fmt(C.RED,
-                "\n✗  No Qobuz credentials configured.\n"
+                f"\n✗  {headline}\n"
                 "   Paste your token and your email or user ID on the Settings page "
                 f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings);\n"
                 "   in terminal mode, press Resume web app there first.\n"

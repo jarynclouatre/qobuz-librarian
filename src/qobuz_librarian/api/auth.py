@@ -360,8 +360,13 @@ def _write_streamrip_creds(user_id, auth_token):
     if config.STREAMRIP_CONFIG.exists():
         try:
             doc = tomlkit.parse(config.STREAMRIP_CONFIG.read_text(encoding="utf-8"))
-        except Exception:
-            doc = None
+        except OSError:
+            return False
+        except Exception as exc:
+            if not state_file.preserve_corrupt(
+                    os.path.realpath(config.STREAMRIP_CONFIG),
+                    "The streamrip config", exc, "its other settings"):
+                return False
     if doc is None:
         doc = _default_streamrip_doc()
     if "qobuz" not in doc:
