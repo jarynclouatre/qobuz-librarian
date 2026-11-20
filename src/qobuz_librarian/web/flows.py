@@ -6419,6 +6419,10 @@ def _unreadable_left(count):
             "not be read and stayed at the source")
 
 
+_MIGRATE_DISK_FULL = ("The destination disk is full. Free space there and run "
+                      "Migrate again; it carries on from where it stopped.")
+
+
 def execute_migration(job, chosen, dest, *, in_place, src=None,
                       allow_low_space=False):
     """Copy (or move) the files behind the approved albums into the layout."""
@@ -6710,6 +6714,8 @@ class _MigrationRun:
             self.lead = ("Finished, but "
                          f"{plural(self.unreadable, 'file or folder', 'files or folders')} "
                          "could not be read")
+        elif self.result.disk_full:
+            self.lead = "Stopped: the destination disk is full"
         elif self.has_problem:
             self.lead = (
                 "Migration stopped with problems"
@@ -6753,6 +6759,8 @@ class _MigrationRun:
             # failed copies ends red, like every other execute path, instead of a
             # green DONE that buries "N failed" mid-sentence.
             self.job.error = f"{plural(self.failed, 'file')} couldn't be migrated; see the log."
+        if self.result.disk_full:
+            self.job.error = _MIGRATE_DISK_FULL
         if self.pruned:
             self.parts.append(f"cleared {plural(self.pruned, 'empty source folder')}")
         left_lines = migrate_engine.left_in_source_lines(

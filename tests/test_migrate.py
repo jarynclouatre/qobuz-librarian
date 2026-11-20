@@ -657,7 +657,7 @@ def test_terminal_migration_gates_a_short_move_and_leaves_a_dry_run_untouched(
         executed.append(1)
         return SimpleNamespace(copied=1, skipped=0, lingered=0, failed=0,
                                cancelled=False, interrupted=False,
-                               failures=[], outcomes=[],
+                               disk_full=False, failures=[], outcomes=[],
                                companion_outcomes=[])
     monkeypatch.setattr(migrate_mode.engine, "execute_plan", _fake_execute)
     monkeypatch.setattr(

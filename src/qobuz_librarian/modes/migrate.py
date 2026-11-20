@@ -432,6 +432,10 @@ class _MigrateRun:
         n_errors = self.result.failed + self.companion_failed
         if self.result.interrupted:
             log.info(fmt(C.GRAY, "  Interrupted."))
+        elif self.result.disk_full:
+            log.warning(fmt(C.RED,
+                "  ✗  Stopped: the destination disk is full. Free space there "
+                "and run migrate again; it carries on from where it stopped."))
         elif self.result.cancelled:
             log.warning(fmt(C.RED,
                 "  ✗  Stopped early"

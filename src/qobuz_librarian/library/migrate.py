@@ -173,6 +173,7 @@ class ExecResult:
     left_in_source: list = field(default_factory=list)
     cancelled: bool = False
     interrupted: bool = False
+    disk_full: bool = False
     # One (source, dest_rel, status, reason) per attempted file - the record of
     # what actually happened, surfaced to the user and written to the results
     # manifest. status is COPIED | SKIPPED | FAILED | INTERRUPTED.
@@ -2791,7 +2792,7 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
             except (OSError, shutil.Error) as exc:
                 log.info(f"  ⚠  couldn't carry {name}: {exc}")
                 if getattr(exc, "errno", None) == errno.ENOSPC:
-                    result.cancelled = True
+                    result.cancelled = result.disk_full = True
                 result.companion_outcomes.append((
                     source_path,
                     destination_path,
@@ -4081,7 +4082,7 @@ class _PlanRun:
             self.result.outcomes.append(
                 (src, entry.dest_rel, FAILED, str(exc)))
             if getattr(exc, "errno", None) == errno.ENOSPC:
-                self.result.cancelled = True
+                self.result.cancelled = self.result.disk_full = True
                 stop_after_item = True
         except Exception as exc:
             log.exception("Migration stopped at %s", src)
