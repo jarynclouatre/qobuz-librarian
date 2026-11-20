@@ -286,6 +286,14 @@ def test_album_folders_are_found_by_what_they_hold(tmp_path, monkeypatch, tagged
     sequel = {"id": "B", "artist": {"name": "Bloodrock"}, "title": "Bloodrock 3",
               "release_date_original": "1971-01-01"}
     assert find_album_dir_filesystem(sequel) is None
+    poe = root / "The Alan Parsons Project" / (
+        "Tales Of Mystery And Imagination - Edgar Allan Poe (1975)")
+    poe.mkdir(parents=True)
+    scanner.clear_scan_caches()
+    remix = {"id": "T", "artist": {"name": "The Alan Parsons Project"},
+             "title": "Tales Of Mystery And Imagination (Edgar Allan Poe)",
+             "version": "1987 Remix", "release_date_original": "1975-01-01"}
+    assert find_album_dir_filesystem(remix) == poe
     # A version keeps its own folder beside the plain release, both ways.
     acoustic = {"id": "A", "artist": {"name": "Phoebe Bridgers"},
                 "title": "Lost Boys", "version": "Acoustic", "tracks_count": 2,

@@ -19,6 +19,7 @@ Behaviour you should not change without understanding the consequence:
 - predicted_album_paths uses a list, not a set, to preserve deterministic
   candidate order across runs (set hash iteration is non-deterministic).
 """
+import itertools
 import math
 import os
 import re
@@ -51,6 +52,7 @@ from qobuz_librarian.library.tags import (
     normalize,
     similarity,
     strip_album_decorations,
+    strip_album_decorations_strict,
     strip_edition_suffix,
     strip_leading_article,
     strip_year_decoration,
@@ -420,8 +422,14 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
 
     search_dirs = _artist_search_dirs(artist)
 
-    global_best, global_best_score = None, 0.0
-    norm_title = normalize(strip_album_decorations(title))
+    global_best, global_best_rank = None, (0.0, False)
+    # A bracketed subtitle is still the title: "Tales Of Mystery And
+    # Imagination (Edgar Allan Poe)" is filed as "... - Edgar Allan Poe".
+    # Kept whole, the title must match the folder name exactly.
+    title_forms = [(strip_album_decorations(title), False)]
+    full_title = strip_album_decorations_strict(title)
+    if normalize(full_title) != normalize(title_forms[0][0]):
+        title_forms.append((full_title, True))
     edition_title = canonical_track_title(beets_sanitize(title))
     # Folder names often leave out a bracketed "(Live)" or the version, so
     # only the rest of the title has to agree with the folder name.
@@ -433,7 +441,6 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
         if not subdirs:
             continue
 
-        stripped_title = strip_album_decorations(title)
         # Evaluate every subdir that clears both gates, not just the single
         # top scorer: a prefix-only high scorer that fails the coverage gate
         # (studio 'The North Borders' scoring 0.79 against the live 'The North
@@ -447,15 +454,20 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
                     return d
                 continue
             folder_words = _other_release_words(d.name)
-            for dir_bare in folder_title_forms(d.name, artist_dir.name, artist):
+            for dir_bare, (stripped_title, whole) in itertools.product(
+                    folder_title_forms(d.name, artist_dir.name, artist),
+                    title_forms):
                 score = similarity(dir_bare, stripped_title)
-                if score < config.FUZZY_DIR_THRESH or score <= global_best_score:
+                if (score < config.FUZZY_DIR_THRESH
+                        or whole and score < 1
+                        or (score, whole) <= global_best_rank):
                     continue
                 # Real edition variants normalize to the same string, so require
                 # the titles to be close in length - that keeps an extra word
                 # ('Live', 'Tour') from resolving to the base album's folder on
                 # prefix alone.
                 norm_dir = normalize(dir_bare)
+                norm_title = normalize(stripped_title)
                 coverage = (min(len(norm_dir), len(norm_title))
                             / max(len(norm_dir), len(norm_title))
                             if norm_dir and norm_title else 0.0)
@@ -470,7 +482,7 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
                     continue
                 if audio_only and not _holds_audio(d):
                     continue
-                global_best, global_best_score = d, score
+                global_best, global_best_rank = d, (score, whole)
                 vlog(f"fuzzy match: {d}  (score {score:.2f})")
     return global_best
 
