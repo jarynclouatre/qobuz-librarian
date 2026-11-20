@@ -504,7 +504,11 @@ async def _lifespan(_app: FastAPI):
                 f"{cfg.WEB_AUTH_FILE}; refusing to start with an open "
                 "first-run setup screen."
             )
-        if cred_status == "applied":
+        if cred_status == "partial":
+            _log.warning("WEB_AUTH_USER and WEB_AUTH_PASSWORD (or "
+                         "WEB_AUTH_PASSWORD_FILE) are not both set, so the "
+                         "saved web login was left as it is.")
+        elif cred_status == "applied":
             _log.info("Configured the web login from WEB_AUTH_USER / "
                       "WEB_AUTH_PASSWORD.")
         elif cred_status == "kept":

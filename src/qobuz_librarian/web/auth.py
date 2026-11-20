@@ -87,6 +87,7 @@ _OPEN_PREFIXES = ("/static/",)
 
 _PBKDF2_ROUNDS = 600_000
 _COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days, matching the CSRF cookie
+_SESSION_RENEW_AFTER = 60 * 60 * 24
 
 
 def safe_next_path(raw) -> str:
@@ -566,6 +567,22 @@ def verify_session(cookie_value: str) -> bool:
         return True
 
 
+def renew_session(cookie_value: str) -> bool:
+    """Start a session's 30 days again, at most once a day, while it is in
+    use. Returns whether the browser needs the cookie again."""
+    now = time.time()
+    with _credentials_lock, _sessions_lock:
+        digest = _token_digest(cookie_value)
+        exp = _sessions.get(digest)
+        if exp is None or exp > now + _COOKIE_MAX_AGE - _SESSION_RENEW_AFTER:
+            return False
+        _sessions[digest] = now + _COOKIE_MAX_AGE
+        if not _save_sessions_locked():
+            _sessions[digest] = exp
+            return False
+    return True
+
+
 def _secure(request) -> bool:
     return request_is_https(request)
 
@@ -579,13 +596,17 @@ def session_token(request) -> str:
 
 
 def set_session_cookie(response, request, *, expected_generation=None) -> None:
+    _send_session_cookie(response, request,
+                         mint_session(expected_generation=expected_generation))
+
+
+def _send_session_cookie(response, request, token) -> None:
     # SameSite=strict (matching the CSRF cookie): the session is the auth
-    # credential, and no app flow needs it carried on a cross-site first hop.
-    # a deep link from elsewhere just bounces once through /login, which
-    # re-issues it. Strict keeps the auth cookie off every cross-site request.
+    # credential. A link from elsewhere arrives without it and /login loads
+    # itself once more so the browser sends it.
     response.set_cookie(
         session_cookie_name(request),
-        mint_session(expected_generation=expected_generation),
+        token,
         max_age=_COOKIE_MAX_AGE,
         httponly=True,
         samesite="strict",
@@ -904,9 +925,6 @@ def login_lockout_remaining(ip: str, username: str = "") -> int:
                  if now - t < _LOGIN_WINDOW]
         if _locked(times, _LOGIN_MAX, now):
             waits.append(_LOGIN_LOCKOUT - (now - max(times)))
-        elif not _has_attempt_slot(
-                times, _login_pending.get(ip, 0), _LOGIN_MAX, now):
-            waits.append(1)
         if times and _user_paused(uname, now):
             waits.append(_user_paused_until[uname] - now)
     # A live lockout never rounds down to nothing, or the refusal it drives
@@ -985,7 +1003,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         cookie = session_token(request)
         if cookie and verify_session(cookie):
-            return await call_next(request)
+            renewed = renew_session(cookie)
+            response = await call_next(request)
+            # Signing out or a password change in this request ended it.
+            if renewed and verify_session(cookie):
+                _send_session_cookie(response, request, cookie)
+            return response
         if path in (LOGIN_PATH, SETUP_PATH):
             return await call_next(request)
         return self._reject(request, LOGIN_PATH)

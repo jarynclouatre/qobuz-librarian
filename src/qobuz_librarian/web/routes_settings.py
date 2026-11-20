@@ -40,9 +40,10 @@ async def settings_head():
 
 
 def _web_login_env_managed() -> bool:
-    """Whether Compose is still carrying a web password."""
-    return bool(os.environ.get("WEB_AUTH_PASSWORD", "").strip()
-                or os.environ.get("WEB_AUTH_PASSWORD_FILE", "").strip())
+    """Whether Compose is still carrying a web login a restart would apply."""
+    return bool(os.environ.get("WEB_AUTH_USER", "").strip() and (
+        os.environ.get("WEB_AUTH_PASSWORD", "").strip()
+        or os.environ.get("WEB_AUTH_PASSWORD_FILE", "").strip()))
 
 
 def _settings_response(request, *, saved=False, queued=False, connected=False,
@@ -256,6 +257,8 @@ async def check_qobuz_again(request: Request, return_to: str = Form("/")):
         msg = "Qobuz still rejects the saved token."
     elif verdict is AuthOutcome.ENTITLEMENT:
         msg = "Qobuz accepted the token, but this account cannot download."
+    elif verdict is AuthOutcome.INCONCLUSIVE:
+        msg = "Qobuz answered but didn't confirm the token. Try again later."
     else:
         msg = "Qobuz still can't be reached."
     return RedirectResponse(
@@ -581,6 +584,11 @@ async def change_web_password(request: Request):
         web_auth.current_username_and_generation()
     )
     loop = asyncio.get_running_loop()
+    if not current:
+        diags = await loop.run_in_executor(None, diagnostics_mod._diagnostics)
+        return _settings_response(
+            request, password_error="Enter your current password.",
+            diagnostics=diags, rerendered=True, section="web-login")
     # The sign-in throttle covers this form too: a session left open is
     # otherwise an unlimited guesser of the password it was opened with.
     ip = web_auth.client_ip(request)

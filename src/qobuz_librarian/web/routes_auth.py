@@ -22,9 +22,15 @@ async def login_page(request: Request):
         return RedirectResponse(url="/", status_code=303)
     if not web_auth.credentials_configured():
         return RedirectResponse(url="/setup", status_code=303)
+    next_path = web_auth.safe_next_path(request.query_params.get("next"))
     cookie = web_auth.session_token(request)
     if cookie and web_auth.verify_session(cookie):
-        return RedirectResponse(url="/", status_code=303)
+        return RedirectResponse(url=next_path or "/", status_code=303)
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        # The session cookie is SameSite=strict, so a link from another site
+        # arrives without it. Loading the page again from here sends it.
+        return HTMLResponse('<meta http-equiv="refresh" content="0">',
+                            headers={"Cache-Control": "no-store"})
     typed_cookie = cookie_name(_TYPED_USERNAME_COOKIE, request)
     typed = urllib.parse.unquote(request.cookies.get(typed_cookie, ""))
     resp = rendering.templates.TemplateResponse(
@@ -33,8 +39,7 @@ async def login_page(request: Request):
                            or rendering._lockout_notice(web_auth.client_ip(request))),
                  "username": typed[:_MAX_USERNAME_ECHO],
                  "changed": request.query_params.get("changed") == "1",
-                 "next_path": web_auth.safe_next_path(
-                     request.query_params.get("next"))})
+                 "next_path": next_path})
     if typed:
         resp.delete_cookie(typed_cookie, path=web_auth.LOGIN_PATH, samesite="strict")
     return resp
@@ -90,11 +95,7 @@ async def login_submit(request: Request, username: str = Form(""),
         refusal = rendering._lockout_notice(ip, username) or (
             "Sign-in checks are busy. Try again shortly."
         )
-        return rendering.templates.TemplateResponse(
-            request=request, name="login.html",
-            context={"error": refusal, "username": username.strip(),
-                     "next_path": next_path},
-            status_code=429)
+        return _login_again(request, refusal, username.strip(), next_path)
     # Offload the 600k-round PBKDF2 to a thread so one login attempt can't stall
     # the single-worker event loop (health, API and SSE all freeze during a KDF
     # that runs on the loop thread).
@@ -122,13 +123,10 @@ async def login_submit(request: Request, username: str = Form(""),
     except web_auth.SessionPersistenceError:
         _log.warning(
             "Couldn't persist a new web session; login refused.")
-        return rendering.templates.TemplateResponse(
-            request=request, name="login.html",
-            context={"error": "Couldn't save your session. Check that the "
-                              "data volume is writable, then try again.",
-                     "username": username.strip(),
-                     "next_path": next_path},
-            status_code=503)
+        return _login_again(
+            request, "Couldn't save your session. Check that the data volume "
+                     "is writable, then try again.",
+            username.strip(), next_path)
     return resp
 
 
@@ -215,12 +213,9 @@ async def setup_submit(request: Request, username: str = Form(""),
     except web_auth.SessionPersistenceError:
         _log.warning(
             "Couldn't persist the first web session; setup login was saved.")
-        return rendering.templates.TemplateResponse(
-            request=request, name="login.html",
-            context={"error": "Your login was created, but its session couldn't "
-                              "be saved. Check that the data volume is writable, "
-                              "then sign in.",
-                     "username": user,
-                     "next_path": ""},
-            status_code=503)
+        return _login_again(
+            request, "Your login was created, but its session couldn't be "
+                     "saved. Check that the data volume is writable, then "
+                     "sign in.",
+            user, "")
     return resp

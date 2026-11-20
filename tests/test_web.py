@@ -2989,8 +2989,8 @@ def test_failed_logins_lock_out_only_the_guesser(monkeypatch, tmp_path, caplog):
                    data={"username": "admin", "password": "hunter2hunter2!",
                          "_csrf_token": tok},
                    headers={"X-CSRF-Token": tok}, follow_redirects=False)
-        assert r.status_code == 429
-        assert 'action="/login"' in r.text
+        assert r.status_code == 303
+        assert r.headers["location"].startswith("/login?error=")
         assert "ql_session" not in r.cookies
 
     warnings = [record.getMessage() for record in caplog.records
