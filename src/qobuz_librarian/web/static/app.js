@@ -1411,6 +1411,12 @@
       link.classList.toggle("hidden", !n);
     });
   }
+  function discoverShownCount(parent) {
+    var n = parent.querySelectorAll("[data-discover-card]").length;
+    document.querySelectorAll("[data-discover-count]").forEach(function (el) {
+      el.textContent = n + (n === 1 ? " artist" : " artists");
+    });
+  }
   function discoverHiddenPost(url, form) {
     var body = new FormData(form);
     return sessionFetch(url, {
@@ -1440,12 +1446,14 @@
     var next = cards[at + 1] || cards[at - 1];
     card.remove();
     if (panel) panel.remove();
+    discoverShownCount(parent);
     var focusTo = next && next.querySelector(".ql-result-title a");
     if (focusTo) focusTo.focus({ preventScroll: true });
     function putBack() {
       if (!parent.isConnected) return false;
       parent.insertBefore(card, after && after.parentNode === parent ? after : null);
       if (panel) parent.insertBefore(panel, card.nextSibling);
+      discoverShownCount(parent);
       return true;
     }
     discoverHiddenPost(form.action, form).then(function (data) {

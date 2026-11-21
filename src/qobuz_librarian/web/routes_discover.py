@@ -12,10 +12,17 @@ from qobuz_librarian.api.auth import (
     QobuzError,
     QobuzUnavailable,
 )
-from qobuz_librarian.library import discover_hidden, recommendations
+from qobuz_librarian.library import collection_snapshot, discover_hidden, recommendations
 from qobuz_librarian.library.tags import known_year
 from qobuz_librarian.quality.tiers import format_quality
-from qobuz_librarian.web import download_admission, job_labels, qobuz_access, rendering, runtime
+from qobuz_librarian.web import (
+    download_admission,
+    job_labels,
+    qobuz_access,
+    rendering,
+    runtime,
+    storage,
+)
 
 router = APIRouter()
 
@@ -93,6 +100,7 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         "feed_age": "",
         "library_count": 0,
         "hidden_count": 0,
+        "library_problem": "",
         "notice": rendering._notice_text(request.query_params.get("notice")),
     }
     if not context["qobuz_ready"]:
@@ -105,6 +113,14 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         context["qobuz_ready"] = False
         return rendering._tr(request, "discover.html", context)
     loop = asyncio.get_running_loop()
+    # An unmounted share reads as an empty library, which would wipe the saved
+    # suggestions and offer every favourite as missing.
+    root_state, recorded = await loop.run_in_executor(
+        None, collection_snapshot.music_root_write_state)
+    if root_state != "ready":
+        context["library_problem"] = storage._music_write_target_message(
+            root_state, recorded)
+        return rendering._tr(request, "discover.html", context)
     if tab == "genres":
         tags_view = await loop.run_in_executor(
             None, lambda: recommendations.ensure_library_tags(token))
@@ -249,6 +265,10 @@ def _hidden_answer(request, back, message, *, hidden=0, failed=False):
 
 async def _hidden_change(request, change, fallback):
     if not runtime._discover_available():
+        if "application/json" in request.headers.get("accept", ""):
+            return JSONResponse(
+                {"error": "Discover is off: there is no Last.fm API key in Settings."},
+                status_code=409)
         return _discover_unavailable_response()
     form = await request.form()
     artist_id = str(form.get("artist_id") or "").strip()[:64]

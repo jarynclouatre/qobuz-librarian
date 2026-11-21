@@ -1,6 +1,7 @@
 """Build the artist and album feeds shown on Discover."""
 import hashlib
 import logging
+import re
 import threading
 import time
 from difflib import SequenceMatcher
@@ -70,6 +71,7 @@ _NAMESAKE_TITLES = 10
 # progress to protect, and three timeouts at ten seconds each would leave the
 # page counting to nothing for a minute and a half before saying why.
 _MAX_CONSECUTIVE_FAILURES = 3
+_JOINT_CREDIT = re.compile(r", | & | and ", re.IGNORECASE)
 # How long a failed build is left alone before anything starts it again. Without
 # it, every reopened page relaunches a build against the same dead key or the
 # same unreachable service. A different key is tried at once, so a key just
@@ -98,6 +100,7 @@ class Library:
         self.signature = signature
         self._owned_names = {}
         self._bare_keys = None
+        self._partner_keys = None
 
     def __len__(self):
         return len(self.seeds)
@@ -122,7 +125,7 @@ class Library:
             # nothing matches everything. Exact text is all that is safe here.
             target = str(name or "").strip()
             return bool(target) and any(target == r.strip() for r in self.raws)
-        if key in self.keys:
+        if key in self.keys or key in self._partners():
             return True
         if not key.isascii():
             # Exact only, as tags.key_similarity scores it.
@@ -142,6 +145,18 @@ class Library:
             if matcher.ratio() >= thresh:
                 return True
         return False
+
+    def _partners(self):
+        """Artists filed jointly with an owned one: 'Wings' when the library
+        has both 'Paul McCartney' and 'Paul McCartney & Wings'."""
+        if self._partner_keys is None:
+            partners = set()
+            for raw in self.raws:
+                parts = [normalize(part) for part in _JOINT_CREDIT.split(raw)]
+                if len(parts) > 1 and any(part in self.keys for part in parts):
+                    partners.update(part for part in parts if part)
+            self._partner_keys = partners
+        return self._partner_keys
 
 
 def read_library() -> Library:
@@ -295,8 +310,6 @@ def resolve_artist(name: str, token) -> dict | None:
         results = search_artists(name, token, limit=cfg.ARTIST_LOOKUP_LIMIT)
         best = pick_best_artist(results, name, token,
                                 lambda: _lastfm_album_titles(name))
-    except (AuthLost, QobuzUnavailable):
-        raise
     except QobuzError as e:
         # Qobuz answered badly, which is not the same as answering "no". Don't
         # write a miss the next build would trust.
@@ -379,8 +392,6 @@ def resolve_album(
     try:
         results = search_albums(f"{artist} {title}", token,
                                 limit=cfg.ARTIST_LOOKUP_LIMIT)
-    except (AuthLost, QobuzUnavailable):
-        raise
     except QobuzError as e:
         vlog(f"discover: album search failed for {artist!r} / {title!r}: {e}")
         return None
@@ -440,8 +451,12 @@ def _qobuz_artist(name: str, token, *, prefer_hires: bool) -> dict | None:
     artist = resolve_artist(name, token)
     if not artist:
         return None
-    albums = artist_albums(
-        artist["id"], artist["name"], token, prefer_hires=prefer_hires)
+    try:
+        albums = artist_albums(
+            artist["id"], artist["name"], token, prefer_hires=prefer_hires)
+    except QobuzError as e:
+        vlog(f"discover: catalogue failed for {name!r}: {e}")
+        return None
     if not albums:
         return None
     return {
@@ -821,7 +836,9 @@ def _genre_worker(
             prefer_hires=prefer_hires,
         )
         _publish(kind, looked_up=index)
-        if not album:
+        # Last.fm lists "Rumours" and "Rumours (Remastered)" apart; both
+        # resolve to the one Qobuz record.
+        if not album or any(card["id"] == album["id"] for card in cards):
             continue
         # Same short-release rule as the artist rows; an unknown track count
         # passes rather than punishing bad metadata.
@@ -1093,7 +1110,7 @@ def feed_view(kind: str, library_sig: str, *,
     saved = cache.get_feed(kind)
     if build and build["phase"] == "error":
         view.update(phase="error", error=build["error"], items=build["items"])
-        if not view["items"] and saved:
+        if saved and len(saved["payload"]) > len(view["items"]):
             view.update(items=saved["payload"], built_at=saved["built_at"],
                         stale=True)
         return view

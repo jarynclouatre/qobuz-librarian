@@ -15,6 +15,8 @@
 
   {% if not qobuz_ready %}
   {% include "_connect_cta.html" %}
+  {% elif library_problem %}
+  <div class="ql-notice ql-notice-warning"><span>{{ library_problem }}</span></div>
   {% else %}
 
   {% if discover_tab == 'search' %}
@@ -79,14 +81,14 @@
       <span class="ql-status-chip is-error">Key rejected</span>
       <span>Last.fm rejected the API key. <a href="/settings#discover" class="ql-inline-link">Check it in Settings</a>.</span>
       {% elif feed.phase == 'error' and feed.error == 'rate_limited' %}
-      <span class="ql-status-chip is-warning">Paused</span>
-      <span>Last.fm is rate-limiting this key.</span>
+      <span class="ql-status-chip is-warning">Rate-limited</span>
+      <span>Last.fm is rate-limiting this key. Try again in a few minutes.</span>
       {% elif feed.phase == 'error' and feed.error == 'qobuz' %}
       <span class="ql-status-chip is-error">Qobuz unavailable</span>
       <span>Qobuz could not be reached.</span>
       {% elif feed.phase == 'error' and feed.error == 'other' %}
       <span class="ql-status-chip is-error">Failed</span>
-      <span>The suggestions could not be built.</span>
+      <span>{% if discover_tab == 'favourites' %}Your saved albums could not be checked.{% else %}The suggestions could not be built.{% endif %}</span>
       {% elif feed.stale %}
       <span class="ql-status-chip is-warning">Saved suggestions</span>
       <span>Last.fm could not be reached. These were found {{ feed_age }}.</span>
@@ -95,8 +97,8 @@
       <span>Last.fm could not be reached. Try again in a few minutes.</span>
       {% elif discover_tab == 'search' %}
       {% if query %}
-      <span class="ql-status-chip is-info ql-status-chip--wrap">{{ artists | length }} artist{{ 's' if artists | length != 1 }} like {{ searched }}</span>
-      {% if artists %}<span>Artists Qobuz can serve that are not in your library.</span>{% endif %}
+      <span class="ql-status-chip is-info ql-status-chip--wrap"><span data-discover-count>{{ artists | length }} artist{{ 's' if artists | length != 1 }}</span> like {{ searched }}</span>
+      {% if artists %}<span>On Qobuz and not in your library.</span>{% endif %}
       {% endif %}
       {% elif discover_tab == 'genres' %}
       <span class="ql-status-chip is-info ql-status-chip--wrap">{% if tag %}{{ tag | lower }}{% else %}Genres{% endif %}</span>
@@ -139,7 +141,7 @@
     {% else %}
     {% include "_discover_feed.html" %}
     {% if not artists and feed.phase == 'ready' %}
-    <p class="ql-empty-state">{% if discover_tab == 'search' %}Last.fm has no artists like {{ searched }} that Qobuz can serve.{% elif library_count %}Nothing Last.fm suggested is on Qobuz and missing from your library.{% else %}Your library has no artists to suggest from yet.{% endif %}</p>
+    <p class="ql-empty-state">{% if discover_tab == 'search' %}Last.fm has no artists like {{ searched }} that are on Qobuz and not in your library.{% elif library_count %}Nothing Last.fm suggested is on Qobuz and missing from your library.{% else %}Your library has no artists to suggest from yet.{% endif %}</p>
     {% endif %}
     {% endif %}
 
