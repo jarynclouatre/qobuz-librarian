@@ -2,6 +2,21 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.6.0] - 2026-11-21
+
+A Queue page that shows what needs attention, what is running and what just finished, History as one list, shorter text on every page, and runs that check a folder before they download into it.
+
+- **Queue** lists finished jobs that need attention, running work, what is up next and the latest finished work, with a link to all of History. Its icon carries a count while work is in flight, in the warning colour when a finished job needs attention. Download rows and job pages show the album's cover, and a finished album's page names the folder it was filed in.
+- History is one list, newest first, 25 to a page. A run that landed part of its work shows **Partly done**, or **Imported** for a single album; its status for Retry, the hook and the API stays `failed`. Counts carry thousands separators, **Retry** from a job page answers on that page, and Repair history counts replaced tracks.
+- Pages carry fewer controls and less text. A review's toolbar is one row with its less used actions in a menu, its activity log folds, the Library download bar appears once an album is ticked, and a running job's button says **Stop**. Messages stop at what happened and what to do, and each thing has one name across pages, summaries and the terminal.
+- A new album download, a Repair and a Migrate move check the folders they write to before they start and name the one the app can't write to. Beets errors, Diagnostics Restore and Undo name it too, and Lyrics leaves a read-only `.lrc` as it is. When file names on a FAT disk are not valid UTF-8, the scan names the mount and says to mount it with `utf8`.
+- A link to the app from another site opens in a signed-in browser, and a browser in use stays signed in: the 30 days start again with use. A refused sign-in redirects, so a refresh never resends the password, and every password check waits behind the sign-in throttle. A `WEB_AUTH_PASSWORD` that is too short stops start-up with one line saying what to fix.
+- Discover explains a missing or unmounted music folder, counts a jointly credited band as owned when the library has one of its names alone, keeps its saved list when a build fails partway, and shows one Genres card per record.
+- Library scans find album folders named with a title's bracketed subtitle, read a version Qobuz gives as digits, such as "2018" and skip hidden and system folders inside an album. A saved review says when the music folder is unavailable. Migrate takes the year from the first date tag that names one, and says when the destination disk is full; running it again carries on from the files already in place.
+- Saving a Qobuz token over a streamrip `config.toml` that doesn't parse moves the file aside as `config.toml.corrupt` first, and the terminal names the line the parser stopped at. Settings asks for a full path as the Backup folder, and Diagnostics shows the streamrip and Beets versions and, outside Docker, names the user running the app.
+- In the terminal, the Upgrade walk goes by artist name and passes over an album Qobuz has withdrawn, `--yes` tries an album's sibling folders in turn, `q` cancels the migration's folder prompts, and a Lyrics pass prints only the tracks it adds to, couldn't find or skipped.
+- The Docker image runs Python 3.14.10 with Starlette 1.10.0 and pydantic 2.14.3.
+
 ## [1.5.2] - 2026-10-28
 
 Library and New releases reviews that stay in step, a notice up front where the music disk can't take downloads, and terminal consolidation that offers only real duplicates.
