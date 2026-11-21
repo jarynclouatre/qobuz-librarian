@@ -138,7 +138,8 @@ async def queue_history(
 
     def _load_page(page):
         recoveries = rendering._retire_gone_recoveries(
-            job_persistence.recovery_history(attention_only=attention))
+            job_persistence.recovery_history(
+                attention_only=attention, listed=True))
         for row in recoveries:
             row["bulk"] = True
         total = job_persistence.history_count(

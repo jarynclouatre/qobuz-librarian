@@ -1185,8 +1185,11 @@ def _friendly_job_error(exc, fallback: str) -> str:
     if isinstance(exc, FileNotFoundError):
         # job.error is rendered through Jinja autoescape, so don't escape here
         # too (that double-encodes characters like & in a path).
-        named = f" ({exc.filename})" if exc.filename else ""
-        return f"Required tool or path missing; see log{named}."
+        named = ""
+        if exc.filename:
+            shown, _is_host = storage._resolve_host_path(str(exc.filename))
+            named = f": {shown}"
+        return f"A file or tool the job needed is missing{named}. See job log."
     if isinstance(exc, beets.MusicDiskFull):
         return f"{exc.strerror}."
     if isinstance(exc, OSError):

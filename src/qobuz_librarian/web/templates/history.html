@@ -21,7 +21,7 @@
 <div class="ql-notice ql-notice-success" data-flash data-flash-kind="success">
   <span>
     <strong>{% if started_job.artist %}{{ started_job.artist }} · {% endif %}{{ started_job.display_title }}</strong>
-    {% if started_job.status.value in ('scanning', 'running') %}is downloading now.{% elif started_job.status.value == 'done' %}had already finished.{% else %}added to the queue.{% endif %}
+    {% if started_job.status.value in ('scanning', 'running') %}is downloading now.{% elif started_job.status.value == 'done' %}had already finished.{% elif started_job.status.value == 'failed' %}had already failed.{% elif started_job.status.value == 'canceled' %}was cancelled.{% else %}added to the queue.{% endif %}
     <a href="/jobs/{{ started_job.id }}" class="ql-inline-link">Open it →</a>
   </span>
 </div>
@@ -48,7 +48,7 @@
   </div>
 </section>
 
-{% if pages > 1 %}
+{% if pages > 1 and not attention_only %}
 <nav class="ql-activity-pagination" aria-label="History pages">
   {% if cur_page > 1 %}
   <a href="/queue/history?p={{ cur_page - 1 }}" class="ql-btn ql-btn-sm ql-btn-secondary ql-secondary-action">Newer</a>
@@ -69,7 +69,7 @@
   <form action="/queue/clear" method="post">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
-            data-confirm="Clear finished jobs from history? Downloaded tracks lose their Undo. Saved reviews and unresolved items stay."
+            data-confirm="Clear finished jobs from history? Downloaded tracks lose their Undo. Saved reviews and kept originals stay."
             data-confirm-action="Clear history" data-irreversible>Clear history</button>
   </form>
 </div>

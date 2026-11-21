@@ -228,7 +228,7 @@ def _strip_log_pointer(message, log_lines):
     """Drop a trailing "see the log" from a message when there is no log."""
     if log_lines:
         return message
-    return _LOG_POINTER_RE.sub("", message or "").strip() or message
+    return _LOG_POINTER_RE.sub(".", message or "").strip() or message
 
 
 templates.env.globals["when_label"] = job_labels._when_label

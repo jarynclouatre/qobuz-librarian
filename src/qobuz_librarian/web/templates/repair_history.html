@@ -12,7 +12,7 @@
 
 {% if entries %}
 <p class="ql-repair-history-summary">
-  {% if entries | length == 1 %}1 repair.{% else %}{{ entries | length }} most recent repairs, newest first.{% endif %}
+  {% if entries | length == 1 %}1 replaced track.{% elif entries | length >= 500 %}The {{ entries | length }} most recently replaced tracks.{% else %}{{ entries | length }} replaced tracks.{% endif %}
 </p>
 <ul class="ql-repair-history-list">
   {% for e in entries %}

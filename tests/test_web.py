@@ -1900,7 +1900,7 @@ def test_retry_rebuilds_archived_failed_download(client, monkeypatch):
     r = client.post(f"/jobs/{archived.id}/retry", follow_redirects=False)
 
     assert r.status_code == 303
-    assert r.headers["location"].startswith("/queue?error=")
+    assert r.headers["location"].startswith(f"/jobs/{archived.id}?error=")
     assert job_persistence.load_one(archived.id)["status"] == "failed"
     assert {item.id for item in jm.registry.all()} == jobs_before
 

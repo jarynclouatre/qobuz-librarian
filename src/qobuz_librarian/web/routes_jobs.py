@@ -1389,7 +1389,7 @@ async def job_retry(request: Request, job_id: str):
         dest = _retry_return_url(return_to, started=started, error=error)
         if dest is None:
             dest = (f"/jobs/{started}" if started
-                    else "/queue?error=" + error)
+                    else f"/jobs/{urllib.parse.quote(job_id)}?error={error}")
         return RedirectResponse(url=dest, status_code=303)
 
     job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)

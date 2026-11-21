@@ -2168,9 +2168,10 @@ def history_page(limit: int, offset: int,
     return result
 
 
-def recovery_history(*, attention_only: bool = False,
+def recovery_history(*, attention_only: bool = False, listed: bool = False,
                      strict: bool = False) -> list[dict]:
-    """Unresolved recoveries, optionally limited to terminal attention."""
+    """Unresolved recoveries, optionally limited to terminal attention or to
+    the jobs History lists."""
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -2178,10 +2179,12 @@ def recovery_history(*, attention_only: bool = False,
                 raise RuntimeError("saved recovery history is unavailable")
             return []
         try:
-            attention_clause = (
-                f"AND {_TERMINAL_SQL} AND attention != '' "
-                if attention_only else ""
-            )
+            if attention_only:
+                attention_clause = f"AND {_TERMINAL_SQL} AND attention != '' "
+            elif listed:
+                attention_clause = f"AND {_HISTORY_SQL} "
+            else:
+                attention_clause = ""
             rows = conn.execute(
                 "SELECT id, title, artist, album_id, status, error, summary, "
                 "execute_kind, execute_args, created_at, finished_at, "
