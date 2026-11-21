@@ -167,7 +167,8 @@ def _library_header_note():
 
 
 def _last_finished_library_job():
-    """The most recent library scan that finished or failed, or None."""
+    """The most recent Library scan or download that finished or failed,
+    or None."""
     return scans._last_finished(
         "library", (job_mgr.JobStatus.DONE, job_mgr.JobStatus.FAILED))
 
@@ -186,7 +187,8 @@ def _library_refresh_failure():
     """Why the last library scan stopped, while that is still the last thing
     a refresh did, or ""."""
     latest = _last_finished_library_job()
-    if latest is None or latest.status is not job_mgr.JobStatus.FAILED:
+    if (latest is None or latest.status is not job_mgr.JobStatus.FAILED
+            or latest.phase == "execute"):
         return ""
     # Any library work started or stopped since then supersedes it, whatever
     # became of that work.
@@ -611,8 +613,9 @@ async def library_hidden_restore_all(request: Request):
     # Under a filter only part of the set moved, so the message says how much
     # rather than claiming everything came back.
     what = ("Brought everything back" if fingerprints is None else
-            f"Brought back {restored} "
+            f"Brought back {restored:,} "
             f"{'album' if restored == 1 else 'albums'}")
+    one = fingerprints is not None and restored == 1
     if rejoined is False:
         msg = (f"{what}, but the open Library review couldn't "
                "be saved. Check the data folder, then refresh the review.")
@@ -620,7 +623,8 @@ async def library_hidden_restore_all(request: Request):
         lifted = await loop.run_in_executor(
             None, library_scan_state.clear_review_retired)
         msg = (f"{what} to the Library review." if lifted
-               else f"{what}. They return the next time the library scans.")
+               else f"{what}. {'It returns' if one else 'They return'} the "
+                    "next time the library scans.")
     elif rejoined:
         msg = f"{what} to the Library review."
     elif held:

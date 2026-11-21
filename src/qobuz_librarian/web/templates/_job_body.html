@@ -109,7 +109,7 @@
     {% endif %}
     {% set _upgrades = library_upgrade_count() if job.execute_kind == 'library' and not census else 0 %}
     {% if _job_summary or _upgrades %}
-    <div class="ql-job-summary ql-job-summary--review"><span>{{ _job_summary }}{% if _upgrades %}{{ ' ' if _job_summary }}{{ _upgrades }} album{{ 's' if _upgrades != 1 }} can be upgraded. <a href="/upgrade" class="ql-inline-link">Open Upgrade</a>{% endif %}</span></div>
+    <div class="ql-job-summary ql-job-summary--review"><span>{{ _job_summary }}{% if _upgrades %}{{ ' ' if _job_summary }}{{ '{:,}'.format(_upgrades) }} album{{ 's' if _upgrades != 1 }} can be upgraded. <a href="/upgrade" class="ql-inline-link">Open Upgrade</a>{% endif %}</span></div>
     {% endif %}
 
     {# Tab scoping: on a library review the bulk bar acts on the ACTIVE tab

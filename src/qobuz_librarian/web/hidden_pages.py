@@ -173,7 +173,9 @@ async def _restore_hidden(request, scope, redirect):
                 None, library_scan_state.clear_review_retired)
             waits_for_scan = not lifted
             msg = ("Brought back to the Library review." if lifted
-                   else "Brought back. They return the next time the library scans.")
+                   else "Brought back. "
+                   + ("It returns" if restored == 1 else "They return")
+                   + " the next time the library scans.")
         elif rejoined:
             msg = (f"Brought back {rejoined} to the Library review."
                    if rejoined != 1 else "Brought back to the Library review.")

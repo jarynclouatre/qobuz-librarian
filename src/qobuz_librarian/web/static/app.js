@@ -3079,7 +3079,8 @@
     // A ticked album stays listed whatever its release type, so unticking one
     // whose switch is off takes it off the list.
     function listMayHaveChanged(c) {
-      if (c && c.missing_total !== lastCounts.missing_total) refreshNeeded = true;
+      if (c && (c.missing_total !== lastCounts.missing_total ||
+                c.gap_total !== lastCounts.gap_total)) refreshNeeded = true;
     }
 
     function reviewPageCounts(box) {
@@ -4322,10 +4323,13 @@
         return;
       }
       shutReview();
-      if (window.htmx) {
-        var jc = document.getElementById("job-content");
-        var embedded = jc && jc.dataset.embedded ? "?embedded=1" : "";
-        window.htmx.ajax("GET", "/jobs/" + id + "/content" + embedded, { target: "#job-content", swap: "outerHTML" });
+      if (reviewNavigating) return;
+      // A page that hosts a review (Library, Repair) shows whichever job owns
+      // it now, which after a split download is the rest of the review, not
+      // this job.
+      var jc = document.getElementById("job-content");
+      if (window.htmx && !(jc && jc.dataset.embedded)) {
+        window.htmx.ajax("GET", "/jobs/" + id + "/content", { target: "#job-content", swap: "outerHTML" });
       } else { location.reload(); }
     });
     rsrc.addEventListener("auth", function () {
