@@ -1,4 +1,4 @@
-{% from "_search_results.html" import download_form, quality_badge with context %}
+{% from "_search_results.html" import download_form, pending_chip, quality_badge with context %}
 {% if error %}
 <div class="ql-notice ql-notice-warning" data-flash><span>{{ error }}</span></div>
 {% else %}
@@ -25,6 +25,7 @@
     </div>
     <div class="ql-discover-album-side">
       {{ quality_badge(al) }}
+      {{ pending_chip(al) }}
       {{ download_form(al.id, al.title, al.artist, version=al.version, queued=al.queued, scanning=al.scanning) }}
     </div>
   </div>

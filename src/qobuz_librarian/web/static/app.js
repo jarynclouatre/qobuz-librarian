@@ -531,7 +531,20 @@
       if (unavailable) checkbox.checked = false;
     }
 
-    var form = item.querySelector("[data-search-download-form]");
+    // A grid tile holds its other versions' rows; leave their state to them.
+    var own = function (el) { return el.closest("[data-search-item]") === item; };
+    var mine = function (selector) {
+      return Array.prototype.filter.call(item.querySelectorAll(selector), own);
+    };
+    mine(".ql-search-quality-status, [data-search-download-form]").forEach(function (el) {
+      el.hidden = unavailable;
+    });
+    mine("[data-search-pending]").forEach(function (chip) {
+      chip.hidden = !unavailable;
+      chip.textContent = state === "scanning" ? "In current scan" : "Queued";
+    });
+
+    var form = mine("[data-search-download-form]")[0];
     var button = form && form.querySelector("button[type=submit]");
     if (!button) return;
     var icon = button.classList.contains("ql-download-icon-button");
@@ -668,6 +681,8 @@
     // Draw the row as the server draws an owned one, so the track count the
     // row had before the download does not stay beside "In library".
     var own = function (el) { return el.closest("[data-search-item]") === item; };
+    Array.prototype.filter.call(item.querySelectorAll("[data-search-pending]"), own)
+      .forEach(function (chip) { chip.remove(); });
     var statuses = Array.prototype.filter.call(
       item.querySelectorAll(".ql-search-quality-status"), own);
     statuses.forEach(function (status) {
@@ -687,10 +702,13 @@
         download.replaceWith(ownedLabel());
       }
     }
-    // A tracklist fetched before the download still marks its tracks missing.
+    // A tracklist fetched before the download still shows the old marks.
+    var refetched = {};
     item.querySelectorAll("[data-tracks-toggle]").forEach(function (toggle) {
-      if (!own(toggle)) return;
-      var panel = document.getElementById(toggle.getAttribute("aria-controls"));
+      var id = toggle.getAttribute("aria-controls");
+      if (!own(toggle) || refetched[id]) return;
+      refetched[id] = true;
+      var panel = document.getElementById(id);
       if (!panel || !panel.firstElementChild) return;
       if (panel.classList.contains("hidden")) panel.replaceChildren();
       else window.htmx.ajax("GET", toggle.getAttribute("hx-get"), { target: panel, swap: "innerHTML" });
@@ -1199,11 +1217,12 @@
   // Enter on an empty box clears the search and its address as a tab does.
   document.addEventListener("submit", function (evt) {
     var form = evt.target;
-    if (!isSearchRequestForm(form)
-        || form.querySelector('input[name="q"]').value.trim()) return;
+    var q = isSearchRequestForm(form) && form.querySelector('input[name="q"]');
+    if (!q || q.value.trim()) return;
     evt.preventDefault();
     evt.stopImmediatePropagation();
     showSearchTab(form.querySelector('input[name="kind"]:checked'));
+    q.focus();
   }, true);
 
   function showSearchTab(radio) {
@@ -1286,8 +1305,7 @@
     if (evt.detail.successful) return;
     var panel = document.getElementById(btn.getAttribute("aria-controls"));
     if (!panel || panel.firstElementChild) return;
-    btn.setAttribute("aria-expanded", "false");
-    panel.classList.add("hidden");
+    setPanelOpen(panel, false);
   });
   var discoverFocus = null;
   document.addEventListener("htmx:beforeSwap", function (evt) {
@@ -1317,10 +1335,16 @@
     var open = btn.getAttribute("aria-expanded") === "true";
     // A press on an open panel that holds a notice asks again in place.
     if (open && panelHoldsNotice(panel)) return;
-    var nextOpen = !open;
-    btn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
-    panel.classList.toggle("hidden", !nextOpen);
+    setPanelOpen(panel, !open);
   });
+  // A desktop search row and its phone layout each have a Tracks button for
+  // the same list, so both follow it.
+  function setPanelOpen(panel, open) {
+    document.querySelectorAll('[aria-controls="' + panel.id + '"]').forEach(function (btn) {
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    panel.classList.toggle("hidden", !open);
+  }
 
   // The menu of review actions. Any press outside the toggle closes
   // it, a press on one of its actions included.
@@ -1948,6 +1972,9 @@
         source: form, target: "#search-results", swap: "innerHTML",
         headers: { "HX-History-Restore-Request": "true" }
       }).catch(function () {});
+    } else if (window.matchMedia && window.matchMedia("(pointer: fine)").matches) {
+      // Not on a touch screen, where focus would open the keyboard.
+      form.querySelector('input[name="q"]').focus();
     }
   }
 

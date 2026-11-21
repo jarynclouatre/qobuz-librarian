@@ -14,16 +14,25 @@
   {% if item.unavailable %} <span class="ql-other-version-label" data-unavailable-note title="Qobuz lists these tracks but does not stream them">{{ item.unavailable }}&nbsp;not on&nbsp;Qobuz</span>{% endif %}
 {%- endmacro %}
 
-{% macro album_quality_status(item) -%}
+{# Stands where "In library" will, from the press until the download lands. #}
+{% macro pending_chip(item) -%}
+  <span class="ql-status-chip is-neutral" data-search-pending{% if not (item.queued or item.scanning) %} hidden{% endif %}>{{ 'In current scan' if item.scanning else 'Queued' }}</span>
+{%- endmacro %}
+
+{% macro album_quality_status(item, parent_owned=False) -%}
   {% if item.owned %}<span class="ql-owned-label">In library</span>{{ bonus_note(item) }}{{ unavailable_note(item) }}
   {% else %}
-  <span class="ql-search-quality-status">
+  <span class="ql-search-quality-status"{% if item.queued or item.scanning %} hidden{% endif %}>
     {{ quality_badge(item) }}
-    {% if item.partial %}<span class="ql-partial-label">{{ item.have_tracks }} of {{ item.want_tracks }} tracks</span>
-    {% elif item.other_have %}<span class="ql-other-version-label" title="{{ item.other_folder }}">{{ item.other_have }}&nbsp;of&nbsp;{{ item.other_want }}&nbsp;tracks&nbsp;owned in&nbsp;another&nbsp;version</span>
-    {% elif item.as_new_edition and item.folder %}<span class="ql-other-version-label" title="{{ item.folder }}">Other&nbsp;version in&nbsp;library</span>{% endif %}{{ unavailable_note(item) }}
-  </span>
+    {% if item.partial %}<span class="ql-partial-label">{{ item.have_tracks }} of {{ item.want_tracks }} in&nbsp;library</span>
+    {% elif item.other_have %}<span class="ql-other-version-label is-owned" title="{{ item.other_folder }}">{{ item.other_have }} of {{ item.other_want }} in another&nbsp;version</span>
+    {% elif item.as_new_edition and item.folder and not parent_owned %}<span class="ql-other-version-label is-owned" title="{{ item.folder }}">Other&nbsp;version owned</span>{% endif %}{{ unavailable_note(item) }}
+  </span>{{ pending_chip(item) }}
   {% endif %}
+{%- endmacro %}
+
+{% macro track_quality_status(item) -%}
+  <span class="ql-search-quality-status"{% if item.queued or item.scanning %} hidden{% endif %}>{{ quality_badge(item) }}</span>{{ pending_chip(item) }}
 {%- endmacro %}
 
 {% macro download_icon() -%}
@@ -49,9 +58,9 @@
 
 {% macro download_form(album_id, title, artist, version='', track_id='', as_new_edition=False, small=False, icon=True, queued=False, scanning=False, ownership_unknown=False, missing=0, folder='') -%}
   {% set display_title = release_title(title, version) %}
-  <form method="post" action="/download" hx-post="/download" hx-target="#download-toast"
+  <form method="post" action="/download" hx-post="/download" hx-target="#download-toast"{% if queued or scanning %} hidden{% endif %}
         hx-swap="innerHTML" hx-disabled-elt="find button[type=submit]"
-        hx-confirm='{% if as_new_edition and folder %}Download "{{ display_title }}" as a separate copy? Another version is in {{ folder }}.{% elif as_new_edition %}Download "{{ display_title }}" as a separate copy alongside the one in your library?{% elif missing and folder %}Download the {{ missing }} missing track{{ 's' if missing != 1 else '' }} of "{{ display_title }}" by {{ artist }} into {{ folder }}?{% else %}Download "{{ display_title }}" by {{ artist }}?{% if ownership_unknown == 'names' %} A folder of this artist has a name that is not valid UTF-8, so it could not be checked for this album.{% elif ownership_unknown %} Could not check existing tracks. Downloading may replace tracks already in this album.{% endif %}{% endif %}'
+        {% if as_new_edition or (missing and folder) or ownership_unknown %}hx-confirm='{% if as_new_edition and folder %}Download "{{ display_title }}" as a separate copy? Another version is in {{ folder }}.{% elif as_new_edition %}Download "{{ display_title }}" as a separate copy alongside the one in your library?{% elif missing and folder %}Download the {{ missing }} missing track{{ 's' if missing != 1 else '' }} of "{{ display_title }}" by {{ artist }} into {{ folder }}?{% else %}Download "{{ display_title }}" by {{ artist }}?{% if ownership_unknown == 'names' %} A folder of this artist has a name that is not valid UTF-8, so it could not be checked for this album.{% else %} Could not check existing tracks. Downloading may replace tracks already in this album.{% endif %}{% endif %}'{% endif %}
         data-confirm-action="Download"
         {% if not as_new_edition and ownership_unknown %}data-search-download-warning="unknown"{% endif %}
         data-search-download-form data-search-title="{{ display_title }}"
@@ -91,16 +100,17 @@
   {% else %}{{ name }}{% endif %}
 {%- endmacro %}
 
-{# A phone row has no Tracks column, so there the chip carries the count. #}
-{% macro tracks_toggle(album_id, title, panel_id, count=none) -%}
-  <button type="button" class="ql-vchip" data-tracks-toggle
+{# A desktop row opens its tracks from the Tracks column; a phone row has
+   no columns, so there the chip under the title carries the count. #}
+{% macro tracks_toggle(album_id, title, panel_id, count=none, column=False) -%}
+  <button type="button" class="ql-vchip{% if column %} ql-tracks-count{% endif %}" data-tracks-toggle
           aria-expanded="false" aria-controls="{{ panel_id }}"
           aria-label="{% if count and count != '?' %}{{ count }} {{ 'track' if count == 1 else 'tracks' }} on {{ title }}{% else %}Tracks on {{ title }}{% endif %}"
           hx-get="/search/album-tracks?album_id={{ album_id | urlencode }}"
           hx-target="#{{ panel_id }}" hx-swap="innerHTML"
           hx-trigger="click">
-    {%- if count and count != '?' -%}
-    <span class="ql-vchip-wide">Tracks</span><span class="ql-vchip-narrow">{{ count }} {{ 'track' if count == 1 else 'tracks' }}</span>
+    {%- if column and count and count != '?' -%}{{ count }}
+    {%- elif count and count != '?' -%}{{ count }} {{ 'track' if count == 1 else 'tracks' }}
     {%- else -%}Tracks{%- endif -%}
   </button>
 {%- endmacro %}
@@ -132,7 +142,7 @@
         <p class="ql-table-title">{{ g.title }}</p>
         {% set _year = g.year if g.year and g.year != '?' else '' %}
         {% set _show_artist = not selected_artist or g.artist_id|string != selected_artist.id|string %}
-        {% if _show_artist %}<div class="ql-table-mobile-artist">{{ result_link('artist', g.artist_id, g.artist) }}{% if _year %}<span class="ql-mobile-year"> · {{ _year }}</span>{% endif %}</div>{% endif %}
+        {% if _show_artist %}<div class="ql-table-mobile-artist">{{ result_link('artist', g.artist_id, g.artist) }}</div>{% endif %}
         <div class="ql-table-sub">
           <div class="ql-table-release-meta">
             {% if _show_artist %}<div class="ql-sub-artist">{{ result_link('artist', g.artist_id, g.artist) }}</div>{% endif %}
@@ -150,11 +160,11 @@
             {% endif %}
           </span>
         </div>
-        <p class="ql-sub-mobile ql-sub-meta">{% if _year and not _show_artist %}<span>{{ _year }}</span>{% endif %}{{ album_quality_status(g) }}</p>
+        <p class="ql-sub-mobile ql-sub-meta">{% if _year %}<span>{{ _year }}</span>{% endif %}{{ album_quality_status(g) }}</p>
       </div>
     </div>
     <span class="ql-table-mono ql-num" role="cell">{{ g.year }}</span>
-    <span class="ql-table-mono ql-num" role="cell">{{ g.tracks }}</span>
+    <span class="ql-table-mono ql-num" role="cell">{{ tracks_toggle(g.id, g.title, 'search-tracks-' ~ g.id, g.tracks, column=True) }}</span>
     <span role="cell">{{ album_quality_status(g) }}</span>
     <span class="ql-table-action" role="cell">{% if not g.owned %}{{ download_form(g.id, g.title, g.artist, g.version, as_new_edition=g.as_new_edition, small=True, queued=g.queued, scanning=g.scanning, ownership_unknown=g.ownership_unknown, missing=g.partial and g.want_tracks - g.have_tracks - g.unavailable, folder=g.folder) }}{% endif %}</span>
   </div>
@@ -178,15 +188,15 @@
         {% else %}<span class="ql-subcover ql-cover-placeholder" aria-hidden="true"></span>{% endif %}
         <div class="ql-table-copy">
           <p class="ql-subtitle">{{ e.title }}{% if e.version %} <span class="ql-subver">{{ e.version }}</span>{% endif %}{% if e.explicit %} <span class="ql-subver">Explicit</span>{% endif %}</p>
-          <p class="ql-sub-mobile ql-sub-meta">{% if e.year and e.year != '?' %}<span>{{ e.year }}</span>{% endif %}{{ album_quality_status(e) }}</p>
+          <p class="ql-sub-mobile ql-sub-meta">{% if e.year and e.year != '?' %}<span>{{ e.year }}</span>{% endif %}{{ album_quality_status(e, g.owned) }}</p>
           <div class="ql-row-chips ql-sub-chips">
             {{ tracks_toggle(e.id, e.title, 'search-tracks-' ~ g.id ~ '-' ~ e.id, e.tracks) }}
           </div>
         </div>
       </div>
       <span class="ql-table-mono ql-num" role="cell">{{ e.year }}</span>
-      <span class="ql-table-mono ql-num" role="cell">{{ e.tracks }}</span>
-      <span role="cell">{{ album_quality_status(e) }}</span>
+      <span class="ql-table-mono ql-num" role="cell">{{ tracks_toggle(e.id, e.title, 'search-tracks-' ~ g.id ~ '-' ~ e.id, e.tracks, column=True) }}</span>
+      <span role="cell">{{ album_quality_status(e, g.owned) }}</span>
       <span class="ql-table-action" role="cell">{% if not e.owned %}{{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=(g.owned and not e.partial) or e.as_new_edition, small=True, queued=e.queued, scanning=e.scanning, ownership_unknown=e.ownership_unknown, missing=e.partial and e.want_tracks - e.have_tracks - e.unavailable, folder=e.folder) }}{% endif %}</span>
     </div>
     <div id="search-tracks-{{ g.id }}-{{ e.id }}" class="ql-tracklist-panel hidden"
@@ -218,13 +228,13 @@
         <div class="ql-table-sub"><div class="ql-table-release-meta">{% if r.version %}<span class="ql-sub-version">{{ r.version }}</span>{% endif %}{% if r.explicit %}<span class="ql-sub-version">Explicit</span>{% endif %}</div></div>
         {% endif %}
         <div class="ql-table-subtitle ql-sub-mobile">{{ result_link('album', r.album_id, r.album_title) }}{% if r.year and r.year != '?' %} · {{ r.year }}{% endif %}{% if r.track_n != '?' %} · Track {{ r.track_n }}{% if r.total != '?' %} of {{ r.total }}{% endif %}{% endif %}</div>
-        <span class="ql-sub-mobile ql-sub-meta">{% if r.owned %}<span class="ql-owned-label">In library</span>{% elif not r.unavailable %}{{ quality_badge(r) }}{% endif %}</span>
+        <span class="ql-sub-mobile ql-sub-meta">{% if r.owned %}<span class="ql-owned-label">In library</span>{% elif not r.unavailable %}{{ track_quality_status(r) }}{% endif %}</span>
       </div>
     </div>
     <div class="ql-table-artist" role="cell">{{ result_link('artist', r.artist_id, r.artist) }}</div>
     <div class="ql-table-muted" role="cell">{{ result_link('album', r.album_id, r.album_title) }}</div>
     <span class="ql-table-mono ql-num" role="cell">{{ r.year }}</span>
-    <span role="cell">{% if r.owned %}<span class="ql-owned-label">In library</span>{% elif not r.unavailable %}{{ quality_badge(r) }}{% endif %}</span>
+    <span role="cell">{% if r.owned %}<span class="ql-owned-label">In library</span>{% elif not r.unavailable %}{{ track_quality_status(r) }}{% endif %}</span>
     <span class="ql-table-action" role="cell">{% if r.owned %}{% elif r.unavailable %}<span class="ql-other-version-label" title="Qobuz lists this track but does not stream it">Not&nbsp;on&nbsp;Qobuz</span>{% else %}{{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued, scanning=r.scanning) }}{% endif %}</span>
   </div>
   {% endfor %}
@@ -251,7 +261,7 @@
     <div class="ql-grid-footer">
       {% if r.owned %}<span class="ql-owned-label">In library</span>
       {% elif r.unavailable %}<span class="ql-other-version-label" title="Qobuz lists this track but does not stream it">Not&nbsp;on&nbsp;Qobuz</span>
-      {% else %}{{ quality_badge(r) }}
+      {% else %}{{ track_quality_status(r) }}
       {{ download_form(r.album_id, r.title, r.artist, r.version, r.track_id, small=True, queued=r.queued, scanning=r.scanning) }}{% endif %}
     </div>
   </div>
@@ -312,8 +322,9 @@
         <div class="ql-grid-version-action">
           {% if e.owned %}<span class="ql-owned-label">In library</span>{{ bonus_note(e) }}{{ unavailable_note(e) }}
           {% else %}
-          {% if e.partial %}<span class="ql-partial-label">{{ e.have_tracks }} of {{ e.want_tracks }} tracks</span>
-          {% elif e.as_new_edition and e.folder %}<span class="ql-other-version-label" title="{{ e.folder }}">Other&nbsp;version in&nbsp;library</span>{% endif %}{{ unavailable_note(e) }}
+          {% if e.partial %}<span class="ql-partial-label">{{ e.have_tracks }} of {{ e.want_tracks }} in&nbsp;library</span>
+          {% elif e.as_new_edition and e.folder and not g.owned %}<span class="ql-other-version-label is-owned" title="{{ e.folder }}">Other&nbsp;version owned</span>{% endif %}{{ unavailable_note(e) }}
+          {{ pending_chip(e) }}
           {{ download_form(e.id, e.title, e.artist, e.version, as_new_edition=(g.owned and not e.partial) or e.as_new_edition, small=True, queued=e.queued, scanning=e.scanning, ownership_unknown=e.ownership_unknown, missing=e.partial and e.want_tracks - e.have_tracks - e.unavailable, folder=e.folder) }}
           {% endif %}
         </div>
@@ -428,7 +439,7 @@
             {# Search's albums_count takes in every album the artist appears
                on, compilations included, while the album page lists the
                artist's own releases. #}
-            <p class="ql-result-meta">Artist{% if a.albums_count %} · appears on {% if a.albums_count >= 10 %}about {% endif %}{{ "{:,}".format(a.albums_count) }} album{{ 's' if a.albums_count != 1 else '' }}<span class="ql-result-meta-source"> on Qobuz</span>{% endif %}</p>
+            {% if a.albums_count %}<p class="ql-result-meta">{% if a.albums_count >= 10 %}about {% endif %}{{ "{:,}".format(a.albums_count) }} album{{ 's' if a.albums_count != 1 else '' }}</p>{% endif %}
           </div>
         </div>
         <form method="post" action="/search"
@@ -502,14 +513,9 @@
         {% endif %}
         <h2 class="ql-search-context-title">{{ selected_artist.name }}</h2>
         <span class="ql-search-context-meta" data-search-count
-              data-full-label="{%- if selected_artist.total and selected_artist.shown and selected_artist.total > selected_artist.shown -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · first {{ selected_artist.shown }} of {{ selected_artist.total }} releases{%- elif selected_artist.shown and selected_artist.shown > n_albums -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · {{ selected_artist.shown }} releases on Qobuz, alternate versions included{%- else -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} on Qobuz{%- endif -%}">
+              data-full-label="{%- if selected_artist.total and selected_artist.shown and selected_artist.total > selected_artist.shown -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · first {{ selected_artist.shown }} of {{ selected_artist.total }} releases{%- else -%}{{ n_albums }} album{{ 's' if n_albums != 1 else '' }} on Qobuz{%- endif -%}">
           {%- if selected_artist.total and selected_artist.shown and selected_artist.total > selected_artist.shown -%}
           {{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · first {{ selected_artist.shown }} of {{ selected_artist.total }} releases
-          {%- elif selected_artist.shown and selected_artist.shown > n_albums -%}
-          {# Editions fold into their album's version tree, so this can be a
-             smaller number than the release count the artist row promised;
-             say both so they don't read as a contradiction. #}
-          {{ n_albums }} album{{ 's' if n_albums != 1 else '' }} · {{ selected_artist.shown }} releases on Qobuz, alternate versions included
           {%- else -%}
           {{ n_albums }} album{{ 's' if n_albums != 1 else '' }} on Qobuz
           {%- endif -%}
@@ -556,8 +562,10 @@
   <p>
     {% if kind == 'artist' and selected_artist %}No albums found for {{ selected_artist.name }}.
     {% elif kind == 'artist' %}No artists found for “{{ q }}”.
-    {% else %}No results for “{{ q }}”.{% endif %}
+    {% elif kind == 'track' %}No tracks found for “{{ q }}”.
+    {% else %}No albums found for “{{ q }}”.{% endif %}
   </p>
+  {% if kind != 'artist' %}<span><button type="button" class="ql-inline-link ql-inline-link-hit" data-search-by-artist="{{ q }}">Search by Artist</button></span>{% endif %}
   {% endif %}
 </div>
 {% elif not q and not error %}

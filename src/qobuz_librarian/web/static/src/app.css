@@ -650,6 +650,10 @@ details.ql-mobile-drawer[open]::before {
   max-width: 70rem;
   gap: var(--ql-space-3);
 }
+.ql-search-workspace:has(#search-skeleton.htmx-request) [data-new-release-notice],
+.ql-search-workspace:has(#search-results > :not(.ql-search-idle)) [data-new-release-notice] {
+  display: none;
+}
 .ql-panel {
   border: 1px solid var(--ql-line);
   border-radius: var(--ql-radius-lg);
@@ -1276,11 +1280,6 @@ details.ql-mobile-drawer[open]::before {
   .ql-result-row--artist .ql-result-meta {
     font-size: 0.8rem;
   }
-  /* The count has to fit a ~97 px column beside the picture and the button;
-     the screen is Qobuz's own search, so the phone drops the source. */
-  .ql-result-row--artist .ql-result-meta-source {
-    display: none;
-  }
   .ql-result-row--artist .ql-result-action-form {
     width: auto;
     justify-self: end;
@@ -1292,8 +1291,8 @@ details.ql-mobile-drawer[open]::before {
   }
 }
 /* The Tracks and Versions disclosures: quiet text with the review's chevron,
-   pointing right while closed and down while open. In a table row the Tracks
-   column already carries the count, so there it is the chevron alone. */
+   pointing right while closed and down while open. In a table row the count
+   in the Tracks column is the Tracks disclosure. */
 .ql-vchip {
   position: relative;
   display: inline-flex;
@@ -1344,6 +1343,18 @@ details.ql-mobile-drawer[open]::before {
   justify-content: flex-start;
   margin-top: 0.3rem;
 }
+.ql-tracks-count {
+  margin-right: -0.375rem;
+  color: inherit;
+  font: inherit;
+}
+.ql-table-row .ql-row-chips > [data-tracks-toggle],
+.ql-subrow .ql-sub-chips {
+  display: none;
+}
+.ql-table-sub > .ql-row-chips {
+  margin-block: -0.375rem;
+}
 .ql-tracklist-panel.hidden {
   display: none;
 }
@@ -1392,11 +1403,12 @@ details.ql-mobile-drawer[open]::before {
 .ql-track-line.is-owned {
   opacity: 0.5;
 }
-.ql-track-line.is-missing .ql-track-name {
-  color: var(--ql-warning);
-}
 .ql-track-version {
   color: var(--ql-text-3);
+}
+.ql-track-owned {
+  color: var(--ql-owned);
+  white-space: nowrap;
 }
 .ql-track-disc {
   margin: 0.45rem 0 0.1rem;
@@ -1502,13 +1514,16 @@ details.ql-mobile-drawer[open]::before {
   flex: none;
 }
 /* Part-finished: on disk but short of the release's track count, so it keeps
-   its download button. Reads as a caution, not a completion. */
+   its download button. */
 .ql-partial-label {
-  color: var(--ql-warning);
+  color: var(--ql-owned);
 }
 .ql-other-version-label {
   color: var(--ql-text-2);
   white-space: normal;
+}
+.ql-other-version-label.is-owned {
+  color: var(--ql-owned);
 }
 .ql-search-quality-status {
   display: inline-flex;
@@ -1516,6 +1531,11 @@ details.ql-mobile-drawer[open]::before {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.3rem;
+}
+.ql-search-quality-status[hidden],
+[data-search-download-form][hidden],
+[data-search-pending][hidden] {
+  display: none;
 }
 .ql-search-root {
   display: grid;
@@ -1770,7 +1790,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-table--albums .ql-table-head,
 .ql-table--albums .ql-table-row {
-  grid-template-columns: 1.75rem minmax(0, 1fr) 4.5rem 4.75rem 6.75rem 3rem;
+  grid-template-columns: 1.75rem minmax(0, 1fr) 4.5rem 4.75rem 8.5rem 3rem;
 }
 .ql-table--tracks .ql-table-head,
 .ql-table--tracks .ql-table-row {
@@ -1936,9 +1956,6 @@ details.ql-mobile-drawer[open]::before {
   gap: var(--ql-space-1) var(--ql-space-2);
   margin-top: 0.1875rem;
 }
-.ql-table-sub > .ql-row-chips {
-  margin-left: auto;
-}
 .ql-table-release-meta {
   display: flex;
   min-width: 0;
@@ -1965,8 +1982,7 @@ details.ql-mobile-drawer[open]::before {
   line-height: 1.25;
   overflow-wrap: anywhere;
 }
-.ql-sub-mobile,
-.ql-vchip-narrow {
+.ql-sub-mobile {
   display: none;
 }
 .ql-table-subtitle,
@@ -2074,6 +2090,21 @@ details.ql-mobile-drawer[open]::before {
 .ql-download-icon-button:disabled:not(.is-queued):not(.is-scanning) {
   color: var(--ql-text-3);
   background-color: transparent;
+}
+[data-queue-button].htmx-request .ql-download-icon-button {
+  color: var(--ql-text-2);
+}
+[data-queue-button].htmx-request .ql-download-icon-button > svg {
+  display: none;
+}
+[data-queue-button].htmx-request .ql-download-icon-button::before {
+  content: "";
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 999px;
+  animation: ql-spin 0.7s linear infinite;
 }
 [data-search-item][data-queued="1"] [data-search-select-wrap],
 [data-search-item][data-scanning="1"] [data-search-select-wrap] {
@@ -2483,16 +2514,11 @@ details.ql-mobile-drawer[open]::before {
     font-size: 0.8125rem;
     line-height: 1.2;
   }
-  .ql-mobile-year {
-    color: var(--ql-text-2);
-    font-weight: 500;
-    white-space: nowrap;
+  .ql-table-row .ql-row-chips > [data-tracks-toggle] {
+    display: inline-flex;
   }
-  .ql-vchip-wide {
-    display: none;
-  }
-  .ql-vchip-narrow {
-    display: inline;
+  .ql-subrow .ql-sub-chips {
+    display: flex;
   }
   .ql-table-action .ql-btn,
   .ql-grid-footer .ql-btn {

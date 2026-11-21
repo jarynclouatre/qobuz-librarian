@@ -469,6 +469,21 @@ async def _fetch_artist_albums(artist_id, artist_name, query, token):
     return raw, selected_artist, error
 
 
+async def _fetch_linked_artist(artist_id, query, token):
+    """The artist a pasted artist URL names: its albums and the header."""
+    try:
+        artist = await qobuz_access._qobuz_call(
+            qobuz_search.get_artist, artist_id, token)
+    except asyncio.TimeoutError:
+        return [], None, "Timed out reaching the Qobuz API."
+    except (AuthLost, QobuzUnavailable):
+        raise
+    except QobuzError:
+        return [], None, "Couldn't fetch that artist. Check the URL."
+    return await _fetch_artist_albums(
+        artist_id, artist.get("name") or "", query, token)
+
+
 async def _release_types(artist_id, raw, token):
     """The Qobuz list each of an artist's releases is filed in, or None when
     the lists can't be read and the albums are listed in one run."""
@@ -959,7 +974,7 @@ def _search_error(exc, query):
         return str(exc)
     if not isinstance(exc, QobuzError):
         _log.exception("search failed for %r", query)
-    return "Search failed. Try again."
+    return "The search did not finish. Try again."
 
 
 def _search_origin(kind, q):
@@ -992,6 +1007,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     selected_artist = None
     sectioned = False
     error = None
+    is_qobuz_url = False
     query = q.strip()
     kind_raw = str(kind).strip().lower()
     kind = kind_raw if kind_raw in ("artist", "track") else "album"
@@ -1022,14 +1038,18 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 error = ("That's a track URL. Switch to Track to download one "
                          "track, or paste the album URL in Album mode.")
                 guidance = True
+            elif parsed and parsed[0] == "artist" and kind == "artist":
+                artist_id = parsed[1]
+                raw, selected_artist, error = await _fetch_linked_artist(
+                    artist_id, query, token)
+                artist_name = (selected_artist or {}).get("name", "")
+            elif parsed and parsed[0] == "artist":
+                error = "That's an artist URL. Switch to Artist to list its albums."
+                guidance = True
             elif parsed or is_qobuz_url:
-                # Another Qobuz URL kind (artist, playlist), or a qobuz.com URL
-                # in no recognised format.
-                if kind == "artist":
-                    error = "Search artists by name. Paste album or track URLs only."
-                else:
-                    error = ("Only Qobuz album and track URLs are supported. "
-                             "Search for an artist by name instead.")
+                # A playlist or label URL, or a qobuz.com URL in no
+                # recognised format.
+                error = "Only Qobuz artist, album and track URLs are supported."
                 guidance = True
             elif kind == "artist" and artist_id:
                 raw, selected_artist, error = await _fetch_artist_albums(
@@ -1088,7 +1108,7 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
            "album_total": album_total, "album_more": album_more,
            "artist_results": artist_results, "selected_artist": selected_artist,
            "error": error, "kind": kind, "list_kind": kind,
-           "back": back or {"kind": "artist", "q": query},
+           "back": back or {"kind": "artist", "q": "" if is_qobuz_url else query},
            "search_count_label": search_count_label,
            "artist_only_count": artist_only_count,
            "artist_only_label": plural(artist_only_count, "album"),

@@ -58,9 +58,10 @@ _STARTUP_RECOVERY_RESULT = None
 _RUN_LEASE = None
 
 
-_QOBUZ_PLAY_RE        = re.compile(r"(?:play|open)\.qobuz\.com/(album|track)/([A-Za-z0-9]+)")
+_QOBUZ_PLAY_RE        = re.compile(r"(?:play|open)\.qobuz\.com/(album|track|artist)/([A-Za-z0-9]+)")
 _QOBUZ_STORE_ALBUM_RE = re.compile(r"qobuz\.com/[a-zA-Z-]+/album/[^/]+/([A-Za-z0-9]+)/?(?:[?#]|$)")
 _QOBUZ_STORE_TRACK_RE = re.compile(r"qobuz\.com/[a-zA-Z-]+/track/[^/]+/([A-Za-z0-9]+)/?(?:[?#]|$)")
+_QOBUZ_STORE_ARTIST_RE = re.compile(r"qobuz\.com/[a-zA-Z-]+/interpreter/[^/]+/([0-9]+)/?(?:[?#]|$)")
 
 
 def parse_qobuz_url(url: str) -> tuple[str, str] | None:
@@ -73,6 +74,9 @@ def parse_qobuz_url(url: str) -> tuple[str, str] | None:
     m = _QOBUZ_STORE_TRACK_RE.search(url)
     if m:
         return "track", m.group(1)
+    m = _QOBUZ_STORE_ARTIST_RE.search(url)
+    if m:
+        return "artist", m.group(1)
     return None
 
 

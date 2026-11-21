@@ -108,7 +108,7 @@ def _ownership_note(res):
         return fmt(C.YELLOW,
                    f" • {res['have_tracks']} of {res['want_tracks']} tracks") + gap
     if res.get("as_new_edition") and res.get("folder"):
-        return fmt(C.CYAN, " • Other version in library")
+        return fmt(C.GREEN, " • Other version owned")
     return fmt(C.GRAY, f" • {unavailable} not on Qobuz") if unavailable else ""
 
 

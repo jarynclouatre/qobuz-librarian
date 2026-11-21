@@ -165,20 +165,6 @@
       </form>
     </div>
     {% endif %}
-
-    {% if new_release_review %}
-    <div class="ql-notice ql-notice-info flex items-start flex-wrap gap-3 p-4">
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-info" fill="none"
-           viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
-              d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-      </svg>
-      <span class="min-w-0 flex-1 text-sm">
-        <strong>{{ new_release_review.count }} new release{{ 's' if new_release_review.count != 1 }}</strong> waiting for review.
-      </span>
-      <a href="/jobs/{{ new_release_review.id }}" class="ql-btn ql-btn-primary ql-btn-sm ml-auto shrink-0">Review</a>
-    </div>
-    {% endif %}
   </div>
 
   <div class="ql-search-workspace">
@@ -300,6 +286,20 @@
       <p id="search-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
       {% endif %}
     </section>
+
+    {% if new_release_review and not search_q %}
+    <div data-new-release-notice class="ql-notice ql-notice-info flex items-start flex-wrap gap-3 p-4">
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 text-info" fill="none"
+           viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+              d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <span class="min-w-0 flex-1 text-sm">
+        <strong>{{ new_release_review.count }} new release{{ 's' if new_release_review.count != 1 }}</strong> waiting for review.
+      </span>
+      <a href="/jobs/{{ new_release_review.id }}" class="ql-btn ql-btn-primary ql-btn-sm ml-auto shrink-0">Review</a>
+    </div>
+    {% endif %}
 
     <div id="search-skeleton" class="ql-search-skeleton htmx-indicator" aria-hidden="true">
       {% for _ in range(4) %}

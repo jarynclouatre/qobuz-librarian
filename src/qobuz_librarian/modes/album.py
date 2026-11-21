@@ -246,6 +246,12 @@ def resolve_album_from_args(args, token):
                 "Track tab), or outside Docker with streamrip itself:\n"
                 "     rip url <url>"),
                 EXIT_GENERAL)
+        if kind == "artist":
+            die(fmt(C.RED,
+                "  ✗  Artist URL passed; the terminal downloads albums by URL.\n"
+                "     Use --artist with the artist's name, or paste the URL "
+                "in Search in the web app (its Artist tab)."),
+                EXIT_GENERAL)
         log.info(fmt(C.GRAY, f"  ⟳  Fetching album {qid} …"))
         return get_album(qid, token)
 
@@ -268,6 +274,10 @@ def resolve_album_from_args(args, token):
                     "That's a track URL. Paste the album URL instead. Download "
                     "a single track from Search in the web app (its Track "
                     "tab), or outside Docker with `rip url <url>`.")
+            if parsed and parsed[0] == "artist":
+                raise CatalogMiss(
+                    "That's an artist URL. Paste an album URL, or choose "
+                    "Artist in the menu and give the artist's name.")
             if not parsed:
                 raise CatalogMiss("Bad Qobuz URL. Paste an album URL.")
             return get_album(parsed[1], token)

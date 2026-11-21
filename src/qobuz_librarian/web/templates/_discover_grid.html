@@ -1,4 +1,4 @@
-{% from "_search_results.html" import download_form, quality_badge with context %}
+{% from "_search_results.html" import download_form, pending_chip, quality_badge with context %}
 {% if albums %}
 <div class="ql-grid-view ql-grid-view--even">
   {% for g in albums %}
@@ -12,6 +12,7 @@
     </div>
     <div class="ql-grid-footer">
       {{ quality_badge(g) }}
+      {{ pending_chip(g) }}
       {{ download_form(g.id, g.title, g.artist, version=g.version, queued=g.queued, scanning=g.scanning) }}
     </div>
   </div>

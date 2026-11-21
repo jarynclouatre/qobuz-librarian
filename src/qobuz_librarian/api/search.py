@@ -293,6 +293,15 @@ def find_qobuz_track_by_isrc(isrc, token):
     return None
 
 
+def get_artist(artist_id, token):
+    """One Qobuz artist by id, without its albums."""
+    artist = _expect_dict(
+        qobuz_get("artist/get", {"artist_id": artist_id}, token), "artist/get")
+    if "name" in artist:
+        artist["name"] = clean_qobuz_string(artist.get("name"))
+    return artist
+
+
 def get_artist_albums(artist_id, token, limit=None, fresh=False):
     """Return (items, qobuz_total) for an artist's full discography.
     Items are search-shaped (no tracks); call get_album() for those.
