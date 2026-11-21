@@ -189,7 +189,6 @@
       <p class="ql-job-activity-line">
         {% set _qw = queue_wait if queue_wait is defined else none %}
         <span id="job-activity" aria-live="polite"{% if s == 'pending' %} data-queued{% endif %}>{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s in ('scanning', 'running') and embedded_surface|default(false) %}{{ (job.progress_phase or '') | trim or labels.status_chip_label(job) }}{% elif s in ('scanning', 'running') %}{{ labels.phase_detail(job, labels.status_chip_label(job)) }}{% elif _qw and _qw.paused %}Waiting until downloads can run again.{% elif _qw and _qw.for_qobuz %}Waiting for Qobuz. <a href="/queue" class="ql-inline-link">Open Queue</a>{% elif _qw and _qw.position == 1 and _qw.ahead_title %}Behind “{{ _qw.ahead_title }}”.{% elif _qw %}Behind {{ _qw.position }} job{{ 's' if _qw.position != 1 }}.{% else %}Next.{% endif %}</span>
-        {% if s in ('scanning', 'running') %}<span id="scan-elapsed" class="ql-job-elapsed readout" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>{% endif %}
         {% if job.cancel_requested %}<span class="ql-status-chip is-neutral ql-inline-status">Stopping</span>{% endif %}
         <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
       </p>
@@ -222,14 +221,16 @@
        before the first live event. #}
     {% set _pc = job.progress_current %}
     {% set _pt = job.progress_total %}
-    <div id="progress-card"{% if not job.progress_phase and not _pt %} class="hidden"{% endif %}>
-      <div>
-        <div class="ql-progress-panel-head">
-          <span id="prog-count" class="ql-progress-count readout">{% if _pt %}{{ _pc }} / {{ _pt }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if _pt != 1 }}{% endif %}{% endif %}</span>
-        </div>
+    <div>
+      <div id="progress-card"{% if not job.progress_phase and not _pt %} class="hidden"{% endif %}>
         <progress id="prog-bar" class="ql-progress-bar" aria-label="Progress"{% if job.progress_fraction is not none %} max="100" value="{{ (job.progress_fraction * 100) | int }}"{% elif _pt %} max="100" value="{{ (_pc * 100 // _pt) }}"{% endif %}></progress>
-        <p id="prog-item" class="ql-progress-item">{{ job.progress_item }}</p>
       </div>
+      {% if s in ('scanning', 'running') %}
+      <div class="ql-progress-meta">
+        <p class="ql-progress-meta-text"><span id="prog-count" class="ql-progress-count">{% if _pt %}{{ _pc }} / {{ _pt }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if _pt != 1 }}{% endif %}{% endif %}</span><span id="prog-item" class="ql-progress-item">{{ job.progress_item }}</span></p>
+        <span id="scan-elapsed" class="ql-job-elapsed readout" title="Elapsed" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>
+      </div>
+      {% endif %}
     </div>
 
     {% if s == 'scanning' and job.execute_kind in ('library', 'upgrade', 'downsample', 'new_releases', 'collection_restore') %}

@@ -593,19 +593,19 @@ def sealer_after_put_back(backup_receipt):
     return lambda value: resealed_after_put_back(value, backup_receipt, captures)
 
 
-def resealed_after_own_imports(value, fresh, folders):
+def resealed_after_own_imports(value, fresh, folders, rewritten=()):
     """``fresh``, a capture of a missing album's artist folder, as the new
-    seal for a row sealed over it as ``value``, when everything sealed is
-    unchanged and all that was added is the new top-level ``folders`` a run
-    imported albums into. None otherwise, or when nothing changed."""
+    seal for a row sealed over it as ``value``, when all that was added is
+    the new top-level ``folders`` a run imported albums into and all that
+    changed is inside the top-level ``rewritten`` ones whose files the app
+    wrote. None otherwise, or when nothing changed."""
     premise = canonical_premise(value)
     if (premise is None or premise["version"] != PREMISE_VERSION
             or premise["kind"] != "missing" or fresh is None
             or _durable_premises_match(premise, fresh)):
         return None
-    folders = set(folders)
 
-    def outside(receipt):
+    def outside(receipt, folders):
         def keep(entries):
             return {relative: entry for relative, entry in entries.items()
                     if relative.split("/", 1)[0] not in folders}
@@ -615,10 +615,13 @@ def resealed_after_own_imports(value, fresh, folders):
                          "files": keep(tree["files"])},
                 "directory_generations": keep(receipt["directory_generations"])}
 
+    folders, rewritten = set(folders) - set(rewritten), set(rewritten)
     sealed = premise["receipt"]
-    if premise["path"] != fresh["path"] or outside(sealed) != sealed:
+    if premise["path"] != fresh["path"] or outside(sealed, folders) != sealed:
         return None
-    return fresh if durable_receipts_match(sealed, outside(fresh["receipt"])) else None
+    return fresh if durable_receipts_match(
+        outside(sealed, rewritten),
+        outside(fresh["receipt"], folders | rewritten)) else None
 
 
 def _sealed_file(identity):

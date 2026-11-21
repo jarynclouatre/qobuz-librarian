@@ -12,8 +12,25 @@
   {% include "_writes_paused_notice.html" %}
   {% include "_library_refresh_failure.html" %}
 
-  {% if error %}<div class="ql-flash ql-flash-warning" data-flash><span>{{ error }}</span></div>{% endif %}
+  {% if error and error_refresh %}
+  <div class="ql-notice ql-notice-warning items-center" data-flash>
+    <span class="ql-notice-copy">{{ error }}</span>
+    {% if not library_refresh_running %}
+    <form action="/library" method="post" data-busy-submit data-review-place>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <input type="hidden" name="mode" value="missing_albums">
+      <input type="hidden" name="tab" value="">
+      <input type="hidden" name="q" value="">
+      <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true" title="{{ writes_paused_reason if writes_paused else 'Connect Qobuz before refreshing' }}"{% endif %}>Refresh</button>
+    </form>
+    {% endif %}
+  </div>
+  {% elif error %}<div class="ql-flash ql-flash-warning" data-flash><span>{{ error }}</span></div>{% endif %}
   {% if library_notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ library_notice }}</span></div>{% endif %}
+  {% if scan_finished %}
+  {% set _up = '<a href="/upgrade" class="ql-inline-link">%s to upgrade</a>'|format('{:,}'.format(scan_finished.upgrades))|safe if scan_finished.upgrades else '' %}
+  <div class="ql-flash ql-flash-info" data-flash><span>{% if scan_finished.summary %}{{ scan_finished.summary }}{% elif scan_finished.parts %}Scan finished. {{ scan_finished.parts|join(', ') }}{% if _up %}, {{ _up }}{% endif %}.{% else %}Scan finished. Nothing is missing.{% if _up %} {{ _up }}.{% endif %}{% endif %}</span></div>
+  {% endif %}
   {% if library_generation.outputs.library.limited %}
   <div class="ql-flash ql-flash-warning" data-flash><span>The Library scan finished, but this saved list stops at the configured result limit.</span></div>
   {% endif %}
@@ -47,13 +64,18 @@
       <circle cx="70" cy="66" r="14" stroke="currentColor" stroke-width="2"/>
       <path d="M80.5 76.5 88 84" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
     </svg>
+    {% if library_resume %}
+    <p class="ql-scan-hero-title">Scan interrupted</p>
+    <p class="ql-scan-hero-meta">{{ library_resume.done }} of {{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} already checked</p>
+    {% else %}
     <p class="ql-scan-hero-title">Scan your library</p>
     <p class="ql-scan-hero-text">Finds missing albums, missing tracks, and quality upgrades.</p>
-    <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan{% if library_resume and library_resume.kind == 'missing' %} &middot; {{ library_resume.done }} already checked{% endif %}</p>
+    <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan</p>
+    {% endif %}
     <form action="/library" method="post" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-      <input type="hidden" name="mode" value="missing_albums">
-      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% elif not qobuz_ready %} disabled title="Connect Qobuz before scanning." aria-disabled="true"{% endif %}>Scan library</button>
+      <input type="hidden" name="mode" value="{{ 'partial_fill' if library_resume and library_resume.kind == 'partial' else 'missing_albums' }}">
+      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% elif not qobuz_ready %} disabled title="Connect Qobuz before scanning." aria-disabled="true"{% endif %}>{{ 'Resume scan' if library_resume else 'Scan library' }}</button>
     </form>
   </section>
   {% endif %}

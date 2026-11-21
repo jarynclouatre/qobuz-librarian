@@ -322,6 +322,10 @@ async def _stale_premise_candidates(loop, job, picked):
 
 
 async def _all_stale_redirect(loop, job, dest, stale, picked):
+    folders = await loop.run_in_executor(
+        None, lambda: _library_folders_changed(job, stale.counts, picked))
+    if folders:
+        return _error_redirect(dest, folders, "&offer_refresh=1")
     stale_message = await loop.run_in_executor(
         None, lambda: _all_stale_message_for(job, stale.counts, picked))
     return _error_redirect(dest, stale_message)
@@ -846,15 +850,37 @@ def _rebuild_results_hint(execute_kind):
     return "Rebuild these results before trying again."
 
 
+def _changed_folder_names(candidates):
+    """The artist folders behind ``candidates`` when every one is a missing
+    album, whose files are its artist folder's, or []."""
+    if not candidates or any(candidate_premise.expected_kind(c) != "missing"
+                             for c in candidates):
+        return []
+    names = sorted({Path(candidate_premise.expected_path(c)).name
+                    for c in candidates})
+    return [] if "" in names else names
+
+
+def _library_folders_changed(job, counts, candidates):
+    """The Library refusal when nothing but the artist folders changed, which
+    the page pairs with a Refresh button, or ""."""
+    changed = counts.get("changed", 0)
+    if (job.execute_kind != "library" or changed != len(candidates)
+            or changed != sum(counts.values())):
+        return ""
+    names = _changed_folder_names(candidates)
+    if len(names) == 1:
+        return f"The {names[0]} folder changed since the last scan."
+    if names:
+        return f"{len(names)} artist folders changed since the last scan."
+    return ""
+
+
 def _changed_artist_folders(candidates):
     """"the Chiodos folder" when every one of ``candidates`` is a missing
     album, whose files are its artist folder's, or ""."""
-    if not candidates or any(candidate_premise.expected_kind(c) != "missing"
-                             for c in candidates):
-        return ""
-    names = sorted({Path(candidate_premise.expected_path(c)).name
-                    for c in candidates})
-    if "" in names:
+    names = _changed_folder_names(candidates)
+    if not names:
         return ""
     if len(names) == 1:
         return f"the {names[0]} folder"

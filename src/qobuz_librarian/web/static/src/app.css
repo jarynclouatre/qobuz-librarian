@@ -5258,9 +5258,8 @@ details[open] > summary .ql-review-chevron {
   line-height: 1.45;
 }
 .ql-job-elapsed {
-  margin-left: 0.55rem;
-  color: var(--ql-text-3);
-  font-size: 0.78rem;
+  flex: none;
+  font-size: 0.75rem;
 }
 .ql-job-cancel {
   flex: none;
@@ -5269,27 +5268,25 @@ details[open] > summary .ql-review-chevron {
   flex: none;
   align-self: center;
 }
-.ql-progress-panel-head {
+.ql-progress-meta {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--ql-space-3);
-  margin-bottom: 0.55rem;
-}
-.ql-progress-count {
-  flex: none;
+  margin-top: var(--ql-space-2);
   color: var(--ql-text-3);
-  font-size: 0.78rem;
-}
-.ql-progress-item {
-  min-width: 0;
-  margin: var(--ql-space-2) 0 0;
-  overflow: hidden;
-  color: var(--ql-text-3);
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   line-height: 1.35;
+}
+.ql-progress-meta-text {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.ql-progress-count:not(:empty) + .ql-progress-item:not(:empty)::before {
+  content: " · ";
 }
 .ql-scan-found {
   margin: 0;

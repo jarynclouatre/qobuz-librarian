@@ -27,6 +27,7 @@ from qobuz_librarian.web import (
     rendering,
     review_badges,
     review_pages,
+    runtime,
     saved_reviews,
     scans,
     storage,
@@ -181,6 +182,35 @@ def _library_refresh_outcome():
     if time.time() - (latest.finished_at or 0) > 300:
         return ""
     return str(latest.summary or "").strip()
+
+
+def _scan_finished(job, tab_counts, notice_bits):
+    """What the Library scan that just ended found, for the first render after
+    it, or None. A refresh folded into the open review has its own sentence,
+    the one History shows."""
+    folded = None
+    for j in job_mgr.registry.all():
+        if (j.execute_kind == "library" and j.phase == "scan"
+                and j.status is job_mgr.JobStatus.DONE and j.summary
+                and (folded is None
+                     or (j.finished_at or 0) > (folded.finished_at or 0))):
+            folded = j
+    if (folded is not None and job is not None and job is not folded
+            and (folded.finished_at or 0) > (job.created_at or 0)):
+        summary = str(folded.summary).strip()
+        return None if summary in notice_bits else {"summary": summary}
+    tab_counts = tab_counts or {}
+    missing = int(tab_counts.get("missing") or 0)
+    gaps = int(tab_counts.get("gaps") or 0)
+    parts = []
+    if missing:
+        parts.append(f"{missing:,} missing album{'s' if missing != 1 else ''}")
+    if gaps:
+        parts.append(f"{gaps:,} album{'s' if gaps != 1 else ''} with missing tracks")
+    upgrades = 0
+    if runtime._upgrade_available():
+        upgrades = int(saved_reviews._upgrade_state_summary()["count"] or 0)
+    return {"parts": parts, "upgrades": upgrades}
 
 
 def _library_refresh_failure():
@@ -369,6 +399,8 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
     if (refreshed is not None and refreshed.execute_kind == "library"
             and refreshed.status is job_mgr.JobStatus.DONE and refreshed.summary):
         notice_bits.append(refreshed.summary)
+    # The page that watched a scan to its end asks for itself again with it.
+    finished = job_mgr.registry.get(request.query_params.get("finished", ""))
     # Bring all back redirects here with what happened, a store-write failure
     # included.
     notice = rendering._notice_text(request.query_params.get("notice"))
@@ -380,7 +412,18 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
     if ctx["interrupted_download_note"]:
         notice_bits.append(ctx["interrupted_download_note"])
     ctx["library_notice"] = " ".join(notice_bits)
+    ctx["scan_finished"] = None
+    if finished is not None and not (finished.execute_kind == "library"
+                                     and finished.phase == "scan"):
+        finished = None
+    if (badge_ack and (badge_ack[1] or finished is ctx["library_job"])):
+        ctx["scan_finished"] = _scan_finished(
+            ctx["library_job"], ctx.get("review_tab_counts"), notice_bits)
+    elif (finished is not None
+          and finished.status is job_mgr.JobStatus.DONE):
+        ctx["scan_finished"] = _scan_finished(None, None, notice_bits)
     ctx["error"] = rendering._notice_text(request.query_params.get("error"))
+    ctx["error_refresh"] = request.query_params.get("offer_refresh") == "1"
     return rendering._tr(request, "library.html", ctx, review_badge_ack=badge_ack)
 
 
@@ -413,7 +456,11 @@ async def library_refresh_note(request: Request):
         }
 
     ctx = await loop.run_in_executor(None, _context)
-    return rendering._tr(request, "_library_refresh.html", ctx)
+    # The outcome said here is the news the Library dot carried.
+    badge_ack = (("library", review_badges.ready_generation("library"))
+                 if ctx["library_refresh_outcome"] else None)
+    return rendering._tr(request, "_library_refresh.html", ctx,
+                         review_badge_ack=badge_ack)
 
 
 @router.get("/library/scan-offer")

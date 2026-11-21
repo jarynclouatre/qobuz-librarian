@@ -206,9 +206,13 @@ def _refresh_after_local_album_change(
     token=None,
     args=None,
     claims_album=False,
+    rewritten=(),
 ):
+    filed_into = None
     if (result or {}).get("imported") and result.get("dir"):
-        reseal_past_album_import(result["dir"])
+        filed_into = result["dir"]
+    if filed_into or any(rewritten):
+        reseal_past_album_import(filed_into, rewritten)
     saved_views.refresh_after_changes(
         [{**(result or {}), "album": album, "fallback_artist": fallback_artist}],
         token,
@@ -1292,32 +1296,36 @@ def reseal_after_own_writes(writes):
         _reseal_reviews(candidate_premise.sealer_after_writes(writes))
 
 
-def reseal_past_album_import(album_dir):
+def reseal_past_album_import(album_dir=None, rewritten=()):
     """Seal again the missing albums whose artist folder changed only by
-    ``album_dir``, a new folder a download filed an album into, so Start does
-    not refuse another album of that artist for it. One that the new folder
+    ``album_dir``, a new folder a download filed an album into, and inside
+    ``rewritten``, album folders whose files the app wrote, so Start does
+    not refuse another album of that artist for them. One that those folders
     may hold keeps its old seal. Reads file details only."""
-    album_dir = Path(album_dir)
+    rewritten = [Path(d) for d in rewritten if d]
+    changed = [*([Path(album_dir)] if album_dir else []), *rewritten]
     captures = {}
+
+    def tops(path, folders):
+        return {d.relative_to(path).parts[0] for d in folders
+                if d != path and d.is_relative_to(path)}
 
     def fresh_seal(value):
         if (type(value) is not dict or value.get("kind") != "missing"
                 or type(value.get("path")) is not str):
             return None
         path = Path(value["path"])
-        if album_dir == path or not album_dir.is_relative_to(path):
-            return None
-        if candidate_premise.canonical_premise(value) is None:
+        own = tops(path, changed)
+        if not own or candidate_premise.canonical_premise(value) is None:
             return None
         if path not in captures:
             captures[path] = candidate_premise.capture("missing", path)
         return candidate_premise.resealed_after_own_imports(
-            value, captures[path], {album_dir.relative_to(path).parts[0]})
+            value, captures[path], own, tops(path, rewritten))
 
     def admits(c):
         path = Path(c["payload"]["_premise"]["path"])
-        return not _may_hold(
-            c, [path / album_dir.relative_to(path).parts[0]])
+        return not _may_hold(c, [path / name for name in tops(path, changed)])
 
     _reseal_reviews(fresh_seal, admits)
 
@@ -2227,6 +2235,13 @@ class _LibraryScan:
     def _step(self, name):
         return f"Step {self._passes.index(name) + 1} of {len(self._passes)}: {name}"
 
+    def _push_step(self, name, done, total, item, **kw):
+        # One bar for the whole scan: each step fills its share of it.
+        share = done / total if total else 0
+        self.job.push_progress(
+            self._step(name), done, total, item,
+            fraction=(self._passes.index(name) + share) / len(self._passes), **kw)
+
     def _refresh_disk_views(self):
         # The two refreshes and the fingerprint pass below run before the main
         # artist loop, and on a first scan of a large library each takes real
@@ -2250,9 +2265,8 @@ class _LibraryScan:
             cancel_check=lambda: bool(self.job.cancel_requested),
             persist=False,
             skip_unchanged=self.cheap_refresh,
-            on_artist=lambda ad, _specs, _err, done_i, total_i: self.job.push_progress(
-                self._step("Reading albums on disk"),
-                done_i, total_i, ad.name, unit="artist"),
+            on_artist=lambda ad, _specs, _err, done_i, total_i: self._push_step(
+                "Reading albums on disk", done_i, total_i, ad.name, unit="artist"),
         )
         self.upgrade_refresh = None
         self.upgrade_refresh_started_at = None
@@ -2276,9 +2290,8 @@ class _LibraryScan:
                 previous=finished_upgrade,
                 persist=False,
                 known_fingerprints=self.downsample_refresh.fingerprints,
-                on_artist=lambda ad, _specs, _err, done_i, total_i: self.job.push_progress(
-                    self._step("Checking upgrade quality"),
-                    done_i, total_i, ad.name, unit="artist"),
+                on_artist=lambda ad, _specs, _err, done_i, total_i: self._push_step(
+                    "Checking upgrade quality", done_i, total_i, ad.name, unit="artist"),
             )
             if self.upgrade_refresh.complete and not self.job.cancel_requested:
                 self.checkpoint.keep_pass(
@@ -2302,8 +2315,8 @@ class _LibraryScan:
                 self._artist_read_failed(_ad, exc)
                 log.warning(f"Unreadable artist {_ad.name}: {exc}. Check permissions and retry.")
             if _i % 25 == 0 or _i == len(self.artists):
-                self.job.push_progress(self._step("Checking artist folders"),
-                                       _i, len(self.artists), _ad.name, unit="folder")
+                self._push_step("Checking artist folders",
+                                _i, len(self.artists), _ad.name, unit="folder")
         self.artists = ([] if self.job.cancel_requested
                         else [ad for ad in self.artists if ad.name in self.fingerprints])
         self.discovery_errors = len(self.unreadable_artists)
@@ -2431,8 +2444,8 @@ class _LibraryScan:
                     _reuse_owned(artist_dir.name, self.state_artists[artist_dir.name])
                 hit = ({"artist": artist_dir.name, "albums": shown}
                        if shown else None)
-                self.job.push_progress(
-                    self._step(self._finding), self.done, self.n, artist_dir.name,
+                self._push_step(
+                    self._finding, self.done, self.n, artist_dir.name,
                     found=self.total, hit=hit, unit="artist")
             else:
                 self.todo.append(artist_dir)
@@ -2492,8 +2505,8 @@ class _LibraryScan:
                         self.read_errors += 1
                         self.unreadable_artists.add(ad.name)
                     log.info(f"    skipped {ad.name}: {e}")
-                    self.job.push_progress(
-                        self._step(self._finding), self.done, self.n, ad.name,
+                    self._push_step(
+                        self._finding, self.done, self.n, ad.name,
                         found=self.total, unit="artist")
                     continue
                 self.scanned.add(name)
@@ -2539,9 +2552,8 @@ class _LibraryScan:
                 # preview the same moment the running total moves.
                 hit = ({"artist": artist_name or name, "albums": shown}
                        if shown else None)
-                self.job.push_progress(
-                    self._step(self._finding), self.done, self.n,
-                    artist_name or name,
+                self._push_step(
+                    self._finding, self.done, self.n, artist_name or name,
                     found=self.total, hit=hit, unit="artist")
                 if shown:
                     # A full scan's count holds missing albums and gaps together.
@@ -4155,6 +4167,7 @@ class _UpgradesRun:
             fallback_artist=self.cand.get("artist"),
             token=self.token,
             args=self.args,
+            rewritten=[candidate_premise.expected_path(self.cand)],
         )
         # The verified replace refreshed the whole album, so a parked
         # library review's candidates for it (incl. Gap Fill) are stale.
@@ -4637,6 +4650,7 @@ class _DownsamplesRun:
             self.skipped_unchanged += 1
         self.read_only_tracks += self.res.get("read_only", 0)
         saved_views.refresh_downsample_artist(self.album_dir.parent)
+        reseal_past_album_import(rewritten=[self.album_dir])
         self.total_errors += self.res.get("errors", 0)
         self.total_flush_warns += self.res.get("flush_warnings", 0)
         self.resampled_files += self.res.get("resampled", 0)
@@ -5764,6 +5778,7 @@ class _RepairsRun:
                     fallback_artist=self.p.get("artist_name"),
                     token=self.token,
                     args=self.args,
+                    rewritten=[self.p["album_dir"]],
                 )
             if self.stopped_early:
                 break

@@ -474,6 +474,7 @@ def _make_single_track_run(album, track, token):
             fallback_artist=artist,
             token=active_token,
             args=args,
+            rewritten=[landed_dir],
         )
         if rest_note == _SCANS_OFFER_REST:
             # The refresh takes the album off the review; a scan would list

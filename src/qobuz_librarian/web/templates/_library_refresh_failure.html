@@ -4,7 +4,7 @@
   <div class="ql-notice ql-notice-error"><span>{{ library_refresh_failure }}</span></div>
   {% endif %}
   {% set latest_attempt = library_generation.latest_attempt %}
-  {% if latest_attempt.status in ('failed', 'cancelled', 'incomplete') %}
-  <div class="ql-flash ql-flash-warning" data-flash><span>The latest Library refresh {{ 'was cancelled' if latest_attempt.status == 'cancelled' else 'did not finish' }}.{% if latest_attempt.message %} {{ latest_attempt.message }}{% endif %}</span></div>
+  {% if latest_attempt.status in ('failed', 'incomplete') and not library_refresh_running %}
+  <div class="ql-flash ql-flash-warning" data-flash><span>The last {{ 'Refresh' if library_baseline_exists else 'Library scan' }} did not finish.{% if latest_attempt.message %} {{ latest_attempt.message }}{% endif %}</span></div>
   {% endif %}
 </div>

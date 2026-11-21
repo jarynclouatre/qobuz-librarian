@@ -1631,7 +1631,8 @@
   // One-shot flash flags should not stay in the URL after first paint.
   var FLASH_PARAMS = ["approved", "stale", "saved", "queued", "connected",
                       "unverified", "mode", "error", "noselection", "skipped",
-                      "notice", "quality_note", "waiting", "refreshed", "started"];
+                      "notice", "quality_note", "waiting", "refreshed", "started",
+                      "offer_refresh"];
   function cleanFlashUrl() {
     if (typeof URL !== "function" || !history.replaceState) return;
     try {
@@ -2741,8 +2742,7 @@
         if (!document.body.contains(elapsedEl)) { stopElapsed(); return; }
         var secs = Math.max(0, Math.floor(elapsedAtLoad + (Date.now() - clientBase) / 1000));
         var mm = Math.floor(secs / 60), ss = secs % 60;
-        var lead = (activity && activity.textContent.trim()) ? "· " : "";
-        elapsedEl.textContent = lead + mm + ":" + (ss < 10 ? "0" : "") + ss + " elapsed";
+        elapsedEl.textContent = mm + ":" + (ss < 10 ? "0" : "") + ss;
       };
       // The clock reads off the server's start time, so a stream that dropped
       // and came back picks the count straight back up.
@@ -2950,7 +2950,7 @@
         stopWatching();
         hideGap();
         var surface = "#" + surfacePage.id;
-        window.htmx.ajax("GET", surfacePage.id === "repair-page" ? "/repair" : "/library",
+        window.htmx.ajax("GET", surfacePage.id === "repair-page" ? "/repair" : "/library?finished=" + encodeURIComponent(id),
           { target: surface, swap: "outerHTML", select: surface });
         return;
       }

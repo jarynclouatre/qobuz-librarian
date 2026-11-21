@@ -495,7 +495,7 @@ class Job:
         self._fan_out(STREAM_END)
 
     def push_progress(self, phase, current=0, total=0, item="", found=0,
-                      hit=None, unit=""):
+                      hit=None, unit="", fraction=None):
         """Update the live progress header (phase + counts) and stream it as a
         distinct event. Kept out of log_lines so it never clutters the log or
         gets replayed line-by-line on reconnect; the latest snapshot is re-sent
@@ -505,7 +505,8 @@ class Job:
         a one-off {artist, albums} the scanning page appends to its live preview
         It is deliberately left out of the stored snapshot so a reconnect
         replay doesn't duplicate a preview row. ``unit`` names what current/total
-        count ("artist"/"album"/"track") so the UI can label the bare numbers."""
+        count ("artist"/"album"/"track") so the UI can label the bare numbers.
+        ``fraction`` fills the bar when it covers more than current/total."""
         # Write the snapshot fields under the lock so a reconnecting subscriber
         # reading them via _progress_snapshot() (also under the lock) can't catch
         # a torn mix, e.g. the new phase label with the previous phase's counts.
@@ -513,7 +514,6 @@ class Job:
             # An execute loop can pin the counts to an overall scope (e.g. 3 of
             # 16 albums finished) so inner per-album phases don't reset the
             # card to 1/1. The count is work completed, never work begun.
-            fraction = None
             scope = self._progress_scope
             if scope is not None:
                 done, scope_total, scope_unit, *album = scope
@@ -1775,8 +1775,8 @@ def submit_scan(job: Job, scan_fn, execute_fn):
         if j.cancel_requested:
             return  # _run_task will detect the flag and set CANCELED
         if j.selected_candidates() or j.candidates:
-            j.status = JobStatus.AWAITING_REVIEW
             review_badges.mark_ready(j.execute_kind)
+            j.status = JobStatus.AWAITING_REVIEW
         else:
             j.push_line("Nothing to review.")
             j.status = JobStatus.DONE
