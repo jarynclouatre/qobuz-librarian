@@ -2,7 +2,7 @@
 #    uv pip compile pyproject.toml --extra test -o requirements-test.txt
 aiofiles==25.1.0
     # via qobuz-librarian (pyproject.toml)
-annotated-doc==0.0.6
+annotated-doc==0.0.7
     # via fastapi
 annotated-types==0.8.0
     # via pydantic
@@ -20,7 +20,7 @@ charset-normalizer==3.5.2
     # via requests
 click==8.5.1
     # via uvicorn
-fastapi==0.141.1
+fastapi==0.164.0
     # via qobuz-librarian (pyproject.toml)
 h11==0.16.0
     # via
