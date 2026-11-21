@@ -796,6 +796,15 @@ def _read_bound_sidecar_with_identity(
             os.close(descriptor)
 
 
+def _sidecar_read_only(path: Path, parent_fd) -> bool:
+    try:
+        mode = os.stat(Path(path).with_suffix(".lrc").name, dir_fd=parent_fd,
+                       follow_symlinks=False).st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) and not mode & 0o222
+
+
 def _valid_regular_identity(value) -> bool:
     return (
         isinstance(value, dict)
@@ -2503,7 +2512,9 @@ def _process_bound_file(
         return bool(places) and (
             not os.access(f"/proc/self/fd/{binding.parent_fd}",
                           os.W_OK | os.X_OK)
-            or ("embed" in places and is_read_only(binding.track_fd)))
+            or ("embed" in places and is_read_only(binding.track_fd))
+            or ("sidecar" in places and sidecar_identity is not None
+                and _sidecar_read_only(path, binding.parent_fd)))
 
     keeps_lrc = (kinds["sidecar"] == "plain" and "sidecar" in required
                  and run is not None and not run.replaces_lrc)

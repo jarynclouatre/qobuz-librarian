@@ -1805,8 +1805,30 @@ class _UndoRun:
             return rendering._tr(self.request, "lock_busy.html", {"msg": msg}, status_code=503)
         return None
 
+    def _refuse_read_only(self):
+        if not storage.music_mounted_read_only():
+            return None
+        msg = ("Your music folder is mounted read-only, so Undo can't "
+               "remove anything.")
+        if rendering._is_htmx(self.request):
+            return HTMLResponse(
+                f'<div id="job-content">'
+                f'{rendering._ql_notice_html("warning", html.escape(msg))}</div>')
+        return rendering._tr(self.request, "lock_busy.html", {"msg": msg}, status_code=503)
+
+    def _denied_folder(self):
+        """The folder holding the track when the app may not write to it."""
+        root = _undo_root(self.info)
+        owned = self.info.get("owned_path")
+        if root is None or not isinstance(owned, dict):
+            return None
+        folder = (root / str(owned.get("relative", ""))).parent
+        if folder.is_dir() and not os.access(folder, os.W_OK | os.X_OK):
+            return folder
+        return None
+
     async def run(self):
-        refused = self._refuse()
+        refused = self._refuse() or self._refuse_read_only()
         if refused is not None:
             return refused
         # Register under the same gate as the CLI handoff before taking the
@@ -1924,7 +1946,14 @@ class _UndoRun:
                     "save the single mark cleanup. Retry Undo."
                 )
         else:
-            if self.undo_outcome.get("files_complete"):
+            denied = (None if self.undo_outcome.get("files_complete")
+                      else self._denied_folder())
+            if denied is not None:
+                folder, _is_host = storage._resolve_host_path(str(denied))
+                self.job.summary = (
+                    f"Undo couldn't remove “{self.info.get('title')}”: the "
+                    f"app can't write to {folder}.")
+            elif self.undo_outcome.get("files_complete"):
                 self.job.summary = (
                     f"Removed “{self.info.get('title')}”, but couldn't "
                     "finish cleaning up its folders. Try Undo again.")

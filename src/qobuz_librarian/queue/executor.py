@@ -90,6 +90,7 @@ from qobuz_librarian.library.backup import (
     restore_upgrade_backup,
     some_names,
     unwritable_folder,
+    unwritable_new_album_folder,
     warn_pin_failed,
 )
 from qobuz_librarian.library.candidate_premise import (
@@ -2777,9 +2778,14 @@ class _QueueFlush:
                 self.item, self.args, False, authority=self.authority))
             return _NEXT_ALBUM
 
-        if self.resume_owner is None and self.album_dir and self.album_dir.is_dir() and (
-                folder := unwritable_folder(
-                    self.album_dir, parent=bool(self.item["auto_upgrade"]))):
+        if self.resume_owner is not None:
+            folder = None
+        elif self.album_dir and self.album_dir.is_dir():
+            folder = unwritable_folder(
+                self.album_dir, parent=bool(self.item["auto_upgrade"]))
+        else:
+            folder = unwritable_new_album_folder(self.album)
+        if folder:
             log.info(fmt(C.RED,
                 f"    ✗  The app can't write to {folder}. Nothing was "
                 "downloaded."))
@@ -2921,6 +2927,8 @@ class _QueueFlush:
                 "companions_unsettled": outcome.reason
                     == "library-backup-companions-unsettled",
             })
+            if outcome.permission_denied:
+                self.results[-1]["import_denied"] = outcome.permission_denied
             self.durable_stopped = True
             if outcome.reason == "managed-import-disk-full":
                 self.results[-1]["disk_full"] = True

@@ -740,7 +740,15 @@ class QobuzOwnershipPlugin(BeetsPlugin):
             parent_chain, parent_names
         ):
             raise OSError("ownership parent chain changed")
-        os.mkdir(temporary_name, mode=0o777, dir_fd=parent_fd)
+        try:
+            os.mkdir(temporary_name, mode=0o777, dir_fd=parent_fd)
+        except OSError as exc:
+            # The temporary name means nothing to the user; the error names
+            # the folder Beets was making.
+            raise type(exc)(
+                exc.errno, exc.strerror,
+                os.fsdecode(os.path.join(self._root, os.fsencode(public_relative))),
+            ) from None
         child = _open_ownership_dir(temporary_name, dir_fd=parent_fd)
         created_stat = os.stat(
             temporary_name, dir_fd=parent_fd, follow_symlinks=False

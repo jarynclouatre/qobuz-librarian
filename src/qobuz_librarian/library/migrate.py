@@ -2025,9 +2025,8 @@ def validate_paths(src: Path, dest: Path, *,
         if (link := _symlink_on_path(path)) is not None:
             return (f"{link} is a symbolic link, which Migrate does not "
                     f"follow. Use the real folder instead: {path.resolve()}")
-    if in_place and not os.access(str(src), os.W_OK):
-        return (f"Source is not writable - in-place mode moves files out of "
-                f"the source tree and requires write access: {src}")
+    if in_place and (locked := _unwritable_source_folder(src)) is not None:
+        return f"Can't move the files: the app can't write to {locked}."
     if dest.exists() and not dest.is_dir():
         return f"Destination exists but isn't a folder: {dest}"
     if src.resolve() == dest.resolve():
@@ -2053,6 +2052,17 @@ def validate_paths(src: Path, dest: Path, *,
     if dest_anchor is None or not os.access(str(dest_anchor), os.W_OK):
         return f"Destination isn't writable: {dest_anchor or dest}"
     return None
+
+
+def _unwritable_source_folder(src: Path) -> Optional[Path]:
+    """The first folder in ``src`` that moving its files out of needs and
+    the app can't write to, or None."""
+    unreadable = []
+    for folder, _dirs, _files in os.walk(
+            src, onerror=lambda exc: unreadable.append(exc.filename)):
+        if not os.access(folder, os.W_OK | os.X_OK):
+            return Path(folder)
+    return Path(unreadable[0]) if unreadable else None
 
 
 def existing_ancestor(path: Path) -> Optional[Path]:

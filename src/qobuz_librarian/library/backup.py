@@ -23,6 +23,7 @@ from qobuz_librarian import disk_support
 from qobuz_librarian.integrations.rip import flac_audio_ok
 from qobuz_librarian.library import scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
+from qobuz_librarian.library.tags import beets_sanitize
 from qobuz_librarian.recovery import (
     decode_recovery_json,
     normalise_recovery_owner,
@@ -3472,6 +3473,17 @@ def _finish_put_back(note_name) -> None:
         _drop_put_back_note(note_name)
 
 
+def unwritable_new_album_folder(album):
+    """The folder Beets would make a new ``album`` in when the app can't
+    write to it: the artist's folder if it exists, else the music folder."""
+    root = Path(cfg.MUSIC_ROOT)
+    name = beets_sanitize(((album.get("artist") or {}).get("name") or "").strip())
+    folder = root / name if name and (root / name).is_dir() else root
+    if not folder.is_dir() or os.access(folder, os.W_OK | os.X_OK):
+        return None
+    return folder
+
+
 def unwritable_folder(album: Path, *, parent: bool = True):
     """The first folder that removing ``album`` needs to change and the app
     may not write to: its parent, itself or a folder in it. Without
@@ -4381,9 +4393,10 @@ def restore_gap_fill_backup(backup, album_dir: Path,
             fsync_dir(album.parent)
         if album is None or not stat.S_ISDIR(os.lstat(album).st_mode):
             raise OSError
-    except OSError:
+    except OSError as exc:
+        reason = f": {exc.strerror}" if exc.strerror else ""
         log.info(fmt(C.RED,
-            f"  ✗  Couldn't bind the real album path for restore.\n"
+            f"  ✗  Couldn't restore into {album_dir}{reason}.\n"
             f"     Backed-up tracks remain at: {source}"))
         return 0
     payload = backup_payload(backup.receipt)

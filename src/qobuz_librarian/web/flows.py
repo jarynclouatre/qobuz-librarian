@@ -3393,10 +3393,18 @@ def _denied_folder_cause(exc):
     if (isinstance(exc, OSError)
             and exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS)
             and isinstance(exc.filename, str) and os.path.isabs(exc.filename)):
-        folder, _is_host = storage._resolve_host_path(
-            os.path.dirname(exc.filename))
-        return f"permission denied in {folder}"
+        return _permission_cause(os.path.dirname(exc.filename))
     return ""
+
+
+def _permission_cause(folder):
+    folder, _is_host = storage._resolve_host_path(folder)
+    return f"permission denied in {folder}"
+
+
+def _download_failure_cause(result):
+    denied = result.get("folder_denied") or result.get("import_denied")
+    return _permission_cause(denied) if denied else failure_cause(result)
 
 
 def execute_albums(job, chosen, token):
@@ -3735,7 +3743,7 @@ class _AlbumsRun:
         else:
             self.failed += 1
             self.failed_cands.append(self.cand)
-            self.failure_causes.append(failure_cause(self.result or {}))
+            self.failure_causes.append(_download_failure_cause(self.result or {}))
 
     def _finish_stopped_early(self):
         # Nothing this run leaves behind is lost: the picks it never started
@@ -3999,7 +4007,7 @@ class _UpgradesRun:
         self.quality_attention = 0
         self.processing_attention = 0
         self.failed = 0
-        self.denied = 0
+        self.denied = []
         self.changed = 0
         self.failed_cands = []
         self.refused_cands = []
@@ -4105,7 +4113,7 @@ class _UpgradesRun:
         elif _res not in self._skip:
             self.failed += 1
             if self.result and self.result.get("folder_denied"):
-                self.denied += 1
+                self.denied.append(self.result["folder_denied"])
             if self.result and self.result.get("upgrade_refused"):
                 self.refused_cands.append(self.cand)
             else:
@@ -4747,14 +4755,18 @@ class _DownsamplesRun:
 
 
 def _folders_denied_note(failed, denied):
-    """Why ``denied`` of ``failed`` albums couldn't be upgraded, the app may
-    not write to their folders, as a tail for the count, or ""."""
+    """Why the albums whose folders are in ``denied`` couldn't be upgraded,
+    as a tail for the count of ``failed``, or ""."""
     if not denied:
         return ""
-    folders = "its folder" if denied == 1 else "their folders"
-    if denied == failed:
+    named = set(denied)
+    if len(named) == 1:
+        folders, _is_host = storage._resolve_host_path(denied[0])
+    else:
+        folders = "their folders"
+    if len(denied) == failed:
         return f": the app can't write to {folders}"
-    return f", {denied} because the app can't write to {folders}"
+    return f", {len(denied)} because the app can't write to {folders}"
 
 
 def _kept_companions_note(notes):
@@ -5775,6 +5787,7 @@ class _RepairsRun:
         self.partly = []
         self.cd_quality_tracks = []
         self.failed_cands = []
+        self.denied = []
         self.processed = 0
         self.stopped_early = False
         self.unfinished_start = None
@@ -5808,7 +5821,9 @@ class _RepairsRun:
         if not self.failed:
             return ""
         note = (f"{self.failed} of {plural(len(self.chosen), 'album')} couldn't "
-                "be repaired; see the log.")
+                "be repaired"
+                f"{_folders_denied_note(self.failed, self.denied)}"
+                f"{'.' if len(self.denied) == self.failed else '; see the log.'}")
         if self.failed_stale:
             if self.failed_stale < self.failed:
                 which = f"{self.failed_stale} of them"
@@ -5942,6 +5957,8 @@ class _RepairsRun:
             self.cd_quality_tracks.extend(self.result.get("cd_quality_tracks") or [])
         else:
             self.failed += 1
+            if self.result and self.result.get("folder_denied"):
+                self.denied.append(self.result["folder_denied"])
             # Start refuses a pick whose album this run changed, so unless
             # the put-back resealed it above, only a fresh scan can offer it.
             try:

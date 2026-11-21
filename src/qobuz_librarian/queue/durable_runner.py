@@ -101,6 +101,7 @@ class DurableAlbumResult:
     post_dir: Path | None = None
     operation_id: str | None = None
     item_id: str | None = None
+    permission_denied: str | None = None
 
 
 class DurableAlbumUnavailable(RuntimeError):
@@ -1266,6 +1267,7 @@ class _DurableAlbumRun:
                 else "managed-import-unsettled",
                 operation_id=self.operation_id,
                 item_id=self.item_id,
+                permission_denied=self.imported.permission_denied,
             )
 
     def _retire_staging(self):

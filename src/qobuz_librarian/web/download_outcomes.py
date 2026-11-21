@@ -56,9 +56,6 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "cancelled": "Cancelled. Nothing was imported.",
     "incomplete": "Qobuz couldn't deliver the whole album. Nothing was imported.",
     "upgrade_aborted_backup_failed": "Upgrade aborted: couldn't back up the original.",
-    "folder_read_only": (
-        "The app can't write to the album's folder. Nothing was downloaded."
-    ),
     "stale_candidate": (
         "Left as it is: the album's files changed after it was queued, or "
         "could not be read. A run that stopped part way may already have "
@@ -74,6 +71,12 @@ _UPGRADE_REFUSED = (
     "The new copy couldn't be verified against yours, so your original was "
     "kept and the download was discarded."
 )
+
+
+def _folder_denied_text(folder):
+    folder, _is_host = storage._resolve_host_path(folder)
+    return (f"Nothing was downloaded: the app can't write to {folder}. "
+            "Check that folder's permissions, then retry.")
 
 
 def _summarize_download_result(r):
@@ -181,6 +184,8 @@ def _download_summary(r):
     if kind == "disk_refused":
         return " ".join(filter(None, (
             disk_support.refusal("whole_albums"), "Nothing was downloaded.")))
+    if kind == "folder_read_only":
+        return _folder_denied_text(r["folder_denied"])
     if kind in _DOWNLOAD_SUMMARY_LABELS:
         return _DOWNLOAD_SUMMARY_LABELS[kind]
     if not r.get("imported"):
@@ -295,7 +300,7 @@ def download_error(result, *, job_controls=True):
         if result.get("consolidation_failed"):
             messages.append(
                 f"{plural(result['consolidation_failed'], 'duplicate track')} "
-                "could not be moved to the backup folder"
+                "could not be set aside"
             )
         if result.get("siblings_preserved"):
             messages.append(_copies_left(result["siblings_preserved"]))
@@ -355,10 +360,7 @@ def download_error(result, *, job_controls=True):
             return (f"{plural(n_failed, 'track')} failed."
                     + hint("See job log.") + other)
         if result.get("folder_denied"):
-            folder, _is_host = storage._resolve_host_path(
-                result["folder_denied"])
-            return (f"Nothing was downloaded: the app can't write to "
-                    f"{folder}. Check that folder's permissions, then retry.")
+            return _folder_denied_text(result["folder_denied"])
         if result.get("import_denied"):
             return import_denied_text(result["import_denied"])
         if result.get("n_ok"):

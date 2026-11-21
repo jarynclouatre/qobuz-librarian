@@ -63,6 +63,7 @@ from qobuz_librarian.library.backup import (
     restore_incomplete_upgrade_backup,
     restore_upgrade_backup,
     unwritable_folder,
+    unwritable_new_album_folder,
     upgrade_backup_restorable,
     warn_pin_failed,
 )
@@ -1453,11 +1454,15 @@ class _AlbumRun:
 
     def _confirm(self):
         # Tracks for an album already on disk land in its folder, and an upgrade
-        # or --force moves that folder aside first, so a folder the app can't
-        # write to is refused here, before anything is downloaded or asked.
-        if self.album_dir is not None and self.album_dir.is_dir() and (
-                folder := unwritable_folder(
-                    self.album_dir, parent=self.auto_upgrade_active or self.use_force)):
+        # or --force moves that folder aside first; a new album is made in its
+        # artist's folder. A folder the app can't write to is refused here,
+        # before anything is downloaded or asked.
+        if self.album_dir is not None and self.album_dir.is_dir():
+            folder = unwritable_folder(
+                self.album_dir, parent=self.auto_upgrade_active or self.use_force)
+        else:
+            folder = unwritable_new_album_folder(self.album)
+        if folder:
             log.info(fmt(C.RED,
                 f"  ✗  The app can't write to {folder}. Nothing was downloaded."))
             return {"result": "folder_read_only", "folder_denied": str(folder)}

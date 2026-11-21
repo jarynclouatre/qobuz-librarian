@@ -494,7 +494,8 @@ class _AlbumRepair:
         saved_no_upgrade = getattr(self.args, "no_upgrade", False)
         self.args.no_upgrade = True
         try:
-            for step in (self._plan_refill, self._back_up_originals,
+            for step in (self._check_folders, self._plan_refill,
+                         self._back_up_originals,
                          self._check_album_after_backup,
                          self._download_refills, self._verify_refills,
                          self._settle_backup):
@@ -504,6 +505,15 @@ class _AlbumRepair:
             return self._finish()
         finally:
             self.args.no_upgrade = saved_no_upgrade
+
+    def _check_folders(self):
+        denied = unwritable_track_folder(self.verified_truncated)
+        if denied is None:
+            return None
+        log.info(fmt(C.RED,
+            f"  ✗  Can't repair this album: the app can't write to "
+            f"{denied}. Every track was left in place."))
+        return {**self._failed(), "folder_denied": str(denied)}
 
     def _checkpoint_recovery(self, backup, stage, reason, *, required=False):
         recovery = RepairRecovery(
@@ -1163,6 +1173,16 @@ class _AlbumRepair:
         }
 
 
+def unwritable_track_folder(verified_truncated):
+    """The first folder holding a track to repair that the app can't write
+    to, or None."""
+    return next((
+        folder for folder in sorted({
+            Path(b["path"]).parent for b in verified_truncated})
+        if folder.is_dir() and not os.access(folder, os.W_OK | os.X_OK)),
+        None)
+
+
 def repair_album_dir(album_dir, verified_truncated, artist_name, args, token,
                      *, recovery_checkpoint=None):
     """Back up truncated originals, ISRC-refill them, resolve the backup.
@@ -1371,10 +1391,7 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             f"{plural(len(verified_truncated), 'track')}."))
         return "attention" if unverified else "would_repair"
 
-    read_only = next((
-        folder for folder in sorted({
-            Path(b["path"]).parent for b in verified_truncated})
-        if not os.access(folder, os.W_OK | os.X_OK)), None)
+    read_only = unwritable_track_folder(verified_truncated)
     if read_only is not None:
         log.info(fmt(C.RED,
             f"\n  ✗  Can't repair this album: the app can't write to "

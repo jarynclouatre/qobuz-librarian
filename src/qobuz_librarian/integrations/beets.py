@@ -943,6 +943,7 @@ class ManagedBeetsImportResult:
     reservation: dict | None = None
     replaced_entries: dict | None = None
     disk_full: bool = False
+    permission_denied: str | None = None
 
 
 def _valid_ownership_identity(value):
@@ -5060,6 +5061,7 @@ def beets_import_managed(
         )
     intended_audio = tuple(intent)
     started_ns = time.time_ns()
+    failure = {}
     try:
         ok, kind = _beets_direct(
             override_path,
@@ -5068,6 +5070,7 @@ def beets_import_managed(
             intended_audio=intended_audio,
             managed_capture=capture,
             before_managed_spawn=authority_check,
+            failure_out=failure,
         )
     except Exception:
         spawned = capture.get("spawned") is True
@@ -5088,6 +5091,7 @@ def beets_import_managed(
             spawned=spawned,
             reservation=reservation,
             disk_full=kind == "disk_full",
+            permission_denied=failure.get("permission_denied"),
         )
     return ManagedBeetsImportResult(
         "ok",
@@ -6278,12 +6282,14 @@ def _beets_direct_guarded(
         proc.returncode, full_out, override_path, failure_out)
 
 
+_DENIED = r"(?:Permission denied|Operation not permitted|Read-only file system)"
 _DENIED_RES = (
-    re.compile(r"Permission denied while (?:moving|copying|renaming|linking"
+    re.compile(_DENIED + r" while (?:moving|copying|renaming|linking"
                r"|hardlinking|reflinking) /.+? to (?P<path>/.+?)\.?$"),
-    re.compile(r"Permission denied while (?:creating|writing|deleting|removing)"
+    re.compile(_DENIED + r" while (?:creating|writing|deleting|removing)"
                r"(?: directory)? (?P<path>/.+?)\.?$"),
-    re.compile(r"\[Errno 13\] Permission denied: (['\"])(?P<path>.+)\1"),
+    re.compile(r"\[Errno (?:1|13|30)\] " + _DENIED
+               + r": (['\"])(?P<path>.+)\1"),
 )
 
 

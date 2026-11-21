@@ -460,6 +460,10 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
     target = _backup_target(backup)
     if target is None:
         return _diagnostics_result_notice("error", _BACKUP_GONE)
+    if storage.music_mounted_read_only():
+        return _diagnostics_result_notice(
+            "warning", "Your music folder is mounted read-only, so nothing "
+            "can be restored into it.")
     with _library_held(request, "Backup restore", "Restore") as refusal:
         if refusal:
             return refusal
@@ -557,9 +561,15 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                     "couldn't be "
                     "moved and stay in the backup.")
             else:
+                denied = (origin.is_dir()
+                          and backup_mod.unwritable_folder(origin, parent=False))
+                cause = (
+                    ": the app can't write to "
+                    f"{html.escape(storage._resolve_host_path(str(denied))[0])}."
+                    if denied else ". The log says why.")
                 note = _diagnostics_result_notice(
-                    "error", "Nothing could be restored. The backup is "
-                    "untouched; check the log.")
+                    "error", f"Nothing could be restored{cause} The files "
+                    "stay in the backup.")
         elif kind == "upgrade":
             ok = backup_mod.restore_upgrade_backup(carried, origin)
             if ok:
