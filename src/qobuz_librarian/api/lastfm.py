@@ -171,7 +171,14 @@ def lastfm_get(method: str, params: dict | None = None, *,
                 ) from None
             if code == _NOT_FOUND_CODE:
                 return {}
-            _raise_for_code(code, str(body.get("message") or "").strip(), method)
+            message = str(body.get("message") or "").strip()
+            if (r.status_code in (401, 403)
+                    and code not in (_NOT_FOUND_CODE, _RATE_LIMIT_CODE,
+                                     *_TEMPORARY_CODES)):
+                raise LastfmKeyRejected(
+                    f"Last.fm rejected the API key "
+                    f"({message or 'no reason given'})", code=code)
+            _raise_for_code(code, message, method)
 
         if r.status_code == 429:
             raise LastfmRateLimited(
@@ -187,6 +194,9 @@ def lastfm_get(method: str, params: dict | None = None, *,
                  f"{attempt}/{_MAX_ATTEMPTS} in {wait}s")
             _sleep(wait)
             continue
+        if r.status_code in (401, 403):
+            raise LastfmKeyRejected(
+                f"Last.fm rejected the API key (HTTP {r.status_code} from {method})")
         if r.status_code != 200:
             raise LastfmError(
                 f"HTTP {r.status_code} from {method}", code=None)

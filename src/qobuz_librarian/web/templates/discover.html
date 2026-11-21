@@ -79,7 +79,7 @@
       </span>
       {% elif feed.phase == 'error' and feed.error == 'key' %}
       <span class="ql-status-chip is-error">Key rejected</span>
-      <span>Last.fm rejected the API key. <a href="/settings#discover" class="ql-inline-link">Check it in Settings</a>.</span>
+      <span>Last.fm rejected the API key. Its Last.fm account needs Pro. <a href="/settings#discover" class="ql-inline-link">Check it in Settings</a>.</span>
       {% elif feed.phase == 'error' and feed.error == 'rate_limited' %}
       <span class="ql-status-chip is-warning">Rate-limited</span>
       <span>Last.fm is rate-limiting this key. Try again in a few minutes.</span>

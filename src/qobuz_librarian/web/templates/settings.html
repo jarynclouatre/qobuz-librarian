@@ -490,7 +490,7 @@
     </div>
     {% elif lastfm_check == 'rejected' %}
     <div class="ql-notice ql-notice-error mb-6">
-      <span>Last.fm rejected this key, so it was not saved. Check it was copied whole.</span>
+      <span>Last.fm rejected this key, so it was not saved. Check it was copied whole and that its Last.fm account has Pro.</span>
     </div>
     {% elif lastfm_check == 'empty' %}
     <div class="ql-notice ql-notice-warning mb-6">
@@ -525,7 +525,7 @@
                  class="ql-input ql-mono pr-12">
           {{ secret_toggle("f-" ~ key, "key") }}
         </div>
-        <p class="ql-field-help">{{ help }} <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener" class="ql-link">Free keys come from last.fm.</a></p>
+        <p class="ql-field-help">{{ help }} <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener" class="ql-link">Keys come from last.fm</a> and need a Pro account.</p>
       </div>
       {% endfor %}
       <div class="ql-settings-actions">

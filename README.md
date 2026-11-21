@@ -31,7 +31,7 @@ It has a web UI and a CLI.
 - **Upgrades.** Finds albums Qobuz now has in higher quality and replaces them, keeping a backup until the new files check out.
 - **Downsample.** Converts FLACs above 48 kHz to 44.1 or 48 kHz, on demand or for every new download.
 - **New releases.** Checks regularly for new albums by artists in your library.
-- **Discover.** With a free Last.fm API key, suggests artists like yours, browses your library by genre and lists albums you saved on Qobuz that aren't on disk yet.
+- **Discover.** With a Last.fm API key, which needs Last.fm Pro, suggests artists like yours, browses your library by genre and lists albums you saved on Qobuz that aren't on disk yet.
 - **Lyrics.** Fetched on import, with a Lyrics page to fill in the rest of your library.
 - **Repair.** Finds truncated or corrupt FLACs and replaces just those tracks when Qobuz has the same recording, or offers the whole album again when it can't tell.
 - **Migration.** Reorganises an existing library into `Artist/Album (Year)` folders, copying by default.
