@@ -318,19 +318,10 @@
     <div class="ql-settings-notice">
       <p class="ql-settings-notice-title">Credentials supplied by environment</p>
       <p class="ql-settings-notice-copy">
-        Values from <code>.env</code> or Compose take priority after restart.
-        Remove them to manage the token from this page.
+        The token comes from <code>QOBUZ_USER_AUTH_TOKEN</code> or
+        <code>QOBUZ_USER_AUTH_TOKEN_FILE</code> in <code>.env</code> or
+        Compose. Remove it there to manage the token from this page.
       </p>
-      <details class="ql-settings-details ql-settings-details-compact">
-        <summary class="ql-disclosure-summary">
-          Show details
-        </summary>
-        <p class="ql-settings-details-copy">
-          Remove <code>QOBUZ_USER_AUTH_TOKEN</code> or
-          <code>QOBUZ_USER_AUTH_TOKEN_FILE</code> from <code>.env</code> or
-          <code>compose.yaml</code>.
-        </p>
-      </details>
     </div>
     {% endif %}
 
@@ -455,7 +446,7 @@
     {% if library_size or music_storage %}
     <div class="ql-storage">
       {% if library_size %}
-      <p class="ql-storage-meta">Your library: {{ library_size }}, as of the last scan and the app's own changes since</p>
+      <p class="ql-storage-meta">{{ library_size }} in your library</p>
       {% endif %}
       {% if music_storage %}
       <p class="ql-storage-meta">{{ music_storage.free }} free on {% if music_storage.own_volume %}the music drive{% else %}the drive holding your music{% endif %}</p>
@@ -509,6 +500,10 @@
     <div class="ql-notice ql-notice-warning mb-6">
       <span>The key was saved, but Last.fm could not be reached to check it.{% if queued %} It takes effect once no job is running.{% endif %}</span>
     </div>
+    {% elif lastfm_check == 'limited' %}
+    <div class="ql-notice ql-notice-warning mb-6">
+      <span>The key was saved, but Last.fm is limiting requests, so it could not be checked.{% if queued %} It takes effect once no job is running.{% endif %}</span>
+    </div>
     {% endif %}
 
     <form action="/settings/behavior" method="post" class="ql-settings-form" data-busy-submit>
@@ -519,7 +514,7 @@
       <div class="ql-field">
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
         {% if behavior[key] and lastfm_from_env %}
-        <p class="ql-field-state">Key set in your Compose file. A key saved here replaces it.</p>
+        <p class="ql-field-state">Key set in {% if in_container %}<code>.env</code> or Compose{% else %}the environment{% endif %}. A key saved here replaces it.</p>
         {% elif behavior[key] %}
         <p class="ql-field-state">Key saved. Leave this field blank to keep it.</p>
         {% endif %}
@@ -767,7 +762,7 @@
 {% call section("diagnostics", "Diagnostics") %}
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
-        <p>Checks what the container can see before scans or downloads start.</p>
+        <p>Checks what the app can see before scans or downloads start.</p>
       </div>
       <button class="ql-btn ql-btn-sm ql-btn-secondary"
               hx-get="/api/diagnostics"

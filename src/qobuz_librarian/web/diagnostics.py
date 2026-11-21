@@ -1,12 +1,12 @@
 """The health checks and staging leftovers that Settings reports."""
 import html
+import importlib.metadata
 import json
 import logging
 import os
 import re
 import shutil
 import stat
-import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -61,7 +61,7 @@ def _beets_runtime_diagnostic() -> tuple[str | None, str]:
             "Could not verify a Beets 2.14.1 runtime and readable "
             f"configuration using {runtime.python}",
         )
-    return runtime.python, runtime.python
+    return runtime.python, f"Version {beets_mod._SUPPORTED_BEETS_VERSION}"
 
 
 # What each kind of kept staging group is, in the user's terms. The keys are
@@ -385,7 +385,9 @@ def _dir_check(checks, label, path, *, want_writable, skip_names=(),
     if want_writable and not os.access(p, os.W_OK):
         checks.append({"label": label, "ok": False,
                        "detail": f"{display} is not writable by the container user. "
-                       "On a NAS, set PUID/PGID in .env to your media-share owner"})
+                       "On a NAS, set PUID/PGID in .env to your media-share owner"
+                       if cfg.in_container() else
+                       f"{display} is not writable by the user running the app"})
         return
     try:
         n = sum(1 for entry in p.iterdir()
@@ -487,7 +489,10 @@ def _data_folder_checks(checks):
             f" and {len(locked) - 5} more" if len(locked) > 5 else "")
         checks.append({"label": "Data folder files", "ok": False,
                        "detail": f"Not readable and writable by the container "
-                       f"user: {shown}. Set their owner to PUID/PGID"})
+                       f"user: {shown}. Set their owner to PUID/PGID"
+                       if cfg.in_container() else
+                       f"Not readable and writable by the user running the "
+                       f"app: {shown}"})
 
 
 def _upgrade_backups_check(checks, retained, waiting):
@@ -528,13 +533,23 @@ def _beets_database_check(checks):
                        "detail": f"{parent_display} does not exist"})
 
 
+def _streamrip_version():
+    try:
+        return f"Version {importlib.metadata.version('streamrip')}"
+    except importlib.metadata.PackageNotFoundError:
+        return "Built in"
+
+
 def _tool_checks(checks):
     missing_tool_fix = ("Pull the image again (docker compose pull)."
                         if cfg.in_container()
                         else "See Quick start in the README.")
-    for binary in ("rip", "ffmpeg", "flac"):
-        found = (sys.executable if binary == "rip" and rip_mod.rip_command() != ["rip"]
-                 else shutil.which(binary))
+    built_in = rip_mod.rip_command() != ["rip"]
+    if built_in:
+        checks.append({"label": "streamrip", "ok": True,
+                       "detail": _streamrip_version()})
+    for binary in ("ffmpeg", "flac") if built_in else ("rip", "ffmpeg", "flac"):
+        found = shutil.which(binary)
         checks.append({"label": "streamrip" if binary == "rip" else binary,
                        "ok": bool(found), "mono": bool(found),
                        "detail": found or f"{binary} was not found. "
@@ -543,7 +558,6 @@ def _tool_checks(checks):
     checks.append({
         "label": "Beets",
         "ok": beets_python is not None,
-        "mono": beets_python is not None,
         "detail": beets_detail,
     })
 
@@ -902,7 +916,7 @@ def _set_aside_row(rows, tok, path, classification, name, dest, album):
         f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
         f'<input type="hidden" name="_csrf_token" value="{tok}">'
         f'<input type="hidden" name="backup" value="{name}">'
-        f'<button type="submit" class="ql-btn ql-btn-sm" '
+        f'<button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary" '
         f'data-confirm="{confirm}" data-confirm-action="Delete"'
         f'{irreversible}>Delete</button>'
         f'</form></div></div>'
@@ -1008,15 +1022,13 @@ def _backup_row(rows, tok, shared, path, origin, classification,
 def _undo_state(undo, tok, path, origin, restorable, name, dest, album):
     if restorable:
         detail = (
-            f'Copies of the files this album had before it was '
-            f'downsampled, so the rewrite can be undone; cleared '
-            f'automatically after '
-            f'{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, "day")}.')
+            "Copies of the files this album had before it was "
+            "downsampled.")
         restore_form = (
             f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
             f'<input type="hidden" name="backup" value="{name}">'
-            f'<button type="submit" class="ql-btn ql-btn-sm" '
+            f'<button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary" '
             f'data-confirm="Put the hi-res originals of '
             f'{album or dest} back? This undoes the downsample." '
             f'data-confirm-action="Restore">Restore</button>'
@@ -1201,7 +1213,8 @@ def _collection_backup_status():
     """What the Settings page shows about the collection snapshot."""
     state, latest = collection_snapshot.latest_status()
     info = {
-        "folder": str(collection_snapshot.snapshot_dir()),
+        "folder": storage._resolve_host_path(
+            str(collection_snapshot.snapshot_dir()))[0],
         "age": None,
         "counts": None,
         "held_back": None,

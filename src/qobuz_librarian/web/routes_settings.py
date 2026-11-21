@@ -158,7 +158,8 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "collection_backup_generation": generations["collection-backup"],
         "collection_backup": diagnostics_mod._collection_backup_status(),
         "lastfm_check": (lastfm_check
-                         if lastfm_check in ("ok", "rejected", "down", "empty")
+                         if lastfm_check in ("ok", "rejected", "down", "limited",
+                                             "empty")
                          else ""),
         "option_labels": settings_store.ENUM_OPTION_LABELS,
         # Which dropdowns keep their unset entry after something is picked, so
@@ -495,6 +496,8 @@ async def save_behavior(request: Request):
         except lastfm.LastfmKeyRejected:
             return RedirectResponse(url="/settings?lastfm=rejected#discover",
                                     status_code=303)
+        except lastfm.LastfmRateLimited:
+            lastfm_check = "limited"
         except (lastfm.LastfmError, asyncio.TimeoutError, OSError):
             lastfm_check = "down"
     effective_before = settings_store.current()
@@ -746,7 +749,7 @@ async def set_mode(request: Request, target: str = Form("")):
             if outcome == "maintenance":
                 return _mode_refused(
                     "The web app is still tidying its caches after starting. "
-                    "This finishes on its own; try again in a minute.")
+                    "Try again in a minute.")
             return _mode_refused(
                 "Finish or cancel the running library work before handing off to the "
                 "terminal.")

@@ -357,10 +357,12 @@ _ROOT_NAMES = {
 
 def _backup_dir_problem(value):
     """Why a Backup folder cannot be saved, in the user's words, or ""."""
+    label = _FIELD_LABELS["COLLECTION_BACKUP_DIR"]
+    if value and not os.path.isabs(value):
+        return f"“{label}” has to be a full path, starting with /."
     conflict = cfg.collection_backup_dir_conflict(value)
     if not conflict:
         return ""
-    label = _FIELD_LABELS["COLLECTION_BACKUP_DIR"]
     if conflict == "control":
         return f"\u201c{label}\u201d can't contain control characters."
     if conflict == "unresolvable":
@@ -404,7 +406,8 @@ def _restored_default_warning(key, value):
     variable = key
     if key in SECRET_KEYS and not os.environ.get(key, "").strip():
         variable = f"{key}_FILE"
-    return (f"\u201c{label}\u201d comes from your Compose file, so clearing the "
+    source = ".env or Compose" if cfg.in_container() else "the environment"
+    return (f"\u201c{label}\u201d comes from {source}, so clearing the "
             f"box put {restored} back. Remove {variable} there to stop using it.")
 
 
@@ -773,10 +776,15 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
             raw = values[key]
             items = _str_to_list(raw) if isinstance(raw, str) else list(raw or [])
             kept, dropped = _validate_list(key, items)
+            before = _validate_list(key, _str_to_list(baseline.get(key) or ""))[0]
+            if dropped and not kept:
+                # Nothing typed was recognised, which is not the user
+                # clearing the box.
+                kept = before
             clean[key] = ",".join(kept)
             # "lrclib,netease" from Compose saves as "Lrclib,NetEase"; that is
             # no change and must not pin the field.
-            if kept == _validate_list(key, _str_to_list(baseline.get(key) or ""))[0]:
+            if kept == before:
                 unchanged.add(key)
             if dropped:
                 warnings.append(_dropped_warning(key, dropped))
