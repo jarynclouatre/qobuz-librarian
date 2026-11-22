@@ -39,6 +39,7 @@ class ArtistScanStore:
         data = {
             "version": self.version,
             "updated_at": None,
+            "scanned_at": None,
             "generation": 0,
             "revision": 0,
             "complete": False,
@@ -85,6 +86,7 @@ class ArtistScanStore:
             candidates_ok = False
         base.update({
             "updated_at": updated_at,
+            "scanned_at": self.scan_time(data),
             "generation": generation,
             "revision": revision,
             "complete": bool(data.get("complete")) and all((
@@ -106,6 +108,18 @@ class ArtistScanStore:
             base["quality_signature"] = str(data.get("quality_signature") or "")
         return base
 
+    @staticmethod
+    def scan_time(data):
+        """When the scan behind these rows was saved. Older files hold only
+        the time each artist was last scanned."""
+        scanned_at, _ = state_file.optional_time(data.get("scanned_at"))
+        if scanned_at is not None:
+            return scanned_at
+        artists = data.get("artist_updated_at")
+        times = [state_file.optional_time(value)[0] for value in
+                 (artists.values() if isinstance(artists, dict) else ())]
+        return min((value for value in times if value is not None), default=None)
+
     def write_state(self, data):
         try:
             state_file.write_json(self.path(), data)
@@ -119,6 +133,7 @@ class ArtistScanStore:
         data = {
             "version": self.version,
             "updated_at": now,
+            "scanned_at": now,
             "generation": int(generation),
             "revision": int(revision),
             "complete": bool(result.complete),
@@ -241,6 +256,7 @@ class ArtistScanStore:
         data = {
             "version": self.version,
             "updated_at": now,
+            "scanned_at": state.get("scanned_at"),
             "generation": generation,
             "revision": revision,
             "complete": bool(state.get("complete", True)),

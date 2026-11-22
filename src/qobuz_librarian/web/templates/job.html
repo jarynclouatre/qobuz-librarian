@@ -2,7 +2,6 @@
 {% block title %}{% if job.execute_kind == 'new_releases' %}New releases{% else %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}{% endif %} - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-5xl{% endblock %}
 {% block content %}
-{% import "_job_labels.html" as labels %}
 
 <div class="ql-list-page ql-job-page">
 
@@ -12,29 +11,11 @@
 </div>
 {% endif %}
 
-{% if stale %}
-<div class="ql-notice ql-notice-warning ql-job-banner" data-flash>
-  <span>This job is no longer awaiting review. The previous click already
-    started it.</span>
-</div>
-{% endif %}
-
-{% if error %}
-<div class="ql-notice ql-notice-warning ql-job-banner" data-flash>
-  <span>{{ error }}</span>
-</div>
-{% endif %}
+{% include "_review_banners.html" %}
 
 {% if disk_notice and not error and job.status.value == 'awaiting_review' %}
 <div class="ql-notice ql-notice-warning ql-job-banner">
   <span>{{ disk_notice }}</span>
-</div>
-{% endif %}
-
-{% if noselection and job.status.value == 'awaiting_review' %}
-<div class="ql-notice ql-notice-warning ql-job-banner" data-flash>
-  {% set _review_thing = labels.discard_review_label(job) %}
-  <span>Nothing was selected. Choose at least one item, or use Discard {{ _review_thing }} to remove this review.</span>
 </div>
 {% endif %}
 

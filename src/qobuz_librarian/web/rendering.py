@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 
+from fastapi.responses import FileResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from qobuz_librarian import __version__, disk_support
@@ -85,12 +86,6 @@ def _downsample_originals_choice():
     return settings_store.current().get("DOWNSAMPLE_KEEP_ORIGINALS")
 
 
-templates.env.globals["keeps_ds_originals"] = (
-    lambda: _downsample_originals_choice() == "keep"
-)
-templates.env.globals["ds_originals_chosen"] = (
-    lambda: _downsample_originals_choice() in ("keep", "delete")
-)
 templates.env.globals["backup_retention_days"] = cfg.UPGRADE_BACKUP_RETENTION_DAYS
 
 
@@ -246,12 +241,27 @@ def _quality_readout(text):
     return format_quality(bits, float(m.group(2)) * 1000), bits >= 24
 
 
+_RATES_RE = r"[\d.]+kHz(?:/[\d.]+kHz)*"
+_RATE_CHANGE_RE = re.compile(rf"({_RATES_RE}) → ({_RATES_RE})")
+
+
+def _rate_readout(text):
+    """("96", "48") for a Downsample row's "96kHz → 48kHz" part, and
+    ("88.2, 96", "44.1, 48") when an album holds more than one rate."""
+    m = _RATE_CHANGE_RE.fullmatch(text or "")
+    if not m:
+        return None
+    return tuple(", ".join(r.removesuffix("kHz") for r in side.split("/"))
+                 for side in m.groups())
+
+
 templates.env.globals["when_label"] = job_labels._when_label
 templates.env.globals["fmt_elapsed"] = _fmt_elapsed
 templates.env.globals["quality_shortfall_view"] = _quality_shortfall_view
 templates.env.filters["strip_log_pointer"] = _strip_log_pointer
 templates.env.filters["known_year"] = known_year
 templates.env.filters["quality_readout"] = _quality_readout
+templates.env.filters["rate_readout"] = _rate_readout
 # Worded at render time, so a review saved before a wording change reads
 # the same as a new one.
 templates.env.filters["repair_damage_detail"] = flows._repair_damage_detail
@@ -527,6 +537,23 @@ def _local_album_art(album_dir):
     if discs:
         return _local_album_art(discs[0][1])
     return None
+
+
+def _library_art_response(album_dir):
+    """An album folder's cover file, only ever one inside the music library."""
+    try:
+        art = _local_album_art(album_dir)
+        if art is None or not art.resolve().is_relative_to(
+                Path(cfg.MUSIC_ROOT).resolve()):
+            return Response(status_code=404)
+    except (OSError, ValueError):
+        return Response(status_code=404)
+    return FileResponse(
+        art,
+        # Covers change when the album is re-imported, so a few minutes of
+        # caching costs nothing.
+        headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 def _review_cover(job, candidate):

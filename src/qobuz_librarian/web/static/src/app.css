@@ -3353,9 +3353,6 @@ details.ql-mobile-drawer[open]::before {
     font-size: 1rem;
   }
 }
-.ql-review-warning {
-  margin-bottom: var(--ql-space-3);
-}
 .ql-review-page {
   display: grid;
   gap: 0.625rem;
@@ -3715,58 +3712,6 @@ details.ql-mobile-drawer[open]::before {
   align-self: start;
   max-width: 100%;
 }
-.ql-repair-phase {
-  display: flex;
-  max-width: 26rem;
-  align-items: center;
-  gap: var(--ql-space-2);
-  margin-bottom: var(--ql-space-1);
-  color: var(--ql-text-3);
-  font-size: 0.75rem;
-  font-weight: 680;
-  user-select: none;
-}
-.ql-repair-phase-number {
-  display: grid;
-  width: 1.5rem;
-  height: 1.5rem;
-  flex: none;
-  place-items: center;
-  border: 1px solid var(--ql-line);
-  border-radius: 999px;
-  background-color: color-mix(in oklab, var(--ql-surface) 88%, var(--ql-bg));
-  color: var(--ql-text-3);
-  font-family: var(--ql-font-mono);
-  font-size: 0.68rem;
-}
-.ql-repair-phase-number.is-done {
-  color: var(--ql-text-2);
-}
-.ql-repair-phase-number.is-current {
-  border-color: var(--ql-text);
-  background-color: var(--ql-text);
-  color: var(--ql-bg);
-}
-.ql-repair-phase-number.is-error {
-  border-color: color-mix(in oklab, var(--ql-danger) 60%, transparent);
-  background-color: color-mix(in oklab, var(--ql-danger) 12%, transparent);
-  color: color-mix(in oklab, var(--ql-danger) 88%, var(--ql-text));
-}
-.ql-repair-phase-label.is-done,
-.ql-repair-phase-label.is-current {
-  color: var(--ql-text);
-}
-.ql-repair-phase-label.is-error {
-  color: color-mix(in oklab, var(--ql-danger) 82%, var(--ql-text));
-}
-.ql-repair-phase-line {
-  min-width: 1rem;
-  flex: 1 1 auto;
-  border-top: 1px solid var(--ql-line-soft);
-}
-.ql-repair-phase-line.is-done {
-  border-color: var(--ql-text-3);
-}
 .ql-hidden-summary {
   display: flex;
   min-width: 0;
@@ -3914,8 +3859,7 @@ details.ql-mobile-drawer[open]::before {
   background-color: color-mix(in oklab, var(--ql-surface) 90%, var(--ql-bg));
   padding: var(--ql-pad-card);
 }
-[data-theme="night"] .ql-system-card,
-[data-theme="night"] .ql-repair-history-row {
+[data-theme="night"] .ql-system-card {
   border-color: var(--ql-line);
   background-color: color-mix(in oklab, var(--ql-surface) 86%, #000);
 }
@@ -4161,63 +4105,44 @@ details.ql-mobile-drawer[open]::before {
 .ql-repair-history-summary {
   margin: -0.15rem 0 0;
   color: var(--ql-text-3);
-  font-size: 0.85rem;
+  font-size: 0.875rem;
   line-height: 1.35;
 }
-.ql-repair-history-list {
-  display: grid;
-  gap: var(--ql-space-2);
-  margin: 0;
-  padding: 0;
+.ql-repair-run + .ql-repair-run {
+  border-top: 1px solid var(--ql-line-soft);
+}
+[data-theme="night"] .ql-repair-run + .ql-repair-run {
+  border-top-color: var(--ql-line);
+}
+.ql-repair-run > summary {
+  cursor: pointer;
   list-style: none;
 }
-.ql-repair-history-row {
-  min-width: 0;
-  border: 1px solid var(--ql-line-soft);
-  border-radius: var(--ql-radius);
-  background-color: color-mix(in oklab, var(--ql-surface) 90%, var(--ql-bg));
-  padding: 0.85rem 0.95rem;
+.ql-repair-run > summary::-webkit-details-marker {
+  display: none;
 }
-.ql-repair-entry {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 0.35rem;
+.ql-repair-run > summary:focus-visible {
+  outline: 2px solid var(--ql-gold);
+  outline-offset: -2px;
 }
-.ql-repair-entry-main {
+.ql-repair-run .ql-activity-main {
   display: grid;
-  min-width: 0;
-  gap: 0.15rem;
 }
-.ql-repair-title {
-  min-width: 0;
-  color: var(--ql-text);
-  font-size: 0.95rem;
-  font-weight: 700;
-  line-height: 1.28;
+.ql-repair-tracks {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0 var(--ql-space-1) 0.9rem calc(var(--ql-space-1) + 3rem);
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  list-style: none;
   overflow-wrap: anywhere;
 }
-.ql-repair-meta,
-.ql-repair-time {
-  min-width: 0;
-  color: var(--ql-text-3);
-  font-size: 0.78rem;
-  line-height: 1.3;
-}
-.ql-repair-meta {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ql-repair-time {
-  flex: none;
-  font-family: var(--ql-font-mono);
-  white-space: nowrap;
-}
-.ql-empty-state--repair {
-  display: grid;
-  justify-items: center;
-  padding-block: 1.6rem;
+@media (max-width: 519.98px) {
+  .ql-repair-tracks {
+    padding-inline: calc(34px + 1.6rem) 0.9rem;
+  }
 }
 @media (min-width: 640px) {
   .ql-work-card {
@@ -4240,12 +4165,6 @@ details.ql-mobile-drawer[open]::before {
   .ql-notice-action {
     width: auto;
     margin-left: auto;
-  }
-  .ql-repair-entry {
-    flex-direction: row;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: var(--ql-space-4);
   }
 }
 .ql-scan-hero {

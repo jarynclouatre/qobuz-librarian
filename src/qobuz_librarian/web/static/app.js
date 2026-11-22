@@ -3000,28 +3000,23 @@
       var body = document.getElementById("job-content");
       if (!body) { stopWatching(); return; }
       if (!window.htmx) { reloadToRecover(); return; }
-      // The Library and Repair pages draw more than the job around it, such
-      // as the Library header's refresh controls, and hide that while a job
-      // runs, so the whole page is fetched again.
-      var surfacePage = body.dataset.embedded
-        && (document.getElementById("repair-page") || document.getElementById("library-page"));
-      if (surfacePage) {
-        stopWatching();
-        hideGap();
-        var surface = "#" + surfacePage.id;
-        window.htmx.ajax("GET", surfacePage.id === "repair-page" ? "/repair" : "/library?finished=" + encodeURIComponent(id),
-          { target: surface, swap: "outerHTML", select: surface });
-        return;
-      }
-      var embedded = body.dataset.embedded ? "?embedded=1" : "";
-      sessionFetch("/jobs/" + id + "/content" + embedded)
+      // A tool page draws more than the job around it, such as the Library
+      // header's refresh controls, and hides that while a job runs, so the
+      // whole page is fetched again.
+      var surface = body.dataset.embedded && body.closest("[data-job-surface]");
+      var targetId = surface ? surface.id : body.id;
+      var href = surface
+        ? surface.dataset.jobSurface + "?finished=" + encodeURIComponent(id)
+        : "/jobs/" + id + "/content" + (body.dataset.embedded ? "?embedded=1" : "");
+      sessionFetch(href)
         .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
         .then(function (html) {
-          var target = document.getElementById("job-content");
+          var target = document.getElementById(targetId);
           if (!target) return;
           stopWatching();
           hideGap();
-          window.htmx.swap(target, html, { swapStyle: "outerHTML" });
+          window.htmx.swap(target, html, { swapStyle: "outerHTML" },
+            surface ? { select: "#" + targetId } : {});
         })
         .catch(function (why) {
           if (why === "navigation") return;
@@ -3303,6 +3298,8 @@
         dsTotal.textContent = c.reclaimable_label
           ? "~" + c.reclaimable_label + " smaller" : "";
       }
+      var countLine = document.querySelector("[data-review-count]");
+      if (countLine) countLine.textContent = plural(c.total, "album");
       cont.dataset.reviewTotal = c.total;
       cont.dataset.reviewSelected = c.selected;
       syncMaster();

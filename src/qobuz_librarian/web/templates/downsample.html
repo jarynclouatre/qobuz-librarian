@@ -2,35 +2,53 @@
 {% block title %}Downsample - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-5xl{% endblock %}
 {% block content %}
+{% import "_job_labels.html" as labels %}
 
-<div class="ql-tool-page ql-quality-page">
-  <header class="ql-page-header">
-    <h1>Downsample</h1>
-  </header>
-
-  {% include "_writes_paused_notice.html" %}
-
-  {% set active_tab = 'downsample' %}
-  {% include "_quality_tabs.html" %}
-
+<div id="downsample-page" class="ql-tool-page ql-quality-page" data-job-surface="/downsample">
   {% if review_parked %}
   {% set refresh_confirm = "Refresh local downsample results? This replaces your saved review and clears its ticks." %}
   {% else %}
   {% set refresh_confirm = "Refresh local downsample results?" %}
   {% endif %}
 
-  <div id="downsample-body" class="ql-tool-body"{% if downsample_running %} hx-get="/downsample"
-       hx-trigger="every 3s" hx-target="#downsample-body"
-       hx-select="#downsample-body" hx-swap="outerHTML"{% endif %}>
+  <header class="ql-page-header{% if review_job %} ql-page-header--split{% endif %}">
+    <h1>Downsample</h1>
+    {% if review_job %}
+    <form action="/downsample" method="post" data-busy-submit>
+      <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      <button type="submit" class="ql-header-refresh"{% if writes_paused %} disabled aria-disabled="true"{% endif %}
+              title="{{ writes_paused_reason if writes_paused else 'Refresh results' }}" aria-label="Refresh results"
+              data-confirm="{{ refresh_confirm }}" data-confirm-action="Refresh">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+    </form>
+    {% endif %}
+  </header>
+
+  {% include "_writes_paused_notice.html" %}
+
+  {% with job = review_job, embedded_surface = true %}{% include "_review_banners.html" %}{% endwith %}
+
+  {% set active_tab = 'downsample' %}
+  {% include "_quality_tabs.html" %}
 
   {% set failed = downsample_failed and not downsample_running %}
+  {% set _held_back %}{{ downsample_state.held_back }} more album{% if downsample_state.held_back != 1 %}s{% endif %} from the discarded review {% if downsample_state.held_back != 1 %}are{% else %}is{% endif %} left out until you refresh results.{% endset %}
+  {% if review_job %}
   <div class="ql-work-status ql-quality-status">
-    <span class="ql-status-chip {% if failed %}is-error{% elif downsample_state.stale %}is-warning{% elif downsample_state.count %}is-info{% else %}is-neutral{% endif %}">
-      {% if failed %}Last run failed{% elif downsample_state.stale %}Refresh needed{% elif downsample_state.discarded %}Review discarded{% elif downsample_state.count %}Review ready{% elif downsample_state.complete %}No albums to downsample{% else %}Not scanned yet{% endif %}
+    <span><span data-review-count>{{ labels.format_count(review_counts.total) }} album{{ 's' if review_counts.total != 1 }}</span>{% if downsample_state.updated and not review_job.unchecked_artists %} · refreshed {{ downsample_state.updated }}{% endif %}</span>
+    {% if downsample_state.held_back %}<span>{{ _held_back }}</span>{% endif %}
+  </div>
+  {% elif not downsample_running %}
+  <div class="ql-work-status ql-quality-status">
+    {% if failed or downsample_state.stale or not downsample_state.count %}
+    <span class="ql-status-chip {% if failed %}is-error{% elif downsample_state.stale %}is-warning{% else %}is-neutral{% endif %}">
+      {% if failed %}Last run failed{% elif downsample_state.stale %}Refresh needed{% elif downsample_state.discarded %}Review discarded{% elif downsample_state.complete %}No albums to downsample{% else %}Not scanned yet{% endif %}
     </span>
+    {% endif %}
     {% if downsample_state.stale or downsample_state.updated or (last_run and downsample_state.complete) %}
     <span>
-      {% if downsample_state.stale %}Saved results are out of date.{% elif downsample_state.updated %}Results refreshed {{ downsample_state.updated }}.{% else %}Last downsample refresh {{ last_run }}.{% endif %}
+      {% if downsample_state.stale %}Saved results are out of date.{% elif downsample_state.updated %}Refreshed {{ downsample_state.updated }}.{% else %}Last downsample refresh {{ last_run }}.{% endif %}
     </span>
     {% endif %}
     {% if hidden_count %}
@@ -39,27 +57,26 @@
     </a>
     {% endif %}
   </div>
+  {% endif %}
 
   {% if failed %}
   <div class="ql-tool-note ql-tool-note-warning" role="alert">
-    <p class="ql-tool-note-title">Last Downsample run failed</p>
+    <p class="ql-tool-note-title">Last Downsample run {{ 'partly done' if (downsample_failed.execute_args or {}).get('partly_done') else 'failed' }}</p>
     {% if downsample_failed.summary and downsample_failed.summary != downsample_failed.error %}<p>{{ downsample_failed.summary }}</p>{% endif %}
-    <p>{% if downsample_failed.error %}{{ downsample_failed.error }} {% endif %}<a href="/jobs/{{ downsample_failed.id }}" class="ql-inline-link">Open details →</a></p>
+    <p>{% if downsample_failed.error %}{{ downsample_failed.error }} {% endif %}<a href="/jobs/{{ downsample_failed.id }}" class="ql-inline-link">Details</a></p>
   </div>
   {% elif downsample_stopped and not downsample_running %}
   <div class="ql-tool-note ql-tool-note-info">
     <p class="ql-tool-note-title">Last Downsample run {% if downsample_stopped.interrupted_by_restart %}interrupted{% else %}stopped{% endif %}</p>
-    <p>{{ downsample_stopped.error or downsample_stopped.summary }} <a href="/jobs/{{ downsample_stopped.id }}" class="ql-inline-link">Open details →</a></p>
+    <p>{{ downsample_stopped.error or downsample_stopped.summary }} <a href="/jobs/{{ downsample_stopped.id }}" class="ql-inline-link">Details</a></p>
   </div>
   {% endif %}
 
   {% if have_downsample %}
     {% if downsample_running %}
-    {% set _ds_executing = downsample_running.phase == 'execute' or downsample_running.status.value == 'running' %}
-    <div class="ql-tool-note {{ 'ql-tool-note-warning' if _ds_executing else 'ql-tool-note-info' }}">
-      <p class="ql-tool-note-title">{% if _ds_executing %}Downsampling now{% elif downsample_running.status.value == 'pending' %}Downsample scan queued{% else %}Downsample scan running{% endif %}</p>
-      <p>{% if _ds_executing %}Your files are being rewritten in place.{% elif downsample_running.status.value == 'pending' %}Starts when the current job finishes.{% else %}Checking your files for albums that can be downsampled.{% endif %} <a href="/jobs/{{ downsample_running.id }}" class="ql-inline-link">Watch progress →</a></p>
-    </div>
+    {% with job = downsample_running, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
+    {% elif review_job %}
+    {% with job = review_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
     {% elif downsample_state.stale %}
     <section class="ql-work-card">
       <div class="ql-work-card-copy">
@@ -79,8 +96,7 @@
     <section class="ql-work-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">{{ downsample_state.count }} album{% if downsample_state.count != 1 %}s{% endif %} can be downsampled</p>
-        <p class="ql-work-card-text">Files are rewritten in place at 44.1 / 48 kHz{% if ds_originals_chosen() and keeps_ds_originals() %}, and the hi-res originals are kept for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}{% elif ds_originals_chosen() %} and the hi-res originals are not kept{% else %}. You choose whether the hi-res originals are kept{% endif %}.</p>
-        {% if downsample_state.held_back %}<p class="ql-work-card-text">{{ downsample_state.held_back }} more album{% if downsample_state.held_back != 1 %}s{% endif %} from the discarded review {% if downsample_state.held_back != 1 %}are{% else %}is{% endif %} left out until you refresh results.</p>{% endif %}
+        {% if downsample_state.held_back %}<p class="ql-work-card-text">{{ _held_back }}</p>{% endif %}
         {% if writes_paused and cli_mode %}<p class="ql-work-card-text">Review albums and Refresh results open after you resume the web app.</p>{% endif %}
       </div>
       <div class="ql-work-card-actions">
@@ -121,8 +137,6 @@
     </div>
   </section>
   {% endif %}
-
-  </div>
 </div>
 
 {% endblock %}

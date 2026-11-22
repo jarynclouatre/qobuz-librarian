@@ -121,28 +121,6 @@
   </div>
   </div>
 
-  {% if job.execute_kind == 'downsample' %}
-  {% if downsample_originals_choice == 'keep' %}
-  <div class="ql-notice ql-notice-info ql-review-warning">
-    <span><strong>Undoable for {{ backup_retention_days }} day{{ 's' if backup_retention_days != 1 }}</strong>
-      from Settings &rarr; Diagnostics.</span>
-  </div>
-  {% elif downsample_originals_choice == 'delete' %}
-  <div class="ql-notice ql-notice-warning ql-review-warning">
-    <span><strong>This cannot be undone.</strong> Hi-res originals are not kept.</span>
-  </div>
-  {% endif %}
-  {% endif %}
-
-  {# Upgrade is the one destructive tool with no undo at all, so its review
-     says what it does. #}
-  {% if job.execute_kind == 'upgrade' %}
-  <div class="ql-notice ql-notice-warning ql-review-warning">
-    <span>Your current copy is removed once the replacement is verified.
-      <strong>This cannot be undone.</strong></span>
-  </div>
-  {% endif %}
-
   <div id="review-page" class="ql-review-page">
     {% include "_review_page.html" %}
   </div>

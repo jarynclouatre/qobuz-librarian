@@ -45,32 +45,6 @@
   </header>
   {% endif %}
 
-  {% if job.execute_kind == 'repair' %}
-  {% set _st = job.status.value %}
-  {% if _st in ('pending', 'scanning') %}
-  {% set _ph = 'scan' %}
-  {% elif _st == 'awaiting_review' %}
-  {% set _ph = 'review' %}
-  {% elif _st == 'running' %}
-  {% set _ph = 'repair' %}
-  {% elif _st == 'done' %}
-  {% set _ph = 'done' %}
-  {% else %}
-  {% set _ph = 'repair' if job.phase == 'execute' else ('review' if job.phase == 'review' else 'scan') %}
-  {% endif %}
-  {% set _phase_outcome = ' ' ~ (labels.status_chip_label(job) | lower) if _st in ('failed', 'canceled') else '' %}
-  <div class="ql-repair-phase" aria-label="Repair phase: {{ _ph }}{{ _phase_outcome }}">
-    {% for key, label in [('scan','Scan'), ('review','Review'), ('repair','Repair')] %}
-    {% set _done = (key == 'scan' and _ph in ('review','repair','done')) or (key == 'review' and _ph in ('repair','done')) or (key == 'repair' and _ph == 'done') %}
-    {% set _current = key == _ph %}
-    {% set _failed = _current and _st == 'failed' %}
-    <span{% if _current %} aria-current="step"{% endif %} class="ql-repair-phase-number{% if _done %} is-done{% endif %}{% if _current %} is-current{% endif %}{% if _failed %} is-error{% endif %}">{{ loop.index }}</span>
-    <span class="ql-repair-phase-label{% if _done %} is-done{% endif %}{% if _current %} is-current{% endif %}{% if _failed %} is-error{% endif %}">{{ label }}</span>
-    {% if not loop.last %}<span class="ql-repair-phase-line{% if _done %} is-done{% endif %}"></span>{% endif %}
-    {% endfor %}
-  </div>
-  {% endif %}
-
   {% set s = job.status.value %}
   {% set _review_thing = labels.discard_review_label(job) %}
   {% set _review_needs_qobuz = job.execute_kind in ('library', 'new_releases', 'upgrade', 'repair', 'collection_restore') %}

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_job_labels.html" as labels %}
 {% block title %}Repair history - Qobuz Librarian{% endblock %}
 {% block content %}
 
@@ -10,34 +11,30 @@
   <a href="/repair" class="ql-page-action ql-inline-link">Back to Repair</a>
 </header>
 
-{% if entries %}
-<p class="ql-repair-history-summary">
-  {% if entries | length == 1 %}1 replaced track.{% elif entries | length >= 500 %}The {{ entries | length }} most recently replaced tracks.{% else %}{{ entries | length }} replaced tracks.{% endif %}
-</p>
-<ul class="ql-repair-history-list">
-  {% for e in entries %}
-  <li class="ql-repair-history-row">
-    <div class="ql-repair-entry">
-      <span class="ql-repair-entry-main">
-        <span class="ql-repair-title">{{ e.title }}</span>
-        <span class="ql-repair-meta">{{ e.artist }} · {{ e.album }}</span>
+{% if repairs %}
+<p class="ql-repair-history-summary">{{ labels.format_count(track_count) }} track{{ 's' if track_count != 1 }} replaced in {{ labels.format_count(album_count) }} album{{ 's' if album_count != 1 }}.{% if more %} The newest {{ repairs | length }} repairs are listed.{% endif %}</p>
+<div class="ql-activity-list">
+  {% for r in repairs %}
+  <details class="ql-repair-run">
+    <summary class="ql-activity-row ql-history-row">
+      {{ labels.kind_tile({'execute_kind': 'repair', 'execute_args': {'cover': r.cover}}, 'ql-job-tile--done') }}
+      <span class="ql-activity-main">
+        <span class="ql-row-title">{{ r.artist }} · {{ r.album }}</span>
+        <span class="ql-row-meta">{{ r.tracks | length }} track{{ 's' if r.tracks | length != 1 }} replaced</span>
       </span>
-      <span class="ql-repair-time">{{ e.when }}</span>
-    </div>
-  </li>
+      <span class="ql-activity-side">
+        <span class="ql-activity-time tabular-nums"{% if r.when_exact %} title="{{ r.when_exact }}"{% endif %}>{{ r.when }}</span>
+        <span class="ql-review-chevron" aria-hidden="true"></span>
+      </span>
+    </summary>
+    <ul class="ql-repair-tracks">
+      {% for title in r.tracks %}<li>{{ title }}</li>{% endfor %}
+    </ul>
+  </details>
   {% endfor %}
-</ul>
-{% else %}
-<div class="ql-empty-state ql-empty-state--repair">
-  <span class="ql-state-icon" aria-hidden="true">
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M6 7.5h12"/>
-      <path d="M8 12h8"/>
-      <path d="M10.5 16.5h3"/>
-    </svg>
-  </span>
-  <p class="ql-empty-title">Nothing repaired yet.</p>
 </div>
+{% else %}
+<p class="ql-empty-state">Nothing repaired yet.</p>
 {% endif %}
 
 </div>

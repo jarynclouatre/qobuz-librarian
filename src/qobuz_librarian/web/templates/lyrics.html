@@ -3,49 +3,34 @@
 {% block content_max %}max-w-5xl{% endblock %}
 {% block content %}
 
-<div class="ql-tool-page">
+<div id="lyrics-page" class="ql-tool-page" data-job-surface="/lyrics">
   <header class="ql-page-header">
     <h1>Lyrics</h1>
   </header>
 
   {% include "_writes_paused_notice.html" %}
 
-  {# Same reason as the Downsample page: this describes a job it does not
-     watch. Poll while there is one, and the replacement stops polling once
-     there isn't. #}
-  <div id="lyrics-body" class="ql-tool-body"{% if lyrics_running %} hx-get="/lyrics"
-       hx-trigger="every 3s" hx-target="#lyrics-body"
-       hx-select="#lyrics-body" hx-swap="outerHTML"{% endif %}>
+  <div class="ql-tool-body">
 
+  {% if lyrics_running %}
+  {% with job = lyrics_running, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
+  {% else %}
   <div class="ql-work-status">
-    <span class="ql-status-chip {% if lyrics_running %}is-info{% elif lyrics_failed %}is-error{% elif have_lyrics %}is-neutral{% else %}is-warning{% endif %}">
-      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Queued{% elif lyrics_running %}Scanning{% elif lyrics_failed %}Failed{% elif not have_lyrics %}Not installed{% elif lyrics_stopped %}{% if lyrics_stopped.interrupted_by_restart %}Interrupted{% else %}Stopped{% endif %}{% elif last_run %}Ready{% else %}Not scanned yet{% endif %}
+    <span class="ql-status-chip {% if lyrics_failed %}is-error{% elif have_lyrics %}is-neutral{% else %}is-warning{% endif %}">
+      {% if lyrics_failed %}Failed{% elif not have_lyrics %}Not installed{% elif lyrics_stopped %}{% if lyrics_stopped.interrupted_by_restart %}Interrupted{% else %}Stopped{% endif %}{% elif last_run %}Ready{% else %}Not scanned yet{% endif %}
     </span>
-    {% if lyrics_running or lyrics_failed or (have_lyrics and (last_run or lyrics_stopped)) %}
-    <span>
-      {% if lyrics_running and lyrics_running.status.value == 'pending' %}Starts when the current job finishes.{% elif lyrics_running %}Fetching lyrics across your library…{% elif lyrics_failed %}The last lyrics scan needs attention.{% elif lyrics_stopped %}The next scan carries on from where it stopped.{% else %}Last lyrics scan {{ last_run }}{% if lyrics_summary %}: {{ lyrics_summary }}{% else %}.{% endif %}{% endif %}
-    </span>
-    {% endif %}
-    {% if lyrics_running %}<a href="/jobs/{{ lyrics_running.id }}">Watch progress →</a>{% endif %}
-    {% if have_lyrics and not lyrics_running %}
-    <span>
-      Output: {{ lyrics_format }}. Providers: {{ providers }}.
-      <a href="/settings#f-LYRICS_PROVIDERS">Change</a>
-    </span>
+    {% if have_lyrics and lyrics_stopped %}
+    <span>{{ lyrics_stopped_line }} <a href="/jobs/{{ lyrics_stopped.id }}" class="ql-inline-link">Details</a></span>
+    {% elif have_lyrics and last_run and not lyrics_failed %}
+    <span>Last scan {{ last_run }}{% if lyrics_summary %}: {{ lyrics_summary }}{% else %}.{% endif %}{% if lyrics_done %} <a href="/jobs/{{ lyrics_done.id }}" class="ql-inline-link">Details</a>{% endif %}</span>
     {% endif %}
   </div>
 
   {% if have_lyrics %}
-  {% if not lyrics_running %}
   {% if lyrics_failed %}
   <div class="ql-tool-note ql-tool-note-warning" role="alert">
     <p class="ql-tool-note-title">Last lyrics scan failed</p>
-    <p>{{ lyrics_failed.error or lyrics_failed.summary }} <a href="/jobs/{{ lyrics_failed.id }}" class="ql-inline-link">Open details →</a></p>
-  </div>
-  {% elif lyrics_stopped and lyrics_stopped.summary %}
-  <div class="ql-tool-note ql-tool-note-info">
-    <p class="ql-tool-note-title">Last lyrics scan {% if lyrics_stopped.interrupted_by_restart %}interrupted{% else %}stopped{% endif %}</p>
-    <p>{{ lyrics_stopped.summary }} <a href="/jobs/{{ lyrics_stopped.id }}" class="ql-inline-link">Open details →</a></p>
+    <p>{{ lyrics_failed.error or lyrics_failed.summary }} <a href="/jobs/{{ lyrics_failed.id }}" class="ql-inline-link">Details</a></p>
   </div>
   {% endif %}
   <form action="/lyrics" method="post" data-busy-submit>
@@ -69,11 +54,18 @@
         </span>
         <input type="checkbox" name="rescan" id="cb-rescan" class="ql-toggle shrink-0">
       </label>
+      <div class="ql-setting-row">
+        <span class="ql-setting-main">
+          <span class="ql-setting-title">Written to {{ lyrics_format|lower }}</span>
+          <span class="ql-setting-help">{{ providers }}</span>
+        </span>
+        <a href="/settings#f-LYRICS_PROVIDERS" class="ql-inline-link text-sm shrink-0">Change</a>
+      </div>
     </div>
     <section class="ql-work-card">
       <div class="ql-work-card-copy">
         <p class="ql-work-card-title">Scan library for lyrics</p>
-        <p class="ql-work-card-text">Missing lyrics are written to {{ lyrics_format|lower }}, and plain lyrics are replaced when synced ones are found.</p>
+        <p class="ql-work-card-text">Plain lyrics are replaced when synced ones are found.</p>
       </div>
       <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
               data-confirm="Start a library-wide lyrics scan? Missing lyrics will be written to {{ lyrics_format|lower }} as the scan runs."
@@ -82,7 +74,6 @@
               data-confirm-action="Start scan">Start lyrics scan</button>
     </section>
   </form>
-  {% endif %}
   {% else %}
   <section class="ql-work-card">
     <div class="ql-work-card-copy">
@@ -90,6 +81,7 @@
       <p class="ql-work-card-text">Run <code>pip install 'syncedlyrics&gt;=1.0'</code> in the Python environment Qobuz Librarian runs from, or <code>pipx inject qobuz-librarian 'syncedlyrics&gt;=1.0'</code> for a pipx install, then restart the app.</p>
     </div>
   </section>
+  {% endif %}
   {% endif %}
 
   </div>

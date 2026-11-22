@@ -2038,11 +2038,12 @@ def approve(
             if parked is not None:
                 parked.log_lines = job.log_lines
             job.log_lines = []
-        # Restart the elapsed clock at approve so the execute phase (downloading /
-        # repairing) times itself; otherwise it keeps counting from the scan
-        # start and folds in however long the results sat awaiting review, making
-        # "Downloading · 1:17" read as download time when it was mostly browsing.
-        job.started_at = time.time()
+        # The execute phase (downloading / repairing) times itself from the
+        # worker's claim; otherwise it keeps counting from the scan start and
+        # folds in however long the results sat awaiting review and the run
+        # then waited in the queue, making "Downloading · 1:17" read as
+        # download time when it was mostly browsing and waiting.
+        job.started_at = None
         # Drop the scan's last progress snapshot for the same reason: it
         # would stand in for the execute phase until its first push.
         job.progress_phase = ""

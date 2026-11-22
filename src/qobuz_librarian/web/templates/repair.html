@@ -3,7 +3,7 @@
 {% block content_max %}max-w-6xl{% endblock %}
 {% block content %}
 
-<div id="repair-page" class="ql-tool-page ql-tool-page--wide">
+<div id="repair-page" class="ql-tool-page ql-tool-page--wide" data-job-surface="/repair">
   {% set review_parked = repair_job and repair_job.status.value == 'awaiting_review' %}
   <header class="ql-page-header{% if review_parked %} ql-page-header--split{% endif %}">
     <h1>Repair</h1>
@@ -23,6 +23,7 @@
   {% include "_writes_paused_notice.html" %}
 
 {% if error %}<div class="ql-flash ql-flash-warning" data-flash><span>{{ error }}</span></div>{% endif %}
+{% with error = None, job = None, embedded_surface = true %}{% include "_review_banners.html" %}{% endwith %}
 
 {% set _launcher = not repair_job or repair_job.status.value in ('failed', 'canceled') %}
 {% if not qobuz_ready and not _launcher %}
@@ -45,6 +46,11 @@
 <div class="ql-work-status" role="alert">
   <span class="ql-status-chip is-error">Repair failed</span>
   {% if not repair_job.candidates %}<span>No repair choices were saved from that run.</span>{% endif %}
+</div>
+{% elif repair_job.status.value == 'canceled' and (repair_job.phase == 'execute' or not repair_job.execute_args.get('_scan_finished_at')) %}
+{# A discarded review says so in its own summary. #}
+<div class="ql-work-status">
+  <span class="ql-status-chip is-neutral">{{ 'Repair' if repair_job.phase == 'execute' else 'Scan' }} cancelled</span>
 </div>
 {% endif %}
 {% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}

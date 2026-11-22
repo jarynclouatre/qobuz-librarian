@@ -1494,9 +1494,9 @@ def test_upgrade_saved_review_respects_hidden_candidates_and_clears_its_dot(
     monkeypatch.setattr(
         "qobuz_librarian.quality.upgrade_state.load", lambda: state)
 
-    first = client.post("/upgrade/review", follow_redirects=False)
-    job_id = first.headers["location"].removeprefix("/jobs/")
-    job = job_mgr.registry.get(job_id)
+    client.post("/upgrade/review", follow_redirects=False)
+    [job] = [j for j in job_mgr.registry.awaiting_review()
+             if j.execute_kind == "upgrade"]
     keep = next(c["cid"] for c in job.candidates if c["title"] == "Dummy")
     client.post(f"/jobs/{job.id}/select", data={"cid": keep, "checked": "1"})
     client.post(f"/jobs/{job.id}/hide", data={"artist": "Portishead"})
@@ -1511,12 +1511,9 @@ def test_upgrade_saved_review_respects_hidden_candidates_and_clears_its_dot(
     assert review_badges.snapshot()["upgrade"] is False
     assert saved_reviews._upgrade_state_summary()["count"] == 1
 
-    second = client.post("/upgrade/review", follow_redirects=False)
-    assert second.headers["location"] == first.headers["location"]
-    assert len([
-        j for j in job_mgr.registry.awaiting_review()
-        if j.execute_kind == "upgrade"
-    ]) == 1
+    client.post("/upgrade/review", follow_redirects=False)
+    assert [j for j in job_mgr.registry.awaiting_review()
+            if j.execute_kind == "upgrade"] == [job]
 
     state["candidates"][0] = {**state["candidates"][0],
                               "detail": "16-bit/44.1 kHz -> 24-bit/192 kHz"}
@@ -1778,8 +1775,9 @@ def test_first_downsample_prompts_for_keep_choice_then_saves_it(
     monkeypatch.setattr(
         "qobuz_librarian.library.downsample_state.load", lambda: state)
 
-    first = client.post("/downsample/review", follow_redirects=False)
-    job = job_mgr.registry.get(first.headers["location"].removeprefix("/jobs/"))
+    client.post("/downsample/review", follow_redirects=False)
+    [job] = [j for j in job_mgr.registry.awaiting_review()
+             if j.execute_kind == "downsample"]
     client.post(f"/jobs/{job.id}/select",
                 data={"cid": job.candidates[0]["cid"], "checked": "1"})
 

@@ -1,9 +1,13 @@
 """Routes for the Repair page."""
 import asyncio
+import time
+import urllib.parse
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from qobuz_librarian import config as cfg
 from qobuz_librarian import repair_log
 from qobuz_librarian.api.auth import QobuzAccess
 from qobuz_librarian.library import scan_checkpoint
@@ -23,6 +27,8 @@ from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
 
+_HISTORY_ROWS = 200
+
 
 def _repair_current_job():
     """The repair job that owns the /repair surface right now: the most recent
@@ -30,17 +36,19 @@ def _repair_current_job():
     the surface is idle (show the start-or-resume form). This is what lets
     /repair stay the single authoritative repair page across every phase instead
     of handing a parked review off to /jobs/{id}, and it's why a review is never
-    hidden behind a "Start scan" button that would silently discard it."""
-    states = (job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
-              job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.RUNNING,
+    hidden behind a "Start scan" button that would silently discard it.
+    A run of some of the flagged albums is shown over the newer review it
+    left the rest in, until it ends."""
+    active = (job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
+              job_mgr.JobStatus.RUNNING)
+    states = (*active, job_mgr.JobStatus.AWAITING_REVIEW,
               # A run that failed or was cancelled is part of the phase set
               # too, or the page would go back to its idle launcher on the next
               # reload.
               job_mgr.JobStatus.FAILED, job_mgr.JobStatus.CANCELED)
+    repairs = [j for j in job_mgr.registry.all() if j.execute_kind == "repair"]
     cur = None
-    for j in job_mgr.registry.all():
-        if j.execute_kind != "repair":
-            continue
+    for j in [j for j in repairs if j.status in active] or repairs:
         if cur is None or (j.created_at or 0) >= (cur.created_at or 0):
             cur = j
     # A run that finished after a failed or interrupted one supersedes it.
@@ -57,6 +65,11 @@ async def repair_page(request: Request, page: int = 1):
            "page": "repair", "repair_job": rjob,
            "error": rendering._notice_text(request.query_params.get("error")),
            "JobStatus": job_mgr.JobStatus}
+    ended = scans._ended_run(request, "repair", (
+        job_mgr.JobStatus.DONE, job_mgr.JobStatus.FAILED,
+        job_mgr.JobStatus.CANCELED))
+    if ended is not rjob:
+        ctx["ended_run"] = ended
     if rjob is not None:
         ctx["queue_wait"] = job_labels._queue_wait(rjob)
         ctx.update(review_pages._review_context(rjob, page))
@@ -140,13 +153,38 @@ async def repair_scan(request: Request):
     return RedirectResponse(url="/repair", status_code=303)
 
 
+def _repair_history():
+    """The Repair history page's rows and totals."""
+    repairs = repair_log.read_repair_log_albums()
+    context = {
+        "track_count": sum(len(r["tracks"]) for r in repairs),
+        "album_count": len({(r["artist"], r["album"]) for r in repairs}),
+        "more": len(repairs) > _HISTORY_ROWS,
+        "repairs": repairs[:_HISTORY_ROWS],
+    }
+    for r in context["repairs"]:
+        try:
+            ts = time.mktime(time.strptime(r["when"], "%Y-%m-%d %H:%M"))
+            r["when"], r["when_exact"] = job_labels._when_label(ts)
+        except (ValueError, OverflowError):
+            pass
+        if rendering._local_album_art(
+                Path(cfg.MUSIC_ROOT) / r["artist"] / r["album"]) is not None:
+            r["cover"] = "/repair/history/art?" + urllib.parse.urlencode(
+                {"artist": r["artist"], "album": r["album"]})
+    return context
+
+
 @router.get("/repair/history", response_class=HTMLResponse)
 async def repair_history(request: Request):
-    """Tracks Repair has replaced in place."""
-    # Walks lines on the data volume, so offload to match the dashboard's pattern
-    # and keep the event loop free if the file is sizable.
+    """Albums Repair has replaced tracks in."""
+    # Walks lines on the data volume and looks in each album folder for a cover.
     loop = asyncio.get_running_loop()
-    entries = await loop.run_in_executor(
-        None, lambda: repair_log.read_repair_log_entries(limit=500))
+    context = await loop.run_in_executor(None, _repair_history)
     return rendering._tr(request, "repair_history.html",
-               {"page": "repair", "entries": entries})
+               {"page": "repair", **context})
+
+
+@router.get("/repair/history/art")
+def repair_history_art(artist: str, album: str):
+    return rendering._library_art_response(Path(cfg.MUSIC_ROOT) / artist / album)

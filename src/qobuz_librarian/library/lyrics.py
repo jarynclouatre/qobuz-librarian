@@ -188,7 +188,7 @@ def stop_summary(summary, lyrics_format):
     waiting = (f" {plural(left, 'track')} left for NetEase "
                f"{'is' if left == 1 else 'are'} looked up again by the next run."
                if left else "")
-    return (f"{STOPPED}checking {summary['processed'] + left} of "
+    return (f"{STOPPED}checking {summary['processed'] + left:,} of "
             f"{plural(summary['candidate_total'], 'track')}. "
             f"{wrote[0].upper()}{wrote[1:]}{waiting}")
 

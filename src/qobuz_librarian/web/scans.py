@@ -63,6 +63,17 @@ def _last_finished(kind, statuses=job_mgr.TERMINAL):
     return latest
 
 
+def _ended_run(request, kind, statuses=(job_mgr.JobStatus.DONE,
+                                        job_mgr.JobStatus.FAILED)):
+    """The ``kind`` run whose page watched it to its end and now asks for
+    itself again with it, or None."""
+    job = job_mgr.registry.get(request.query_params.get("finished", ""))
+    if (job is not None and job.execute_kind == kind and job.phase == "execute"
+            and job.status in statuses):
+        return job
+    return None
+
+
 async def _submit_scan_deduped_async(job, scan_fn, execute_fn, *kinds, **kw):
     """Run _submit_scan_deduped off the event loop."""
     loop = asyncio.get_running_loop()

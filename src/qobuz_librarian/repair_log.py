@@ -750,17 +750,18 @@ def append_repair_log(entries):
         return False
 
 
-def read_repair_log_entries(limit=None):
-    """Parse the replaced-tracks log into dicts, newest-first.
+def read_repair_log_albums():
+    """Parse the replaced-tracks log into one dict per album repair,
+    newest-first, with that repair's track titles in the order it wrote them.
 
     Each data line is ``YYYY-MM-DD HH:MM  |  Artist  |  Album  |  Track``;
     header (``#`` comments) and blank lines are skipped, and lines that don't
     split into four pipe fields are dropped quietly rather than poisoning the
-    view. ``limit`` caps the most recent entries (None for everything).
+    view.
     """
     if not cfg.REPAIR_LOG_PATH.exists():
         return []
-    entries = []
+    repairs = {}
     try:
         with cfg.REPAIR_LOG_PATH.open("r", encoding="utf-8",
                                       errors="replace") as f:
@@ -772,11 +773,10 @@ def read_repair_log_entries(limit=None):
                 if len(parts) != 4:
                     continue
                 when, artist, album, title = parts
-                entries.append({"when": when, "artist": artist,
-                                "album": album, "title": title})
+                repair = repairs.setdefault((when, artist, album), {
+                    "when": when, "artist": artist, "album": album,
+                    "tracks": []})
+                repair["tracks"].append(title)
     except OSError:
         return []
-    entries.reverse()
-    if limit is not None:
-        entries = entries[:limit]
-    return entries
+    return list(reversed(repairs.values()))

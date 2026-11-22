@@ -1,0 +1,27 @@
+{% import "_job_labels.html" as labels %}
+{% set _banner = 'ql-notice ql-notice-warning' ~ ('' if embedded_surface|default(false) else ' ql-job-banner') %}
+{% if ended_run %}
+<div class="ql-flash ql-flash-{{ 'warning' if ended_run.attention or ended_run.status.value == 'failed' else 'info' }}" data-flash>
+  <span>{{ [ended_run.summary, ended_run.error]|select|unique(true)|join(' ') }} <a href="/jobs/{{ ended_run.id }}" class="ql-inline-link">Details</a></span>
+</div>
+{% endif %}
+
+{% if stale %}
+<div class="{{ _banner }}" data-flash>
+  <span>This job is no longer awaiting review. The previous click already
+    started it.</span>
+</div>
+{% endif %}
+
+{% if error %}
+<div class="{{ _banner }}" data-flash>
+  <span>{{ error }}</span>
+</div>
+{% endif %}
+
+{% if noselection and job and job.status.value == 'awaiting_review' %}
+<div class="{{ _banner }}" data-flash>
+  {% set _review_thing = labels.discard_review_label(job) %}
+  <span>Nothing was selected. Choose at least one item, or use Discard {{ _review_thing }} to remove this review.</span>
+</div>
+{% endif %}

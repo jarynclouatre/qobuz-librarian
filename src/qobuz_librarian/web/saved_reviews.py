@@ -5,6 +5,7 @@ import threading
 
 from fastapi.responses import RedirectResponse
 
+from qobuz_librarian.integrations import downsample_engine
 from qobuz_librarian.library import candidate_premise, downsample_state, generation_state
 from qobuz_librarian.quality import upgrade_state
 from qobuz_librarian.ui_cli.errors import plural
@@ -12,8 +13,11 @@ from qobuz_librarian.web import (
     job_labels,
     job_persistence,
     job_runs,
+    qobuz_access,
     review_badges,
+    runtime,
     settings_store,
+    storage,
     write_gate,
 )
 from qobuz_librarian.web import jobs as job_mgr
@@ -47,7 +51,7 @@ def _upgrade_state_summary():
     candidates = kept
     saved_quality_signature = str(state.get("quality_signature") or "")
     current_quality_signature = _effective_upgrade_quality_signature()
-    updated_at = state.get("updated_at")
+    scanned_at = state.get("scanned_at")
     return {
         "complete": complete,
         "discarded": discarded,
@@ -76,9 +80,9 @@ def _upgrade_state_summary():
             else "library"
         ),
         # Results are listed only once complete, and only then given an age.
-        "updated": (job_labels._format_age(updated_at)
-                    if complete and updated_at else None),
-        "updated_at": updated_at,
+        "updated": (job_labels._format_age(scanned_at)
+                    if complete and scanned_at else None),
+        "updated_at": state.get("updated_at"),
     }
 
 
@@ -113,7 +117,7 @@ def _downsample_state_summary():
     discarded = bool(candidates) and not kept
     held_back = len(candidates) - len(kept)
     candidates = kept
-    updated_at = state.get("updated_at")
+    scanned_at = state.get("scanned_at")
     return {
         "complete": complete,
         "discarded": discarded,
@@ -126,8 +130,9 @@ def _downsample_state_summary():
         # age out either, so a saved run is stale only when it did not finish.
         "status": "current" if complete else "stale",
         "stale": bool(state.get("updated_at") and not complete),
-        "updated": job_labels._format_age(updated_at) if updated_at else None,
-        "updated_at": updated_at,
+        "updated": job_labels._format_age(scanned_at) if scanned_at else None,
+        "scanned_at": scanned_at,
+        "updated_at": state.get("updated_at"),
     }
 
 
@@ -319,19 +324,24 @@ def _saved_review_summary(surface, count):
     return f"{plural(count, 'album')} can be {surface}d."
 
 
-def _is_saved_review_title(surface, title):
-    return title in (_SAVED_REVIEW_TITLES.get(surface),
-                     _SAVED_REVIEW_TITLES_PRIOR.get(surface))
+def _is_saved_review(job):
+    surface = job.execute_kind
+    return (getattr(job, "_saved_review_signature", None) is not None
+            or job.title in (_SAVED_REVIEW_TITLES.get(surface),
+                             _SAVED_REVIEW_TITLES_PRIOR.get(surface)))
+
+
+def _parked_reviews(surface):
+    """The surface's parked reviews, newest first."""
+    return [job for job in reversed(job_mgr.registry.awaiting_review())
+            if job.execute_kind == surface]
 
 
 def _stale_saved_review_job(surface):
-    review_jobs = [
-        job for job in job_mgr.registry.awaiting_review()
-        if job.execute_kind == surface
-    ]
-    for job in reversed(review_jobs):
-        if (getattr(job, "_saved_review_signature", None) is not None
-                or _is_saved_review_title(surface, job.title)):
+    for job in _parked_reviews(surface):
+        # A finished Downsample refresh saved what its own review lists.
+        if (_is_saved_review(job)
+                or surface == "downsample" and not job.unchecked_artists):
             return job
     return None
 
@@ -446,8 +456,7 @@ def _sync_saved_review_before_approve(job):
     surface = job.execute_kind
     if surface not in _SAVED_REVIEW_TITLES:
         return job
-    if (getattr(job, "_saved_review_signature", None) is None
-            and not _is_saved_review_title(surface, job.title)):
+    if not _is_saved_review(job):
         return job
     with _SAVED_REVIEW_LOCK:
         state = _saved_state_summary(surface)
@@ -471,8 +480,7 @@ def open_saved_review(job):
     surface = job.execute_kind
     if (surface not in _SAVED_REVIEW_TITLES
             or job.status != job_mgr.JobStatus.AWAITING_REVIEW
-            or (getattr(job, "_saved_review_signature", None) is None
-                and not _is_saved_review_title(surface, job.title))):
+            or not _is_saved_review(job)):
         return job
     with _SAVED_REVIEW_LOCK:
         state = _saved_state_summary(surface)
@@ -487,7 +495,7 @@ def open_saved_review(job):
         return _sync_saved_review_job(job, surface, state, signature) or job
 
 
-def _review_job_from_state(surface, state):
+def _review_job_from_state(surface, state, *, create=True):
     with _SAVED_REVIEW_LOCK:
         claimed = _active_saved_review_claim(surface, state)
         if claimed is not None:
@@ -499,6 +507,8 @@ def _review_job_from_state(surface, state):
         stale = _stale_saved_review_job(surface)
         if stale is not None:
             return _sync_saved_review_job(stale, surface, state, signature)
+        if not create:
+            return None
         job = job_mgr.Job(title=_SAVED_REVIEW_TITLES[surface])
         job.kind = "scan"
         job.execute_kind = surface
@@ -519,7 +529,7 @@ def _review_job_from_state(surface, state):
         return job
 
 
-def _review_job_from_current_saved_state(surface):
+def _review_job_from_current_saved_state(surface, *, create=True):
     """Build or reuse one review from a state snapshot taken atomically.
 
     Hide and approval use the same lock. A delayed request therefore cannot
@@ -534,4 +544,52 @@ def _review_job_from_current_saved_state(surface):
             return None
         if surface == "upgrade" and state.get("stale"):
             return None
-        return _review_job_from_state(surface, state)
+        return _review_job_from_state(surface, state, create=create)
+
+
+def _partial_refresh_review(state):
+    """A Downsample refresh that could not check every artist saves nothing,
+    so until a newer scan its own review is all that lists what it found."""
+    for job in _parked_reviews("downsample"):
+        if (job.unchecked_artists and not _is_saved_review(job)
+                and job.created_at > (state["scanned_at"] or 0)):
+            return job
+    return None
+
+
+def page_review(surface):
+    """The parked review the Upgrade or Downsample page lists, built from the
+    saved results if none is parked, or None for the page to say why not."""
+    if surface == "upgrade":
+        available = runtime._upgrade_available()
+        create = qobuz_access._qobuz_ready()
+    else:
+        available = downsample_engine.HAVE_DOWNSAMPLE
+        create = True
+    if not available:
+        return None
+    create = (create and not storage.music_mounted_read_only()
+              and not write_gate._web_writes_paused())
+    with _SAVED_REVIEW_LOCK:
+        if any(job.execute_kind == surface
+               and job.status != job_mgr.JobStatus.AWAITING_REVIEW
+               for job in job_mgr.registry.pending_and_running()):
+            return None
+        job = (_partial_refresh_review(_saved_state_summary(surface))
+               if surface == "downsample" else None)
+        job = job or _review_job_from_current_saved_state(
+            surface, create=create)
+    if job is None or job.status != job_mgr.JobStatus.AWAITING_REVIEW:
+        return None
+    return job
+
+
+def review_location(job):
+    """Where ``job``, a parked Upgrade or Downsample review, is shown when it
+    is not its own job page, or None."""
+    with _SAVED_REVIEW_LOCK:
+        shown = page_review(job.execute_kind)
+        if shown is not None and (shown is job or _is_saved_review(job)):
+            return f"/{job.execute_kind}"
+        shown = open_saved_review(job)
+    return None if shown is job else f"/jobs/{shown.id}"

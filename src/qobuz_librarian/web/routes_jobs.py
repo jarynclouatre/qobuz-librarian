@@ -10,7 +10,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import (
-    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -114,12 +113,11 @@ async def job_page(request: Request, job_id: str,
             and job.execute_kind in ("upgrade", "downsample")
             and job_mgr.registry.get(job.id) is job):
         loop = asyncio.get_running_loop()
-        shown = await loop.run_in_executor(
-            None, lambda: saved_reviews.open_saved_review(job))
-        if shown is not job:
+        shown_at = await loop.run_in_executor(
+            None, lambda: saved_reviews.review_location(job))
+        if shown_at:
             query = f"?{request.url.query}" if request.url.query else ""
-            return RedirectResponse(url=f"/jobs/{shown.id}{query}",
-                                    status_code=303)
+            return RedirectResponse(url=shown_at + query, status_code=303)
     review_badge_ack = _review_badge_ack_for(job)
     nav_page, _return_href, _return_label = job_labels._job_nav_destination(job)
     shown_attention = job.attention
@@ -281,13 +279,10 @@ def _error_redirect(dest, message, suffix=""):
 
 
 def _review_dest(job):
-    # Repair and Library stay on their single surfaces through the executing
-    # phase; every other kind (new-release checks included) keeps using the
-    # job page.
-    if job.execute_kind == "repair":
-        return "/repair"
-    if job.execute_kind == "library":
-        return "/library"
+    # These stay on their single surfaces through the executing phase; every
+    # other kind (new-release checks included) keeps using the job page.
+    if job.execute_kind in ("library", "repair", "upgrade", "downsample"):
+        return f"/{job.execute_kind}"
     return f"/jobs/{job.id}"
 
 
@@ -633,7 +628,7 @@ async def _approve(request: Request, job_id: str):
             and (job.execute_args or {}).get("quality_signature")
             != saved_reviews._effective_upgrade_quality_signature()):
         return _error_redirect(
-            f"/jobs/{job.id}",
+            dest,
             "Download quality changed since this Upgrade review was "
             "built. Run a Library refresh before approving it.")
     # A library review approves per tab: the button acts on the tab the user
@@ -830,12 +825,12 @@ _SELECTABLE_KINDS = review_pages._TRIAGE_KINDS + (
 def _rebuild_results_hint(execute_kind):
     """Where the results behind a review are rebuilt.
 
-    The review screen itself carries no refresh control, so a message telling
-    the user to refresh has to name the page that does, or it sends them back
-    to press the same button for the same failure.
+    A message telling the user to refresh has to name the control that does,
+    or it sends them back to press the same button for the same failure.
     """
     if execute_kind == "downsample":
-        return "Refresh results on the Downsample page, then try again."
+        return ("Refresh results with the button beside the Downsample title, "
+                "then try again.")
     if execute_kind in ("library", "upgrade"):
         return ("Refresh the Library, which rebuilds these results, then try "
                 "again.")
@@ -1176,21 +1171,9 @@ async def job_candidate_art(job_id: str, cid: str):
              for c in job.candidates if c.get("cid") == cid),
             None,
         )
-    art = rendering._local_album_art(album_dir) if album_dir else None
-    if art is None:
+    if not album_dir:
         return Response(status_code=404)
-    try:
-        inside = art.resolve().is_relative_to(Path(cfg.MUSIC_ROOT).resolve())
-    except OSError:
-        inside = False
-    if not inside:
-        return Response(status_code=404)
-    return FileResponse(
-        art,
-        # Covers change when the album is re-imported, which also changes the
-        # review it is shown in, so a few minutes of caching costs nothing.
-        headers={"Cache-Control": "private, max-age=300"},
-    )
+    return rendering._library_art_response(album_dir)
 
 
 @router.post("/jobs/{job_id}/hide", response_class=HTMLResponse)

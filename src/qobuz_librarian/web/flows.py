@@ -4262,8 +4262,7 @@ class _UpgradesRun:
             self.job.attention = "processing"
             self.job.error = "A step after the download did not finish; see the job log."
         elif self.failed:
-            self.job.error = (f"{plural(self.failed, 'album')} couldn't be upgraded"
-                              f"{_folders_denied_note(self.failed, self.denied)}.")
+            self.job.error = f"{self._not_upgraded()}."
         elif self.changed:
             self.job.error = (_changed_since_review(self.changed)
                               + "; refresh Upgrade to check again.")
@@ -4307,6 +4306,11 @@ class _UpgradesRun:
         self.job.summary = msg
         log.info(msg)
 
+    def _not_upgraded(self):
+        return (f"{named_albums(self.failed_cands + self.refused_cands)} "
+                "couldn't be upgraded"
+                f"{_folders_denied_note(self.failed, self.denied)}")
+
     def _finish(self):
         retry_saved = _return_upgrade_picks(
             self.failed_cands, self.refused_cands, self.job.execute_args)
@@ -4323,10 +4327,7 @@ class _UpgradesRun:
                     "updated in Beets"
                 )
             if self.failed:
-                problems.append(
-                    f"{plural(self.failed, 'album')} couldn't be upgraded"
-                    f"{_folders_denied_note(self.failed, self.denied)}"
-                )
+                problems.append(self._not_upgraded())
             if self.changed:
                 problems.append(_changed_since_review(self.changed))
             if self.quality_attention:
@@ -6195,7 +6196,7 @@ def run_library_lyrics(job, *, rescan=False, synced_only=False):
     if res.get("stopped") and res.get("stop_stage") == "index":
         job.summary = (
             f"{lyrics.STOPPED}reading the lyrics of "
-            f"{min(total, int(res.get('processed', 0)))} of "
+            f"{min(total, int(res.get('processed', 0))):,} of "
             f"{plural(total, 'track')}, before any lookup. Nothing was written.")
         log.info(job.summary)
         return

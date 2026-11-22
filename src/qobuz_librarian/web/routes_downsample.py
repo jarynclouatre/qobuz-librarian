@@ -15,6 +15,7 @@ from qobuz_librarian.web import (
     refusals,
     rendering,
     review_badges,
+    review_pages,
     saved_reviews,
     scans,
 )
@@ -24,8 +25,12 @@ router = APIRouter()
 
 
 @router.get("/downsample", response_class=HTMLResponse)
-async def downsample_page(request: Request):
+async def downsample_page(request: Request, page: int = 1, q: str = "",
+                          stale: bool = False, noselection: bool = False):
     badge_generation = review_badges.ready_generation("downsample")
+    loop = asyncio.get_running_loop()
+    review = await loop.run_in_executor(
+        None, lambda: saved_reviews.page_review("downsample"))
     state = saved_reviews._downsample_state_summary()
     latest = scans._last_finished("downsample")
     if (latest and state["complete"]
@@ -41,21 +46,31 @@ async def downsample_page(request: Request):
     review_parked = any(
         j.execute_kind == "downsample"
         for j in job_mgr.registry.awaiting_review())
-    return rendering._tr(request, "downsample.html", {
+    running = scans._active_scan(
+        "downsample",
+        statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
+                  job_mgr.JobStatus.RUNNING))
+    ctx = {
         "page": "downsample",
         "have_downsample": downsample_engine.HAVE_DOWNSAMPLE,
         "creds_ok": qobuz_access._creds_ok(),
         "downsample_state": state,
         "review_parked": review_parked,
-        "downsample_running": scans._active_scan(
-            "downsample",
-            statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
-                      job_mgr.JobStatus.RUNNING)),
+        "downsample_running": running,
+        "review_job": None if running else review,
+        "downsample_originals_choice": rendering._downsample_originals_choice(),
+        "error": rendering._notice_text(request.query_params.get("error")),
+        "stale": stale, "noselection": noselection,
+        "ended_run": None if failed else scans._ended_run(request, "downsample"),
+        "queue_wait": job_labels._queue_wait(running) if running else None,
         "downsample_failed": failed,
         "downsample_stopped": stopped,
         "last_run": job_labels._tool_last_run_age("downsample"),
-        "hidden_count": hidden_mod.count(hidden_mod.SCOPE_DOWNSAMPLE)},
-        review_badge_ack=("downsample", badge_generation))
+        "hidden_count": hidden_mod.count(hidden_mod.SCOPE_DOWNSAMPLE)}
+    if ctx["review_job"]:
+        ctx.update(review_pages._review_context(review, page, q))
+    return rendering._tr(request, "downsample.html", ctx,
+                         review_badge_ack=("downsample", badge_generation))
 
 
 @router.get("/downsample/hidden", response_class=HTMLResponse)
@@ -86,11 +101,9 @@ async def downsample_review(request: Request):
     if busy is not None:
         return busy
     loop = asyncio.get_running_loop()
-    job = await loop.run_in_executor(
+    await loop.run_in_executor(
         None, lambda: saved_reviews._review_job_from_current_saved_state("downsample"))
-    if job is None:
-        return RedirectResponse(url="/downsample", status_code=303)
-    return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
+    return RedirectResponse(url="/downsample", status_code=303)
 
 
 @router.post("/downsample")
@@ -114,4 +127,4 @@ async def downsample_scan(request: Request):
         "downsample")
     if job is None:
         return scans._scan_submission_failure_response(request, "/downsample")
-    return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
+    return RedirectResponse(url="/downsample", status_code=303)
