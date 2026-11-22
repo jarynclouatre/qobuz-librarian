@@ -55,7 +55,9 @@ mkdir -p music   # skip if QL_MUSIC_DIR points at an existing folder
 docker compose up -d
 ```
 
-Open <http://localhost:8666> and choose a username and password. On **Settings**, paste your Qobuz token and your email or user ID (see below).
+Open <http://localhost:8666> and choose a username and a password of 15 characters or more. On **Settings**, paste your Qobuz token and your email or user ID (see below).
+
+If the music folder already has albums in it, press **Scan library** on the Library page: one scan builds the Missing Albums, Gap Fill, Upgrade and Downsample lists. [Existing libraries](docs/existing-libraries.md) has the folder layout it expects.
 
 `QL_MUSIC_DIR` should hold only music: the app moves and replaces files inside it.
 

@@ -2,7 +2,9 @@
 
 [← README](../README.md)
 
-The CLI runs from the same image and Compose service as the web UI, with no separate install: `docker compose run` starts a one-off container from that service that shares the same volumes, config, and run lock. It uses the same matching engine as the web app, walking gaps album by album with yes/no prompts instead of parking a checklist. Run with no arguments for the menu, or flags to jump straight to a mode. The examples below use Docker; from a `pip`/`pipx` or source install run the same commands with `qobuz-librarian` in place of everything up to and including `cli`. Install straight from the repo with the `[lyrics]` extra for the lyrics walk: `pipx install 'qobuz-librarian[lyrics] @ git+https://github.com/jarynclouatre/qobuz-librarian.git'`.
+The CLI runs from the same image and Compose service as the web UI, with no separate install: `docker compose run` starts a one-off container from that service that shares the same volumes, config, and run lock. It uses the same matching engine as the web app, walking gaps album by album with yes/no prompts instead of a list to tick.
+
+Run with no arguments for the menu, or flags to jump straight to a mode. The examples below use Docker; from a `pip`/`pipx` or source install run the same commands with `qobuz-librarian` in place of everything up to and including `cli`. Install straight from the repo with the `[lyrics]` extra for the lyrics walk: `pipx install 'qobuz-librarian[lyrics] @ git+https://github.com/jarynclouatre/qobuz-librarian.git'`.
 
 ## The run lock
 
@@ -40,7 +42,7 @@ the album's folder gains or loses tracks. Each says how many it left out.
 A real Library walk or Gap Fill run refreshes the collection backup after it
 scans every artist it set out to. A dry run, a walk you stop or interrupt, an
 artist it could not read, or anything left to retry leaves the current backup
-unchanged, so the snapshot always describes a walk that finished. A walk you
+unchanged, so the backup always describes a walk that finished. A walk you
 stop with `s` exits with status 0.
 
 Choose `s` in the menu to open Settings, or use the flag to jump straight in.
@@ -53,7 +55,13 @@ docker compose run --rm -it qobuz-librarian cli --settings
 
 ## Direct downloads
 
-Both ask before anything downloads, so keep `-it`. Search results come 25 at a time, with `m` for more and every album you already own listed from the start, and carry the web app's marks (**In library**, how many tracks of a part-owned album you have, **Other version owned**, **Explicit**). An album URL, or a search whose result you pick by number, shows what is missing and asks `Proceed with downloading N tracks? [y/N]`. `--artist` asks about each incomplete album you own in turn (`y`, `N`, `a` for yes to the rest, `s` to stop) and keeps the albums you approve in the saved queue, so a Ctrl-C leaves them to resume on the next run; it then lists the albums you don't have and asks for the numbers to download. Search in the menu also offers to queue an album; the queue downloads when you leave Search with `q`. A Ctrl-C before then drops the queue, and one during its downloads keeps the rest for the next run. With no terminal attached, an album download stops at its question without downloading anything, and the run exits with status 1.
+Both ask before anything downloads, so keep `-it`. Search results come 25 at a time, with `m` for more and every album you already own listed from the start, and carry the web app's marks (**In library**, how many tracks of a part-owned album you have, **Other version owned**, **Explicit**). An album URL, or a search whose result you pick by number, shows what is missing and asks `Proceed with downloading N tracks? [y/N]`.
+
+`--artist` asks about each incomplete album you own in turn (`y`, `N`, `a` for yes to the rest, `s` to stop) and keeps the albums you approve in the saved queue, so a Ctrl-C leaves them to resume on the next run; it then lists the albums you don't have and asks for the numbers to download.
+
+Search in the menu also offers to queue an album; the queue downloads when you leave Search with `q`. A Ctrl-C before then drops the queue, and one during its downloads keeps the rest for the next run.
+
+With no terminal attached, an album download stops at its question without downloading anything, and the run exits with status 1.
 
 ```bash
 # Download a specific album (URL or "Artist Album" string)

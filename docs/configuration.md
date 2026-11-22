@@ -22,7 +22,7 @@ These settings apply to new jobs. A field you change on the Settings page wins o
 | `QL_MUSIC_DIR` | `./music` | Music library; beets imports into this |
 | `QL_STAGING_DIR` | `./staging` | Scratch space for in-progress downloads |
 | `QL_UPGRADE_BACKUPS` | `./upgrade_backups` | Backups of files Upgrade, Repair and the other tools replace |
-| `QL_COLLECTION_BACKUPS` | `./collection_backups` | Collection snapshots used by Backup & Restore |
+| `QL_COLLECTION_BACKUPS` | `./collection_backups` | Collection backups, saved after a finished Library scan, terminal Library walk or Gap Fill run (**Settings → Collection backup**) |
 | `WEB_PORT` | `8666` | Host port for the web UI |
 
 The bundled `compose.yaml` also hands the folder values you set here to the app, so Settings and Diagnostics can name the host folder. A folder left at its default, or set some other way, shows as the path inside the container, such as `/music`.
@@ -61,7 +61,7 @@ Library review picks up the new path.
 | `ARTWORK` | `both` | Cover art: `sidecar`, `embed`, or `both` |
 | `COLLECTION_BACKUP_DIR` | `/collection_backups` in Compose; app data otherwise | Container path for collection backups from completed Library scans and terminal Library walks and Gap Fill runs |
 | `LASTFM_API_KEY` | unset | Enables the Discover tab; without it the tab does not appear. The key's Last.fm account needs Pro. Also settable on the Settings page, and `LASTFM_API_KEY_FILE` reads it from a file |
-| `AUTO_LIBRARY_SCAN` | `true` | Offer the first Library scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; the manual Resume button still works) |
+| `AUTO_LIBRARY_SCAN` | `true` | Offer the first Library scan on the Search page on first run, and auto-resume an interrupted library scan when the app is idle (`false` turns both off; **Resume scan** still works) |
 | `NEW_RELEASE_CHECK_INTERVAL` | `86400` | How often (seconds) to auto-check for new releases, at least 900; daily (also on Settings) |
 | `NEW_RELEASE_MAX_AGE_DAYS` | `365` | Only flag albums released within this many days as new (`0` = any catalogue newcomer counts, including older releases Qobuz recently added) |
 | `ARTIST_CATALOG_CACHE_TTL` | `604800` | How long (seconds) artist album-lists stay cached; 7 days (also on Settings) |
@@ -126,7 +126,9 @@ Set folder and file naming with `BEETS_PATH_DEFAULT` and `BEETS_PATH_COMP` on th
 BEETS_PATH_DEFAULT='$albumartist/$album ($year)/$track - $title'
 ```
 
-Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian, and may name your own plugins in the folders `config.yaml` lists under `pluginpath`. The app then adds `inline` for its multi-disc folder field, its internal import guards, and `fetchart` unless `ARTWORK` is `embed`, which leaves it out. Plugin settings, such as the replaygain backend, go in `config.yaml`. Extra plugins may need dependencies not bundled in the image; [lastgenre](https://beets.readthedocs.io/en/stable/plugins/lastgenre.html), for example, needs `beets[lastgenre]==2.14.1` installed in the same Python environment. Docker users need a custom image for those additions.
+Set the plugins you choose with `BEETS_PLUGINS`. When set, this list replaces the plugins selected in `config.yaml` for imports run by Qobuz Librarian, and may name your own plugins in the folders `config.yaml` lists under `pluginpath`. The app then adds `inline` for its multi-disc folder field, its internal import guards, and `fetchart` unless `ARTWORK` is `embed`, which leaves it out. Plugin settings, such as the replaygain backend, go in `config.yaml`.
+
+Extra plugins may need dependencies not bundled in the image; [lastgenre](https://beets.readthedocs.io/en/stable/plugins/lastgenre.html), for example, needs `beets[lastgenre]==2.14.1` installed in the same Python environment. Docker users need a custom image for those additions.
 
 For a `pip` or `pipx` installation, install beets 2.14.1 in the same environment. Qobuz Librarian normally finds that environment from the `beet` launcher. If the launcher is an unusual wrapper, set `BEETS_PYTHON` to the absolute path of the Python executable in that environment. Other beets versions are refused.
 
@@ -135,7 +137,7 @@ Treat enabled beets plugins as trusted code. A plugin must finish all database w
 For its own imports, the downloader pins these beets settings regardless of your config:
 
 - `autotag: no` keeps Qobuz's tags
-- `write: no` prevents beets from rewriting media tags during the move
+- `write: no` prevents beets from rewriting media tags during the move, so the replaygain plugin's values stay in the beets database and are not written to the files
 - `move: yes` clears staging, including across filesystems
 - `incremental: no` rescans on retry
 - `duplicate_action: merge` keeps an import from deleting files already in your library
@@ -194,7 +196,9 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 ## Deployment
 
-**Login.** The web UI requires sign-in out of the box. The password is stored as a salted PBKDF2 hash (`0600`, never plaintext) and the session is an `HttpOnly` cookie backed by a persisted token digest. Its name, and the form-security cookie's, carry the port in the address (`ql_session_8666` for `http://nas:8666`), so two instances reached by one host name keep separate sign-ins. New and reset passwords need at least 15 characters, and common or product-name passwords are refused. Set the credentials on the first-visit screen, or seed `WEB_AUTH_USER` / `WEB_AUTH_PASSWORD` in `.env`. Those two double as a password reset: change them and restart. The same policy applies when the password comes from `WEB_AUTH_PASSWORD_FILE`. To reset without env vars, stop the container, delete `.qobuz_web_auth.json` from the data volume, and set new credentials on the next visit.
+**Login.** The web UI requires sign-in out of the box. The password is stored as a salted PBKDF2 hash (`0600`, never plaintext) and the session is an `HttpOnly` cookie backed by a persisted token digest. Its name, and the form-security cookie's, carry the port in the address (`ql_session_8666` for `http://nas:8666`), so two instances reached by one host name keep separate sign-ins.
+
+New and reset passwords need at least 15 characters, and common or product-name passwords are refused. Set the credentials on the first-visit screen, or seed `WEB_AUTH_USER` / `WEB_AUTH_PASSWORD` in `.env`. Those two double as a password reset: change them and restart. The same policy applies when the password comes from `WEB_AUTH_PASSWORD_FILE`. To reset without env vars, stop the container, delete `.qobuz_web_auth.json` from the data volume, and set new credentials on the next visit.
 
 `WEB_AUTH=none` disables login. Use it only on a trusted LAN or behind your own authenticating proxy. The container logs a warning every boot while login is off.
 
@@ -202,19 +206,29 @@ Set `TZ` in `.env` (an IANA name like `America/Edmonton`) so exact timestamps in
 
 **Container probes.** `/healthz` is a process-liveness check. Docker uses `/readyz`, which returns 503 when an existing login cannot be read, the data directory or Queue/History database is unavailable, saved jobs could not be restored, the run lock is unsafe or lost, or shutdown has started. Deliberate write pauses such as terminal mode, another active run, recovery, or read-only music and staging volumes return 200 with `status: degraded`. Both routes are available without signing in and return only category names, never paths or credentials.
 
-**Behind a reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the address the app sees the proxy connect from: in Docker, the network's gateway (often `172.18.0.1`) for a proxy on the host, or the proxy container's address on a shared network; with host networking or outside Docker, `127.0.0.1` for a proxy on the same machine (add `::1` if `WEB_HOST` is `::`). Ranges such as `172.18.0.0/16` work for a proxy container whose address changes. Trusting the gateway also trusts anything that reaches the published port through the host, so pair it with `WEB_BIND=127.0.0.1`. It decides three things: the failed-login throttle counts attempts per real client rather than per the shared proxy IP, a request the proxy received over HTTPS is recognised as such, which is what marks the session cookie `Secure`, and the proxy's requests skip the host-name check above. Point it at your proxy, not `*`. By default no proxy is trusted, so leaving it unset behind a proxy throttles every visitor as one.
+**Behind a reverse proxy.** Set `FORWARDED_ALLOW_IPS` to the address the app sees the proxy connect from: in Docker, the network's gateway (often `172.18.0.1`) for a proxy on the host, or the proxy container's address on a shared network; with host networking or outside Docker, `127.0.0.1` for a proxy on the same machine (add `::1` if `WEB_HOST` is `::`). Ranges such as `172.18.0.0/16` work for a proxy container whose address changes. Trusting the gateway also trusts anything that reaches the published port through the host, so pair it with `WEB_BIND=127.0.0.1`.
+
+`FORWARDED_ALLOW_IPS` decides three things: the failed-login throttle counts attempts per real client rather than per the shared proxy IP, a request the proxy received over HTTPS is recognised as such, which is what marks the session cookie `Secure`, and the proxy's requests skip the host-name check above.
+
+Point it at your proxy, not `*`. By default no proxy is trusted, so leaving it unset behind a proxy throttles every visitor as one.
 
 The web UI needs its own host name or port; it can't be served under a path such as `example.com/qobuz`. In Nginx Proxy Manager, leave **Block Common Exploits** off for it: that option refuses searches for some words, such as "cocaine".
 
 **Keeping the token out of the environment.** `docker inspect` exposes environment variables, so to keep the Qobuz token out of them, point `QOBUZ_USER_AUTH_TOKEN_FILE` at a file containing only the token (a [Docker secret](https://docs.docker.com/engine/swarm/secrets/) or read-only bind mount) instead of setting `QOBUZ_USER_AUTH_TOKEN`. The web-login password supports the same pattern with `WEB_AUTH_PASSWORD_FILE`.
 
-**Hardening.** The bundled `compose.yaml` ships with `mem_limit: 1g`, `pids_limit: 256`, `no-new-privileges`, `cap_drop: [ALL]`, and `0600` token files. It adds back only the capabilities needed for the PUID/PGID handover. The built-in login is a single shared credential with brute-force limiting (after 5 failures an hour from one address, its sign-ins get a 429 with the login page until 15 minutes after the last failure; each failed sign-in and each lockout is logged as a warning with the client address), which is appropriate for a trusted network; use a proxy, VPN, or Tailscale for internet exposure. The image is multi-arch (`linux/amd64`, `linux/arm64`), so arm64 NAS boxes run natively, and a `--read-only` rootfs works with `--tmpfs /tmp`. For a `/var/tmp` mount instead, set `APP_HOME=/var/tmp` in `.env` and use `--tmpfs /var/tmp`. See [SECURITY.md](../SECURITY.md).
+**Hardening.** The bundled `compose.yaml` ships with `mem_limit: 1g`, `pids_limit: 256`, `no-new-privileges`, `cap_drop: [ALL]`, and `0600` token files. It adds back only the capabilities needed for the PUID/PGID handover.
+
+The built-in login is a single shared credential with brute-force limiting (after 5 failures an hour from one address, its sign-ins get a 429 with the login page until 15 minutes after the last failure; each failed sign-in and each lockout is logged as a warning with the client address), which is appropriate for a trusted network; use a proxy, VPN, or Tailscale for internet exposure.
+
+The image is multi-arch (`linux/amd64`, `linux/arm64`), so arm64 NAS boxes run natively, and a `--read-only` rootfs works with `--tmpfs /tmp`. For a `/var/tmp` mount instead, set `APP_HOME=/var/tmp` in `.env` and use `--tmpfs /var/tmp`. See [SECURITY.md](../SECURITY.md).
 
 ## Notifications
 
-`POST_JOB_HOOK` runs a command of your choice every time a background job finishes and when a scan parks results for you to review. The command runs inside the container, which bundles `curl` and Python. Its environment is the app's without `WEB_AUTH_PASSWORD`, `QOBUZ_USER_AUTH_TOKEN`, `LASTFM_API_KEY` or their `_FILE` forms. `POST_JOB_HOOK_TIMEOUT` (default 10s) caps a slow endpoint, and a command that cannot start, times out, or exits nonzero is recorded in the application log.
+`POST_JOB_HOOK` runs a command of your choice every time a background job finishes and when a scan has results to review. The command runs inside the container, which bundles `curl` and Python. Its environment is the app's without `WEB_AUTH_PASSWORD`, `QOBUZ_USER_AUTH_TOKEN`, `LASTFM_API_KEY` or their `_FILE` forms. `POST_JOB_HOOK_TIMEOUT` (default 10s) caps a slow endpoint, and a command that cannot start, times out, or exits nonzero is recorded in the application log.
 
-The job's state arrives as JSON on stdin (`id`, `status`, `title`, `edition`, `display_title`, `artist`, `error`, `tracks_missing`, `finished_at`, `kind`, `summary`, `review_items`). `status` is `done`, `failed` or `canceled` for a finished job; `awaiting_review` when a Library scan, new-release check, or Upgrade, Downsample or Repair scan has results waiting, with `review_items` saying how many; and `interrupted` for a job a restart cut short. `kind` names the work (`download`, `library`, `new_releases`, `upgrade`, `downsample`, `repair`, `lyrics`, `migration`, `collection_snapshot`, `collection_restore`), and `summary` is the one-line result shown in History. An album that imported with tracks still missing finishes as `done` with `tracks_missing` above 0. Terminal runs report their album downloads and their Upgrade, Repair and Downsample runs; terminal Lyrics and Library migration runs are not reported.
+The job's state arrives as JSON on stdin (`id`, `status`, `title`, `edition`, `display_title`, `artist`, `error`, `tracks_missing`, `finished_at`, `kind`, `summary`, `review_items`). `status` is `done`, `failed` or `canceled` for a finished job; `awaiting_review` when a Library scan, new-release check, or Upgrade, Downsample or Repair scan has results waiting, with `review_items` saying how many; and `interrupted` for a job a restart cut short.
+
+`kind` names the work (`download`, `library`, `new_releases`, `upgrade`, `downsample`, `repair`, `lyrics`, `migration`, `collection_snapshot`, `collection_restore`), and `summary` is the one-line result shown in History. An album that imported with tracks still missing finishes as `done` with `tracks_missing` above 0. Terminal runs report their album downloads and their Upgrade, Repair and Downsample runs; terminal Lyrics and Library migration runs are not reported.
 
 The hook must not run `beet` or otherwise edit its database while Qobuz Librarian is running.
 
@@ -250,15 +264,30 @@ print(json.dumps({"content": "Qobuz Librarian: " + line}))' \
 
 Anything that accepts an HTTP request works the same way: Gotify, Slack, Home Assistant webhooks, or a plain script that writes to a file.
 
+A hook can also ask a media server to rescan after a job ends. A run that stopped part-way may still have added albums, so `failed`, `canceled` and `interrupted` count too. Keep the line for your server:
+
+```sh
+#!/bin/sh
+status=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+case "$status" in done|failed|canceled|interrupted) ;; *) exit 0 ;; esac
+# Plex: 1 is the music library's section ID
+curl -s -o /dev/null "http://plex:32400/library/sections/1/refresh?X-Plex-Token=YOUR_TOKEN"
+# Jellyfin
+curl -s -o /dev/null -X POST -H 'Authorization: MediaBrowser Token="YOUR_API_KEY"' http://jellyfin:8096/Library/Refresh
+# Navidrome: an admin user
+curl -s -o /dev/null "http://navidrome:4533/rest/startScan?u=admin&p=YOUR_PASSWORD&v=1.16.1&c=qobuz-librarian"
+```
+
 The hook also fires once if the saved Qobuz token stops being accepted (`status` is `auth_lost`).
 
 ## What the app does on its own
 
-On first run the Search page offers a first Library scan (`AUTO_LIBRARY_SCAN`). Once a full scan has finished, new-release checks (`NEW_RELEASE_CHECK_INTERVAL`) run on a background timer while nothing else is running, the first one an interval after that scan. A pre-order is listed once its release date has passed, and an artist with more than 1,000 albums on Qobuz is checked from their newest releases alone. Both park a review list.
+On first run the Search page offers a first Library scan (`AUTO_LIBRARY_SCAN`). Once a full scan has finished, new-release checks (`NEW_RELEASE_CHECK_INTERVAL`) run on a background timer while nothing else is running, the first one an interval after that scan. A pre-order is listed once its release date has passed, and an artist with more than 1,000 albums on Qobuz is checked from their newest releases alone. Both leave a list to review.
 
 - **Library gap-fill** adds missing albums or missing tracks after review.
 - **After a download**, it re-checks the new album's track lengths against Qobuz, and the download's log says to run **Repair** if one is short.
-- **Upgrade** and **Downsample** change files only when you start them. Upgrade backs up the original album and removes that backup only after replacement and catalogue checks pass. If verification fails, it restores the original where safe; otherwise the backup remains for review. A backup the upgrade keeps is listed under Settings → Diagnostics and stays until you restore or remove it. An album still in its backup, or part way into it, because the app or a terminal run was stopped before the replacement was imported is put back the next time either one starts, provided its folder is still missing and the folders above it are the same ones. Downsample rewrites in place after verifying each file decodes, or, with *Keep originals when downsampling* set to keep (`DOWNSAMPLE_KEEP_ORIGINALS`), parks the hi-res copies in the backup area first so the rewrite can be undone from Settings → Diagnostics until the retention window (`UPGRADE_BACKUP_RETENTION_DAYS`) ends, as long as the album still holds the files Downsample wrote.
+- **Upgrade** changes files only when you start it. It backs up the original album and removes that backup only after replacement and catalogue checks pass. If verification fails, it restores the original where safe; otherwise the backup remains for review. A backup the upgrade keeps is listed under Settings → Diagnostics and stays until you restore or remove it. An album still in its backup, or part way into it, because the app or a terminal run was stopped before the replacement was imported is put back the next time either one starts, provided its folder is still missing and the folders above it are the same ones.
+- **Downsample** changes files only when you start it. It rewrites in place after verifying each file decodes, or, with *Keep originals when downsampling* set to keep (`DOWNSAMPLE_KEEP_ORIGINALS`), copies the hi-res originals to the backup area first so the rewrite can be undone from Settings → Diagnostics until the retention window (`UPGRADE_BACKUP_RETENTION_DAYS`) ends, as long as the album still holds the files Downsample wrote.
 - **Lyrics** writes tags or `.lrc` sidecars, not the audio. A track without lyrics gets synced ones, or plain ones when no synced lyrics are found and *Synced lyrics only* is off. Plain lyrics are replaced when synced ones are found. Synced lyrics are never replaced, and no lyrics are removed, though in `sidecar` format the tag lyrics of newly imported tracks move into `.lrc` files. A lookup that finds nothing new is repeated after 30 days, or sooner with *Re-check everything* (`--lyrics-rescan`).
 - **Consolidation** (`CONSOLIDATE`, off) merges duplicate folders, CLI-only (it needs per-folder confirmation). It offers only a folder whose tracks are all in the album just downloaded. The duplicate tracks it takes out wait in the backup area and are cleared after `UPGRADE_BACKUP_RETENTION_DAYS`, as long as the album kept in their place still holds a playable track at least as long for each.
 - **`MIGRATE_MULTI_ARTIST`** (on) re-files `A, B/Album` or `B, A/Album` under `A/Album` after import.

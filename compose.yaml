@@ -11,7 +11,6 @@ services:
     init: true
     mem_limit: 1g
     pids_limit: 256
-    # Receipt capture holds file guards for a whole artist folder at once.
     ulimits:
       nofile:
         soft: 65536
@@ -67,10 +66,9 @@ services:
       QOBUZ_USER_AUTH_TOKEN_FILE: "${QOBUZ_USER_AUTH_TOKEN_FILE:-}"
 
       # ── Discover ──────────────────────────────────────────────────────────
-      # A free Last.fm API key turns on the Discover tab, which suggests
-      # artists based on the ones already in your library. Empty = no tab.
-      # Get one at https://www.last.fm/api/account/create, or set it on the
-      # Settings page instead.
+      # A Last.fm API key turns on the Discover tab; the key's Last.fm account
+      # needs Pro. Empty = no tab. Get one at
+      # https://www.last.fm/api/account/create, or set it on the Settings page.
       LASTFM_API_KEY: "${LASTFM_API_KEY:-}"
       # Or keep it out of the container environment and read it from a file
       # (e.g. a Docker secret), like the Qobuz token above:
