@@ -16,7 +16,12 @@
   {# The Library surface renders this body under its own "Library" heading, so
      it skips the job header. Everywhere else the header is de-jargoned: plain
      names, no job ids or scan-mode strings. #}
-  {% if not embedded_surface|default(false) %}
+  {% if not embedded_surface|default(false) and job.execute_kind == 'new_releases' and job.status.value == 'awaiting_review' %}
+  <header class="ql-page-header ql-page-header--split">
+    <h1>New releases</h1>
+    <a href="{{ job_return_href }}" class="ql-link-action ql-inline-link-hit">{{ job_return_label }}</a>
+  </header>
+  {% elif not embedded_surface|default(false) %}
   <header class="ql-page-header ql-page-header--actions ql-job-header">
     <div class="ql-job-heading">
       {% if job.execute_args.get('cover') %}<img src="{{ job.execute_args.cover }}" alt="" width="56" height="56" class="ql-job-cover ql-job-cover--page">{% endif %}
@@ -123,7 +128,7 @@
     {% endif %}
     {# Off, so Back shows the saved ticks rather than the ones the browser
        remembers from before another tab changed them. #}
-    <form id="review-form" action="/jobs/{{ job.id }}/approve" method="post" autocomplete="off"
+    <form id="review-form" action="/jobs/{{ job.id }}/approve" method="post" autocomplete="off" data-busy-submit
           data-job-id="{{ job.id }}" data-review-kind="{{ job.execute_kind }}"
           data-review-blocked="{{ '1' if _review_qobuz_blocked or _review_paused else '0' }}">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -232,6 +237,12 @@
       </div>
       {% endif %}
     </div>
+
+    {% if job_pending_review and not _embedded %}
+    <div class="ql-job-actions">
+      <a href="{{ job_pending_review.href }}" class="ql-job-link">{{ job_pending_review.label }}</a>
+    </div>
+    {% endif %}
 
     {% if s == 'scanning' and job.execute_kind in ('library', 'upgrade', 'downsample', 'new_releases', 'collection_restore') %}
     <p id="scan-found" class="ql-scan-found" aria-live="polite"></p>

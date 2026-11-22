@@ -103,9 +103,9 @@
       {% for a in g.albums %}
       <li class="ql-hidden-item">
         <span class="ql-hidden-title">
-          <span class="ql-hidden-title-line"><span class="ql-hidden-name">{{ a.title }}</span>{% if a.year %}<span class="ql-hidden-year">({{ a.year }})</span>{% endif %}{% if a.gap_fill and not is_upgrade and not is_downsample %}<span class="ql-partial-label" title="You own this album; it returns to Gap Fill">Gap Fill</span>{% endif %}</span>{% if a.others %}
-          <span class="ql-hidden-also">with {% for o in a.others %}{{ o.title }}{% if o.year %} ({{ o.year }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}{% if a.when %}
-          <span class="ql-hidden-when"{% if a.when_exact %} title="{{ a.when_exact }}"{% endif %}>{{ 'Kept' if is_downsample else 'Dismissed' }} {{ a.when }}</span>{% endif %}</span>
+          <span class="ql-hidden-title-line"><span class="ql-hidden-name">{{ a.title }}</span>{% if a.gap_fill and not is_upgrade and not is_downsample %}<span class="ql-partial-label" title="You own this album; it returns to Gap Fill">Gap Fill</span>{% endif %}</span>{% if a.others %}
+          <span class="ql-hidden-also">with {% for o in a.others %}{{ o.title }}{% if o.year %} ({{ o.year }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}{% if a.year or a.when %}
+          <span class="ql-hidden-when">{{ a.year or '' }}{% if a.year and a.when %} · {% endif %}{% if a.when %}<span{% if a.when_exact %} title="{{ a.when_exact }}"{% endif %}>{{ 'Kept' if is_downsample else 'Dismissed' }} {{ a.when }}</span>{% endif %}</span>{% endif %}</span>
         <form action="{{ restore_action }}" method="post" class="ql-hidden-restore">
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           {% if hidden_page and hidden_page > 1 %}<input type="hidden" name="p" value="{{ hidden_page }}">{% endif %}
@@ -137,17 +137,8 @@
 {% endif %}
 
 {% else %}
-<div class="ql-empty-state ql-empty-state--hidden">
-  <span class="ql-state-icon" aria-hidden="true">
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M5 6.5h14"/>
-      <path d="M7 12h10"/>
-      <path d="M9.5 17.5h5"/>
-    </svg>
-  </span>
-  <p class="ql-empty-title">{% if is_downsample %}No kept hi-res albums.{% else %}Nothing dismissed.{% endif %}</p>
-  <a href="{{ back_url }}" class="ql-btn ql-btn-primary w-full sm:w-auto mt-4">Go to {{ back_label }}</a>
-</div>
+<div class="ql-work-status"><a href="{{ back_url }}">Back to {{ back_label }}</a></div>
+<p class="ql-empty-state">{% if is_downsample %}No albums kept hi-res.{% else %}Nothing dismissed.{% endif %}</p>
 {% endif %}
 
 </div>

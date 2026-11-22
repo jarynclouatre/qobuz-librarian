@@ -17,9 +17,10 @@
              aria-label="Select shown {{ labels.review_item_plural(job) }} by {{ artist or 'this artist' }}">
     </label>
     {% endif %}
+    {% set _n = items | length %}
     <span class="ql-review-title">
-      <span class="ql-review-title-main">{{ artist or 'Artist not recorded' }}</span>
-      <span class="ql-review-title-meta">{% if review_tab|default('') == 'gaps' %}{{ labels.format_count(items | length) }} album{{ 's' if (items | length) != 1 }} to fill{% elif review_tab|default('') == 'missing' %}{{ labels.format_count(items | length) }} missing album{{ 's' if (items | length) != 1 }}{% else %}{{ labels.review_count(job, items | length) }}{% endif %}</span>
+      <span class="ql-review-title-main" title="{{ artist or 'Artist not recorded' }}">{{ artist or 'Artist not recorded' }}</span>
+      <span class="ql-review-title-meta"><span class="readout">{{ labels.format_count(_n) }}</span> {% if review_tab|default('') == 'gaps' %}to fill{% elif review_tab|default('') == 'missing' %}missing{% elif job.execute_kind == 'upgrade' %}to upgrade{% elif job.execute_kind == 'new_releases' %}album{{ 's' if _n != 1 }}{% elif _n == 1 %}{{ labels.review_item_singular(job) }}{% else %}{{ labels.review_item_plural(job) }}{% endif %}</span>
     </span>
   </summary>
   {% if lazy | default(false) %}
@@ -47,7 +48,9 @@
         title="{{ 'Keep unselected hi-res' if job.execute_kind == 'downsample' else 'Dismiss unselected' }}"
         aria-label="{% if job.execute_kind == 'downsample' %}Keep unselected albums by {{ _who }} hi-res{% else %}Dismiss unselected {{ _nouns }} by {{ _who }}{% endif %}"
         {% if _rest > 0 %}
-        data-confirm="{% if job.execute_kind == 'downsample' %}Keep the {% if _rest != 1 %}{{ _rest }} {% endif %}unselected {{ 'album' if _rest == 1 else 'albums' }} by {{ _who }} hi-res? You can downsample {{ 'it' if _rest == 1 else 'them' }} later.{% else %}Dismiss the {% if _rest != 1 %}{{ _rest }} {% endif %}unselected {{ _noun if _rest == 1 else _nouns }} by {{ _who }}? You can bring {{ 'it' if _rest == 1 else 'them' }} back from Dismissed.{% endif %}"
+        {% set _lead = ('all ' ~ labels.format_count(_rest) ~ ' ') if not group_selected and _rest > 1
+                       else 'the ' ~ ((labels.format_count(_rest) ~ ' ') if _rest != 1 else '') ~ ('unselected ' if group_selected else '') %}
+        data-confirm="{% if job.execute_kind == 'downsample' %}Keep {{ _lead }}{{ 'album' if _rest == 1 else 'albums' }} by {{ _who }} hi-res? You can downsample {{ 'it' if _rest == 1 else 'them' }} later.{% else %}Dismiss {{ _lead }}{{ _noun if _rest == 1 else _nouns }} by {{ _who }}? You can bring {{ 'it' if _rest == 1 else 'them' }} back from Dismissed.{% endif %}"
         data-confirm-action="{{ 'Keep hi-res' if job.execute_kind == 'downsample' else 'Dismiss' }}"
         {% endif %}
         hx-post="/jobs/{{ job.id }}/hide"

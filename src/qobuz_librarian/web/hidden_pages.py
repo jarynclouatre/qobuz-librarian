@@ -20,17 +20,17 @@ def _hidden_matching(groups, q):
     The page and every Bring back button on it go through here, so what the
     filter shows is exactly what those buttons take.
     """
-    needle = (q or "").strip().lower()
-    if not needle:
+    if not (q or "").strip():
         return groups
     matched = []
     for g in groups:
-        if needle in g["artist"].lower():
+        if flows.filter_matches(q, g["artist"]):
             matched.append(g)
             continue
         albums = [a for a in g["albums"]
-                  if needle in a["title"].lower()
-                  or any(needle in o["title"].lower() for o in a["others"])]
+                  if flows.filter_matches(q, a["title"])
+                  or any(flows.filter_matches(q, o["title"])
+                         for o in a["others"])]
         if albums:
             matched.append({
                 "artist": g["artist"], "albums": albums,

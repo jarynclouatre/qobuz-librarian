@@ -9,9 +9,7 @@
         <div class="ql-result-copy">
           <p class="ql-result-title"><a href="/?kind=artist&amp;q={{ a.name | urlencode }}&amp;artist_id={{ a.artist_id | urlencode }}&amp;artist_name={{ a.name | urlencode }}&amp;back_kind=discover{% if discover_tab == 'search' and query %}&amp;back_q={{ query | urlencode }}{% endif %}" class="ql-result-link">{{ a.name }}</a></p>
           {% if discover_tab != 'search' %}
-          <p class="ql-discover-reason">Because you have
-            {% for s in a.seeds %}<span class="ql-seed-chip">{{ s }}</span>{% endfor %}
-          </p>
+          <p class="ql-discover-reason">Because you have {{ a.seeds[:-1] | join(', ') }}{% if a.seeds | length > 1 %} and {% endif %}{{ a.seeds | last }}</p>
           {% endif %}
         </div>
       </div>

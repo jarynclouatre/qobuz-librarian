@@ -29,11 +29,10 @@ def _active_new_release_check():
 
 def _pending_new_release_review(job):
     """The new-release review still parked after a partial download, for the
-    finished job page to point at. New releases have no page of their own,
-    and the dashboard notice and History are the only other ways to it."""
+    download's job page to point at while it waits, runs and after. New
+    releases have no page of their own, and the dashboard notice and History
+    are the only other ways to it."""
     if job.execute_kind != "new_releases":
-        return None
-    if job.status not in job_mgr.TERMINAL:
         return None
     other = None
     for j in job_mgr.registry.awaiting_review():

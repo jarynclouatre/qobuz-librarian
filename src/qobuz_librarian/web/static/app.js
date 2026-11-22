@@ -940,7 +940,8 @@
       b.classList.add("is-disabled");
       b.innerHTML =
         '<span class="ql-spinner ql-inline-spinner" aria-hidden="true"></span> ';
-      b.appendChild(document.createTextNode(form.dataset.busyLabel || "Starting…"));
+      b.appendChild(document.createTextNode(
+        b.dataset.busyLabel || form.dataset.busyLabel || "Starting…"));
     }, 0);
   });
 
@@ -1366,8 +1367,19 @@
     panel.classList.toggle("hidden", !open);
   }
 
+  // The line under an opened artist's albums presses that artist's
+  // dismiss button, so both ask the same question and send the same request.
+  document.addEventListener("click", function (evt) {
+    var line = evt.target.closest && evt.target.closest("[data-hide-rest]");
+    if (!line) return;
+    var shell = line.closest(".ql-review-group-shell");
+    var btn = shell && shell.querySelector("[data-hide]");
+    if (btn) btn.click();
+  });
+
   // The menu of review actions. Any press outside the toggle closes
-  // it, a press on one of its actions included.
+  // it, a press on one of its actions included. It listens on the way
+  // down because an action's confirm stops the click there.
   function setReviewMore(menu, open) {
     var toggle = menu.querySelector(".ql-review-more-toggle");
     menu.toggleAttribute("data-open", open);
@@ -1381,7 +1393,7 @@
     if (!toggle) return;
     var menu = toggle.closest("[data-review-more]");
     if (menu) setReviewMore(menu, !menu.hasAttribute("data-open"));
-  });
+  }, true);
   // On a phone the release-type switches open from Include. A press on a
   // switch leaves them open, so several can be set in one go.
   function setReviewInclude(host, open) {
@@ -3168,9 +3180,14 @@
       return pendingWrites > 0 || choicesUnknown || dismissPending || pageLoading;
     }
 
+    function submitBlocked() {
+      return reviewBlocked || actionsBlocked() || submit.dataset.busyHtml !== undefined
+        || tabCounts(lastCounts).selected === 0;
+    }
+
     function syncActions() {
       var blocked = actionsBlocked();
-      if (submit) submit.disabled = reviewBlocked || blocked || tabCounts(lastCounts).selected === 0;
+      if (submit) submit.disabled = submitBlocked();
       form.querySelectorAll("[data-hide], #review-dismiss-rest, [formaction$='/cancel']").forEach(function (button) {
         if (blocked && !button.disabled) {
           button.disabled = true;
@@ -3213,6 +3230,8 @@
     function queueChoice(url, body, accept) {
       pendingWrites += 1;
       choiceVersion += 1;
+      // A changed selection is a different download from the one sent.
+      restoreBusySubmitButtons(form);
       syncActions();
       var request = choiceQueue.then(function () {
         if (choicesUnknown) return Promise.reject("uncertain");
@@ -3261,9 +3280,11 @@
       }
       var tc = tabCounts(c);
       if (submit) {
-        submit.disabled = reviewBlocked || actionsBlocked() || tc.selected === 0;
-        submit.textContent = (submit.dataset.reviewVerb || "Download") + " " +
+        submit.disabled = submitBlocked();
+        var label = (submit.dataset.reviewVerb || "Download") + " " +
           formatCount(tc.selected) + " selected";
+        if (submit.dataset.busyHtml === undefined) submit.textContent = label;
+        else submit.dataset.busyHtml = label;
       }
       if (summaryRow) summaryRow.classList.toggle("hidden", c.total === 0);
       if (emptyBox) emptyBox.classList.toggle("hidden", c.total > 0);
@@ -3399,7 +3420,7 @@
       if (offscreen) {
         var outside = curQuery() ? tabCounts(lastCounts).selected - tc.selected : 0;
         offscreen.textContent = outside > 0
-          ? formatCount(outside) + " more selected outside this filter"
+          ? formatCount(outside) + " of them outside this filter"
           : "";
       }
     }
@@ -3597,15 +3618,27 @@
     function theCount(n) { return n === 1 ? "" : formatCount(n) + " "; }
 
     // Label each artist action for what it will drop or keep.
-    function artistDismissConfirm(who, rest) {
+    function artistDismissConfirm(who, rest, total) {
+      var all = rest === total;
+      var lead = all && rest > 1 ? "all " + formatCount(rest) + " "
+        : "the " + theCount(rest) + (all ? "" : "unselected ");
       if (isDownsampleReview) {
-        return "Keep the " + theCount(rest) + "unselected " +
-          (rest === 1 ? "album" : "albums") + " by " + who +
+        return "Keep " + lead + (rest === 1 ? "album" : "albums") + " by " + who +
           " hi-res? You can downsample " + (rest === 1 ? "it" : "them") + " later.";
       }
-      return "Dismiss the " + theCount(rest) + "unselected " +
+      return "Dismiss " + lead +
         (rest === 1 ? dismissItemSingular() : dismissItemPlural()) +
         " by " + who + "? You can bring " + (rest === 1 ? "it" : "them") + " back from Dismissed.";
+    }
+    // The same action as a line under an opened artist's albums.
+    function restLineLabel(rest, total) {
+      if (rest === total) {
+        if (total === 1) return isDownsampleReview ? "Keep hi-res" : "Dismiss";
+        return isDownsampleReview ? "Keep all " + formatCount(total) + " hi-res"
+          : "Dismiss all " + formatCount(total);
+      }
+      var n = rest === 1 ? "one" : formatCount(rest);
+      return isDownsampleReview ? "Keep the other " + n + " hi-res" : "Dismiss the " + n + " not ticked";
     }
     function updateHideLabels() {
       var box = pageBox();
@@ -3632,11 +3665,16 @@
         var rest = total - picked;
         if (rest > 0) {
           btn.setAttribute("data-confirm",
-            artistDismissConfirm(det.dataset.artist || "this artist", rest));
+            artistDismissConfirm(det.dataset.artist || "this artist", rest, total));
           btn.setAttribute("data-confirm-action",
             isDownsampleReview ? "Keep hi-res" : "Dismiss");
         } else {
           btn.removeAttribute("data-confirm");
+        }
+        var line = det.querySelector("[data-hide-rest]");
+        if (line) {
+          line.textContent = restLineLabel(rest, total);
+          line.parentElement.classList.toggle("hidden", rest <= 0);
         }
       });
     }

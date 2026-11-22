@@ -2129,6 +2129,29 @@ def test_library_approve_downloads_the_checked_choices_and_parks_the_rest(
         _remove_job(job)
 
 
+def test_review_filter_typed_without_accents_shows_and_selects_the_artist(
+        client):
+    """Typing "sigur ros" for Sigur Rós showed nothing, so Select all had
+    nothing to act on."""
+    job = _inject_job(jm.JobStatus.AWAITING_REVIEW)
+    job.execute_kind = "library"
+    job.add_candidate(kind="album", title="Takk...", artist="Sigur Rós",
+                      payload={"year": "2005"}, selected=False)
+    job.add_candidate(kind="album", title="Third", artist="Portishead",
+                      payload={"year": "2008"}, selected=False)
+    try:
+        page = client.get(f"/jobs/{job.id}/review",
+                          params={"tab": "missing", "q": "sigur ros"})
+        assert 'data-filtered-total="1"' in page.text
+        client.post(f"/jobs/{job.id}/select-all",
+                    data={"on": "1", "scope": "all", "tab": "missing",
+                          "q": "sigur ros"})
+        flags = {x["title"]: x["selected"] for x in job.candidates}
+        assert flags == {"Takk...": True, "Third": False}
+    finally:
+        _remove_job(job)
+
+
 def test_select_all_and_dismiss_rest_act_only_on_the_rows_in_scope(
         client, monkeypatch, tmp_path):
     """With a filter showing 3 rows, Select all must not silently flip the

@@ -125,7 +125,7 @@
         {%- if id %} id="{{ id }}"{% endif %}
         class="{{ cls or 'ql-review-tool ql-review-discard' }}"
         data-confirm="{{ confirm }}"
-        data-confirm-action="Discard"{% if job.execute_kind == 'new_releases' %} data-irreversible{% endif %}>Discard {{ thing }}</button>
+        data-confirm-action="Discard" data-busy-label="Discarding…"{% if job.execute_kind == 'new_releases' %} data-irreversible{% endif %}>Discard {{ thing }}</button>
 {%- endmacro %}
 
 {% macro discard_confirm(job) -%}

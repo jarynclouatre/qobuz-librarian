@@ -15,8 +15,10 @@ from qobuz_librarian import config as cfg
 from qobuz_librarian import download as download_mod
 from qobuz_librarian.library import generation_state
 from qobuz_librarian.library.tags import known_year
+from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import (
+    flows,
     job_labels,
     job_persistence,
     new_release_checks,
@@ -231,11 +233,28 @@ def _strip_log_pointer(message, log_lines):
     return _LOG_POINTER_RE.sub(".", message or "").strip() or message
 
 
+_LONG_QUALITY_RE = re.compile(r"(\d+)-bit/([\d.]+)kHz(?: \(hi-res\))?")
+
+
+def _quality_readout(text):
+    """("24/96", True) for a "24-bit/96kHz (hi-res)" part of a review
+    row's detail, the way Search writes quality; None for any other part."""
+    m = _LONG_QUALITY_RE.fullmatch(text or "")
+    if not m:
+        return None
+    bits = int(m.group(1))
+    return format_quality(bits, float(m.group(2)) * 1000), bits >= 24
+
+
 templates.env.globals["when_label"] = job_labels._when_label
 templates.env.globals["fmt_elapsed"] = _fmt_elapsed
 templates.env.globals["quality_shortfall_view"] = _quality_shortfall_view
 templates.env.filters["strip_log_pointer"] = _strip_log_pointer
 templates.env.filters["known_year"] = known_year
+templates.env.filters["quality_readout"] = _quality_readout
+# Worded at render time, so a review saved before a wording change reads
+# the same as a new one.
+templates.env.filters["repair_damage_detail"] = flows._repair_damage_detail
 templates.env.globals["auth_active"] = web_auth.auth_active
 
 static_dir = _here / "static"

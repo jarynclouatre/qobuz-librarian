@@ -13,7 +13,9 @@ import re
 import shutil
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
@@ -436,10 +438,28 @@ def add_restore_candidate(job, album, artist_name, *, artist_key=None,
     return _add_candidate_spec(job, spec)
 
 
+@lru_cache(maxsize=8192)
+def _filter_key(text):
+    """``text`` as the filters compare it: case, accents, spaces and
+    punctuation dropped, "&" read as "and"."""
+    text = unicodedata.normalize("NFKD", text.replace("&", "and")).casefold()
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def filter_matches(q, text):
+    """Whether ``text`` holds the filter ``q``. The review and Dismissed
+    pages and every button that acts on what they show use it. A filter of
+    punctuation alone, such as "!!!", is matched as typed."""
+    needle = _filter_key(q)
+    if not needle:
+        return q.strip().casefold() in text.casefold()
+    return needle in _filter_key(text)
+
+
 def candidate_matches_query(c, q):
     """The review filter's predicate, artist or album title contains ``q``."""
-    hay = (c.get("artist") or "") + " " + (c.get("title") or "")
-    return (q or "").lower() in hay.lower()
+    return filter_matches(q or "", (c.get("artist") or "") + " "
+                          + (c.get("title") or ""))
 
 
 def is_gap_candidate(c):
@@ -3195,8 +3215,9 @@ class _NewReleasesRun:
     def _summarize_stop(self):
         # A cancelled crawl only reached a fraction of the artists, so it can't
         # claim "No new releases" or "First check recorded" definitively.
-        self.job.summary = ("Stopped early. Partial check, "
-                            f"{plural(self.total, 'new release')} found so far.")
+        self.job.summary = (
+            f"Stopped early. {plural(self.total, 'new release')} found so far."
+            if self.total else "Stopped early. Nothing new found before the stop.")
         if self.failed_count:
             self.job.summary += (
                 f" {self.unchecked} couldn't be checked "
@@ -4880,7 +4901,7 @@ def _repair_damage_detail(truncated):
                     - float(t.get("file_length") or 0) for t in short)
         lead = "up to " if len(short) > 1 else ""
         parts.append(f"{plural(len(short), 'track')} {lead}"
-                     f"{int(round(worst))}s shorter than the Qobuz recording")
+                     f"{repair._format_mmss(worst)} shorter than the Qobuz recording")
     return ", ".join(parts) or plural(len(truncated), "damaged track")
 
 

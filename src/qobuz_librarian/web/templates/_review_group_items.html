@@ -1,3 +1,4 @@
+{% import "_job_labels.html" as labels %}
 {% for c in items %}
 <label class="ql-review-candidate{% if job.execute_kind == 'repair' %} ql-review-candidate--note{% endif %}">
   <input type="checkbox" class="ql-checkbox cb" name="cid"
@@ -16,19 +17,24 @@
   {% endif %}
   <span class="ql-review-candidate-body">
     <span class="ql-review-candidate-heading">
-      <span class="ql-review-candidate-title">{{ c.payload.album if job.execute_kind == 'downsample' and c.payload.album else c.title }}</span>{% if c.payload.is_new %}
+      <span class="ql-review-candidate-title">{{ c.payload.album if job.execute_kind == 'downsample' and c.payload.album else c.title }}</span>{% if c.payload.is_new and job.execute_kind != 'new_releases' %}
       <span class="ql-badge ql-badge-new ql-badge-xs">new</span>{% endif %}{% if c.payload.version %}
-      <span class="ql-sub-version">{{ c.payload.version }}</span>{% endif %}{% if c.payload.explicit %}
-      <span class="ql-sub-version">Explicit</span>{% endif %}
+      <span class="ql-sub-version">{{ c.payload.version }}</span>{% endif %}
     </span>
     {% set _release_label = {'live': 'Live', 'compilation': 'Compilation', 'epSingle': 'EP or single'}.get(c.payload.release_type) if review_tab|default('') == 'missing' %}
     {% if _release_label and (c.payload.version or '') | lower == _release_label | lower %}{% set _release_label = '' %}{% endif %}
     {% set _detail = (c.detail | replace('gap-fill: ', '')) if review_tab|default('') == 'gaps' else c.detail %}
     {# Downsample results saved by 1.5.0 and earlier name the saving "reclaimable". #}
     {% if job.execute_kind == 'downsample' %}{% set _detail = (_detail or '') | replace(' reclaimable', ' smaller') %}{% endif %}
-    {# Each "·" part stays on one line, so "24-bit/96kHz" or "9 missing of
-       10" never breaks inside on a phone. #}
-    <span class="ql-review-candidate-detail">{% if _release_label %}{{ _release_label }} · {% endif %}{% if job.execute_kind in ('upgrade', 'downsample') and c.payload.year | known_year %}{{ c.payload.year | known_year }} · {% endif %}{% if job.execute_kind == 'repair' %}{{ _detail }}{% else %}{% for _part in (_detail or '').split(' · ') %}{% if not loop.first %} · {% endif %}{% if loop.first and _part | length == 4 and _part.isdigit() and not _part | known_year %}{% set _part = '?' %}{% endif %}{% for _step in _part.split(' → ') %}{% if not loop.first %} {% endif %}<span class="whitespace-nowrap">{% if not loop.first %}→ {% endif %}{{ _step }}</span>{% endfor %}{% endfor %}{% endif %}</span>
+    {% if job.execute_kind == 'repair' and c.payload.verified_truncated %}{% set _detail = c.payload.verified_truncated | repair_damage_detail %}{% endif %}
+    {% set _parts = (['Explicit'] if c.payload.explicit else [])
+                    + ([_release_label] if _release_label else [])
+                    + ([c.payload.year | known_year] if job.execute_kind in ('upgrade', 'downsample') and c.payload.year | known_year else []) %}
+    {% set _detail_parts = (_detail or '').split(' · ') | reject('equalto', '') | list %}
+    {% if _detail_parts and _detail_parts[0] | length == 4 and _detail_parts[0].isdigit() and not _detail_parts[0] | known_year %}{% set _detail_parts = ['?'] + _detail_parts[1:] %}{% endif %}
+    {# Each part stays on one line and carries the "·" before it, so a
+       phone never breaks inside "24/96" or leaves a dot at a line's end. #}
+    <span class="ql-review-candidate-detail">{% if job.execute_kind == 'repair' %}{{ _detail }}{% else %}{% for _part in _parts + _detail_parts %}{% set _sep = '' if loop.first else '· ' %}{% for _step in _part.split(' → ') %}{% set _q = _step | quality_readout %} <span class="whitespace-nowrap">{{ _sep if loop.first else '→ ' }}{% if _q %}<span class="readout {{ 'quality-hires' if _q[1] else 'quality-cd' }}">{{ _q[0] }}</span>{% else %}{{ _step }}{% endif %}</span>{% endfor %}{% endfor %}{% endif %}</span>
     {% if c.payload.missing_tracks and review_tab|default('') == 'gaps' %}
     <span class="ql-review-truncated ql-review-truncated--missing">
       {% for t in c.payload.missing_tracks %}
@@ -58,3 +64,11 @@
   </span>
 </label>
 {% endfor %}
+{% if items and job.execute_kind in ('library', 'upgrade', 'new_releases', 'downsample') %}
+{% set _total = items | length %}
+{% set _rest = _total - (items | selectattr('selected') | list | length) %}
+{% set _keep = job.execute_kind == 'downsample' %}
+<div class="ql-review-items-foot{% if not _rest %} hidden{% endif %}">
+  <button type="button" class="ql-inline-link ql-inline-link-hit" data-hide-rest>{% if _rest == _total %}{% if _total == 1 %}{{ 'Keep hi-res' if _keep else 'Dismiss' }}{% else %}{{ 'Keep all' if _keep else 'Dismiss all' }} {{ labels.format_count(_total) }}{{ ' hi-res' if _keep }}{% endif %}{% else %}{{ 'Keep the other' if _keep else 'Dismiss the' }} {{ 'one' if _rest == 1 else labels.format_count(_rest) }}{{ ' hi-res' if _keep else ' not ticked' }}{% endif %}</button>
+</div>
+{% endif %}

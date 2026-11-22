@@ -486,6 +486,17 @@ def restore_rows(scope, items):
     return removed
 
 
+def _listed_album(row, fallback="?"):
+    """A row's title and year for the Dismissed page, with the year left off a
+    title that already ends in it: Downsample stores the album folder's name."""
+    title = row.get("title") or fallback
+    year = known_year(row.get("year"))
+    m = _TRAILING_YEAR_RE.match(title)
+    if m and m.group(2) == year:
+        title = m.group(1)
+    return {"title": title, "year": year}
+
+
 def hidden_by_artist(scope, store=None):
     """[{artist, rows, albums: [{title, year, ts, fp, others}]}] for the Hidden view.
 
@@ -506,16 +517,14 @@ def hidden_by_artist(scope, store=None):
         rows = _entry_rows(e)
         first = rows[0]
         groups.setdefault(key, []).append({
-            "title": first.get("title") or e.get("title") or "?",
-            "year": known_year(first.get("year")),
+            **_listed_album(first, e.get("title") or "?"),
             "ts": first.get("ts") or e.get("ts") or "",
             "fp": fp,
             "gap_fill": bool(first.get("gap_fill")),
             # Year travels with each title: two editions sharing one name
             # (a self-titled album and its reissue) are otherwise identical
             # text on screen.
-            "others": [{"title": r.get("title") or "?", "year": known_year(r.get("year"))}
-                       for r in rows[1:]],
+            "others": [_listed_album(r) for r in rows[1:]],
         })
     out = []
     for key, albums in groups.items():
