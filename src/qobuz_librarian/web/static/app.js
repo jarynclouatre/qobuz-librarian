@@ -202,7 +202,7 @@
 
     // The phone tab carries one mark: the count while work is in flight,
     // tinted when a finished job needs attention, and a dot when nothing is.
-    function apply(n, attention) {
+    function apply(n, attention, reviews) {
       document.querySelectorAll(".js-queue-badge").forEach(function (badge) {
         badge.classList.toggle("is-attention", !!attention);
         if (!n) {
@@ -221,6 +221,13 @@
           + (attention === 1 ? " needs" : "s need") + " attention";
         badge.setAttribute("aria-label", label);
         if (badge.hasAttribute("title")) badge.setAttribute("title", label);
+      });
+      // More carries one dot for all the tools in its sheet.
+      document.querySelectorAll("[data-review-badge]").forEach(function (badge) {
+        var ready = badge.dataset.reviewBadge.split(" ").some(function (name) {
+          return reviews[name];
+        });
+        badge.classList.toggle("hidden", !ready);
       });
     }
 
@@ -247,7 +254,7 @@
             }
             sessionStorage.setItem(queueSignatureKey, signature);
           } catch (e) {}
-          apply(data.count, data.attention || 0);
+          apply(data.count, data.attention || 0, data.reviews || {});
           // Redraw when the rendered rows no longer match the live queue.
           var body = document.getElementById("queue-body");
           var rows = data.rows || String(data.count);
@@ -1788,8 +1795,12 @@
         if (notice.dataset.flashPersistent === persistentKey) notice.remove();
       });
     }
-    var el = document.createElement("div");
     var noticeKind = kind || "info";
+    host.querySelectorAll("[data-flash]:not([data-flash-persistent])").forEach(function (notice) {
+      if (notice.dataset.flashKind === noticeKind
+          && notice.textContent.trim() === message) notice.remove();
+    });
+    var el = document.createElement("div");
     el.className = "ql-notice ql-notice-" + noticeKind;
     el.setAttribute("data-flash", "");
     el.setAttribute("data-flash-kind", noticeKind);

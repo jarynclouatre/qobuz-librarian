@@ -110,8 +110,7 @@ def request_is_https(request) -> bool:
     return request.url.scheme == "https"
 
 
-_STALE_MESSAGE = ("The form's security token did not match. Open the page "
-                  "again, then try once more.")
+_STALE_MESSAGE = "Open the page again, then try once more."
 
 
 def _referring_page(request) -> str:
@@ -135,11 +134,16 @@ def _stale_page_response(request, token):
         resp = HTMLResponse("", status_code=200,
                             headers={"HX-Refresh": "true"})
     else:
-        from qobuz_librarian.web import rendering
-        back = _referring_page(request)
-        resp = rendering.render_error_page(
-            request, 403, "That page went stale", _STALE_MESSAGE,
-            action={"href": back, "label": "Open the page again"} if back else None)
+        from qobuz_librarian.web import auth, rendering
+        signed_out = auth.signed_out_target(request)
+        if signed_out and request.scope["path"] not in (auth.LOGIN_PATH,
+                                                        auth.SETUP_PATH):
+            resp = auth.refuse_signed_out(request, signed_out)
+        else:
+            back = _referring_page(request)
+            resp = rendering.render_error_page(
+                request, 403, "That page went stale", _STALE_MESSAGE,
+                action={"href": back, "label": "Open the page again"} if back else None)
     _set_csrf_cookie(request, resp, token)
     return resp
 

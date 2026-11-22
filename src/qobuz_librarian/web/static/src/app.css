@@ -6192,7 +6192,7 @@ details[data-artist].htmx-swapping {
   .ql-mobilebar .ql-icon-button::after {
     content: "";
     position: absolute;
-    inset: -0.25rem;
+    inset: calc(-0.25rem - 1px);
   }
   .ql-sheet-foot .ql-sidebar-meta a {
     display: inline-flex;

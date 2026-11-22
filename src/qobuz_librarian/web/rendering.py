@@ -310,6 +310,24 @@ def _lockout_notice(ip, username="", *, after_failure=False) -> str:
             "restart Qobuz Librarian to clear it.")
 
 
+def nav_review_badges() -> dict[str, bool]:
+    """Which review pages carry a dot in the navigation."""
+    badges = review_badges.snapshot()
+    if not runtime._upgrade_available():
+        badges["upgrade"] = False
+    if badges.get("upgrade") or badges.get("downsample"):
+        # A dot promises candidates are ready. A saved view the generation
+        # authority holds stale has none to show, so it must not carry one.
+        # Library keeps its dot: its review still renders, with a caveat.
+        authority = generation_state.load()
+        for surface in ("upgrade", "downsample"):
+            if badges.get(surface) and not generation_state.output_is_current(
+                surface, state=authority
+            ):
+                badges[surface] = False
+    return badges
+
+
 def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
     """TemplateResponse wrapper for Starlette 1.0+ signature.
 
@@ -398,22 +416,7 @@ def _tr(request, name, context, *, status_code=200, review_badge_ack=None):
         if (surface in review_badges.SURFACES
                 and (surface != "upgrade" or context["upgrade_available"])):
             review_badges.mark_seen(surface, generation)
-    badges = review_badges.snapshot()
-    if not context["upgrade_available"]:
-        badges = dict(badges)
-        badges["upgrade"] = False
-    if badges.get("upgrade") or badges.get("downsample"):
-        # A dot promises candidates are ready. A saved view the generation
-        # authority holds stale has none to show, so it must not carry one.
-        # Library keeps its dot: its review still renders, with a caveat.
-        authority = generation_state.load()
-        badges = dict(badges)
-        for surface in ("upgrade", "downsample"):
-            if badges.get(surface) and not generation_state.output_is_current(
-                surface, state=authority
-            ):
-                badges[surface] = False
-    context.setdefault("nav_review_badges", badges)
+    context.setdefault("nav_review_badges", nav_review_badges())
     attention_count = job_persistence.attention_count()
     context.setdefault(
         "history_attention",

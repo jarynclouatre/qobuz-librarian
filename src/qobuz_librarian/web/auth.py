@@ -958,6 +958,39 @@ def _record_login_failure(key: str, uname: str, now: float) -> tuple[int, bool]:
     return address_locked, False
 
 
+def refuse_signed_out(request, location):
+    """Send a request without a session to `location`, the sign-in or setup
+    page, in the form its caller can follow."""
+    if request.headers.get("HX-Request") == "true":
+        target = safe_current_path(
+            request.headers.get("HX-Current-URL"),
+            request.headers.get("host", ""),
+        )
+        if location == LOGIN_PATH and target:
+            location += "?next=" + urllib.parse.quote(target)
+        return Response(status_code=401, headers={"HX-Redirect": location})
+    # API/SSE callers get a machine-readable 401.
+    if request.scope["path"].startswith("/api/"):
+        return JSONResponse({"detail": "authentication required"},
+                            status_code=401)
+    # Remember where a page GET was headed, or the page a form was sent from,
+    # so login can land there instead of dumping every deep link on the
+    # dashboard.
+    if location == LOGIN_PATH:
+        if request.method == "GET":
+            target = request.scope["path"]
+            qs = request.scope.get("query_string", b"").decode("utf-8", "ignore")
+            if qs:
+                target += "?" + qs
+            target = safe_next_path(target)
+        else:
+            target = safe_current_path(request.headers.get("referer"),
+                                       request.headers.get("host", ""))
+        if target not in ("", "/"):
+            location = LOGIN_PATH + "?next=" + urllib.parse.quote(target)
+    return RedirectResponse(url=location, status_code=303)
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Gate every route behind a session cookie once a login is configured.
 
@@ -999,7 +1032,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return host_refusal(request)
             if path == SETUP_PATH:
                 return await call_next(request)
-            return self._reject(request, SETUP_PATH)
+            return refuse_signed_out(request, SETUP_PATH)
 
         cookie = session_token(request)
         if cookie and verify_session(cookie):
@@ -1011,29 +1044,4 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return response
         if path in (LOGIN_PATH, SETUP_PATH):
             return await call_next(request)
-        return self._reject(request, LOGIN_PATH)
-
-    @staticmethod
-    def _reject(request, location):
-        if request.headers.get("HX-Request") == "true":
-            target = safe_current_path(
-                request.headers.get("HX-Current-URL"),
-                request.headers.get("host", ""),
-            )
-            if location == LOGIN_PATH and target:
-                location += "?next=" + urllib.parse.quote(target)
-            return Response(status_code=401, headers={"HX-Redirect": location})
-        # API/SSE callers get a machine-readable 401.
-        if request.scope["path"].startswith("/api/"):
-            return JSONResponse({"detail": "authentication required"},
-                                status_code=401)
-        # Remember where a plain page GET was headed so login can land there
-        # instead of dumping every deep link on the dashboard.
-        if location == LOGIN_PATH and request.method == "GET":
-            target = request.scope["path"]
-            qs = request.scope.get("query_string", b"").decode("utf-8", "ignore")
-            if qs:
-                target += "?" + qs
-            if target != "/" and safe_next_path(target):
-                location = LOGIN_PATH + "?next=" + urllib.parse.quote(target)
-        return RedirectResponse(url=location, status_code=303)
+        return refuse_signed_out(request, LOGIN_PATH)

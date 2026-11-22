@@ -15,6 +15,7 @@ from qobuz_librarian.web import (
     download_admission,
     job_labels,
     job_persistence,
+    rendering,
     runtime,
 )
 from qobuz_librarian.web import jobs as job_mgr
@@ -267,8 +268,8 @@ async def job_status(job_id: str):
 
 @router.get("/api/queue/count")
 async def queue_count():
-    """Live count of in-flight jobs for the nav Queue badge; parked reviews
-    have their own dots."""
+    """Live count of in-flight jobs for the nav Queue badge, and the dots of
+    the reviews waiting on other pages."""
     active = [j for j in job_mgr.registry.pending_and_running()
               if j.status != job_mgr.JobStatus.AWAITING_REVIEW]
     revision = "\n".join(sorted(
@@ -285,9 +286,10 @@ async def queue_count():
         # Status alone: the signature above moves every time a scan adds a
         # candidate, which would redraw the Queue on every poll for hours.
         "rows": job_labels._queue_rows_signature(active),
-        # Carried on the same poll so the nav's warning dot appears the moment
-        # a job needs the user, not at their next full page load.
+        # Carried on the same poll so the nav's dots appear the moment a job
+        # needs the user or a review is ready, not at their next full page load.
         "attention": job_persistence.attention_count(),
+        "reviews": rendering.nav_review_badges(),
     })
 
 
