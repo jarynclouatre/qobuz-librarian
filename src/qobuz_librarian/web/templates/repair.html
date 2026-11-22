@@ -24,14 +24,15 @@
 
 {% if error %}<div class="ql-flash ql-flash-warning" data-flash><span>{{ error }}</span></div>{% endif %}
 
-{% if not qobuz_ready %}
+{% set _launcher = not repair_job or repair_job.status.value in ('failed', 'canceled') %}
+{% if not qobuz_ready and not _launcher %}
 <section class="ql-work-card">
   {% with connect_embedded=True %}
     {% include "_connect_cta.html" %}
   {% endwith %}
 </section>
 {% endif %}
-{% if not repair_job or repair_job.status.value in ('failed', 'canceled') %}
+{% if _launcher %}
 {# A failed or cancelled run stays on the page, but with the launcher under
    it, so another scan can be started. #}
 {% if repair_job %}
@@ -66,12 +67,17 @@
     <p class="ql-work-card-title">Scan for damaged files</p>
     <p class="ql-work-card-text">Damaged tracks are listed for review.</p>
     {% endif %}
+    {% if not qobuz_ready %}<p class="ql-work-card-text">{% if health_qobuz_missing %}Repairs need a Qobuz token.{% else %}Qobuz rejected the saved token.{% endif %}</p>{% endif %}
   </div>
+  {% if qobuz_ready %}
   <form action="/repair" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-    <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused or not qobuz_ready %} disabled title="{{ writes_paused_reason if writes_paused else 'Connect Qobuz first.' }}" aria-disabled="true"{% endif %}
+    <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
             {% if repair_resume %}data-confirm="Continue the repair scan from where it left off?" data-confirm-action="Resume scan"{% else %}data-confirm="Scan the whole library for damaged files?" data-confirm-action="Scan"{% endif %}>{% if repair_resume %}Resume scan{% else %}Scan{% endif %}</button>
   </form>
+  {% else %}
+  <a href="/settings#qobuz" class="ql-btn ql-btn-primary w-full sm:w-auto">{% if health_qobuz_missing %}Connect{% else %}Reconnect{% endif %} Qobuz</a>
+  {% endif %}
 </section>
 {% else %}
 {% if repair_job %}

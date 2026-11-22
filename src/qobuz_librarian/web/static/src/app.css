@@ -4286,10 +4286,12 @@ details.ql-mobile-drawer[open]::before {
   color: var(--ql-text-3);
   font-size: 0.8125rem;
 }
-.ql-scan-hero form {
+.ql-scan-hero form,
+.ql-scan-hero > .ql-btn {
   margin-top: 1.125rem;
 }
-.ql-scan-hero form .ql-btn {
+.ql-scan-hero form .ql-btn,
+.ql-scan-hero > .ql-btn {
   min-width: 11rem;
 }
 .ql-scan-hero .ql-inline-link {
@@ -4598,13 +4600,29 @@ details.ql-mobile-drawer[open]::before {
   display: none;
 }
 .ql-settings-summary h2 {
+  flex: none;
   margin: 0;
-  min-width: 0;
   color: var(--ql-text);
   font-family: var(--ql-font-ui);
   font-size: 1rem;
   font-weight: 600;
   line-height: 1.25;
+}
+.ql-settings-state {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ql-settings-state--warning {
+  color: var(--ql-warning);
+}
+.ql-settings-section[open] > .ql-settings-summary .ql-settings-state {
+  display: none;
 }
 .ql-conn-line {
   display: flex;
@@ -4843,6 +4861,9 @@ details.ql-mobile-drawer[open]::before {
 .ql-default-control .ql-field-help {
   max-width: 68ch;
 }
+.ql-field-refusal {
+  color: var(--ql-warning);
+}
 /* A link to one field lands with its label and the fields before it in view. */
 .ql-default-control > :target {
   scroll-margin-top: 30vh;
@@ -4968,6 +4989,30 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-diagnostic-row:last-child {
   padding-bottom: 0;
+}
+.ql-diagnostic-row-kept {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ql-diagnostic-heading {
+  margin: 0;
+  color: var(--ql-text);
+  font-family: var(--ql-font-ui);
+  font-size: 0.9375rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.ql-diagnostic-kept > .ql-diagnostic-row:first-of-type {
+  margin-top: var(--ql-space-3);
+}
+.ql-diagnostics-list > * + .ql-diagnostic-kept {
+  border-top: 1px solid var(--ql-line);
+  padding-top: var(--ql-space-4);
+}
+.ql-diagnostics-list > * + .ql-settings-details {
+  margin-top: var(--ql-space-4);
+}
+.ql-diagnostic-ok {
+  margin-top: var(--ql-space-3);
 }
 .ql-diagnostic-status {
   display: inline-grid;
@@ -6170,6 +6215,22 @@ details[data-artist].htmx-swapping {
        the Download button full-width), or the last result stays behind
        it. */
     padding-bottom: 6rem;
+  }
+}
+
+/* Settings' bar for unsaved Behaviour changes: one row, held at the bottom of
+   the screen whatever part of the page is on it. */
+.ql-bulk-bar.ql-unsaved-bar {
+  position: sticky;
+  bottom: 1rem;
+  z-index: 25;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+  margin-top: var(--ql-space-4);
+}
+@media (max-width: 1023.98px) {
+  .ql-bulk-bar.ql-unsaved-bar {
+    bottom: calc(var(--ql-tabbar-h, calc(3.6rem + env(safe-area-inset-bottom))) + 0.5rem);
   }
 }
 

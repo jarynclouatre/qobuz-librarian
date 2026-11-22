@@ -107,7 +107,7 @@ async def api_diagnostics(request: Request):
     """Htmx partial that returns just the diagnostics list items for the Recheck button."""
     loop = asyncio.get_running_loop()
     return HTMLResponse(await loop.run_in_executor(
-        None, diagnostics._diagnostics_fragment, request))
+        None, diagnostics._diagnostics_swap, request))
 
 
 @router.get("/api/jobs/{job_id}/stream")

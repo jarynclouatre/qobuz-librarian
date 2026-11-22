@@ -54,7 +54,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
                        quality_note=False, password_error="",
                        password_locked=False, lastfm_check="",
                        section="", submitted_values=None,
-                       submitted_generation="",
+                       submitted_generation="", refused_field="",
                        status_code=200):
     creds = qobuz_access._read_creds()
     settings_store.refresh()
@@ -91,6 +91,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
     library_size = census.get("total") if census else ""
     open_restore = scans._active_scan("collection_restore",
                                       statuses=job_mgr.ACTIVE)
+    diagnostics = diagnostics_mod._fragment_report(diagnostics)
     return rendering._tr(request, "settings.html", {
         "music_storage": music_storage,
         "library_size": library_size,
@@ -131,6 +132,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         "settings_section": section,
         "error": error,
         "warnings": warnings or [],
+        "refused_field": refused_field,
         "defaults_open": bool(warnings) or error in {
             "invalidsettings", "settingschanged", "persist"
         },
@@ -172,6 +174,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
             for store in state_file.corrupt_store_details()),
         "backup_dir_cleared": settings_store.cleared_backup_dir_notice(),
         "diagnostics_html": diagnostics_mod._diagnostics_fragment(request, diagnostics),
+        "diagnostics_state": diagnostics_mod._needs_a_look(diagnostics),
         "web_login_available": (not web_auth.auth_disabled()
                                 and web_auth.credentials_configured()),
         "web_login_username": web_auth.current_username(),
@@ -531,7 +534,9 @@ async def save_behavior(request: Request):
                                   warnings=warnings, diagnostics=diags,
                                   rerendered=True, section=anchor,
                                   submitted_values=values,
-                                  submitted_generation=submitted_generation)
+                                  submitted_generation=submitted_generation,
+                                  refused_field=getattr(
+                                      next(iter(warnings), None), "key", ""))
     # A quality, singles or Downsample change leaves a saved Upgrade review
     # promising targets the settings no longer produce, and a saved Library
     # scan whose lists were built under the old policy (library_scan_state

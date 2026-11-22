@@ -388,7 +388,7 @@ async def _run_diagnostics_action(request: Request, action, arg):
     if busy is not None:
         return busy
     def run():
-        return action(request, arg) + diagnostics._diagnostics_fragment(request)
+        return action(request, arg) + diagnostics._diagnostics_swap(request)
 
     return HTMLResponse(await asyncio.get_running_loop().run_in_executor(None, run))
 

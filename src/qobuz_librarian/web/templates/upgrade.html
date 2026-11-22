@@ -15,13 +15,9 @@
 
   {# Without Qobuz the connect button is the one thing to do first. #}
   {% set _entry_btn = 'ql-btn-primary' if qobuz_ready else 'ql-btn-secondary ql-secondary-action' %}
-  {% if not qobuz_ready %}
-  <section class="ql-work-card">
-    {% with connect_embedded=True %}
-      {% include "_connect_cta.html" %}
-    {% endwith %}
-  </section>
-  {% endif %}
+  {% set _connect_line %}{% if not qobuz_ready %}<p class="ql-work-card-text">{% if health_qobuz_missing %}Upgrades need a Qobuz token.{% else %}Qobuz rejected the saved token.{% endif %}</p>{% endif %}{% endset %}
+  {% set _connect_btn %}<a href="/settings#qobuz" class="ql-btn ql-btn-primary w-full sm:w-auto">{% if health_qobuz_missing %}Connect{% else %}Reconnect{% endif %} Qobuz</a>{% endset %}
+  {% set _library_btn %}{% if qobuz_ready %}<a href="/library" class="ql-btn ql-btn-primary w-full sm:w-auto">Open Library</a>{% else %}{{ _connect_btn }}{% endif %}{% endset %}
   <div class="ql-work-status ql-quality-status">
     <span class="ql-status-chip {% if upgrade_state.stale %}is-warning{% elif upgrade_state.count %}is-info{% else %}is-neutral{% endif %}">
       {% if upgrade_state.stale %}Refresh needed{% elif upgrade_state.discarded %}Review discarded{% elif upgrade_state.count %}Review ready{% elif upgrade_state.complete %}{% if hidden_count %}Nothing left to review{% else %}No upgrades found{% endif %}{% else %}Not scanned yet{% endif %}
@@ -52,9 +48,10 @@
          situation and hands off. Naming it after a refresh would promise an
          action the page cannot perform. #}
       <p class="ql-work-card-title">Upgrade results need a Library refresh</p>
+      {{ _connect_line }}
     </div>
     <div class="ql-work-card-actions">
-      <a href="/library" class="ql-btn {{ _entry_btn }} w-full sm:w-auto">Open Library</a>
+      {{ _library_btn }}
     </div>
   </section>
   {% elif upgrade_state.count %}
@@ -63,8 +60,10 @@
       <p class="ql-work-card-title">{{ upgrade_state.count }} album{% if upgrade_state.count != 1 %}s{% endif %} to upgrade</p>
       {% if upgrade_state.held_back %}<p class="ql-work-card-text">{{ upgrade_state.held_back }} more album{% if upgrade_state.held_back != 1 %}s{% endif %} from the discarded review {% if upgrade_state.held_back != 1 %}are{% else %}is{% endif %} left out until the next Library scan.</p>{% endif %}
       {% if writes_paused and cli_mode %}<p class="ql-work-card-text">Review albums opens after you resume the web app.</p>{% endif %}
+      {{ _connect_line }}
     </div>
     <div class="ql-work-card-actions">
+      {% if not qobuz_ready %}{{ _connect_btn }}{% endif %}
       <form action="/upgrade/review" method="post" data-busy-submit>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         <button type="submit" class="ql-btn {{ _entry_btn }} w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}
@@ -76,9 +75,10 @@
   <section class="ql-work-card">
     <div class="ql-work-card-copy">
       <p class="ql-work-card-text">{% if upgrade_state.discarded %}The next Library scan lists the discarded upgrades again.{% else %}The latest Library scan checked the whole library with your current quality settings.{% if hidden_count %} Every upgrade it found is dismissed.{% endif %}{% endif %}</p>
+      {{ _connect_line }}
     </div>
     <div class="ql-work-card-actions">
-      <a href="/library" class="ql-btn {{ _entry_btn }} w-full sm:w-auto">Open Library</a>
+      {{ _library_btn }}
     </div>
   </section>
   {% else %}
@@ -86,9 +86,10 @@
     <div class="ql-work-card-copy">
       <p class="ql-work-card-title">No Upgrade results yet</p>
       <p class="ql-work-card-text">A Library scan builds them.</p>
+      {{ _connect_line }}
     </div>
     <div class="ql-work-card-actions">
-      <a href="/library" class="ql-btn {{ _entry_btn }} w-full sm:w-auto">Open Library</a>
+      {{ _library_btn }}
     </div>
   </section>
   {% endif %}

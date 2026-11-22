@@ -681,9 +681,8 @@ def _backup_review_checks(checks, inventory, retained, waiting):
 
 
 def _undo_copy_check(checks, inventory):
-    # Counted separately from the backups above, which are a fault. These are
-    # the undo copies a downsample was asked to keep, and the restore rows
-    # below are theirs.
+    # The undo copies a downsample was asked to keep are no fault, so they
+    # have no check of their own unless they can't be listed.
     try:
         inventory["undo"] = backup_mod.list_undo_copies()
     except Exception as exc:
@@ -693,17 +692,6 @@ def _undo_copy_check(checks, inventory):
             "label": "Hi-res originals kept",
             "ok": False,
             "detail": "Could not inspect retained originals; their status is unknown.",
-        })
-    undo_copies = inventory["undo"]
-    if undo_copies:
-        checks.append({
-            "label": "Hi-res originals kept",
-            "ok": True,
-            "detail": f"Originals of "
-                      f"{plural(len(undo_copies), 'downsampled album')} "
-                      f"kept, listed below. Cleared automatically after "
-                      f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')} "
-                      "while the album still holds each track.",
         })
 
 
@@ -720,12 +708,13 @@ def _staging_leftover_check(checks, inventory):
         })
     leftovers = inventory["leftovers"]
     if leftovers:
+        one = len(leftovers) == 1
         checks.append({
             "label": "Files kept in staging",
             "ok": False,
             "detail": f"{plural(len(leftovers), 'item')} "
-                      f"{'is' if len(leftovers) == 1 else 'are'} being held "
-                      "outside your library. Review them below.",
+                      f"{'is' if one else 'are'} being held outside your "
+                      f"library. Review {'it' if one else 'them'} below.",
         })
     elif not any(d["label"] == "Files kept in staging" for d in checks):
         checks.append({"label": "Files kept in staging", "ok": True,
@@ -798,9 +787,15 @@ def _fragment_report(diagnostics):
     return report
 
 
+def _needs_a_look(report):
+    failing = sum(not check["ok"] for check in report["checks"])
+    if not failing:
+        return ""
+    return f"{failing} need{'s' if failing == 1 else ''} a look"
+
+
 def _check_rows(checks):
     rows = []
-    originals_at = None
     for d in checks:
         icon = "OK" if d["ok"] else "!"
         cls = "ql-diagnostic-status-ok" if d["ok"] else "ql-diagnostic-status-error"
@@ -815,9 +810,14 @@ def _check_rows(checks):
             f'<div class="min-w-0"><div class="ql-diagnostic-label">{html.escape(d["label"])}</div>{detail}</div>'
             f'</div>'
         )
-        if d["label"] == "Hi-res originals kept" and d["ok"]:
-            originals_at = len(rows)
-    return rows, originals_at
+    return rows
+
+
+def _kept_label(album, what, size):
+    if not album:
+        return f'<div class="ql-diagnostic-label">{what}{size}</div>'
+    return (f'<div class="ql-diagnostic-label">{album}</div>'
+            f'<div class="ql-diagnostic-detail">{what}{size}</div>')
 
 
 def _backup_names(path, origin):
@@ -889,28 +889,30 @@ def _set_aside_row(rows, tok, path, classification, name, dest, album):
     # put back. A later upgrade that landed the same files leaves
     # nothing here the album lacks.
     same = classification.reason == "identical"
+    size = _size_note(path)
     if same:
-        chip = ('<span class="ql-diagnostic-status '
-                'ql-diagnostic-status-ok" aria-label="OK">OK</span>')
+        row, chip = "ql-diagnostic-row ql-diagnostic-row-kept", ""
+        label = _kept_label(album, "Download set aside", size)
         detail = (f"{dest} now holds the same files as this "
                   "download, so it is safe to delete.")
         confirm = "Delete this download? The album holds the same files."
         irreversible = ""
     else:
+        row = "ql-diagnostic-row"
         chip = ('<span class="ql-diagnostic-status '
                 'ql-diagnostic-status-error" '
                 'aria-label="Needs attention">!</span>')
+        label = (f'<div class="ql-diagnostic-label">Download set aside'
+                 f'{f": {album}" if album else ""}{size}</div>')
         detail = ("An upgrade couldn't verify this download, so the "
                   f"original album was put back in {dest}.")
         confirm = ("Delete this download? The album keeps the files "
                    "it has now.")
         irreversible = " data-irreversible"
     rows.append(
-        f'<div class="ql-diagnostic-row" data-backup-status="set-aside">'
+        f'<div class="{row}" data-backup-status="set-aside">'
         f'{chip}'
-        f'<div class="min-w-0"><div class="ql-diagnostic-label">'
-        f'Download set aside{f": {album}" if album else ""}'
-        f'{_size_note(path)}</div>'
+        f'<div class="min-w-0">{label}'
         f'<div class="ql-diagnostic-detail">{detail}</div>'
         f'<form hx-post="/backups/discard-unchecked" '
         f'hx-target="#diagnostics-list" class="mt-2" data-busy-submit>'
@@ -926,9 +928,6 @@ def _set_aside_row(rows, tok, path, classification, name, dest, album):
 def _backup_row(rows, tok, shared, path, origin, classification,
                 name, dest, album):
     reason = html.escape(classification.detail)
-    status = "ok" if classification.removable else "error"
-    icon = "OK" if classification.removable else "!"
-    aria = "OK" if classification.removable else "Needs attention"
     where = dest if origin else "the album folder it came from"
     by_file = re.match(
         r"^\d{8}_\d{6}(?:_\d{6})?_(?:gapfill|repair|downsample)_", path.name)
@@ -999,12 +998,23 @@ def _backup_row(rows, tok, shared, path, origin, classification,
             f"Delete this backup? {checked} is no longer in your library, "
             "so this may be the only copy of its files. It cannot be "
             "undone.")
+    what = "Damaged tracks Repair replaced" if repaired else "Backup"
+    size = _size_note(path)
+    if classification.removable:
+        if not by_file and not consolidated:
+            what = "Upgrade backup"
+        row, chip = "ql-diagnostic-row ql-diagnostic-row-kept", ""
+        label = _kept_label(album, what + kept, size)
+    else:
+        row = "ql-diagnostic-row"
+        chip = ('<span class="ql-diagnostic-status ql-diagnostic-status-error" '
+                'aria-label="Needs attention">!</span>')
+        label = (f'<div class="ql-diagnostic-label">{what}'
+                 f'{f": {album}" if album else ""}{kept}{size}</div>')
     rows.append(
-        f'<div class="ql-diagnostic-row" data-backup-status="{classification.status}">'
-        f'<span class="ql-diagnostic-status ql-diagnostic-status-{status}" aria-label="{aria}">{icon}</span>'
-        f'<div class="min-w-0"><div class="ql-diagnostic-label">'
-        f'{"Damaged tracks Repair replaced" if repaired else "Backup"}'
-        f'{f": {album}" if album else ""}{kept}{_size_note(path)}</div>'
+        f'<div class="{row}" data-backup-status="{classification.status}">'
+        f'{chip}'
+        f'<div class="min-w-0">{label}'
         f'<div class="ql-diagnostic-detail">{reason}</div>'
         f'<div class="mt-2 flex gap-2">'
         f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
@@ -1021,9 +1031,7 @@ def _backup_row(rows, tok, shared, path, origin, classification,
 
 def _undo_state(undo, tok, path, origin, restorable, name, dest, album):
     if restorable:
-        detail = (
-            "Copies of the files this album had before it was "
-            "downsampled.")
+        detail = ""
         restore_form = (
             f'<form hx-post="/backups/restore" hx-target="#diagnostics-list" data-busy-submit>'
             f'<input type="hidden" name="_csrf_token" value="{tok}">'
@@ -1110,13 +1118,12 @@ def _undo_rows(tok, undo):
             undo, tok, path, origin, restorable, name, dest, album)
         detail, delete_form = _undo_delete_form(
             tok, path, name, dest, album, detail, what, delete_note)
+        note = f'<div class="ql-diagnostic-detail">{detail}</div>' if detail else ""
         undo_rows.append(
-            f'<div class="ql-diagnostic-row">'
-            f'<span class="ql-diagnostic-status" aria-hidden="true"></span>'
-            f'<div class="min-w-0"><div class="ql-diagnostic-label">'
-            f'Hi-res originals kept{f": {album}" if album else ""}'
-            f'{_size_note(path)}</div>'
-            f'<div class="ql-diagnostic-detail">{detail}</div>'
+            f'<div class="ql-diagnostic-row ql-diagnostic-row-kept">'
+            f'<div class="min-w-0">'
+            f'{_kept_label(album, "Hi-res originals", _size_note(path))}'
+            f'{note}'
             f'<div class="mt-2 flex gap-2">'
             f'{restore_form}'
             f'{delete_form}'
@@ -1174,15 +1181,42 @@ def _leftover_rows(rows, tok, leftovers):
         )
 
 
+def _kept_section(undo_rows, kept_rows):
+    if not undo_rows and not kept_rows:
+        return []
+    note = ""
+    if undo_rows:
+        note = (
+            '<p class="ql-diagnostic-detail">'
+            f'{"Hi-res originals are cleared" if kept_rows else "Cleared"} '
+            f'automatically after {plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, "day")} '
+            'while the album still holds each track.</p>')
+    return ['<section class="ql-diagnostic-kept">'
+            f'<h3 class="ql-diagnostic-heading">Kept backups</h3>{note}',
+            *undo_rows, *kept_rows, '</section>']
+
+
+def _ok_section(checks):
+    if not checks:
+        return []
+    return ['<details class="ql-settings-details">'
+            '<summary class="ql-disclosure-summary">'
+            f'{plural(len(checks), "check")} OK</summary>'
+            '<div class="ql-diagnostics-list ql-diagnostic-ok">',
+            *_check_rows(checks), '</div></details>']
+
+
 def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
-    """The diagnostics list items, plus a row per retained backup.
+    """What needs attention, then the kept backups, then the checks that
+    passed, folded up.
 
     Shared by the Settings page render, the Recheck partial, and the restore
     POST, which re-renders the list in place so a restored backup disappears
     from it without a page reload."""
     report = _fragment_report(diagnostics)
     checks = report["checks"]
-    rows, originals_at = _check_rows(checks)
+    rows = _check_rows([check for check in checks if not check["ok"]])
+    kept = []
     orphans = report["orphans"]
     tok = html.escape(request.state.csrf_token)
     shared = Counter(
@@ -1194,19 +1228,27 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
             continue
         if (backup_mod.is_set_aside_replacement(path)
                 and origin and Path(origin).is_dir()):
-            _set_aside_row(rows, tok, path, classification, name, dest, album)
+            _set_aside_row(kept if classification.reason == "identical" else rows,
+                           tok, path, classification, name, dest, album)
             continue
-        _backup_row(rows, tok, shared, path, origin, classification,
-                    name, dest, album)
-    undo = report["undo"]
-    undo_rows = _undo_rows(tok, undo)
-    if originals_at is None:
-        rows.extend(undo_rows)
-    else:
-        rows[originals_at:originals_at] = undo_rows
-    leftovers = report["leftovers"]
-    _leftover_rows(rows, tok, leftovers)
-    return "\n".join(rows)
+        _backup_row(kept if classification.removable else rows, tok, shared,
+                    path, origin, classification, name, dest, album)
+    _leftover_rows(rows, tok, report["leftovers"])
+    return "\n".join([
+        *rows,
+        *_kept_section(_undo_rows(tok, report["undo"]), kept),
+        *_ok_section([check for check in checks if check["ok"]]),
+    ])
+
+
+def _diagnostics_swap(request: Request) -> str:
+    """The list run again, with the count on the Diagnostics heading, which is
+    outside the part of the page that is swapped."""
+    report = _fragment_report(None)
+    return (
+        f'{_diagnostics_fragment(request, report)}'
+        f'<span id="diagnostics-state" hx-swap-oob="innerHTML">'
+        f'{_needs_a_look(report)}</span>')
 
 
 def _collection_backup_status():

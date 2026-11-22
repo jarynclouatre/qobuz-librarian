@@ -957,8 +957,7 @@
   });
 
   function restoreBusySubmitButtons(root) {
-    (root || document).querySelectorAll("form[data-busy-submit] button[type=submit]").forEach(function (b) {
-      if (b.dataset.busyHtml == null) return;
+    (root || document).querySelectorAll("button[data-busy-html]").forEach(function (b) {
       b.disabled = false;
       b.classList.remove("is-disabled");
       b.innerHTML = b.dataset.busyHtml;
@@ -970,6 +969,27 @@
     if (!evt.persisted) return;
     restoreBusySubmitButtons();
   });
+
+  // A changed setting can be screens away from its form's Save, so a bar with
+  // a Save of its own stays up until the form is back as it was loaded.
+  function fieldChanged(field) {
+    if (field.type === "checkbox") return field.checked !== field.defaultChecked;
+    if (field.tagName === "SELECT") {
+      var loaded = field.querySelector("option[selected]") || field.options[0];
+      return field.value !== loaded.value;
+    }
+    return field.tagName === "INPUT" && field.value !== field.defaultValue;
+  }
+  function syncUnsavedBar() {
+    var bar = document.querySelector("[data-unsaved-bar]");
+    if (!bar) return;
+    var form = document.getElementById(bar.dataset.unsavedBar);
+    bar.classList.toggle("hidden", !form.hasAttribute("data-unsaved")
+      && !Array.prototype.some.call(form.elements, fieldChanged));
+  }
+  document.addEventListener("input", syncUnsavedBar);
+  document.addEventListener("change", syncUnsavedBar);
+  window.addEventListener("pageshow", syncUnsavedBar);
 
   // An htmx form the response left in place (a refusal, an error, no
   // answer) gets its button back.

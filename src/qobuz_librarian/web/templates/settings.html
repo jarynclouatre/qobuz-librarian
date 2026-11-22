@@ -155,10 +155,11 @@
 {% endif %}
 {% endmacro %}
 
-{% macro section(id, title, open=False) %}
+{% macro section(id, title, open=False, state="", warning=False) %}
 <details class="ql-settings-section"{% if open %} open{% endif %}>
   <summary class="ql-settings-summary">
     <h2 id="{{ id }}" tabindex="-1" class="ql-anchor-target">{{ title }}</h2>
+    <span id="{{ id }}-state" class="ql-settings-state{% if warning %} ql-settings-state--warning{% endif %}">{{ state }}</span>
     <span class="ql-review-chevron" aria-hidden="true"></span>
   </summary>
   <div class="ql-settings-section-body">
@@ -182,12 +183,15 @@
 </label>
 {% endmacro %}
 
+{% macro refused_attrs(key) %}{% if key == refused_field %} aria-invalid="true" aria-describedby="refusal-{{ key }}" autofocus{% endif %}{% endmacro %}
+{% macro refusal_note(key) %}{% if key == refused_field %}<p id="refusal-{{ key }}" class="ql-field-help ql-field-refusal">{{ warnings | first }}</p>{% endif %}{% endmacro %}
+
 {% macro setting_field(key, label, help, kind, choices, placeholder) %}
 <div class="ql-default-field">
   <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
   <div class="ql-default-control">
     {% if kind == 'enum' %}
-    <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select sm:max-w-sm">
+    <select name="{{ key }}" id="f-{{ key }}" class="ql-input ql-select sm:max-w-sm"{{ refused_attrs(key) }}>
       {% if key in unset_enum_keys or not behavior[key] %}
       <option value="" {% if not behavior[key] %}selected{% endif %}>Not chosen yet</option>
       {% endif %}
@@ -201,8 +205,9 @@
     {% else %}
     <input type="text" name="{{ key }}" id="f-{{ key }}" value="{{ behavior[key] }}"
            placeholder="{{ placeholder }}"
-           class="ql-input ql-mono sm:max-w-lg">
+           class="ql-input ql-mono sm:max-w-lg"{{ refused_attrs(key) }}>
     {% endif %}
+    {{ refusal_note(key) }}
     {% if help %}<p class="ql-field-help">{{ help }}</p>{% endif %}
   </div>
 </div>
@@ -264,41 +269,34 @@
 {% endif %}
 
 <div class="ql-settings-stack">
-{% call section("qobuz", "Qobuz authentication", connected or envchecked or error in _qobuz_errors) %}
+{% set qobuz_warning = not auth_token_set or token_verified is sameas false %}
+{% set qobuz_state = "Not connected" if not auth_token_set
+                     else "Token not authenticating" if qobuz_warning
+                     else "Connected" if token_verified else "Token saved" %}
+{% call section("qobuz", "Qobuz account", connected or envchecked or error in _qobuz_errors or qobuz_warning,
+                qobuz_state, qobuz_warning) %}
     {{ qobuz_notices() }}
+    {% if auth_token_set %}
     <div class="ql-settings-section-head">
       {# "Connected" is a claim about Qobuz accepting the token, so it waits for
          Qobuz to have accepted it. A saved-but-unproven token says so. #}
-      {% if auth_token_set and token_verified is not sameas false %}
+      {% if token_verified is not sameas false %}
       <span class="ql-conn-line"><span class="ql-conn-dot"></span>{% if token_verified %}Connected{% else %}Token saved{% endif %}{% if user_id %}, downloads as <span class="ql-conn-who">{{ user_id }}</span>{% endif %}</span>
-      {% elif auth_token_set %}
-      <span class="ql-conn-line ql-conn-line--stale"><span class="ql-conn-dot"></span>Token not authenticating{% if user_id %} <span class="ql-conn-who">{{ user_id }}</span>{% endif %}</span>
       {% else %}
-      <span class="ql-badge ql-badge-primary">Required for search</span>
+      <span class="ql-conn-line ql-conn-line--stale"><span class="ql-conn-dot"></span>Token not authenticating{% if user_id %} <span class="ql-conn-who">{{ user_id }}</span>{% endif %}</span>
       {% endif %}
     </div>
+    {% endif %}
     {% if auth_token_set and not downloader_ready %}
     <div class="ql-notice ql-notice-warning">
       <span>Downloads also need your Qobuz email or user ID.</span>
     </div>
     {% endif %}
-    {% if not auth_token_set %}
-    <details class="ql-settings-details">
-      <summary class="ql-disclosure-summary">How do I find my token?</summary>
-      <p class="ql-settings-details-copy">
-        Sign in at <a href="https://play.qobuz.com" target="_blank" rel="noopener" class="ql-link ql-inline-link-hit">play.qobuz.com</a>,
-        open dev tools (F12), then go to Local Storage →
-        play.qobuz.com (<strong>Chrome/Edge:</strong> Application tab;
-        <strong>Firefox:</strong> Storage tab). Click the <code>localuser</code>
-        entry and copy its <code>token</code> value. The <code>id</code> in the
-        same entry is your user ID.
-      </p>
-    </details>
-    {% endif %}
     {# Once connected the whole form collapses. Replacing the account or
        token is a rare event and two open inputs read as a chore to fill.
-       It stays open while downloads still wait for the user ID. #}
-    {% if auth_token_set %}<details class="ql-settings-details"{% if error in _qobuz_errors or not downloader_ready %} open{% endif %}>
+       It stays open while downloads still wait for the user ID or Qobuz
+       rejects the token. #}
+    {% if auth_token_set %}<details class="ql-settings-details"{% if error in _qobuz_errors or not downloader_ready or token_verified is sameas false %} open{% endif %}>
       <summary class="ql-disclosure-summary">Change account or token</summary>
     {% endif %}
 
@@ -328,6 +326,7 @@
     <form action="/settings" method="post" class="ql-settings-form ql-credentials-form" data-busy-submit data-busy-label="Checking…">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="credential_generation" value="{{ credential_generation }}">
+      {% set user_field %}
       <div class="ql-field">
         <label class="ql-field-label" for="user_id">Email or user ID</label>
         <input type="text" name="user_id" id="user_id" value="{{ user_id or '' }}"
@@ -339,6 +338,16 @@
           {% if env_user_id_set %}Set by environment; remove <code>QOBUZ_USER_ID</code> from <code>.env</code> or <code>compose.yaml</code> to manage it here.{% else %}Needed for downloads.{% endif %}
         </p>
       </div>
+      {% endset %}
+      {% if auth_token_set %}
+      {{ user_field }}
+      {% else %}
+      <ol class="ql-step-list max-w-lg">
+        <li><span class="ql-step-number">1</span><span>On a computer, sign in at <a href="https://play.qobuz.com" target="_blank" rel="noopener" class="ql-inline-link">play.qobuz.com</a>.</span></li>
+        <li><span class="ql-step-number">2</span><span>Open developer tools (F12) and go to Local Storage → play.qobuz.com (Application tab in Chrome and Edge, Storage tab in Firefox).</span></li>
+        <li><span class="ql-step-number">3</span><span>Open the <code>localuser</code> entry. Copy <code>token</code> into Auth token. <code>id</code> is your user ID.</span></li>
+      </ol>
+      {% endif %}
       <div class="ql-field">
         <label class="ql-field-label" for="auth_token">Auth token{% if not creds_from_env %} <span class="ql-required" aria-hidden="true">*</span>{% endif %}</label>
         {% if auth_token_set %}
@@ -355,6 +364,7 @@
           {{ secret_toggle("auth_token", "token") }}
         </div>
       </div>
+      {% if not auth_token_set %}{{ user_field }}{% endif %}
 
       <div class="ql-settings-actions">
         <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto">{% if creds_from_env and env_user_id_set %}Check connection{% else %}Save &amp; connect{% endif %}</button>
@@ -363,9 +373,11 @@
     {% if auth_token_set %}</details>{% endif %}
 {% endcall %}
 
-{% call section("behaviour", "Behaviour", settings_section == 'behaviour') %}
+{% call section("behaviour", "Behaviour", settings_section == 'behaviour',
+                option_labels['STREAMRIP_QUALITY'].get(behavior['STREAMRIP_QUALITY'], behavior['STREAMRIP_QUALITY'])) %}
 {% if not rerendered %}{{ behaviour_notices() }}{% endif %}
-    <form action="/settings/behavior" method="post" data-busy-submit data-busy-label="Saving…">
+    <form id="behaviour-form" action="/settings/behavior" method="post" data-busy-submit data-busy-label="Saving…"
+          {%- if settings_section == 'behaviour' and error in ("invalidsettings", "persist") %} data-unsaved{% endif %}>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="form_complete" value="1">
       <input type="hidden" name="settings_generation" value="{{ behavior_generation }}">
@@ -412,11 +424,11 @@
         </div>
       </details>
 
-      <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Save behaviour</button>
+      <button type="submit" class="ql-btn ql-btn-secondary w-full sm:w-auto">Save</button>
     </form>
 {% endcall %}
 
-{% call section("library-paths", "Library paths") %}
+{% call section("library-paths", "Library paths", state=library_size or "") %}
     {% set _any_host = library_paths | selectattr('resolved') | list %}
     {% if in_container and not _any_host %}<p class="ql-path-kind ql-path-caption">Container paths</p>{% endif %}
     <dl class="ql-path-list">
@@ -482,7 +494,7 @@
 {% endcall %}
 {% endif %}
 
-{% call section("discover", "Discover", settings_section == 'discover') %}
+{% call section("discover", "Discover", settings_section == 'discover', "On" if discover_available else "Off") %}
     {% if not lastfm_check %}{{ saved_notice('discover') }}{% endif %}
     {% if lastfm_check == 'ok' %}
     <div class="ql-notice ql-notice-success mb-6">
@@ -538,7 +550,8 @@
     </form>
 {% endcall %}
 
-{% call section("collection-backup", "Collection backup", settings_section == 'collection-backup') %}
+{% call section("collection-backup", "Collection backup", settings_section == 'collection-backup',
+                collection_backup.age or "") %}
     {{ saved_notice('collection-backup') }}
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
@@ -643,7 +656,8 @@
         <label class="ql-field-label" for="f-{{ key }}">{{ label }}</label>
         <input type="text" name="{{ key }}" id="f-{{ key }}"
                value="{{ behavior[key] or '' }}" placeholder="{{ placeholder }}"
-               class="ql-input ql-mono max-w-lg">
+               class="ql-input ql-mono max-w-lg"{{ refused_attrs(key) }}>
+        {{ refusal_note(key) }}
         <p class="ql-field-help">{% if not behavior[key] %}Writing to <code>{{ collection_backup.folder }}</code>. {% endif %}{{ help }}</p>
       </div>
       {% endfor %}
@@ -705,7 +719,7 @@
 {% endcall %}
 
 {% if web_login_available %}
-{% call section("web-login", "Web login", settings_section == 'web-login') %}
+{% call section("web-login", "Web login", settings_section == 'web-login', web_login_username) %}
     <div class="ql-settings-section-head">
       <div class="ql-settings-section-copy">
         <p>
@@ -759,7 +773,7 @@
 {% endcall %}
 {% endif %}
 
-{% call section("diagnostics", "Diagnostics") %}
+{% call section("diagnostics", "Diagnostics", state=diagnostics_state, warning=True) %}
     <div class="ql-settings-section-head ql-settings-section-head-actions">
       <div class="ql-settings-section-copy">
         <p>Checks what the app can see before scans or downloads start.</p>
@@ -782,7 +796,7 @@
 {# Shown before credentials are saved too: the terminal's lock-busy message
    sends a fresh install here to switch modes, so the control it names has to
    be on the page. #}
-{% call section("mode", "Mode", mode_changed) %}
+{% call section("mode", "Mode", mode_changed, "Terminal mode" if cli_mode else "Web app") %}
     {% if mode_changed == "refused" and error %}
     <div class="ql-notice ql-notice-warning" data-flash><span>{{ error }}</span></div>
     {% endif %}
@@ -841,6 +855,11 @@
     </div>
     {% endif %}
 {% endcall %}
+</div>
+
+<div class="ql-bulk-bar ql-unsaved-bar hidden" data-unsaved-bar="behaviour-form">
+  <span class="ql-bulk-count">Unsaved changes</span>
+  <button type="submit" form="behaviour-form" class="ql-btn ql-btn-primary">Save</button>
 </div>
 
 </div>

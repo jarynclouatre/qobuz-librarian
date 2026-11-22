@@ -115,6 +115,15 @@ class SettingsChanged(RuntimeError):
     """The form was rendered from settings that are no longer current."""
 
 
+class FieldProblem(str):
+    """Why a submitted value was refused, with the setting it names."""
+
+    def __new__(cls, text, key):
+        problem = super().__new__(cls, text)
+        problem.key = key
+        return problem
+
+
 def _form_generation(section: str, values: dict) -> str:
     keys = FORM_KEYS[section]
     payload = json.dumps(
@@ -312,6 +321,7 @@ def _validate_list(key, items):
 _PATH_TEMPLATE_KEYS = ("BEETS_PATH_DEFAULT", "BEETS_PATH_COMP")
 _FIELD_LABELS = {key: label for key, label, *_ in TEXT_FIELDS}
 _FIELD_KINDS = {key: kind for key, _, _, kind, _, _ in TEXT_FIELDS}
+_FIELD_PLACEHOLDERS = {key: hint for key, *_, hint in TEXT_FIELDS}
 
 
 def _path_template_problem(key, value):
@@ -332,6 +342,20 @@ def _path_template_problem(key, value):
                 "inside it.")
     return (f"\u201c{label}\u201d has to stay inside your music folder. "
             "Remove the \u201c..\u201d parts.")
+
+
+def _shared_album_folder_problem(key, value):
+    """Why a beets path template that files several albums in one folder
+    cannot be saved, or "". A crash-safe import needs each album's own
+    folder."""
+    from qobuz_librarian.integrations.beets import _files_albums_apart
+
+    if _files_albums_apart(value):
+        return ""
+    example = _FIELD_PLACEHOLDERS[key].removeprefix("e.g. ")
+    return (f"\u201c{_FIELD_LABELS[key]}\u201d has to give each album a "
+            f"folder of its own, such as {example}, so an import a restart "
+            "cuts off can be finished.")
 
 
 def _path_template_warning(key, value):
@@ -770,7 +794,7 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
                 # Reject the whole submitted change. Applying valid sibling
                 # fields while silently dropping a forged/invalid enum leaves
                 # the operator with a configuration they never submitted.
-                return None, [f"Invalid value for {key}."]
+                return None, [FieldProblem(f"Invalid value for {key}.", key)]
             clean[key] = v  # persist the normalised value, matching cfg
         elif kind == "list":
             raw = values[key]
@@ -798,11 +822,14 @@ def _save_locked(values: dict, *, baseline: Optional[dict] = None):
             if (not problem and key == "COLLECTION_BACKUP_DIR" and value
                     and value != str(baseline.get(key) or "").strip()):
                 problem = _backup_dir_unwritable(value)
+            if (not problem and key in _PATH_TEMPLATE_KEYS and value
+                    and value != str(baseline.get(key) or "").strip()):
+                problem = _shared_album_folder_problem(key, value)
             if problem:
                 # Same rule as the enum branch: reject the whole submission
                 # rather than apply the siblings and leave a path that would
                 # quietly file music outside the library.
-                return None, [problem]
+                return None, [FieldProblem(problem, key)]
             clean[key] = value
             unread = _path_template_warning(key, value)
             if unread:

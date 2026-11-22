@@ -44,7 +44,7 @@
   <div class="ql-flash ql-flash-warning" data-flash><span><strong>Refresh needed.</strong>{% if library_generation.outputs.library.reason %} {{ library_generation.outputs.library.reason }}{% endif %}{% if library_scan_state.ready and qobuz_ready and not library_refresh_running %} Use the refresh button beside the page title.{% endif %}</span></div>
   {% endif %}
 
-  {% if not qobuz_ready %}
+  {% if not qobuz_ready and not first_scan_offered %}
   <section class="ql-work-card">
     {% with connect_embedded=True %}
       {% include "_connect_cta.html" %}
@@ -72,11 +72,16 @@
     <p class="ql-scan-hero-text">Finds missing albums, missing tracks, and quality upgrades.</p>
     <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan</p>
     {% endif %}
+    {% if qobuz_ready %}
     <form action="/library" method="post" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="mode" value="{{ 'partial_fill' if library_resume and library_resume.kind == 'partial' else 'missing_albums' }}">
-      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% elif not qobuz_ready %} disabled title="Connect Qobuz before scanning." aria-disabled="true"{% endif %}>{{ 'Resume scan' if library_resume else 'Scan library' }}</button>
+      <button type="submit" class="ql-btn ql-btn-primary w-full sm:w-auto"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>{{ 'Resume scan' if library_resume else 'Scan library' }}</button>
     </form>
+    {% else %}
+    <p class="ql-scan-hero-meta">{% if health_qobuz_missing %}Scanning needs a Qobuz token.{% else %}Qobuz rejected the saved token.{% endif %}</p>
+    <a href="/settings#qobuz" class="ql-btn ql-btn-primary w-full sm:w-auto">{% if health_qobuz_missing %}Connect{% else %}Reconnect{% endif %} Qobuz</a>
+    {% endif %}
   </section>
   {% endif %}
 

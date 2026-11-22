@@ -1119,9 +1119,9 @@ def test_a_setting_back_on_its_compose_value_is_not_pinned(tmp_path, monkeypatch
     monkeypatch.setattr(ss, "_any_active_job", lambda: False)
     monkeypatch.setattr(ss, "_pending_apply", None)
 
-    ok, _ = ss.save({"BEETS_PATH_DEFAULT": "Mine/$album"})
+    ok, _ = ss.save({"BEETS_PATH_DEFAULT": "Mine/$album/$title"})
     assert ok is True
-    assert cfg.BEETS_PATH_DEFAULT == "Mine/$album"
+    assert cfg.BEETS_PATH_DEFAULT == "Mine/$album/$title"
 
     ok, _ = ss.save({"BEETS_PATH_DEFAULT": ""})
     assert ok is True
