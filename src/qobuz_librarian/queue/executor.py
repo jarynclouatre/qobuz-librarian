@@ -2194,11 +2194,11 @@ def _queue_done_line(results, n_items, *, stopped=False):
              and n_left == 0 and n_own_left == 0)
     text = (f"  {'✓' if clear else '⚠'} Queue {'stopped' if stopped else 'done'}: "
             f"{n_success}/{n_items} album{'s' if n_items != 1 else ''} OK")
-    # A stop tallies finished albums only, so its zeros say nothing about
+    # A stop tallies finished albums only, so its zero says nothing about
     # the album it cut short.
     if n_total_ok or not stopped:
         text += f" · {plural(n_total_ok, 'track')} downloaded"
-    if n_total_missing or not stopped:
+    if n_total_missing:
         text += f" · {plural(n_total_missing, 'track')} unresolved"
     if n_cancelled:
         text += (f" · {n_cancelled} album"
@@ -2450,9 +2450,7 @@ class _QueueFlush:
         elif isinstance(exc, AuthLost):
             reason = (str(exc) if isinstance(exc, DownloadsRefused)
                       else "Qobuz rejected the token.")
-            log.info(fmt(C.RED,
-                f"\n    {reason} Stopping further downloads; "
-                "will restore upgrade backups and exit."))
+            log.info(fmt(C.RED, f"\n    {reason} Stopping further downloads."))
             item["result"] = "auth_lost"
             self.auth_lost_exc = exc
         elif isinstance(exc, OSError):
@@ -2760,7 +2758,7 @@ class _QueueFlush:
 
         print()
         log.info(fmt(C.BOLD + C.WHITE,
-            f"  [Q {self.idx}/{self.n_items}] {truncate(self.title, 55)}"))
+            f"  [{self.idx}/{self.n_items}] {truncate(self.title, 55)}"))
         if self.requires_library_backup and self.plan is None:
             # The exact-recovery lane only covers a handful of shapes (no
             # sibling replacement, no downsampling, whole-album requests). The
@@ -3482,10 +3480,13 @@ class _QueueFlush:
         self._preflight_if_skipped()
         self._consolidate()
         self._write_sidecars()
-        log.info(fmt(*_queue_done_line(
+        colour, text = _queue_done_line(
             self.results, self.n_items,
             stopped=(self.interrupted or self.disk_full or self.io_error or self.durable_stopped
-                     or self.auth_lost_exc is not None))))
+                     or self.auth_lost_exc is not None))
+        # One album's own line has already said it finished.
+        if self.n_items > 1 or colour != C.GREEN:
+            log.info(fmt(colour, text))
 
         # A durable stop leaves the journal holding blocked or retired work on
         # purpose, and rewriting it as pending is what the journal refuses. Every

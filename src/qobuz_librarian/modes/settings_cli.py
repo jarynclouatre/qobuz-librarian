@@ -30,17 +30,17 @@ def _pick_quality(current_value):
         marker = " (current)" if choice == current_value else ""
         log.info(fmt(C.GRAY, f"    {i}) {labels[choice]}{marker}"))
     current_label = labels.get(current_value, "current")
-    r = ask(f"  Choice (Enter = keep {current_label}): ", quiet=True)
-    if r is None:
-        return NO_ANSWER
-    if r == "q":
-        return _QUIT
-    if r == "":
-        return current_value
-    if r in ("1", "2", "3"):
-        return _QUALITY_CHOICES[int(r) - 1]
-    log.info(fmt(C.GRAY, "  Not a listed choice; quality left unchanged."))
-    return current_value
+    while True:
+        r = ask(f"  Choice (Enter = keep {current_label}): ", quiet=True)
+        if r is None:
+            return NO_ANSWER
+        if r == "q":
+            return _QUIT
+        if r == "":
+            return current_value
+        if r in ("1", "2", "3"):
+            return _QUALITY_CHOICES[int(r) - 1]
+        print(fmt(C.YELLOW, "  Answer 1, 2, 3 or q."))
 
 
 def _pick_downsample_policy(current_value):

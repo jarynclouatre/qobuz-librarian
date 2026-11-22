@@ -50,10 +50,8 @@ from qobuz_librarian.queue.persistence import (
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, banner, fmt, wrap
 from qobuz_librarian.ui_cli.errors import (
-    EXIT_AUTH,
     EXIT_GENERAL,
     EXIT_INTERRUPT,
-    auth_lost_msg,
     die,
     plural,
 )
@@ -232,19 +230,19 @@ def resolve_album_from_args(args, token):
         parsed = parse_qobuz_url(args.query[0])
         if not parsed:
             die(fmt(C.RED,
-                f"✗  Couldn't parse Qobuz URL: {args.query[0]}\n"
-                f"   Supported formats:\n"
-                f"     https://play.qobuz.com/album/<id>\n"
-                f"     https://open.qobuz.com/album/<id>\n"
-                f"     https://www.qobuz.com/<lang>/album/<slug>/<id>\n"),
+                f"  ✗  Couldn't parse Qobuz URL: {args.query[0]}\n"
+                f"     Supported formats:\n"
+                f"       https://play.qobuz.com/album/<id>\n"
+                f"       https://open.qobuz.com/album/<id>\n"
+                f"       https://www.qobuz.com/<lang>/album/<slug>/<id>\n"),
                 EXIT_GENERAL)
         kind, qid = parsed
         if kind == "track":
             die(fmt(C.RED,
-                "✗  Track URL passed; the terminal downloads albums only.\n"
-                "   Download a single track from Search in the web app (its "
+                "  ✗  Track URL passed; the terminal downloads albums only.\n"
+                "     Download a single track from Search in the web app (its "
                 "Track tab), or outside Docker with streamrip itself:\n"
-                "     rip url <url>"),
+                "       rip url <url>"),
                 EXIT_GENERAL)
         if kind == "artist":
             die(fmt(C.RED,
@@ -286,7 +284,7 @@ def resolve_album_from_args(args, token):
         album = album or query
 
     if not query:
-        die(fmt(C.RED, "✗  Empty query."), EXIT_GENERAL)
+        die(fmt(C.RED, "  ✗  Empty query."), EXIT_GENERAL)
 
     results = search_albums(query, token, limit=cfg.SEARCH_FETCH_LIMIT)
     if not results:
@@ -408,22 +406,17 @@ def _interactive_album_action(album, args, token, album_queue, flush_queue):
                 log.info(fmt(C.GRAY, f"  Didn't recognise {r!r}."))
             log.info(fmt(C.GRAY, "  Skipped."))
         else:
-            try:
-                return _download_album_now(
-                    album,
-                    args,
-                    token,
-                    existing_state=(existing, album_dir, missing, present),
-                    already_confirmed=True,
-                )
-            except AuthLost as exc:
-                die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
-    except AuthLost as exc:
-        die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
+            return _download_album_now(
+                album,
+                args,
+                token,
+                existing_state=(existing, album_dir, missing, present),
+                already_confirmed=True,
+            )
     except QobuzUnavailable as e:
-        log.info(fmt(C.YELLOW, f"\n⚠  {e}\n"))
+        log.info(fmt(C.YELLOW, f"\n  ⚠  {e}\n"))
     except QobuzError as e:
-        log.info(fmt(C.RED, f"\n✗  Qobuz API error: {friendly_qobuz_error(e)}.\n"))
+        log.info(fmt(C.RED, f"\n  ✗  Qobuz API error: {friendly_qobuz_error(e)}.\n"))
 
 
 def run_album_mode(args, token, *, query_args=None, loop=False):
@@ -526,11 +519,9 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 args.query = query_args
             try:
                 album = resolve_album_from_args(args, token)
-            except AuthLost as exc:
-                die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
             except CatalogMiss as e:
                 (log.info if loop else log.warning)(
-                    fmt(C.YELLOW, f"\n⚠  {e}\n")
+                    fmt(C.YELLOW, f"\n  ⚠  {e}\n")
                 )
                 args.query = saved_query
                 if not loop:
@@ -540,16 +531,16 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 args.query = saved_query
                 if not loop:
                     raise
-                log.info(fmt(C.YELLOW, f"\n⚠  {e}\n"))
+                log.info(fmt(C.YELLOW, f"\n  ⚠  {e}\n"))
                 continue
             except QobuzError as e:
                 cleaned = friendly_qobuz_error(e)
                 report = log.info if loop else log.warning
                 if cleaned.startswith("HTTP 404"):
                     report(fmt(C.RED,
-                        "\n✗  No album with that id. Check the URL or search by name.\n"))
+                        "\n  ✗  No album with that id. Check the URL or search by name.\n"))
                 else:
-                    report(fmt(C.RED, f"\n✗  Qobuz API error: {cleaned}.\n"))
+                    report(fmt(C.RED, f"\n  ✗  Qobuz API error: {cleaned}.\n"))
                 args.query = saved_query
                 if not loop:
                     # One-shot invocation: a Qobuz API failure is fatal.
@@ -586,10 +577,7 @@ def run_album_mode(args, token, *, query_args=None, loop=False):
                 if stopped:
                     return EXIT_GENERAL
             else:
-                try:
-                    result = _download_album_now(album, args, token)
-                except AuthLost as exc:
-                    die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
+                result = _download_album_now(album, args, token)
 
             if not loop:
                 exit_code = _one_shot_exit_code(result)

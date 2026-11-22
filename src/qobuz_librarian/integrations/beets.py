@@ -6147,7 +6147,7 @@ def _beets_direct_guarded(
     explicit_album_paths = [p for p in paths if p.rstrip("/") != staging_root]
     total_albums = len(explicit_album_paths)
     report_progress("Importing into your library", 0, total_albums, "")
-    log.info(fmt(C.CYAN, "  ⟳  Running beets import ..."))
+    log.info(fmt(C.CYAN, "  ⟳  Importing into your library…"))
     output = _BeetsOutput(staging_root, total_albums)
     child = _beets_child_env(override_path, paths, ownership_capture, managed_capture)
     if child is None:
@@ -6238,7 +6238,7 @@ def _beets_direct_guarded(
             _reclaim_ownership_capture(ownership_capture, ownership_payload)
         if managed_result is not None and isinstance(managed_capture, dict):
             managed_capture["result"] = managed_result
-        log.info(fmt(C.GREEN, "  ✓  beets import succeeded."))
+        log.info(fmt(C.GREEN, "  ✓  Imported."))
         if audio_after:
             log.info(
                 fmt(

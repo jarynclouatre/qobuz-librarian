@@ -876,7 +876,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
     from what was typed.
     """
     shown_name = heading_name or artist_name
-    section(f"Step 2: Missing albums by {shown_name}, not yet in your library")
+    section("Step 2: Missing albums")
 
     if artist_id is None:
         log.info(fmt(C.GRAY, "  Looking up artist on Qobuz …"))
@@ -957,7 +957,7 @@ def run_artist_missing_albums(artist_name, owned_titles, args, token,
         return 0, False
 
     print()
-    header = f"  {plural(len(ordered), 'album')} you don't have"
+    header = f"  {plural(len(ordered), 'album')} by {shown_name}"
     if n_partial:
         header += f"  ({n_partial} partially present; listed first)"
     if hidden is None:

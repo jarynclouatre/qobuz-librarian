@@ -42,16 +42,16 @@ def run_library_lyrics_mode(args):
         # die() writes to stderr, so a `--quiet --lyrics-walk` cron run still
         # shows it, and EXIT_CONFIG fails the cron's exit-code check.
         fix = (
-            "   The image includes it, so rebuild it with "
+            "     The image includes it, so rebuild it with "
             "`docker compose build --no-cache`.\n"
             if cfg.in_container() else
-            "   Add it to the environment Qobuz Librarian runs in:\n"
-            "     pipx inject qobuz-librarian 'syncedlyrics>=1.0'\n"
-            "   or, for a pip install:\n"
-            "     pip install 'syncedlyrics>=1.0'\n"
+            "     Add it to the environment Qobuz Librarian runs in:\n"
+            "       pipx inject qobuz-librarian 'syncedlyrics>=1.0'\n"
+            "     or, for a pip install:\n"
+            "       pip install 'syncedlyrics>=1.0'\n"
         )
         die(fmt(C.RED,
-            "\n✗  Lyric fetching needs syncedlyrics (the [lyrics] extra), "
+            "\n  ✗  Lyric fetching needs syncedlyrics (the [lyrics] extra), "
             "which isn't installed.\n" + fix), EXIT_CONFIG)
 
     providers = (", ".join(lyric_fetch.usable_providers(cfg.LYRICS_PROVIDERS))

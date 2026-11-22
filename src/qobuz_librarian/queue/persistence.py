@@ -400,7 +400,7 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  Resume failed: {exc}. Saved queue kept for next launch."))
             return "resume"
-        if ans in ("k", "keep"):
+        if ans in ("k", "keep", "q"):
             log.info(fmt(C.GRAY,
                 "  Keeping the saved queue."))
             return "keep"
@@ -420,5 +420,5 @@ def offer_resume_startup_recovery(args, token_source, recovery):
                 log.info(fmt(C.GRAY, "  Discard cancelled."))
             return "keep"
         allowed = "Y or k" if recovery_bearing else "Y, k, or d"
-        log.info(fmt(C.GRAY, f"  Enter {allowed}."))
+        log.info(fmt(C.GRAY, f"  Enter {allowed} (q=keep)."))
 

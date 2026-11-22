@@ -111,8 +111,9 @@ def _run_lyric_hook(album_dir):
             providers=cfg.LYRICS_PROVIDERS or None,
             lyrics_format="embed",
             state_path=cfg.LYRIC_FETCH_STATE_FILE,
-            progress_cb=lambda c, t, name, note: report_progress(
-                " · ".join(filter(None, ("Fetching lyrics", note))), c, t, name),
+            progress_cb=lambda c, t, _name, note: report_progress(
+                " · ".join(filter(None, ("Fetching lyrics", note))), c, t,
+                unit="track"),
             busy_patience=0,
             track_detail=True,
             skips=skips,
@@ -136,28 +137,34 @@ def _run_lyric_hook(album_dir):
     outcomes = _fetch_outcome_summary(
         counts, expected=len(flacs) - sum(skips.values()))
     failed = outcomes["failed"]
-    msg = (
-        f"lyrics: {synced} synced, {plain} plain, "
-        f"{already} already, {nofnd} not found"
-    )
+    told = [f"{count} {what}" for count, what in (
+        (synced, "synced"), (plain, "plain"),
+        (already, "already had them"), (nofnd, "not found")) if count]
+    if 1 < already == len(flacs):
+        told = [f"all {already} already had them"]
+    parts = [", ".join(told)] if told else []
     instrumental = counts.get("skipped-instrumental", 0)
     if instrumental:
-        msg += f"; {instrumental} skipped as instrumental"
+        parts.append(f"{instrumental} skipped as instrumental")
     too_long = counts.get("skipped-long", 0)
     if too_long:
-        msg += f"; {too_long} skipped (too long)"
+        parts.append(f"{too_long} skipped (too long)")
     no_tags = counts.get("skipped-tags", 0)
     if no_tags:
-        msg += f"; {no_tags} skipped (missing tags)"
+        parts.append(f"{no_tags} skipped (missing tags)")
     if unavailable:
-        msg += f"; {unavailable} not answered by a provider, left to the next Lyrics run"
+        parts.append(f"{unavailable} not answered by a provider, left to the "
+                     "next Lyrics run")
     read_only = counts.get("skipped-read-only", 0)
     if read_only:
-        msg += f"; {read_only} read-only, left alone"
+        parts.append(f"{read_only} read-only, left alone")
     if skips["checked"]:
-        msg += f"; {skips['checked']} checked before"
+        parts.append(f"{skips['checked']} checked before")
     if failed:
-        msg += f"; {failed} failed"
+        parts.append(f"{failed} failed")
+    if not parts:
+        return
+    msg = "lyrics: " + "; ".join(parts)
     if failed or unavailable or read_only:
         log.info(fmt(C.YELLOW, f"  ⚠  {msg}."))
     else:

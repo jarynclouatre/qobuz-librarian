@@ -209,7 +209,8 @@ class _DownsampleWalk:
             keep = confirm(
                 "  Keep a restorable backup of the hi-res originals? "
                 "(answering No deletes them to save space)",
-                default_yes=True, auto_yes=False, on_eof=None, quiet=True)
+                default_yes=True, auto_yes=False, on_eof=None, quiet=True,
+                q_is_no=False)
             if keep is None:
                 log.warning(fmt(C.YELLOW,
                     "\n  No answer was given. No music files were changed."))

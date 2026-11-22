@@ -341,7 +341,7 @@ class _AlbumWalk:
             vlog(f"  {plural(len(self.seen), 'album decision')} loaded from "
                  f"{cfg.ALBUM_WALK_SEEN_FILE.name}.")
         log.info(fmt(C.GRAY,
-            "  Per album: y=queue, enter/N=skip, d=download queue now, s=stop."))
+            "  Per album: y=queue, Enter=skip, d=download the queue now, s=stop."))
         log.info(fmt(C.GRAY, wrap(
             "Albums already complete or checked on earlier walks are skipped.",
             indent="  ", hanging="  ")))
@@ -674,9 +674,9 @@ class _QueuedWalk:
 
     def _start(self):
         log.info(fmt(C.GRAY,
-            "  Per artist: y=scan and queue, Enter/n=skip, p=download the queue,"))
+            "  Per artist: y=scan and queue, Enter=skip, d=download the queue now,"))
         log.info(fmt(C.GRAY,
-            "             s=stop, f <text>=only the rest whose names contain it."))
+            "              s=stop, f <text>=only the rest whose names contain it."))
         print()
 
         self.shared_queue = []
@@ -732,7 +732,7 @@ class _QueuedWalk:
             qhint = f" [queue: {qsize}]" if qsize else ""
             r = ask(
                 f"  [{i + 1}/{len(self.artists)}] {truncate(d.name, 50)}"
-                f"{qhint}: scan? [y/N/p/s/f]: ", lower=False)
+                f"{qhint}: scan? [y/N/d/s/f]: ", lower=False)
             if r is None:
                 self.interrupted = True
                 break
@@ -742,7 +742,7 @@ class _QueuedWalk:
                 log.info(fmt(C.GRAY, "  Stopping walk."))
                 self.walk_stopped = True
                 break
-            if rl == "p":
+            if rl in ("d", "p"):
                 self._flush_queue()
                 if self.parked:
                     break
@@ -774,7 +774,7 @@ class _QueuedWalk:
                 self.n_skipped += 1
             else:
                 log.info(fmt(C.YELLOW,
-                    f"  Unrecognized: {r!r}. Use y/N/p/s/f."))
+                    f"  Unrecognized: {r!r}. Use y/N/d/s/f."))
                 continue
 
             # --dry-run is preview-only: don't record the artist as decided, or

@@ -57,11 +57,8 @@ from qobuz_librarian.repair_log import append_repair_log, scan_dir_for_isrc_repa
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate, wrap
 from qobuz_librarian.ui_cli.errors import (
-    EXIT_AUTH,
     EXIT_GENERAL,
     EXIT_INTERRUPT,
-    auth_lost_msg,
-    die,
     plural,
     unreadable_artist,
 )
@@ -1501,12 +1498,8 @@ def run_album_repair_mode(args, token, *, loop=False):
                 "verify. This cannot be undone.")))
         while True:
             clear_scan_caches()
-            try:
-                artist_dir, album_dir = _prompt_library_album_for_repair(
-                    args, token)
-                started = time.time()
-            except AuthLost as exc:
-                die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
+            artist_dir, album_dir = _prompt_library_album_for_repair(args, token)
+            started = time.time()
 
             if artist_dir == NO_ANSWER:
                 return EXIT_GENERAL
@@ -1555,12 +1548,9 @@ def run_album_repair_mode(args, token, *, loop=False):
                                 aldir, adir.name, args, token,
                                 deep=True, quiet=True,
                                 cd_quality=tally["cd_quality"], tally=tally)
-                        except AuthLost as exc:
-                            print()
-                            die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
-                        except QobuzUnavailable:
-                            # Finish the progress line before the transient
-                            # abort propagates to the clean EXIT_TRANSIENT stop.
+                        except (AuthLost, QobuzUnavailable):
+                            # Finish the progress line before the stop is
+                            # reported.
                             print()
                             raise
                         tally[status] = tally.get(status, 0) + 1
@@ -1627,13 +1617,10 @@ def run_album_repair_mode(args, token, *, loop=False):
                 return 0
 
             single = {"unmatched": 0, "cd_quality": []}
-            try:
-                status = _scan_report_repair(
-                    album_dir, artist_dir.name, args, token,
-                    cd_quality=single["cd_quality"], tally=single,
-                )
-            except AuthLost as exc:
-                die(fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH)
+            status = _scan_report_repair(
+                album_dir, artist_dir.name, args, token,
+                cd_quality=single["cd_quality"], tally=single,
+            )
             if (status in {"repaired", "attention", "failed", "recovery"}
                     and not getattr(args, "dry_run", False)):
                 _report_repair_run({status: 1, **single}, started, clause={

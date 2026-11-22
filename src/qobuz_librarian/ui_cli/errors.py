@@ -89,7 +89,7 @@ def oserr_hint(e: OSError) -> str:
 def auth_lost_msg(exc=None) -> str:
     """Multi-line block for AuthLost catch-and-die sites in CLI modes."""
     if isinstance(exc, DownloadsRefused):
-        return f"\n✗  {exc} The run stopped.\n"
-    return ("\n✗  Qobuz rejected the token, so the run stopped.\n"
-            "   Paste a new token on the Settings page of the web app, or set "
+        return f"\n  ✗  {exc} The run stopped.\n"
+    return ("\n  ✗  Qobuz rejected the token, so the run stopped.\n"
+            "     Paste a new token on the Settings page of the web app, or set "
             "QOBUZ_USER_AUTH_TOKEN, then run this again.\n")

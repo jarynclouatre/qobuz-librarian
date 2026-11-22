@@ -140,6 +140,12 @@ class QobuzEntitlementError(Exception):
     """Qobuz accepted the token but refused the requested account action."""
 
 
+ACCOUNT_CANNOT_DOWNLOAD = (
+    "Qobuz accepted the token, but this account can't download music: free "
+    "and lapsed subscriptions can't. Check the Qobuz subscription, then try "
+    "again.")
+
+
 class CredentialToken(str):
     """A token string carrying the non-secret generation that loaded it."""
 
@@ -629,10 +635,7 @@ def downloads_refused(rip_output):
     new ones."""
     o = rip_output.lower()
     if "ineligibleerror" in o:
-        return DownloadsRefused(
-            "Qobuz accepted the token, but this account can't download "
-            "music: free and lapsed subscriptions can't. Check the Qobuz "
-            "subscription, then try again.")
+        return DownloadsRefused(ACCOUNT_CANNOT_DOWNLOAD)
     if "invalidappiderror" not in o and "invalidappsecreterror" not in o:
         return None
     if _config_sets_app_id():

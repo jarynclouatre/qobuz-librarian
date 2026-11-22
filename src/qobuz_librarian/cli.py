@@ -14,6 +14,7 @@ import textwrap
 from qobuz_librarian import __version__, raise_open_file_limit, run_lock
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import (
+    ACCOUNT_CANNOT_DOWNLOAD,
     AuthLost,
     CredentialChanged,
     DownloaderNotReady,
@@ -133,42 +134,42 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
         # copyable if every character survives to the screen; reflow would
         # collapse doubled spaces and wrap long ones at inner spaces.
         intro = (
-            "\n✗  An interrupted library-folder move could not be verified.\n"
-            f"   Recovery reason: {relocation.reason or 'reason not reported'}\n"
-            "   Paths needing attention:"
+            "\n  ✗  An interrupted library-folder move could not be verified.\n"
+            f"     Recovery reason: {relocation.reason or 'reason not reported'}\n"
+            "     Paths needing attention:"
             + ("" if relocation.paths else " none reported")
         )
         outro = (
-            "   Library changes are paused. See "
+            "     Library changes are paused. See "
             f"the “{POST_IMPORT_RELOCATION_LOG_ENTRY}” entry in the application "
             "log for the same details. Resolve the reported recovery problem, "
             "then restart Qobuz Librarian.\n"
         )
         print(fmt(C.RED, block(intro)), file=sys.stderr)
         for path in relocation.paths:
-            print(fmt(C.RED, f"     {path}"), file=sys.stderr)
+            print(fmt(C.RED, f"       {path}"), file=sys.stderr)
         print(fmt(C.RED, block(outro)), file=sys.stderr)
         raise SystemExit(EXIT_GENERAL)
     elif getattr(result, "reason", None) == "queue-namespace-blocked":
         paths = getattr(result, "paths", ())
         print(fmt(C.RED, block(
-            "\n✗  The saved download queue can't be read.\n"
-            "   No work was started. The file "
+            "\n  ✗  The saved download queue can't be read.\n"
+            "     No work was started. The file "
             "involved:" + ("" if paths else " not reported")
         )), file=sys.stderr)
         for path in paths:
-            print(fmt(C.RED, f"     {path}"), file=sys.stderr)
+            print(fmt(C.RED, f"       {path}"), file=sys.stderr)
         print(fmt(C.RED, block(
-            "   Fix its permissions, or if it is damaged, move it out of the "
+            "     Fix its permissions, or if it is damaged, move it out of the "
             "data folder (the downloads it listed will need queuing again), "
             "then run Qobuz Librarian again.\n"
         )), file=sys.stderr)
         raise SystemExit(EXIT_GENERAL)
     elif getattr(result, "reason", None) == "web-completion-unacknowledged":
         message = (
-            "\n✗  A download the web app finished is waiting for the web app "
+            "\n  ✗  A download the web app finished is waiting for the web app "
             "to record it.\n"
-            "   The album is in your library, and no work was started here. "
+            "     The album is in your library, and no work was started here. "
             "Let the web app take the library once: start it if it is "
             "stopped, and if Settings → Mode shows terminal mode, choose "
             "Resume web app. Then run this again.\n"
@@ -201,9 +202,9 @@ def _die_unsettled_startup_recovery(authority, result=None) -> None:
              any(entry.holds_backup for entry in blocked)),
         ) if holds) or shown_path(cfg.STAGING_DIR)
         message = (
-            "\n✗  An interrupted download could not be cleared.\n"
-            "   No other work was started.\n"
-            f"   What is still outstanding is under {outstanding}. The "
+            "\n  ✗  An interrupted download could not be cleared.\n"
+            "     No other work was started.\n"
+            f"     What is still outstanding is under {outstanding}. The "
             f"“{BLOCKED_DOWNLOAD_LOG_ENTRY}” entry in the application "
             "log has the technical detail.\n"
         )
@@ -217,39 +218,39 @@ def acquire_run_lock():
         lease = run_lock.acquire("terminal")
     except run_lock.LockBusy as busy:
         if busy.holder == "web":
-            message = "\n✗  The web app is using the library.\n"
+            message = "\n  ✗  The web app is using the library.\n"
         elif busy.holder == "terminal":
-            message = "\n✗  Another terminal run is using the library.\n"
+            message = "\n  ✗  Another terminal run is using the library.\n"
         else:
             message = (
-                f"\n✗  Another Qobuz Librarian process (pid {busy.pid}) holds "
-                f"the run lock.\n   Lock file: {cfg.LOCK_FILE}\n"
+                f"\n  ✗  Another Qobuz Librarian process (pid {busy.pid}) holds "
+                f"the run lock.\n     Lock file: {cfg.LOCK_FILE}\n"
             )
-        message += ("   Only one Qobuz Librarian run can change the library at a "
+        message += ("     Only one Qobuz Librarian run can change the library at a "
                     "time.\n\n")
         if busy.holder == "terminal":
-            message += "   Run this again once it finishes.\n"
+            message += "     Run this again once it finishes.\n"
         else:
-            message += ("   Either:\n" if busy.holder == "web"
-                        else "   If it is the web app, either:\n")
+            message += ("     Either:\n" if busy.holder == "web"
+                        else "     If it is the web app, either:\n")
             web_ui = (f"the web app (http://<host>:{cfg.WEB_PUBLIC_PORT})"
                       if _in_container() else "the web app")
             message += (
-                f"     1. In {web_ui}, open Settings → Mode and choose\n"
-                "        Switch to terminal mode, then run this command again.\n"
-                "        Choose Resume web app there when you are done.\n"
+                f"       1. In {web_ui}, open Settings → Mode and choose\n"
+                "          Switch to terminal mode, then run this command again.\n"
+                "          Choose Resume web app there when you are done.\n"
             )
             if _in_container():
                 _svc = compose_service_name()
                 message += (
-                    "     2. Or stop the web container with\n"
-                    f"        `docker compose stop {_svc}`, run this command\n"
-                    f"        again, then `docker compose start {_svc}`.\n"
+                    "       2. Or stop the web container with\n"
+                    f"          `docker compose stop {_svc}`, run this command\n"
+                    f"          again, then `docker compose start {_svc}`.\n"
                 )
             else:
                 message += (
-                    "     2. Or stop qobuz-librarian-web, run this command again,\n"
-                    "        then start it again.\n"
+                    "       2. Or stop qobuz-librarian-web, run this command again,\n"
+                    "          then start it again.\n"
                 )
         die(fmt(C.RED, message),
             EXIT_LOCK_BUSY)
@@ -264,8 +265,8 @@ def acquire_run_lock():
             vlog(f"startup recovery check failed: {exc}")
             die(fmt(
                 C.RED,
-                "\n✗  The saved recovery state could not be checked.\n"
-                "   The run lock was released and no library work was "
+                "\n  ✗  The saved recovery state could not be checked.\n"
+                "     The run lock was released and no library work was "
                 "started. Check the data-folder permissions, then try "
                 "again.\n",
             ), EXIT_GENERAL)
@@ -285,9 +286,9 @@ def acquire_run_lock():
         lease.close()
     die(fmt(
         C.RED,
-        "\n✗  The run lock could not be taken.\n"
-        f"   Lock file: {cfg.LOCK_FILE}\n\n"
-        "   Check the data-volume permissions and "
+        "\n  ✗  The run lock could not be taken.\n"
+        f"     Lock file: {cfg.LOCK_FILE}\n\n"
+        "     Check the data-volume permissions and "
         "filesystem locking support, then try again.\n",
     ), EXIT_GENERAL)
 
@@ -298,10 +299,10 @@ def _in_container() -> bool:
 
 def _missing_tool_hint(tool: str, install_hint: str) -> str:
     if _in_container():
-        return (f"\n✗  `{tool}` not in PATH inside the container.\n"
-                f"   This means the image is broken. Rebuild with "
+        return (f"\n  ✗  `{tool}` not in PATH inside the container.\n"
+                f"     This means the image is broken. Rebuild with "
                 f"`docker compose build --no-cache`.\n")
-    return f"\n✗  `{tool}` not in PATH. {install_hint}\n"
+    return f"\n  ✗  `{tool}` not in PATH. {install_hint}\n"
 
 
 def check_rip():
@@ -318,10 +319,10 @@ def check_rip():
             detail = re.sub(r"\x1b\[[0-9;]*m",
                             "", (r.stderr or r.stdout or "")).strip()
             die(fmt(C.RED,
-                f"\n✗  `rip --version` exited {r.returncode}. streamrip is "
+                f"\n  ✗  `rip --version` exited {r.returncode}. streamrip is "
                 f"installed but not working"
-                + (f":\n     {detail}" if detail else ".")
-                + "\n   Reinstall it with `pipx reinstall streamrip` "
+                + (f":\n       {detail}" if detail else ".")
+                + "\n     Reinstall it with `pipx reinstall streamrip` "
                 "(https://github.com/nathom/streamrip).\n"),
                 EXIT_CONFIG)
     except FileNotFoundError:
@@ -330,7 +331,7 @@ def check_rip():
             "(https://github.com/nathom/streamrip).")), EXIT_CONFIG)
     except (OSError, subprocess.TimeoutExpired) as e:
         die(fmt(C.RED,
-            f"\n✗  `rip --version` couldn't run ({e}). The streamrip binary "
+            f"\n  ✗  `rip --version` couldn't run ({e}). The streamrip binary "
             "may be broken. Reinstall it with `pipx reinstall streamrip`.\n"),
             EXIT_CONFIG)
 
@@ -363,7 +364,7 @@ def check_beets():
         "Install beets 2.14.1 and give it a config, or run with --no-import."
     )
     die(fmt(C.RED, block(
-        f"\n✗  Beets cannot import downloads: {problem}\n   {fix}\n")),
+        f"\n  ✗  Beets cannot import downloads: {problem}\n     {fix}\n")),
         EXIT_CONFIG)
 
 
@@ -376,31 +377,31 @@ def require_music_root():
     if state == "recorded_empty":
         albums = "album" if recorded == 1 else "albums"
         problem = (
-            f"\n✗  The music folder has no artist folders, but the last "
+            f"\n  ✗  The music folder has no artist folders, but the last "
             f"collection backup recorded {recorded:,} {albums}.\n"
         )
         fix = (
-            "   Check that the music folder is mounted. If those albums really "
+            "     Check that the music folder is mounted. If those albums really "
             "are gone, open web Settings → Collection backup, choose Back up "
             "now, then Replace anyway before retrying.\n"
         )
     elif state == "backup_unreadable":
         problem = (
-            "\n✗  The music folder has no artist folders, and the last "
+            "\n  ✗  The music folder has no artist folders, and the last "
             "collection backup could not be read.\n"
         )
         fix = (
-            "   Check that the music folder is mounted and that the collection-"
+            "     Check that the music folder is mounted and that the collection-"
             "backup folder is readable. Refusing to proceed.\n"
         )
     elif _in_container():
-        problem = "\n✗  The /music mount is missing or can't be read.\n"
-        fix = ("   Set QL_MUSIC_DIR in .env to the host folder that holds your "
+        problem = "\n  ✗  The /music mount is missing or can't be read.\n"
+        fix = ("     Set QL_MUSIC_DIR in .env to the host folder that holds your "
                "artist folders, check that it exists, then run this again.\n")
     else:
-        problem = (f"\n✗  The music folder {cfg.MUSIC_ROOT} is missing or "
+        problem = (f"\n  ✗  The music folder {cfg.MUSIC_ROOT} is missing or "
                    "can't be read.\n")
-        fix = ("   Set MUSIC_ROOT to the folder that holds your artist "
+        fix = ("     Set MUSIC_ROOT to the folder that holds your artist "
                "folders, then run this again.\n")
     die(fmt(C.RED, problem + fix), EXIT_CONFIG)
 
@@ -410,7 +411,7 @@ def require_disk_support(*features):
 
     refusal = disk_support.refusal(*features)
     if refusal:
-        die(fmt(C.RED, block(f"\n✗  {refusal}\n")), EXIT_CONFIG)
+        die(fmt(C.RED, block(f"\n  ✗  {refusal}\n")), EXIT_CONFIG)
 
 
 class _ExitOneArgParser(argparse.ArgumentParser):
@@ -522,7 +523,7 @@ def _beets_recovery_command(album_dirs=()):
 
 def _help_epilog():
     width = text_width()
-    lines = ["Examples (credentials required):"]
+    lines = ["Examples:"]
     for command, comment in _HELP_EXAMPLES:
         lines.extend(_help_example(command, comment, width))
 
@@ -590,12 +591,12 @@ def _add_mode_arguments(p):
                         "missing (same as menu Artist)")
     modes.add_argument("--library-walk", action="store_true",
                    help="walk every artist: fill gaps, then offer albums you're "
-                        "missing; queue as you go (same as menu Library walk).")
+                        "missing; queue as you go (same as menu Library walk)")
     modes.add_argument("--gap-fill", "--album-gaps", dest="album_gaps",
                    action="store_true",
                    help="fill missing tracks in every incomplete album you own; "
                         "never suggests albums you don't have (same as menu "
-                        "Gap Fill).")
+                        "Gap Fill)")
     modes.add_argument("--repair", action="store_true",
                    help="re-download damaged (truncated or corrupt) tracks "
                         "you own. '*' at the artist prompt sweeps the whole "
@@ -688,7 +689,7 @@ def _add_download_arguments(p):
                         "queue, and migrating to a disk short on space")
     # Unattended upgrade-walk gate.
     getting.add_argument("--auto-safe",    action="store_true",
-                   help="auto-confirm only the safe upgrades (requires --upgrade-walk).")
+                   help="auto-confirm only the safe upgrades (requires --upgrade-walk)")
     getting.add_argument("--no-import",    action="store_true",
                    help="download but skip beets import; see the recovery "
                         "command below")
@@ -716,9 +717,9 @@ def _add_download_arguments(p):
 def _add_lyrics_arguments(p):
     lyrics = p.add_argument_group("Lyrics", "Only with --lyrics-walk.")
     lyrics.add_argument("--lyrics-rescan", action="store_true",
-                   help="also look up tracks checked in the last 30 days.")
+                   help="also look up tracks checked in the last 30 days")
     lyrics.add_argument("--lyrics-synced-only", action="store_true",
-                   help="only write timed (synced) lyrics, never plain.")
+                   help="only write timed (synced) lyrics, never plain")
 
 
 def _add_migration_arguments(p):
@@ -907,8 +908,8 @@ def _load_saved_settings():
     except (OSError, ValueError) as exc:
         die(fmt(
             C.RED,
-            f"\n✗  Couldn't read the saved settings: {exc}\n"
-            "   Refusing to run with environment defaults because that could "
+            f"\n  ✗  Couldn't read the saved settings: {exc}\n"
+            "     Refusing to run with environment defaults because that could "
             "change download or file-handling behaviour. Fix the data-folder "
             "permissions or recover the settings file, then try again.\n",
         ), EXIT_CONFIG)
@@ -936,8 +937,8 @@ def _reset_walk_seen():
             pass
         except OSError as e:
             die(fmt(C.RED,
-                f"\n✗  Couldn't delete {f}: {e}\n"
-                "   Check the volume permissions / PUID-PGID; /data must be writable.\n"),
+                f"\n  ✗  Couldn't delete {f}: {e}\n"
+                "     Check the volume permissions / PUID-PGID; /data must be writable.\n"),
                 EXIT_GENERAL)
     if removed:
         log.info(fmt(C.GREEN, "  ✓  Cleared the lists of artists and albums already checked:"))
@@ -969,23 +970,23 @@ class _SavedQueue:
         if self.parked and (uses_queue or other_work):
             return fmt(
                 C.YELLOW,
-                "\n⚠  An album is waiting to be recovered.\n"
-                "   Quit and run Qobuz Librarian again; it recovers that album "
+                "\n  ⚠  An album is waiting to be recovered.\n"
+                "     Quit and run Qobuz Librarian again; it recovers that album "
                 "before other work.\n",
             )
         if self.started and (uses_queue or other_work):
             return fmt(
                 C.YELLOW,
-                "\n⚠  An interrupted download must be resumed before other work.\n"
-                "   Run Qobuz Librarian without a mode or search argument and "
+                "\n  ⚠  An interrupted download must be resumed before other work.\n"
+                "     Run Qobuz Librarian without a mode or search argument and "
                 "choose Resume when it offers the saved queue.\n",
             )
         if self.saved and uses_queue:
             return fmt(
                 C.YELLOW,
-                "\n⚠  A saved download queue must be resumed or discarded before "
+                "\n  ⚠  A saved download queue must be resumed or discarded before "
                 "another download.\n"
-                f"   It is in {shown_path(cfg.QUEUE_JOURNAL_DIR)}. Run Qobuz "
+                f"     It is in {shown_path(cfg.QUEUE_JOURNAL_DIR)}. Run Qobuz "
                 "Librarian without a mode or search argument to choose.\n",
             )
         return None
@@ -1017,8 +1018,8 @@ class _SavedQueue:
         except Exception as exc:
             die(fmt(
                 C.RED,
-                "\n✗  The interrupted queue could not be resumed.\n"
-                f"   {exc}\n",
+                "\n  ✗  The interrupted queue could not be resumed.\n"
+                f"     {exc}\n",
             ), EXIT_GENERAL)
         if choice == "blocked":
             _report_settled_downloads(
@@ -1081,11 +1082,11 @@ class _QobuzSession:
                 f"Couldn't read {cfg.STREAMRIP_CONFIG}: {exc.__cause__}"
                 if exc.__cause__ else "No Qobuz credentials configured.")
             message = fmt(C.RED,
-                f"\n✗  {headline}\n"
-                "   Paste your token and your email or user ID on the Settings page "
+                f"\n  ✗  {headline}\n"
+                "     Paste your token and your email or user ID on the Settings page "
                 f"(http://<host>:{cfg.WEB_PUBLIC_PORT}/settings);\n"
-                "   in terminal mode, press Resume web app there first.\n"
-                "   Or set QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID in your environment.\n")
+                "     in terminal mode, press Resume web app there first.\n"
+                "     Or set QOBUZ_USER_AUTH_TOKEN and QOBUZ_USER_ID in your environment.\n")
             if self.in_menu:
                 log.info(message)
                 raise _BackToMenu from None
@@ -1380,6 +1381,9 @@ def _menu_loop(args, session, queue):
             _run_menu_choice(mode, args, session)
         except _BackToMenu:
             continue
+        except (AuthLost, QobuzEntitlementError, QobuzUnavailable) as exc:
+            log.info(block(_qobuz_stop(exc)[0]))
+            continue
         except KeyboardInterrupt:
             # Ctrl-C stops the tool, not the session; at the menu's own
             # prompt it still quits.
@@ -1399,8 +1403,8 @@ def main():
     except ValueError as exc:
         die(fmt(
             C.RED,
-            f"\n✗  Invalid storage paths: {exc}\n"
-            "   Refusing to proceed.\n",
+            f"\n  ✗  Invalid storage paths: {exc}\n"
+            "     Refusing to proceed.\n",
         ), EXIT_CONFIG)
     # role="cli" → a separate log file so a `docker exec` CLI run sharing the
     # container with the long-lived web server can't race it on log rollover.
@@ -1420,13 +1424,6 @@ def main():
         from qobuz_librarian.modes.settings_cli import run_settings_mode
         raise SystemExit(run_settings_mode(args))
 
-    banner("Qobuz Librarian")
-
-    # Single-instance lock first; fail fast before doing any other work.
-    # Hold the file handle for the lifetime of main() so the lock persists.
-    _lockfile = acquire_run_lock()
-
-    queue = _SavedQueue(_lockfile)
     # These download through the one saved queue, so a kept queue that
     # nothing has started from holds up only them.
     queue_modes = (
@@ -1443,6 +1440,14 @@ def main():
         args.downsample_walk,
         args.upgrade_walk,
     )
+    if not any(queue_modes + other_modes) and not args.settings:
+        banner("Qobuz Librarian")
+
+    # Single-instance lock first; fail fast before doing any other work.
+    # Hold the file handle for the lifetime of main() so the lock persists.
+    _lockfile = acquire_run_lock()
+
+    queue = _SavedQueue(_lockfile)
     refusal = queue.refusal(any(queue_modes), any(other_modes))
     if refusal:
         die(refusal, EXIT_GENERAL)
@@ -1490,6 +1495,16 @@ def main():
 
 class _BackToMenu(BaseException):
     """A menu choice that needs Qobuz, picked before a token was saved."""
+
+
+def _qobuz_stop(exc):
+    """What is said, and the exit code, when Qobuz refuses the token or the
+    account, or does not answer."""
+    if isinstance(exc, QobuzUnavailable):
+        return fmt(C.YELLOW, f"\n  ⚠  {exc}\n"), EXIT_TRANSIENT
+    if isinstance(exc, AuthLost):
+        return fmt(C.RED, auth_lost_msg(exc)), EXIT_AUTH
+    return fmt(C.RED, f"\n  ✗  {ACCOUNT_CANNOT_DOWNLOAD}\n"), EXIT_AUTH
 
 
 def _check_staging_occupied():
@@ -1603,8 +1618,8 @@ def _maybe_drop_privileges():
     gid = int(pgid, 10)
     if (uid == 0) != (gid == 0):
         die(fmt(C.RED,
-            f"\n✗  PUID={uid} PGID={gid} mixes root with a non-root ID.\n"
-            "   Use a fully non-root pair, or PUID=0 PGID=0 to run as root.\n"),
+            f"\n  ✗  PUID={uid} PGID={gid} mixes root with a non-root ID.\n"
+            "     Use a fully non-root pair, or PUID=0 PGID=0 to run as root.\n"),
             EXIT_CONFIG)
     # A deliberate 0:0 request is already satisfied. Canonicalising before
     # this check also stops values such as 00:00 re-execing as root forever.
@@ -1642,32 +1657,26 @@ def _entry():
             raise
         except KeyboardInterrupt:
             die(fmt(C.GRAY, "\n  Interrupted."), EXIT_INTERRUPT)
-        except AuthLost as e:
-            die(fmt(C.RED, auth_lost_msg(e)), EXIT_AUTH)
-        except QobuzUnavailable as e:
-            die(fmt(C.YELLOW, f"\n⚠  {e}\n"), EXIT_TRANSIENT)
+        except (AuthLost, QobuzEntitlementError, QobuzUnavailable) as e:
+            die(*_qobuz_stop(e))
         except MusicDiskFull as e:
-            die(fmt(C.RED, f"\n✗  {e.strerror}.\n"), EXIT_GENERAL)
+            die(fmt(C.RED, f"\n  ✗  {e.strerror}.\n"), EXIT_GENERAL)
         except DownloaderNotReady:
             die(fmt(C.RED,
-                "\n✗  Your Qobuz token works, but downloads also need your "
+                "\n  ✗  Your Qobuz token works, but downloads also need your "
                 "Qobuz user ID. Add it on the Settings page in the web UI or "
                 "set QOBUZ_USER_ID.\n"),
                 EXIT_CONFIG)
         except CredentialChanged:
             die(fmt(C.YELLOW,
-                "\n⚠  Qobuz credentials changed while the action was starting. "
+                "\n  ⚠  Qobuz credentials changed while the action was starting. "
                 "Run it again.\n"), EXIT_TRANSIENT)
-        except QobuzEntitlementError:
-            die(fmt(C.RED,
-                "\n✗  Qobuz accepted the token, but this account cannot perform "
-                "the requested action.\n"), EXIT_AUTH)
         except PermissionError as e:
             if not e.filename:
                 raise
             die(fmt(C.RED,
-                f"\n✗  Can't use {e.filename}: permission denied.\n"
-                "   Check that it belongs to the user Qobuz Librarian runs as "
+                f"\n  ✗  Can't use {e.filename}: permission denied.\n"
+                "     Check that it belongs to the user Qobuz Librarian runs as "
                 "(PUID and PGID in Docker), then try again.\n"), EXIT_GENERAL)
     finally:
         # Persist any artist resolutions this run discovered (no-op when none),

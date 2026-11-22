@@ -219,7 +219,7 @@ def force_cleanup_preflight(album_dir, args, *, expected_album_receipt=None):
     move_it = confirm(
         "\n  Move this folder to a backup before re-downloading? "
         "(restored automatically if the re-download fails)",
-        default_yes=True, auto_yes=False)
+        default_yes=True, auto_yes=False, q_is_no=False)
     if not move_it:
         log.info(fmt(C.YELLOW, "  Continuing without moving it. Expect file collisions."))
         return False
@@ -1478,6 +1478,11 @@ class _AlbumRun:
         # decide; defaulting yes would mean every enter-press starts a download
         # they may not want. Press y to proceed.
         if not self.already_confirmed:
+            if all(catalog.unstreamable(track) for track in self.missing):
+                log.info(fmt(C.YELLOW,
+                    f"\n  ⚠  Nothing can be downloaded: "
+                    f"{plural(len(self.missing), 'track')} not available on Qobuz.\n"))
+                return {"result": "no_tracks", "n_missing": len(self.missing)}
             proceed = confirm(download_question(self.missing),
                               default_yes=False, auto_yes=self.args.yes, on_eof=None)
             if proceed is None:

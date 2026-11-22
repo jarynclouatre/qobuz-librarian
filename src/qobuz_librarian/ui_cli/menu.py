@@ -15,8 +15,7 @@ _CHOICES = [
     ("2", "Artist", Mode.ARTIST,
      "one artist: fill gaps, then offer albums you're missing"),
     ("3", "Library walk", Mode.WALK_QUEUE,
-     "every artist, same as Artist; queue as you go and download after each "
-     "artist or all at the end"),
+     "every artist in turn, same steps as Artist"),
     ("4", "Gap Fill", Mode.ALBUM_WALK,
      "fill missing tracks in every incomplete album you own; "
      "never suggests albums you don't have"),

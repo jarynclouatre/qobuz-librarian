@@ -70,7 +70,10 @@ def _flush_stdin():
         pass
 
 
-def confirm(msg, default_yes=True, auto_yes=False, on_eof=False, quiet=False):
+def confirm(msg, default_yes=True, auto_yes=False, on_eof=False, quiet=False,
+            q_is_no=True):
+    """Yes or no. q is no too, except at a question whose no changes
+    something (q_is_no=False)."""
     if auto_yes:
         return True
     suffix = " [Y/n]: " if default_yes else " [y/N]: "
@@ -83,9 +86,10 @@ def confirm(msg, default_yes=True, auto_yes=False, on_eof=False, quiet=False):
             return default_yes
         if r in ("y", "yes"):
             return True
-        if r in ("n", "no"):
+        if r in ("n", "no") or (q_is_no and r == "q"):
             return False
-        print(fmt(C.YELLOW, "  Answer y or n."))
+        print(fmt(C.YELLOW, "  Answer y or n (q=no)." if q_is_no
+                  else "  Answer y or n."))
 
 
 def download_question(missing):
@@ -501,25 +505,27 @@ def print_album_summary(album, missing, present, album_dir, force, auto_upgrade=
 
     other_dir = None if album_dir else catalog.other_version_dir(album)
     if album_dir:
-        log.info(f"  {fmt(C.GRAY, 'found:')}    {shown_path(album_dir)}")
+        folder = shown_path(album_dir)
     elif other_dir:
-        log.info(f"  {fmt(C.GRAY, 'found:')}    another version in "
-                 f"{shown_path(other_dir)}")
+        folder = f"another version in {shown_path(other_dir)}"
     else:
-        log.info(f"  {fmt(C.GRAY, 'found:')}    not found on disk")
+        folder = "not in your library"
+    log.info(f"  {fmt(C.GRAY, 'folder:')}   {folder}")
 
-    if n_present == 0 and other_dir:
-        log.info(f"  {fmt(C.GREEN, 'in your library:')}  "
-                 "none of this version - full album will be fetched as a separate copy")
-    elif n_present == 0:
-        log.info(f"  {fmt(C.GREEN, 'in your library:')}  none - full album will be fetched")
-    elif n_missing == 0:
-        log.info(f"  {fmt(C.GREEN, 'in your library:')}  "
-                 f"all {n_total} track{'s' if n_total != 1 else ''}")
+    fetch = plural(n_missing - unstreamed, "track")
+    if n_present:
+        have = f"{n_present} of {n_total} tracks" if n_missing else f"all {plural(n_total, 'track')}"
+        log.info(f"  {fmt(C.GRAY, 'have:')}     {have}")
     else:
-        log.info(f"  {fmt(C.GREEN, 'in your library:')}  "
-                 f"{n_present} of {n_total} tracks")
-        log.info(f"  {fmt(C.YELLOW, 'missing:')}          {n_missing}")
+        if not unstreamed:
+            fetch = "the whole album"
+        if other_dir:
+            log.info(f"  {fmt(C.GRAY, 'have:')}     none of this version")
+            fetch += ", as a separate copy"
+    if n_missing > unstreamed:
+        log.info(f"  {fmt(C.GRAY, 'fetch:')}    {fetch}")
+
+    if n_present and n_missing:
         log.info(fmt(C.GRAY, "  Missing tracks:"))
         for t in missing[:25]:
             n = t.get("track_number") or "?"
