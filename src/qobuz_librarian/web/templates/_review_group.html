@@ -19,7 +19,7 @@
     {% endif %}
     {% set _n = items | length %}
     <span class="ql-review-title">
-      <span class="ql-review-title-main" title="{{ artist or 'Artist not recorded' }}">{{ artist or 'Artist not recorded' }}</span>
+      <span class="ql-review-title-main" role="heading" aria-level="2" title="{{ artist or 'Artist not recorded' }}">{{ artist or 'Artist not recorded' }}</span>
       <span class="ql-review-title-meta"><span class="readout">{{ labels.format_count(_n) }}</span> {% if review_tab|default('') == 'gaps' %}to fill{% elif review_tab|default('') == 'missing' %}missing{% elif job.execute_kind in ('upgrade', 'downsample') %}to {{ job.execute_kind }}{% elif job.execute_kind == 'new_releases' %}album{{ 's' if _n != 1 }}{% elif _n == 1 %}{{ labels.review_item_singular(job) }}{% else %}{{ labels.review_item_plural(job) }}{% endif %}</span>
     </span>
   </summary>

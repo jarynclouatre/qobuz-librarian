@@ -9,6 +9,8 @@
   --ql-surface-hover: #2a2114;
   --ql-line: rgb(243 234 215 / 0.12);
   --ql-line-soft: rgb(243 234 215 / 0.075);
+  /* Box and field outlines, at 3:1 against the page. */
+  --ql-field-line: color-mix(in oklab, var(--ql-text) 40%, transparent);
   --ql-text: #f3ead7;
   --ql-text-2: #b9a888;
   --ql-text-3: #8d7c63;
@@ -38,6 +40,7 @@
   --ql-surface-hover: #e9dcc4;
   --ql-line: rgb(43 32 19 / 0.16);
   --ql-line-soft: rgb(43 32 19 / 0.09);
+  --ql-field-line: color-mix(in oklab, var(--ql-text) 52%, transparent);
   --ql-text: #2b2013;
   --ql-text-2: #6d5a41;
   --ql-text-3: #735f42;
@@ -208,7 +211,7 @@
 .ql-input {
   width: 100%;
   min-height: 2.75rem;
-  border: 1px solid color-mix(in oklab, var(--ql-text) 14%, transparent);
+  border: 1px solid var(--ql-field-line);
   border-radius: var(--ql-radius-sm);
   background-color: color-mix(in oklab, var(--ql-surface) 82%, var(--ql-bg));
   padding: 0.68rem 0.82rem;
@@ -218,7 +221,7 @@
 }
 
 .ql-input::placeholder {
-  color: color-mix(in oklab, var(--ql-text-2) 68%, transparent);
+  color: var(--ql-text-3);
 }
 
 .ql-input:focus {
@@ -245,14 +248,14 @@
   height: 1rem;
   flex: none;
   appearance: none;
-  border: 1px solid color-mix(in oklab, var(--ql-text) 28%, transparent);
+  border: 1px solid var(--ql-field-line);
   border-radius: 0.1875rem;
   background-color: color-mix(in oklab, var(--ql-bg) 72%, transparent);
   cursor: pointer;
 }
 
 .ql-checkbox:hover {
-  border-color: color-mix(in oklab, var(--ql-text) 50%, transparent);
+  border-color: color-mix(in oklab, var(--ql-text) 66%, transparent);
 }
 
 /* Ticked boxes are cream on night and ink on winter, not gold: a page of
@@ -314,6 +317,31 @@
 .ql-toggle:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--ql-gold) 62%, transparent);
   outline-offset: 2px;
+}
+
+/* Forced colours drop the knob and repaint the box under a tick drawn in a
+   theme colour, so on and off would look alike. The browser draws its own
+   box, and the switch is painted in system colours. */
+@media (forced-colors: active) {
+  .ql-checkbox {
+    appearance: auto;
+  }
+  .ql-toggle {
+    forced-color-adjust: none;
+    border-color: CanvasText;
+    background:
+      radial-gradient(circle at 0.62rem 50%, CanvasText 0 0.34rem, transparent 0.36rem),
+      Canvas;
+  }
+  .ql-toggle:checked {
+    border-color: Highlight;
+    background:
+      radial-gradient(circle at calc(100% - 0.62rem) 50%, HighlightText 0 0.34rem, transparent 0.36rem),
+      Highlight;
+  }
+  .ql-toggle:focus-visible {
+    outline-color: CanvasText;
+  }
 }
 
 .ql-setting-row {

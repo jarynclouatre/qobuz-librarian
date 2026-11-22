@@ -1105,8 +1105,14 @@
       // Asked whether to cancel a job, a button labelled "Cancel" reads as yes.
       cancelButton.textContent = opts.dismiss || "Cancel";
       cancelButton.onclick = function () { choice = false; d.close(); };
+      // An action in the review's menu closes the menu as the dialog opens,
+      // so the dialog has no visible button to hand focus back to.
+      var menu = document.activeElement.closest("[data-review-more]");
       d.addEventListener("close", function h() {
         d.removeEventListener("close", h);
+        if (menu && !document.activeElement.getClientRects().length) {
+          menu.querySelector(".ql-review-more-toggle").focus();
+        }
         resolve(choice);
       });
       d.showModal();
@@ -1369,6 +1375,8 @@
     form.querySelector('input[name="q"]').value = button.dataset.searchByArtist;
     var radio = form.querySelector('input[name="kind"][value="artist"]');
     radio.checked = true;
+    // The search takes the pressed button away with the old results.
+    radio.focus({ preventScroll: true });
     radio.dispatchEvent(new Event("change", { bubbles: true }));
   });
 
@@ -3965,6 +3973,7 @@
       return {
         cid: el.matches("input.cb") ? el.value : "",
         kind: el.matches("[data-hide]") ? "[data-hide]"
+          : el.matches("[data-hide-rest]") ? "[data-hide-rest]"
           : el.matches("[data-artist-select]") ? "[data-artist-select]" : "summary",
         artists: [group ? group.getAttribute("data-artist") : null,
                   artistOf(shell && shell.nextElementSibling),
@@ -3974,6 +3983,7 @@
     function restoreReviewFocus(spot) {
       var now = document.activeElement;
       if (!spot || (now && now !== document.body)) return;
+      function shown(el) { return el && el.getClientRects().length ? el : null; }
       var target = spot.cid
         ? cont.querySelector('input.cb[value="' + CSS.escape(spot.cid) + '"]') : null;
       for (var i = 0; !target && i < spot.artists.length; i++) {
@@ -3987,7 +3997,7 @@
           loadGroupItems(group, false).then(function () { restoreReviewFocus(spot); });
           return;
         }
-        target = shell.querySelector(spot.kind) || group.querySelector("summary");
+        target = shown(shell.querySelector(spot.kind)) || group.querySelector("summary");
       }
       target = target || cont.querySelector("[data-select-master]");
       if (target) target.focus({ preventScroll: true });
@@ -4341,7 +4351,9 @@
       dismissPending = true;
       dismissRequest = e.detail.xhr;
       choiceVersion += 1;
-      dismissFocus = btn === document.activeElement ? reviewFocusSpot(btn) : null;
+      var active = document.activeElement;
+      dismissFocus = active === btn || active.matches("[data-hide-rest]")
+        ? reviewFocusSpot(active) : null;
       syncActions();
     }
     function afterDismissRequest(e) {
@@ -4868,6 +4880,25 @@
       apply();
     }
   })();
+  // The browser scrolls a control that Tab reaches into the window, not out
+  // from under the header, the tab bar or a review's footer.
+  document.addEventListener("focusin", function (e) {
+    var el = e.target;
+    if (!el.matches || !el.matches(":focus-visible")) return;
+    requestAnimationFrame(function () {
+      var r = el.getBoundingClientRect();
+      var hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      if (!hit || el.contains(hit) || hit.contains(el)) return;
+      var bar = hit;
+      while (bar && !/^(fixed|sticky)$/.test(getComputedStyle(bar).position)) {
+        bar = bar.parentElement;
+      }
+      if (!bar || bar.contains(el)) return;
+      var b = bar.getBoundingClientRect();
+      if (b.top > window.innerHeight / 2) window.scrollBy(0, r.bottom - b.top + 8);
+      else window.scrollBy(0, r.top - b.bottom - 8);
+    });
+  });
   // "Load more artists" clicks itself as it approaches the viewport, so a
   // long review reads as one continuous scrolling list. Deferred to DOM-ready:
   // this script loads in <head>, where document.body doesn't exist yet.

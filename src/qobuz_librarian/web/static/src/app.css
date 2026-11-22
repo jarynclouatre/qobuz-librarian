@@ -166,7 +166,7 @@ h1, h2, h3 {
   gap: 0.625rem;
   color: var(--color-base-content);
   font-family: var(--ql-font-display);
-  font-size: 1.05rem;
+  font-size: 1rem;
   font-weight: 600;
   letter-spacing: 0.01em;
   text-decoration: none;
@@ -380,7 +380,7 @@ svg.ql-nav-icon-stroke {
   background: var(--ql-text);
   color: var(--ql-bg);
   font-family: var(--ql-font-mono);
-  font-size: 0.65rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   line-height: 1;
   text-align: center;
@@ -714,7 +714,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-panel-header h2 {
   margin: 0;
-  font-size: 1.02rem;
+  font-size: 1rem;
   font-weight: 760;
   line-height: 1.25;
 }
@@ -824,13 +824,12 @@ details.ql-mobile-drawer[open]::before {
   gap: 0.625rem;
   height: 3.125rem;
   padding: 0 1.05rem;
-  border: 1px solid color-mix(in oklab, var(--ql-text) 16%, transparent);
+  border: 1px solid var(--ql-field-line);
   border-radius: 0.6875rem;
   background-color: color-mix(in oklab, var(--ql-text) 4%, var(--ql-bg));
   transition: border-color 150ms ease;
 }
 .ql-search-field:focus-within {
-  border-color: color-mix(in oklab, var(--ql-text) 32%, transparent);
   outline: 2px solid var(--ql-gold-strong);
   outline-offset: 2px;
 }
@@ -859,7 +858,7 @@ details.ql-mobile-drawer[open]::before {
   font-weight: 480;
 }
 .ql-search-input::placeholder {
-  color: color-mix(in oklab, var(--ql-text-2) 52%, transparent);
+  color: var(--ql-text-3);
 }
 .ql-search-submit {
   display: inline-flex;
@@ -1275,10 +1274,10 @@ details.ql-mobile-drawer[open]::before {
     white-space: normal;
   }
   .ql-result-row--artist .ql-result-title {
-    font-size: 0.95rem;
+    font-size: 0.9375rem;
   }
   .ql-result-row--artist .ql-result-meta {
-    font-size: 0.8rem;
+    font-size: 0.8125rem;
   }
   .ql-result-row--artist .ql-result-action-form {
     width: auto;
@@ -1385,7 +1384,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-track-time {
   color: var(--ql-text-3);
   font-family: var(--ql-font-mono);
-  font-size: 0.71875rem;
+  font-size: 0.75rem;
 }
 .ql-track-n {
   text-align: right;
@@ -1597,6 +1596,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-search-tools {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 1.1rem;
   margin-left: auto;
@@ -1658,6 +1658,28 @@ details.ql-mobile-drawer[open]::before {
 .ql-review-switch[aria-pressed="true"] .ql-toggle-switch i {
   transform: translateX(0.9375rem);
   background-color: var(--ql-bg);
+}
+@media (forced-colors: active) {
+  .ql-toggle-switch,
+  .ql-toggle-switch i {
+    forced-color-adjust: none;
+  }
+  .ql-toggle-switch {
+    border-color: CanvasText;
+    background-color: Canvas;
+  }
+  .ql-toggle-switch i {
+    background-color: CanvasText;
+  }
+  .ql-search-filter[aria-pressed="true"] .ql-toggle-switch,
+  .ql-review-switch[aria-pressed="true"] .ql-toggle-switch {
+    border-color: Highlight;
+    background-color: Highlight;
+  }
+  .ql-search-filter[aria-pressed="true"] .ql-toggle-switch i,
+  .ql-review-switch[aria-pressed="true"] .ql-toggle-switch i {
+    background-color: HighlightText;
+  }
 }
 .ql-search-view-toggle {
   display: inline-flex;
@@ -1832,7 +1854,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-table-row.is-owned .ql-table-title,
 .ql-table-row.is-owned .ql-table-sub > :not(.ql-row-chips),
 .ql-table-row.is-owned .ql-table-mobile-artist {
-  opacity: 0.62;
+  opacity: 0.66;
 }
 /* The drawn tick stays 1.5rem; the target does not. Sized by min-width/
    min-height rather than padding, since the native checkbox inside has no
@@ -1937,7 +1959,7 @@ details.ql-mobile-drawer[open]::before {
   min-width: 0;
   overflow: hidden;
   color: var(--ql-text);
-  font-size: 0.90625rem;
+  font-size: 0.875rem;
   font-weight: 620;
   letter-spacing: 0.005em;
   line-height: 1.25;
@@ -2046,16 +2068,16 @@ details.ql-mobile-drawer[open]::before {
   min-width: 0;
   overflow: hidden;
   color: var(--ql-text-2);
-  font-size: 0.84375rem;
+  font-size: 0.8125rem;
   font-weight: 550;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .ql-table-mono {
-  color: color-mix(in oklab, var(--ql-text-2) 88%, transparent);
+  color: color-mix(in oklab, var(--ql-text-2) 94%, transparent);
   font-family: var(--ql-font-mono);
-  font-size: 0.78125rem;
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
 }
 .ql-table-action {
@@ -2291,7 +2313,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-grid-version-action .ql-partial-label,
 .ql-grid-version-action .ql-other-version-label {
   padding: 0.24rem 0.34rem;
-  font-size: 0.59375rem;
+  font-size: 0.625rem;
 }
 .ql-grid-tile.is-owned .ql-grid-cover,
 .ql-grid-tile.is-owned .ql-grid-title {
@@ -2433,7 +2455,7 @@ details.ql-mobile-drawer[open]::before {
     display: block;
     margin-top: 0.16rem;
     color: var(--ql-text);
-    font-size: 0.9rem;
+    font-size: 0.875rem;
     font-weight: 760;
     line-height: 1.2;
   }
@@ -2626,7 +2648,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-activity-section-header p {
   margin: 0.2rem 0 0;
   color: var(--ql-text-3);
-  font-size: 0.84rem;
+  font-size: 0.8125rem;
   line-height: 1.35;
 }
 .ql-section-meta {
@@ -2748,7 +2770,7 @@ details.ql-mobile-drawer[open]::before {
   padding-block: 0.6rem;
 }
 .ql-history-row--compact .ql-row-title {
-  font-size: 0.84rem;
+  font-size: 0.8125rem;
 }
 .ql-row-kind {
   color: var(--ql-text-3);
@@ -2765,7 +2787,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-history-row .ql-activity-time {
   font-family: inherit;
-  font-size: 0.8rem;
+  font-size: 0.8125rem;
 }
 .ql-history-row .ql-row-meta {
   display: -webkit-box;
@@ -2938,7 +2960,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-connect-title {
   margin: 0;
   color: var(--ql-text);
-  font-size: 1.05rem;
+  font-size: 1rem;
   font-weight: 730;
   line-height: 1.25;
   letter-spacing: 0;
@@ -3027,7 +3049,7 @@ details.ql-mobile-drawer[open]::before {
   user-select: none;
   list-style: none;
   color: var(--ql-text-3);
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   border-bottom: 1px dotted color-mix(in oklab, currentColor 55%, transparent);
   transition: color 150ms ease;
 }
@@ -3329,7 +3351,7 @@ details.ql-mobile-drawer[open]::before {
   font-size: 0.6875rem;
   font-weight: 600;
   line-height: 1;
-  color: var(--ql-text-2);
+  color: var(--ql-text);
   background-color: color-mix(in oklab, var(--ql-text) 8%, transparent);
 }
 .ql-page-tabs .is-active .ql-count {
@@ -3498,7 +3520,7 @@ details.ql-mobile-drawer[open]::before {
   max-width: 34rem;
   margin: 0.35rem auto 0;
   color: var(--ql-text-2);
-  font-size: 0.9rem;
+  font-size: 0.875rem;
   line-height: 1.45;
 }
 .ql-empty-state .ql-state-icon {
@@ -3600,7 +3622,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-refresh-note {
   color: var(--ql-text-3);
-  font-size: 0.8rem;
+  font-size: 0.8125rem;
 }
 .ql-refresh-outcome {
   color: var(--ql-text-2);
@@ -3773,7 +3795,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-hidden-artist {
   overflow: hidden;
   color: var(--ql-text);
-  font-size: 0.98rem;
+  font-size: 1rem;
   font-weight: 730;
   line-height: 1.25;
   text-overflow: ellipsis;
@@ -3782,7 +3804,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-hidden-count {
   color: var(--ql-text-2);
-  font-size: 0.85rem;
+  font-size: 0.875rem;
   line-height: 1.25;
 }
 .ql-hidden-group-body {
@@ -3837,7 +3859,7 @@ details.ql-mobile-drawer[open]::before {
   align-items: center;
   gap: var(--ql-space-3);
   padding-block: var(--ql-space-1);
-  font-size: 0.82rem;
+  font-size: 0.8125rem;
 }
 .ql-hidden-title {
   display: grid;
@@ -3862,13 +3884,13 @@ details.ql-mobile-drawer[open]::before {
   display: block;
   overflow: hidden;
   color: var(--ql-text-3);
-  font-size: 0.78125rem;
+  font-size: 0.75rem;
   text-overflow: ellipsis;
 }
 .ql-hidden-title .ql-hidden-when {
   display: block;
   color: var(--ql-text-3);
-  font-size: 0.78125rem;
+  font-size: 0.75rem;
 }
 .ql-hidden-groups {
   display: grid;
@@ -4260,7 +4282,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-scan-panel-title {
   margin: 0;
   color: var(--ql-text);
-  font-size: 0.95rem;
+  font-size: 0.9375rem;
   font-weight: 600;
   letter-spacing: 0.005em;
 }
@@ -4283,6 +4305,14 @@ details.ql-mobile-drawer[open]::before {
   cursor: pointer;
   user-select: none;
   list-style: none;
+}
+.ql-census-fold-summary {
+  position: relative;
+}
+.ql-census-fold-summary::before {
+  content: "";
+  position: absolute;
+  inset: -0.625rem 0;
 }
 .ql-census-fold-summary::-webkit-details-marker {
   display: none;
@@ -4342,6 +4372,15 @@ details.ql-mobile-drawer[open]::before {
 .ql-activity-section-action {
   margin: 0 0 0 auto;
 }
+/* A one-line header link, given a 44px tap area without moving it. */
+a.ql-activity-section-action {
+  position: relative;
+}
+a.ql-activity-section-action::before {
+  content: "";
+  position: absolute;
+  inset: -0.75rem -0.5rem;
+}
 .ql-activity-section-header .ql-inline-link {
   font-size: 0.8125rem;
 }
@@ -4384,7 +4423,7 @@ details.ql-mobile-drawer[open]::before {
   padding: 0;
   cursor: pointer;
   color: var(--ql-text-2);
-  font-size: 0.8rem;
+  font-size: 0.8125rem;
   text-decoration: underline dotted color-mix(in oklab, currentColor 55%, transparent);
   text-decoration-thickness: 1px;
   text-underline-offset: 0.25em;
@@ -4414,7 +4453,7 @@ details.ql-mobile-drawer[open]::before {
 }
 .ql-confirm-text {
   margin: 0 0 1.05rem;
-  font-size: 0.925rem;
+  font-size: 0.9375rem;
   line-height: 1.5;
 }
 .ql-confirm-actions {
@@ -4594,7 +4633,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-conn-line .ql-conn-who {
   color: var(--ql-text-3);
   font-family: var(--ql-font-mono);
-  font-size: 0.76rem;
+  font-size: 0.75rem;
 }
 .ql-storage {
   margin-top: 0.35rem;
@@ -4847,7 +4886,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-path-kind {
   margin-top: 0.45rem;
   color: var(--ql-text-3);
-  font-size: 0.7rem;
+  font-size: 0.6875rem;
   font-weight: 700;
   line-height: 1.2;
 }
@@ -5002,7 +5041,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-diagnostic-detail-mono {
   color: var(--ql-text-3);
   font-family: var(--ql-font-mono);
-  font-size: 0.7rem;
+  font-size: 0.6875rem;
   line-height: 1.45;
 }
 [data-theme="night"] .ql-diagnostic-row {
@@ -5554,7 +5593,7 @@ details[open] > summary .ql-review-chevron {
 .ql-review-candidate-title {
   min-width: 0;
   color: var(--ql-text);
-  font-size: 0.90625rem;
+  font-size: 0.875rem;
   font-weight: 600;
   letter-spacing: 0.005em;
   overflow-wrap: anywhere;
@@ -5585,7 +5624,7 @@ details[open] > summary .ql-review-chevron {
   display: block;
   min-width: 0;
   overflow: hidden;
-  color: color-mix(in oklab, var(--ql-text) 62%, transparent);
+  color: color-mix(in oklab, var(--ql-text) 66%, transparent);
   font-size: 0.75rem;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -5676,7 +5715,7 @@ details[open] > summary .ql-review-chevron {
 }
 .ql-path-check-label {
   color: var(--ql-text);
-  font-size: 0.9rem;
+  font-size: 0.875rem;
   font-weight: 680;
   line-height: 1.25;
 }
@@ -5703,7 +5742,7 @@ details[open] > summary .ql-review-chevron {
   font-weight: 600;
 }
 .ql-definition-list dd {
-  color: color-mix(in oklab, var(--color-base-content) 58%, transparent);
+  color: color-mix(in oklab, var(--color-base-content) 64%, transparent);
   font-size: 0.875rem;
 }
 .ql-step-number {
@@ -5744,7 +5783,7 @@ details[open] > summary .ql-review-chevron {
 .ql-step-list {
   margin-top: var(--ql-space-1);
   color: var(--ql-text-2);
-  font-size: 0.9rem;
+  font-size: 0.875rem;
   line-height: 1.45;
   list-style: none;
 }
@@ -5759,12 +5798,12 @@ details[open] > summary .ql-review-chevron {
 .ql-form-note {
   margin: 0;
   color: var(--ql-text-2);
-  font-size: 0.9rem;
+  font-size: 0.875rem;
   line-height: 1.45;
 }
 .ql-form-note {
   margin-top: 0.55rem;
-  font-size: 0.78rem;
+  font-size: 0.75rem;
 }
 /* An inline link mid-sentence: the drawn text stays its normal size, the
    padding plus matching negative margin grows the tap target to 44px without
@@ -5774,6 +5813,9 @@ details[open] > summary .ql-review-chevron {
   align-items: center;
   padding: 0.85rem 0.2rem;
   margin: -0.85rem -0.2rem;
+  /* Lifted over the lines around it, which would otherwise take the taps
+     on its padding. */
+  position: relative;
 }
 .ql-page-error {
   margin: 0 auto 1rem;
@@ -5922,7 +5964,7 @@ details[open] > summary .ql-review-chevron {
 /* Log/scan console follows the active theme. */
 .log-console {
   font-family: var(--ql-font-mono);
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   line-height: 1.5;
   background: color-mix(in oklab, var(--ql-bg) 74%, black);
   color: var(--ql-text-2);
@@ -6349,7 +6391,7 @@ details[data-artist].htmx-swapping {
    squeeze the search tools off one line on the narrowest phones. */
 @media (max-width: 359.98px) {
   .ql-search-tools {
-    gap: 0.6rem;
+    gap: 0.6rem 0.3rem;
   }
   .ql-search-view-toggle button {
     width: 2.25rem;
