@@ -27,6 +27,12 @@ from qobuz_librarian.ui_cli.logging import report_progress
 HAVE_LYRICS = lyric_fetch.AVAILABLE
 
 
+def _album_of(label):
+    """The "Artist · Album" of a track label made of folders and a file name."""
+    parts = label.split(" / ")
+    return " · ".join(parts[:2]) if len(parts) > 2 else label
+
+
 def iter_library_flacs(*, artist_dirs=None, on_artist_error=None):
     """Yield ``(path, mtime, size)`` for every FLAC under the given artist dirs.
 
@@ -106,13 +112,12 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
     # tracks that actually need them, and its progress count reflects real
     # work instead of ticking through thousands of already-lyriced files.
     if not rescan and not dry_run:
-        report_progress("Scanning library lyrics", 0, total, "", "track")
+        # No count here: the bar belongs to the lookups that follow.
+        report_progress(f"Reading {plural(total, 'track')}…")
         indexed = lyric_fetch.index_existing(
             paths, owned_root=cfg.MUSIC_ROOT,
             state_path=cfg.LYRIC_FETCH_STATE_FILE, log=log,
             should_stop=should_stop,
-            progress_cb=lambda c, t, name: report_progress(
-                "Scanning library lyrics", c, t, name, "track"),
         )
         if indexed.get("stopped"):
             processed = sum(
@@ -141,7 +146,7 @@ def run_library_lyrics(*, dry_run=False, rescan=False, synced_only=False,
         should_stop=should_stop,
         progress_cb=lambda c, t, name, note: report_progress(
             " · ".join(filter(None, ("Looking up lyrics", note))),
-            c, t, name, "track"),
+            c, t, _album_of(name), "track"),
         skips=skips,
     )
     result = dict(counts)

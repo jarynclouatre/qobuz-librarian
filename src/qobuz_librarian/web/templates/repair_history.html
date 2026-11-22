@@ -4,12 +4,12 @@
 {% block content %}
 
 <div class="ql-list-page">
-<header class="ql-page-header ql-page-header--actions">
-  <div>
+<div>
+  <a href="/repair" class="ql-search-back">&larr; Repair</a>
+  <header class="ql-page-header">
     <h1>Repair history</h1>
-  </div>
-  <a href="/repair" class="ql-page-action ql-inline-link">Back to Repair</a>
-</header>
+  </header>
+</div>
 
 {% if repairs %}
 <p class="ql-repair-history-summary">{{ labels.format_count(track_count) }} track{{ 's' if track_count != 1 }} replaced in {{ labels.format_count(album_count) }} album{{ 's' if album_count != 1 }}.{% if more %} The newest {{ repairs | length }} repairs are listed.{% endif %}</p>

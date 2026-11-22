@@ -9,7 +9,7 @@
       {% elif job.interrupted_by_restart %}
         <span class="ql-status-chip is-neutral">Interrupted</span>
       {% elif job.status == 'canceled' %}
-        <span class="ql-status-chip is-neutral">Cancelled</span>
+        <span class="ql-status-chip is-neutral">{{ job.canceled_label }}</span>
       {% elif job.status == 'awaiting_review' %}
         <span class="ql-status-chip is-info">Needs review</span>
       {% elif job.status == 'pending' %}
@@ -42,26 +42,24 @@
       {% elif job.attention == 'unchecked' %}
         <span class="ql-status-chip is-warning" title="Some artists or tracks could not be read; open it for details.">Scan incomplete</span>
       {% elif job.attention == 'cancel_late' %}
-        <span class="ql-status-chip is-warning" title="It finished before the stop could take effect.">Cancelled too late</span>
+        <span class="ql-status-chip is-warning" title="It finished before the stop could take effect.">Finished before the stop</span>
       {% elif job.attention == 'catalog' %}
         <span class="ql-status-chip is-warning" title="Beets still lists the deleted track.">Still in Beets</span>
       {% elif job.attention == 'quality' %}
         <span class="ql-status-chip is-warning" title="Finished below your target quality; open it for details.">Below target quality</span>
       {% endif %}
       <span class="ql-activity-time tabular-nums"{% if job.when_exact %} title="{{ job.when_exact }}"{% endif %}>{{ job.when }}</span>
-      {# No empty actions box: on a phone it pins a wrapped time to the left. #}
-      {% if (job.status in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and job.attention != 'recovery' and not job.recoveries and not job.recovery_unreadable %}
-      <div class="ql-activity-actions">
-        {% set retry_paused = downloads_paused %}
-        {% set retry_quiet = job.status == 'canceled' and not job.interrupted_by_restart %}
-        <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
-          <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-          <input type="hidden" name="return_to" value="{{ return_to }}">
-          <button type="submit" class="ql-btn {{ 'ql-btn-secondary' if retry_quiet else 'ql-btn-primary' }} ql-btn-sm"{% if retry_paused %} disabled title="{{ downloads_paused_reason }}" aria-disabled="true"{% else %} title="Retry"{% endif %}>Retry</button>
-        </form>
-      </div>
-      {% endif %}
     </div>
+    {% if (job.status in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job.single_unreadable and job.attention != 'recovery' and not job.recoveries and not job.recovery_unreadable %}
+    <div class="ql-activity-actions">
+      {% set retry_paused = downloads_paused %}
+      <form action="/jobs/{{ job.id }}/retry" method="post" class="shrink-0">
+        <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        <button type="submit" class="ql-btn ql-btn-ghost ql-btn-sm"{% if retry_paused %} disabled title="{{ downloads_paused_reason }}" aria-disabled="true"{% else %} title="Retry"{% endif %}>Retry</button>
+      </form>
+    </div>
+    {% endif %}
 {%- endmacro %}
 
 {# A scan or run gets its outcome line; a plain download is one line unless
@@ -74,15 +72,15 @@
     <p class="ql-row-title">
       {# Its saved row cannot be loaded as a job, so the title is not a
          link; the line below is the one way on. #}
-      {% if job.recovery_unreadable %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}{% else %}<a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>{% endif %}
+      {% if job.recovery_unreadable %}{{ job_name(job) | select | join(" · ") }}{% else %}<a href="/jobs/{{ job.id }}" class="ql-row-link">{{ job_name(job) | select | join(" · ") }}</a>{% endif %}
     </p>
-    {% if job.recovery_unreadable %}
-    <p class="ql-row-meta ql-row-meta--error">The saved details of this repair could not be read. Check the backups under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
-    {% elif job.recoveries and job.execute_kind != 'migration' %}
-    <p class="ql-row-meta ql-row-meta--error">Original files are kept. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
-    {% endif %}
   </div>
   {{ job_side(job, return_to) }}
+  {% if job.recovery_unreadable %}
+  <p class="ql-row-meta ql-row-meta--error ql-row-reason ql-row-reason--summary">The saved details of this repair could not be read. Check the backups under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+  {% elif job.recoveries and job.execute_kind != 'migration' %}
+  <p class="ql-row-meta ql-row-meta--error ql-row-reason ql-row-reason--summary">Original files are kept. Review or restore them under <a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>.</p>
+  {% endif %}
   {% if job.summary and job.summary != job.error %}<p class="ql-row-meta ql-row-reason ql-row-reason--summary">{{ job.summary }}</p>{% endif %}
   {% if job.error %}{% set reason = job.error | strip_log_pointer(none) %}<p class="ql-row-meta {{ 'ql-row-meta--warning' if job.interrupted_by_restart or job.execute_args.get('partly_done') else 'ql-row-meta--error' }} ql-row-reason">{{ reason }}</p>{% endif %}
 </article>
@@ -92,9 +90,9 @@
   <div class="ql-activity-main">
     <p class="ql-row-title">
       {% if job.single and job.single.get('track_id') %}
-      <a href="/jobs/{{ job.id }}" class="ql-row-link"><span>{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }} <span class="ql-row-kind">Track</span></span></a>
+      <a href="/jobs/{{ job.id }}" class="ql-row-link"><span>{{ job_name(job) | select | join(" · ") }} <span class="ql-row-kind">Track</span></span></a>
       {% else %}
-      <a href="/jobs/{{ job.id }}" class="ql-row-link">{% if job.artist %}{{ job.artist }} · {% endif %}{{ release_title(job.title, job.edition) }}</a>
+      <a href="/jobs/{{ job.id }}" class="ql-row-link">{{ job_name(job) | select | join(" · ") }}</a>
       {% endif %}
     </p>
   </div>

@@ -1,36 +1,27 @@
 {% import "_job_labels.html" as labels %}
 
-{# A full-album download reports its own title as the item, which the row
-   already carries. #}
-{% macro progress_item(job) -%}
-  {%- set item = job.progress_item or '' -%}
-  {%- if job.title and item == job.title -%}
-  {%- elif job.title and item.startswith(job.title ~ ' · ') -%}{{ item[(job.title | length) + 3:] }}
-  {%- else -%}{{ item }}
-  {%- endif -%}
-{%- endmacro %}
-
 {% macro queue_job_row(job, return_to='/queue', streamed=True) -%}
+{% set _artist, _title = job_name(job) %}
 {% set live = job.status.value in ('running', 'scanning') %}
 {% set qw = (queue_waits or {}).get(job.id) %}
 <article class="ql-activity-row ql-activity-row--queue{% if not live %} ql-activity-row--waiting{% endif %}"
      data-queue-row data-place="{{ job.id }}"
-     {%- if live and streamed %} data-job-card data-job-id="{{ job.id }}" data-job-surface="queue" data-job-status="{{ job.status.value }}" data-job-kind="{{ job.execute_kind or job.kind }}" data-job-title="{{ job.title }}"{% if job.importing %} data-job-importing="1"{% endif %}{% endif %}>
+     {%- if live and streamed %} data-job-card data-job-id="{{ job.id }}" data-job-surface="queue" data-job-status="{{ job.status.value }}" data-job-kind="{{ job.execute_kind or job.kind }}" data-job-title="{{ job_own_title(job) }}"{% if job.importing %} data-job-importing="1"{% endif %}{% endif %}>
   {{ labels.kind_tile(job, 'is-live' if live else '') }}
 
   <div class="ql-activity-main">
     <p class="ql-row-title">
       <a id="card-link-{{ job.id }}" href="/jobs/{{ job.id }}" class="ql-row-link">
-        {% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}
+        {% if _artist %}{{ _artist }} · {% endif %}{{ _title }}
       </a>
     </p>
     {% if live %}
     <span id="card-reconnect-{{ job.id }}" class="ql-status-chip ql-status-chip--wrap is-warning hidden">Reconnecting</span>
-    {% set _verb = labels.job_activity(job) if job.status.value == 'scanning' else (job.progress_phase or labels.job_activity(job)) %}
-    {% set _item = progress_item(job) | trim %}
+    {% set _verb = labels.progress_verb(job) %}
+    {% set _item = labels.progress_item(job) | trim %}
     <p id="card-prog-{{ job.id }}" class="ql-row-meta">
       {%- if job.progress_total > 0 -%}
-      {{ _verb }} {{ job.progress_current }} / {{ job.progress_total }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if job.progress_total != 1 }}{% endif %}{% if _item %} · {{ _item }}{% endif %}
+      {{ _verb }} {{ "{:,}".format(job.progress_current) }} / {{ "{:,}".format(job.progress_total) }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if job.progress_total != 1 }}{% endif %}{% if _item %} · {{ _item }}{% endif %}{% if job.progress_track %}<span class="ql-progress-track">{{ job.progress_track }}</span>{% endif %}
       {%- elif job.progress_phase -%}
       {{ job.progress_phase }}{% if _item %} · {{ _item }}{% endif %}
       {%- else -%}
@@ -69,8 +60,7 @@
     <button type="submit" id="card-action-{{ job.id }}" class="ql-btn ql-btn-sm ql-btn-ghost"
             title="{{ _act }} {{ 'job' if live else 'from queue' }}"
             aria-label="{{ _act }} {{ 'job' if live else 'from queue' }}"
-            data-confirm="{% if live %}{{ labels.cancel_confirm(job) }}{% else %}Remove this waiting job from the queue?{% endif %}"
-            data-confirm-action="{{ _act }}"{% if live %} data-confirm-dismiss="Keep running" data-irreversible{% endif %}>{{ _act }}</button>
+            {%- if live %} data-confirm="{{ labels.cancel_confirm(job) }}" data-confirm-action="Stop" data-confirm-dismiss="Keep running"{% if labels.stop_loses_scan(job) | trim %} data-irreversible{% endif %}{% endif %}>{{ _act }}</button>
   </form>
   {% endif %}
 </article>

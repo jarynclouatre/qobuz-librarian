@@ -756,7 +756,7 @@ async def set_mode(request: Request, target: str = Form("")):
                     "The web app is still tidying its caches after starting. "
                     "Try again in a minute.")
             return _mode_refused(
-                "Finish or cancel the running library work before handing off to the "
+                "Finish or stop the running library work before handing off to the "
                 "terminal.")
         return RedirectResponse(url="/settings?mode=cli#mode", status_code=303)
     if want == "nolock":

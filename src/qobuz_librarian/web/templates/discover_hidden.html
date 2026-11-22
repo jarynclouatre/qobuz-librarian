@@ -5,16 +5,18 @@
 {% block content %}
 
 <div class="ql-list-page">
-<header class="ql-page-header">
-  <h1>Dismissed from Discover</h1>
-</header>
+<div>
+  <a href="/discover" class="ql-search-back">&larr; Discover</a>
+  <header class="ql-page-header">
+    <h1>Dismissed from Discover</h1>
+  </header>
+</div>
 
 {% if notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ notice }}</span></div>{% endif %}
 
 {% if artists %}
 <div class="ql-work-status">
   <span>{{ labels.format_count(artists | length) }} dismissed artist{% if artists | length != 1 %}s{% endif %}.</span>
-  <a href="/discover">Back to Discover</a>
 </div>
 
 <ul class="ql-hidden-list ql-discover-hidden-list">
@@ -35,7 +37,6 @@
 </ul>
 
 {% else %}
-<div class="ql-work-status"><a href="/discover">Back to Discover</a></div>
 <p class="ql-empty-state">Nothing dismissed.</p>
 {% endif %}
 

@@ -2760,6 +2760,9 @@ details.ql-mobile-drawer[open]::before {
   align-items: center;
   gap: 0.7rem;
 }
+.ql-history-row:has(> .ql-activity-actions) {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
 .ql-history-row .ql-activity-time {
   font-family: inherit;
   font-size: 0.8rem;
@@ -2860,9 +2863,8 @@ details.ql-mobile-drawer[open]::before {
     width: 100%;
     justify-items: start;
   }
-  /* History follows the Queue rows: the icon sits beside the text, and the
-     chips and time sit at the end of the same line, so a job is one line
-     rather than a card. The "Open" link goes: the name is the same link. */
+  /* History follows the Queue rows: the icon beside the name, and one text
+     action at the end of its line. */
   .ql-history-row {
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 0.4rem 0.7rem;
@@ -2884,28 +2886,22 @@ details.ql-mobile-drawer[open]::before {
     flex-wrap: wrap;
     align-items: center;
     justify-content: flex-end;
-    /* Capped so a busy row wraps its own chips instead of squeezing the
-       name into a column two words wide. A length, not a percentage: a
-       percentage resolves against the column the chips themselves sized. */
-    max-width: 11.5rem;
     gap: 0.4rem;
   }
-  .ql-history-row .ql-activity-side .ql-activity-actions {
+  .ql-history-row .ql-activity-actions {
+    grid-row: 1;
+    grid-column: 3;
     width: auto;
-    margin-left: auto;
   }
-  /* Two chips or a button beside a name leave it a column a few words
-     wide, so they drop to their own line under it. */
-  .ql-history-row:has(.ql-activity-side > .ql-status-chip ~ .ql-status-chip) .ql-activity-main,
-  .ql-history-row:has(.ql-activity-side > .ql-status-chip ~ .ql-status-chip) .ql-activity-side,
-  .ql-history-row:has(.ql-activity-side > .ql-activity-actions) .ql-activity-main,
-  .ql-history-row:has(.ql-activity-side > .ql-activity-actions) .ql-activity-side {
+  .ql-history-row:has(> .ql-activity-actions) {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  /* A job's chips and time have their own line under the name. */
+  .ql-history-row:has(.ql-status-chip) .ql-activity-side {
+    grid-row: 2;
     grid-column: 2 / -1;
-  }
-  .ql-history-row:has(.ql-activity-side > .ql-status-chip ~ .ql-status-chip) .ql-activity-side,
-  .ql-history-row:has(.ql-activity-side > .ql-activity-actions) .ql-activity-side {
-    max-width: none;
     justify-content: flex-start;
+    margin-top: -0.2rem;
   }
   .ql-history-row .ql-activity-actions > form,
   .ql-history-row .ql-activity-actions > .ql-btn {
@@ -2913,6 +2909,8 @@ details.ql-mobile-drawer[open]::before {
   }
   .ql-history-row .ql-activity-actions .ql-btn {
     width: auto;
+    min-width: 0;
+    margin-right: -0.5rem;
   }
   .ql-empty-state--activity {
     text-align: left;
@@ -3644,13 +3642,6 @@ details.ql-mobile-drawer[open]::before {
   font-size: 0.9375rem;
   line-height: 1.45;
 }
-.ql-page-action {
-  display: inline-flex;
-  min-height: 2.75rem;
-  flex: none;
-  align-items: center;
-  justify-self: start;
-}
 .ql-list-page,
 .ql-settings-page {
   display: grid;
@@ -3675,7 +3666,7 @@ details.ql-mobile-drawer[open]::before {
     width: min(100%, 70rem);
     max-width: none;
   }
-  .ql-list-page > :not(.ql-page-header),
+  .ql-list-page > :not(.ql-page-header, :has(> .ql-page-header)),
   .ql-settings-page > :not(.ql-page-header) {
     width: min(100%, 64rem);
     margin-inline: auto;
@@ -3689,6 +3680,14 @@ details.ql-mobile-drawer[open]::before {
   font-size: clamp(1.35rem, 2.4vw, 1.95rem);
   line-height: 1.12;
 }
+.ql-list-page .ql-search-back {
+  margin-bottom: 0.4rem;
+  padding-inline: 0;
+}
+.ql-list-page .ql-search-back:focus-visible {
+  outline: 2px solid var(--ql-gold);
+  outline-offset: 3px;
+}
 .ql-job-shell {
   display: grid;
   min-width: 0;
@@ -3697,9 +3696,6 @@ details.ql-mobile-drawer[open]::before {
 .ql-job-shell > * {
   min-width: 0;
 }
-.ql-job-header {
-  margin-bottom: 0;
-}
 .ql-job-heading {
   display: flex;
   min-width: 0;
@@ -3707,18 +3703,48 @@ details.ql-mobile-drawer[open]::before {
   gap: 0.85rem;
 }
 .ql-job-title,
+.ql-job-result,
 .ql-job-folder {
   overflow-wrap: anywhere;
 }
-.ql-job-finished {
-  color: var(--ql-text-3);
+.ql-job-name {
+  min-width: 0;
+}
+.ql-job-name p {
   font-size: 0.8125rem;
   line-height: 1.4;
 }
-.ql-job-status {
-  flex: none;
-  align-self: start;
-  max-width: 100%;
+.ql-job-name h1 {
+  display: -webkit-box;
+  margin-top: 0.1rem;
+  overflow: hidden;
+  line-height: 1.15;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.ql-job-when {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  margin: 0;
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+.ql-job-result {
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+.ql-job-folder {
+  margin: 0;
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+.ql-job-result + .ql-job-folder {
+  margin-top: calc(0.2rem - var(--ql-space-4));
 }
 .ql-hidden-summary {
   display: flex;
@@ -5235,32 +5261,38 @@ details[open] > summary .ql-review-chevron {
   border-color: oklch(100% 0 0 / 0.10);
   background-color: oklch(100% 0 0 / 0.035);
 }
-.ql-job-summary--review,
-.ql-job-summary--terminal {
-  margin-bottom: 0;
-}
 .ql-job-banner {
   margin-bottom: var(--ql-space-4);
 }
 .ql-job-progress-head {
   display: flex;
+  min-height: 2.75rem;
   align-items: center;
   justify-content: space-between;
   gap: var(--ql-space-3);
 }
+.ql-job-page .ql-job-progress-head {
+  margin-block: calc(0.6rem - var(--ql-space-4)) calc(0.4rem - var(--ql-space-4));
+}
 .ql-job-activity-line {
+  display: -webkit-box;
   min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   margin: 0;
-  color: var(--ql-text-2);
+  overflow-wrap: anywhere;
+  color: var(--ql-text);
   font-size: 0.9375rem;
   line-height: 1.45;
 }
 .ql-job-elapsed {
   flex: none;
-  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
 }
 .ql-job-cancel {
   flex: none;
+  margin-right: -0.75rem;
 }
 .ql-job-import-chip {
   flex: none;
@@ -5283,8 +5315,19 @@ details[open] > summary .ql-review-chevron {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ql-progress-count:not(:empty) + .ql-progress-item:not(:empty)::before {
+.ql-progress-item:not(:empty)::before {
   content: " · ";
+}
+.ql-progress-meta #prog-count:empty ~ .ql-progress-item::before {
+  content: none;
+}
+.ql-progress-track:not(:empty)::before {
+  content: " · ";
+}
+@media (max-width: 639.98px) {
+  .ql-progress-track {
+    display: none;
+  }
 }
 .ql-scan-found {
   margin: 0;
@@ -5295,11 +5338,48 @@ details[open] > summary .ql-review-chevron {
 .ql-job-log-details {
   margin-top: var(--ql-space-1);
 }
+.ql-job-log {
+  border-top: 1px solid var(--ql-line);
+  margin-top: var(--ql-space-2);
+  padding-top: var(--ql-space-1);
+}
+.ql-job-log > .ql-disclosure-summary {
+  min-height: 2.75rem;
+  border: 0;
+  background: none;
+  padding-inline: 0 0.25rem;
+  color: var(--ql-text);
+}
 .ql-job-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--ql-space-2);
-  margin-top: var(--ql-space-4);
+  align-items: center;
+  gap: var(--ql-space-2) 1.1rem;
+}
+.ql-job-actions:not(:has(> *)) {
+  display: none;
+}
+.ql-job-link {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--ql-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, currentColor 40%, transparent);
+  text-underline-offset: 0.18em;
+}
+.ql-job-link:hover:not(:disabled) {
+  text-decoration-color: currentColor;
+}
+.ql-job-link:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 .ql-job-error span {
   overflow-wrap: anywhere;
@@ -5357,13 +5437,9 @@ details[open] > summary .ql-review-chevron {
 .ql-review-footer-secondary {
   width: 100%;
 }
-.ql-inline-status {
-  margin-left: var(--ql-space-2);
-  vertical-align: middle;
-}
 .ql-progress-bar {
   width: 100%;
-  height: 0.55rem;
+  height: 5px;
   overflow: hidden;
   appearance: none;
   border: 0;
@@ -5385,17 +5461,8 @@ details[open] > summary .ql-review-chevron {
 .ql-job-error {
   margin-bottom: var(--ql-space-4);
 }
-/* On a phone the activity line keeps its one control, or the Finishing word,
-   at its end rather than under it at full width. */
-@media (max-width: 639.98px) {
-  .ql-job-actions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .ql-job-actions .ql-btn,
-  .ql-job-actions form {
-    width: 100%;
-  }
+.ql-job-shell:not([data-job-view]) > .ql-notice {
+  margin-bottom: 0;
 }
 @media (min-width: 640px) {
   .ql-review-footer-actions {
@@ -6221,6 +6288,9 @@ details[data-artist].htmx-swapping {
   .ql-search-back,
   .ql-disclosure-summary {
     min-height: 2.75rem;
+  }
+  .ql-list-page .ql-search-back {
+    margin-block: -0.75rem 0;
   }
   .ql-segmented span {
     padding-block: 0.85rem 0.9rem;

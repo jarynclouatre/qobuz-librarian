@@ -16,9 +16,12 @@
 {% block content %}
 
 <div class="ql-list-page">
-<header class="ql-page-header">
-  <h1>{{ heading }}</h1>
-</header>
+<div>
+  <a href="{{ back_url }}" class="ql-search-back">&larr; {{ back_label }}</a>
+  <header class="ql-page-header">
+    <h1>{{ heading }}</h1>
+  </header>
+</div>
 
 {% if notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ notice }}</span></div>{% endif %}
 
@@ -27,7 +30,6 @@
 {% if groups or hidden_q %}
 <div class="ql-work-status">
   <span>{% if hidden_q %}{{ labels.format_count(hidden_total_artists) }} artist{% if hidden_total_artists != 1 %}s{% endif %} match{% if hidden_total_artists == 1 %}es{% endif %} &ldquo;{{ hidden_q }}&rdquo;.{% else %}{{ labels.format_count(hidden_total_artists) }} artist{% if hidden_total_artists != 1 %}s{% endif %} with {{ kept_label }}.{% endif %}</span>
-  <a href="{{ back_url }}">Back to {{ back_label }}</a>
 </div>
 
 <div class="ql-hidden-tools">
@@ -137,7 +139,6 @@
 {% endif %}
 
 {% else %}
-<div class="ql-work-status"><a href="{{ back_url }}">Back to {{ back_label }}</a></div>
 <p class="ql-empty-state">{% if is_downsample %}No albums kept hi-res.{% else %}Nothing dismissed.{% endif %}</p>
 {% endif %}
 

@@ -256,7 +256,11 @@ def _rate_readout(text):
 
 
 templates.env.globals["when_label"] = job_labels._when_label
+templates.env.globals["job_name"] = job_labels._job_name
+templates.env.globals["job_own_title"] = job_labels._job_own_title
 templates.env.globals["fmt_elapsed"] = _fmt_elapsed
+templates.env.globals["music_folder_label"] = storage.music_folder_label
+templates.env.globals["canceled_label"] = job_persistence.canceled_label
 templates.env.globals["quality_shortfall_view"] = _quality_shortfall_view
 templates.env.filters["strip_log_pointer"] = _strip_log_pointer
 templates.env.filters["known_year"] = known_year

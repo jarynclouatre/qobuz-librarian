@@ -170,8 +170,11 @@ _UPGRADE_NOTE = re.compile(r"\s*[0-9][0-9,]* (?:new )?albums? can be upgraded\."
 
 
 def summary_without_old_advice(execute_kind, summary) -> str:
-    """A saved summary without the advice earlier versions wrote into it."""
+    """A saved summary in today's words, without the advice earlier
+    versions wrote into it."""
     summary = str(summary or "").strip()
+    if summary.startswith("Cancelled. Nothing was imported."):
+        summary = "Stopped" + summary.removeprefix("Cancelled")
     if execute_kind in ("library", "new_releases"):
         summary = _NO_ARTIST_NOTE.sub("", summary).strip()
     if execute_kind == "new_releases" and summary.endswith(_OLD_CHECK_AGAIN):

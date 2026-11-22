@@ -2646,6 +2646,23 @@
 
   // Live job and queue streams.
 
+  var progressNumber = new Intl.NumberFormat();
+  function progressFigures(p) {
+    return progressNumber.format(p.current) + " / " + progressNumber.format(p.total);
+  }
+
+  function progressCount(p) {
+    return progressFigures(p) + unitSuffix(p);
+  }
+
+  // A full-album download reports its own title as the item, which the row or
+  // the page heading already carries.
+  function withoutOwnTitle(item, title) {
+    if (!title || !item) return item;
+    if (item === title) return "";
+    return item.indexOf(title + " · ") === 0 ? item.slice(title.length + 3) : item;
+  }
+
   function unitSuffix(p) {
     return p.unit ? " " + p.unit + (p.total === 1 ? "" : "s") : "";
   }
@@ -2654,7 +2671,7 @@
     if (withItem === undefined) withItem = true;
     var item = (withItem && p.item) ? " · " + p.item : "";
     if (p.total > 0) {
-      return (verb ? verb + " " : "") + p.current + " / " + p.total + unitSuffix(p) + item;
+      return (verb ? verb + " " : "") + progressCount(p) + item;
     }
     if (p.phase) return p.phase + item;
     return "";
@@ -2681,15 +2698,7 @@
     var runFallback = jobActivityFallback(kind, status);
     if (!id) return;
     var importing = card.dataset.jobImporting === "1";
-    // A full-album download reports its own title as the item, which the row
-    // already carries.
     var ownTitle = card.dataset.jobTitle || "";
-    function ownItem(item) {
-      if (!ownTitle || !item) return item;
-      if (item === ownTitle) return "";
-      return item.indexOf(ownTitle + " · ") === 0
-        ? item.slice(ownTitle.length + 3) : item;
-    }
     var progId = "card-prog-" + id;
     var containerId = "queue-body";
     var reconnect = document.getElementById("card-reconnect-" + id);
@@ -2791,8 +2800,16 @@
       var verb = status === "scanning" ? runFallback : (p.phase || runFallback);
       var txt = fmtProgress(
         { current: p.current, total: p.total, unit: p.unit, phase: p.phase,
-          item: ownItem(p.item) }, verb);
-      if (txt) el.textContent = txt;
+          item: withoutOwnTitle(p.item, ownTitle) }, verb);
+      if (txt) {
+        el.textContent = txt;
+        if (p.track) {
+          var track = document.createElement("span");
+          track.className = "ql-progress-track";
+          track.textContent = p.track;
+          el.appendChild(track);
+        }
+      }
       var bar = document.getElementById("card-bar-" + id);
       if (bar && p.total > 0) {
         var fill = bar.querySelector("i");
@@ -2838,25 +2855,20 @@
     var logEl = document.getElementById("log");
     var card = document.getElementById("progress-card");
     var count = document.getElementById("prog-count");
+    var unit = document.getElementById("prog-unit");
     var bar = document.getElementById("prog-bar");
     var item = document.getElementById("prog-item");
+    var track = document.getElementById("prog-track");
     var activity = document.getElementById("job-activity");
     var foundEl = document.getElementById("scan-found");
     var reconnect = document.getElementById("sse-reconnect");
     var jc = document.getElementById("job-content");
     var foundSingular = (jc && jc.dataset.progressItemSingular) || "album";
     var foundPlural = (jc && jc.dataset.progressItemPlural) || foundSingular + "s";
-    // The header chip says the activity once. A pushed phase that only repeats
-    // it ("Downloading album" under a "Downloading" chip) says nothing new, so
-    // the line stays quiet and the card's count carries the progress. Empty
-    // when the page rendered before the chip caught up, so nothing is hidden
-    // behind a stale word.
-    var chipWord = ((jc && jc.dataset.activityChip) || "").trim().toLowerCase();
-    function phaseDetail(phase) {
-      var text = (phase || "").trim();
-      if (!text || !chipWord) return text;
-      return text.toLowerCase().indexOf(chipWord) === 0 ? "" : text;
-    }
+    var ownTitle = (jc && jc.dataset.jobTitle) || "";
+    // The line names a scan by its kind, and a tool page names its repair.
+    var fixedVerb = !!jc && (jc.dataset.embedded ? jc.dataset.jobKind === "repair"
+      : jc.dataset.jobStatus === "scanning");
     // Server-relative elapsed clock for long-running scans.
     var elapsedEl = document.getElementById("scan-elapsed");
     var elapsedTimer = null;
@@ -3004,16 +3016,19 @@
         if (renderedQueued) { leaveQueued(); return; }
         clearQueuedState();
         if (window.qlDismissSupersededFlashes) window.qlDismissSupersededFlashes();
-        var detail = phaseDetail(p.phase);
-        if (activity && p.phase && (!jc || jc.dataset.jobKind !== "repair") && activity.textContent !== detail) {
-          activity.textContent = detail;
+        if (activity && p.phase && !fixedVerb && activity.textContent !== p.phase) {
+          activity.textContent = p.phase;
         }
         if (card) card.classList.remove("hidden");
-        var ct = p.total > 0 ? p.current + " / " + p.total + unitSuffix(p) : (p.current ? String(p.current) : "");
-        if (count) count.textContent = ct;
+        if (count) {
+          count.textContent = p.total > 0 ? progressFigures(p)
+            : (p.current ? progressNumber.format(p.current) : "");
+        }
+        if (unit) unit.textContent = p.total > 0 ? unitSuffix(p).trim() : "";
         var share = typeof p.fraction === "number" ? p.fraction : p.current / p.total;
         if (bar) { if (p.total > 0) { bar.max = 100; bar.value = Math.round(share * 100); } else { bar.removeAttribute("value"); } }
-        if (item) item.textContent = p.item || "";
+        if (item) item.textContent = withoutOwnTitle(p.item, ownTitle) || "";
+        if (track) track.textContent = p.track || "";
         if (typeof p.found === "number" && p.found > foundAlbums) foundAlbums = p.found;
         // Both tallies come cumulative from the server (found_artists rides the
         // reconnect snapshot too), so a dropped-and-reopened stream picks the

@@ -56,16 +56,44 @@ def _queue_wait(job):
     }
 
 
+def _field(job, name):
+    return job.get(name) if isinstance(job, dict) else getattr(job, name)
+
+
+def _run_album(job):
+    """The artist, title and version of the one album a Library download
+    fetches, which the job is listed under, as the same download from Search
+    is."""
+    album = (_field(job, "execute_args") or {}).get("run_album")
+    if (album and _field(job, "execute_kind") == "library"
+            and _field(job, "title") == job_mgr.RUN_TITLES["library"]):
+        return album
+    return None
+
+
+def _job_name(job) -> tuple[str, str]:
+    """The artist and title a Job or a History row is listed under."""
+    artist, title, edition = _run_album(job) or (
+        _field(job, "artist"), _field(job, "title"), _field(job, "edition"))
+    return artist or "", job_mgr.release_title(title, edition)
+
+
+def _job_own_title(job) -> str:
+    """The title a job's progress items repeat, left out where it is shown."""
+    album = _run_album(job)
+    return album[1] if album else job.title
+
+
 _JOB_NAV_SURFACES = {
-    "library": ("library", "/library", "Back to Library"),
-    "new_releases": ("library", "/library", "Back to Library"),
-    "upgrade": ("upgrade", "/upgrade", "Back to Upgrade"),
-    "downsample": ("downsample", "/downsample", "Back to Downsample"),
-    "repair": ("repair", "/repair", "Back to Repair"),
-    "lyrics": ("lyrics", "/lyrics", "Back to Lyrics"),
-    "migration": ("settings", "/migrate", "Back to Migration"),
-    "collection_snapshot": ("settings", "/settings", "Back to Settings"),
-    "collection_restore": ("settings", "/settings", "Back to Settings"),
+    "library": ("library", "/library", "Library"),
+    "new_releases": ("library", "/library", "Library"),
+    "upgrade": ("upgrade", "/upgrade", "Upgrade"),
+    "downsample": ("downsample", "/downsample", "Downsample"),
+    "repair": ("repair", "/repair", "Repair"),
+    "lyrics": ("lyrics", "/lyrics", "Lyrics"),
+    "migration": ("settings", "/migrate", "Migration"),
+    "collection_snapshot": ("settings", "/settings", "Settings"),
+    "collection_restore": ("settings", "/settings", "Settings"),
 }
 
 
@@ -73,11 +101,11 @@ def _job_nav_destination(job) -> tuple[str, str, str]:
     destination = _JOB_NAV_SURFACES.get(job.execute_kind)
     if destination is not None:
         if destination[0] == "upgrade" and not runtime._upgrade_available():
-            return "queue", "/queue/history", "Back to History"
+            return "queue", "/queue/history", "History"
         return destination
     if job.status in job_mgr.TERMINAL:
-        return "queue", "/queue/history", "Back to History"
-    return "queue", "/queue", "Back to Queue"
+        return "queue", "/queue/history", "History"
+    return "queue", "/queue", "Queue"
 
 
 def _queue_rows_signature(jobs):

@@ -243,3 +243,14 @@ def _census_view():
 
 
 _resolve_host_path = cfg.host_path
+
+
+def music_folder_label(path):
+    """A folder in the music library as "Artist / Album", any other in full."""
+    for root in (_resolve_host_path(cfg.MUSIC_ROOT)[0], cfg.MUSIC_ROOT):
+        try:
+            parts = Path(path).relative_to(root).parts
+        except ValueError:
+            continue
+        return " / ".join(parts) or str(path)
+    return str(path)

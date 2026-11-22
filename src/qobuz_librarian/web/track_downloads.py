@@ -414,7 +414,7 @@ def _make_single_track_run(album, track, token):
             return
         j.landed_complete = True
         folder = _folder_label(landed_dir)
-        got = f"Got “{t_title}”" + (f", filed under {folder}." if folder else ".")
+        got = f"“{t_title}” downloaded" + (f" to {folder}." if folder else ".")
         # The mark keeps Upgrade off a deliberate single whatever the toggle
         # says; the toggle only decides whether scans read it.
         rest = [t for t in missing
@@ -427,12 +427,8 @@ def _make_single_track_run(album, track, token):
             try:
                 hidden_mod.mark_single(artist, title, catalog.album_year(album),
                                        album.get("id"))
-                upgrade = (
-                    "Upgrade leaves this track alone."
-                    if not cfg.SUPPRESS_SINGLE_TRACK_GAPS
-                    and not cfg.UPGRADE_SINGLES_ENABLED else "")
                 rest_note = _rest_of_album_note(landed_dir, active_token)
-                j.summary = " ".join(filter(None, (got, upgrade, rest_note)))
+                j.summary = " ".join(filter(None, (got, rest_note)))
             except OSError as e:
                 # The track landed fine, so don't fail the job, but don't claim
                 # the exclusion stuck either.
@@ -456,8 +452,8 @@ def _make_single_track_run(album, track, token):
                 year=catalog.album_year(album),
                 album_id=album.get("id"),
             )
-            j.summary = (f"Got “{t_title}”; that completed {title}, so it's "
-                         "filed as a full album.")
+            j.summary = (got if len(missing) == 1 and not present else
+                         f"“{t_title}” downloaded and completed {title}.")
             # Complete means any parked Gap Fill candidate for it is stale.
             flows.prune_library_review_candidates(album)
         with j._lock:
@@ -484,6 +480,6 @@ def _make_single_track_run(album, track, token):
             if flows._library_review_lists(str(album.get("id") or "")):
                 j.summary = j.summary.replace(
                     _SCANS_OFFER_REST,
-                    "The rest of the album is in Library Gap Fill.")
+                    "The rest of the album is under Gap Fill in Library.")
         flows._close_completed_job(j)
     return run

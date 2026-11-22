@@ -20,8 +20,8 @@
 {% if started_job %}
 <div class="ql-notice ql-notice-success" data-flash data-flash-kind="success">
   <span>
-    <strong>{% if started_job.artist %}{{ started_job.artist }} · {% endif %}{{ started_job.display_title }}</strong>
-    {% if started_job.status.value in ('scanning', 'running') %}is downloading now.{% elif started_job.status.value == 'done' %}had already finished.{% elif started_job.status.value == 'failed' %}had already failed.{% elif started_job.status.value == 'canceled' %}was cancelled.{% else %}added to the queue.{% endif %}
+    <strong>{{ job_name(started_job) | select | join(" · ") }}</strong>
+    {% if started_job.status.value in ('scanning', 'running') %}is downloading now.{% elif started_job.status.value == 'done' %}had already finished.{% elif started_job.status.value == 'failed' %}had already failed.{% elif started_job.status.value == 'canceled' %}was {{ canceled_label(started_job.summary) | lower }}.{% else %}added to the queue.{% endif %}
     <a href="/jobs/{{ started_job.id }}" class="ql-inline-link">Open it →</a>
   </span>
 </div>
@@ -85,9 +85,11 @@
   </div>
   <p class="font-medium text-base-content/70">{% if history_unavailable %}History is unavailable or incomplete{% elif attention_only %}Nothing needs attention{% else %}No finished jobs yet{% endif %}.</p>
   {% if history_unavailable %}<p class="text-sm mt-1 text-base-content/50">Saved activity could not be read. Check the data folder and restart Qobuz Librarian.</p>{% endif %}
+  {% if attention_only %}
   <div class="ql-empty-actions">
-    <a href="{% if attention_only %}/queue/history{% else %}/queue{% endif %}" class="ql-btn ql-btn-secondary w-full sm:w-auto">{% if attention_only %}Show all history{% else %}Back to Queue{% endif %}</a>
+    <a href="/queue/history" class="ql-btn ql-btn-secondary w-full sm:w-auto">Show all history</a>
   </div>
+  {% endif %}
 </div>
 {% endif %}
 

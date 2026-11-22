@@ -2202,7 +2202,7 @@ def _queue_done_line(results, n_items, *, stopped=False):
         text += f" · {plural(n_total_missing, 'track')} unresolved"
     if n_cancelled:
         text += (f" · {n_cancelled} album"
-                 f"{'s' if n_cancelled != 1 else ''} cancelled")
+                 f"{'s' if n_cancelled != 1 else ''} stopped")
     if n_left:
         text += (f" · {plural(n_left, 'album')} left as "
                  f"{'it is' if n_left == 1 else 'they are'}")
@@ -2437,7 +2437,7 @@ class _QueueFlush:
         _retained, retention_exc = self._retain_failed_staging(item)
         if retention_exc is None:
             log.info(fmt(C.YELLOW,
-                "    Cancelled; retained this album's partial download "
+                "    Stopped; retained this album's partial download "
                 "for review."))
         self._resolve_failed_item(item, retention_exc)
 
@@ -2862,7 +2862,7 @@ class _QueueFlush:
             self.item["result"] = "cancelled"
             self.cancelled = True
             log.info(fmt(C.YELLOW,
-                "    Cancelled; discarded this album's partial "
+                "    Stopped; discarded this album's partial "
                 "download."))
             self.results.append(_resolve_queue_item(
                 self.item, self.args, False, authority=self.authority))

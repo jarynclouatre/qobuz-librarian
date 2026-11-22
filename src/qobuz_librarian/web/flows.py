@@ -562,6 +562,15 @@ def named_albums(candidates, limit=3):
     return f"{', '.join(names[:limit])} and {len(names) - limit} more"
 
 
+def _downloaded_albums(candidates):
+    if len(candidates) > 1:
+        return f"Downloaded {plural(len(candidates), 'album')}."
+    artist = (candidates[0].get("artist") or "").strip()
+    title = (candidates[0].get("title") or "?").strip()
+    name = f"{title} by {artist}" if artist else title
+    return f"Downloaded {name.removesuffix('.')}."
+
+
 def _first_names(names, limit=5):
     """The first ``limit`` names in order, with a count of the rest."""
     shown = ", ".join(sorted(names, key=str.casefold)[:limit])
@@ -2496,7 +2505,7 @@ class _LibraryScan:
                     for f in futures:
                         f.cancel()
                     self.checkpoint.flush()
-                    log.info("Cancelled. Stopping scan.")
+                    log.info("Stopping the scan.")
                     break
                 self.done += 1
                 try:
@@ -3116,7 +3125,7 @@ class _NewReleasesRun:
                 if self.job.cancel_requested:
                     for f in futures:
                         f.cancel()
-                    log.info("Cancelled. Stopping check.")
+                    log.info("Stopping the check.")
                     break
                 self.done += 1
                 try:
@@ -3793,8 +3802,6 @@ class _AlbumsRun:
             self._remember_review_save(
                 _return_picks(leftovers, self.review_kind, self.review_args))
         parts = []
-        if self.downloaded:
-            parts.append(f"{named_albums(self.downloaded)} downloaded")
         if self.partial:
             parts.append(f"{named_albums(self.partial_cands)} partly downloaded")
         attention_total = sum(self.attention_counts.values())
@@ -3805,8 +3812,11 @@ class _AlbumsRun:
             parts.append(f"{plural(self.failed, 'album')} failed")
         if self.skipped:
             parts.append(f"{named_albums(self.skipped_cands)} skipped")
-        self.job.summary = "Stopped early." + (
-            " " + ", ".join(parts) + "." if parts else "")
+        self.job.summary = "Stopped early."
+        if self.downloaded:
+            self.job.summary += f" {_downloaded_albums(self.downloaded)}"
+        if parts:
+            self.job.summary += f" {', '.join(parts)}."
         destination = ("Library" if self.is_library_run else
                        "New releases" if self.is_nr_run else "Restore review")
         if leftovers and self.review_kind:
@@ -3829,14 +3839,10 @@ class _AlbumsRun:
         log.info(self.job.summary)
 
     def _write_summary(self):
-        if self.ok:
-            parts = [f"{named_albums(self.downloaded)} downloaded"]
-        elif self.partial:
-            parts = []
-        elif sum(self.attention_counts.values()):
-            parts = []
-        else:
-            parts = ["No albums downloaded or imported"]
+        sentences = [_downloaded_albums(self.downloaded)] if self.ok else []
+        parts = []
+        if not (self.ok or self.partial or sum(self.attention_counts.values())):
+            parts.append("No albums downloaded or imported")
         if self.partial:
             parts.append(f"{named_albums(self.partial_cands)} partly downloaded")
         if self.skipped and (self.ok or self.partial):
@@ -3863,7 +3869,9 @@ class _AlbumsRun:
                 "unfinished work"
             )
         self.has_issues = bool(self.partial or self.failed or sum(self.attention_counts.values()))
-        self.job.summary = ", ".join(parts) + "."
+        if parts:
+            sentences.append(", ".join(parts) + ".")
+        self.job.summary = " ".join(sentences)
         log.info(self.job.summary)
 
     def _partial_track_messages(self):
@@ -4076,9 +4084,10 @@ class _UpgradesRun:
         album_id = self.cand["payload"].get("album_id")
         log.info(f"[{self.i}/{len(self.chosen)}] {self.cand.get('artist','')} - "
                  f"{self.cand.get('title') or '?'}")
-        self.job._progress_scope = (self.i - 1, len(self.chosen), "album")
-        self.job.push_progress("Upgrading albums", self.i - 1, len(self.chosen),
-                               f"{self.cand.get('artist','')} - {self.cand.get('title') or '?'}", unit="album")
+        album = " · ".join(filter(None, (self.cand.get("artist"), self.cand.get("title"))))
+        self.job._progress_scope = (self.i - 1, len(self.chosen), "album", album)
+        self.job.push_progress("Upgrading albums", self.i - 1, len(self.chosen), album,
+                               unit="album")
         try:
             self.album = get_album(album_id, self.token)
         except (AuthLost, QobuzUnavailable):
@@ -4452,7 +4461,7 @@ def scan_downsamples(job):
     if not job.cancel_requested and refresh.complete:
         saved_views.sync_badge("downsample")
     if job.cancel_requested:
-        log.info("Cancelled. Stopping scan.")
+        log.info("Stopping the scan.")
     elif unchecked:
         log.info(f"Scan incomplete. {plural(unchecked, 'artist')} couldn't be checked.")
     if not job.cancel_requested and refresh.complete:
@@ -4604,7 +4613,7 @@ class _DownsamplesRun:
         log.info(f"[{self.i}/{len(self.chosen)}] {self.cand.get('artist', '')} - {self.title}")
         self.job._progress_scope = (self.i - 1, len(self.chosen), "album")
         self.job.push_progress("Downsampling albums", self.i - 1, len(self.chosen),
-                               f"{self.cand.get('artist', '')} - {self.title}", unit="album")
+                               self.label, unit="album")
 
     def _skip_missing_folder(self):
         if not self.album_dir.is_dir():
@@ -5252,7 +5261,7 @@ def _scan_repairs_impl(job, token, checkpoint):
                 job.summary = stopped + _repair_scan_caveats(
                     n_unverified, n_failed_albums,
                     n_failed_artists - n_linked_artists, n_linked_artists)
-                log.info("Cancelled. Stopping scan.")
+                log.info("Stopping the scan.")
                 if job.stopping_for_restart:
                     save_checkpoint(force=True)
                 elif checkpoint.clear() is False:

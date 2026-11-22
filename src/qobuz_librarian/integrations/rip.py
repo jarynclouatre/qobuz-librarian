@@ -265,14 +265,14 @@ def rip_command():
 
 
 def rip_url(url, timeout=None, live_output=False, quality=None,
-            staging_dir=None):
+            staging_dir=None, on_written=None):
     """Run `rip url <url>`, returning (returncode, combined_output_string).
 
     live_output=True: stream rip's output to the terminal in real time via a
     reader thread - used for full-album downloads where silence for many minutes
     is unacceptable on mobile. On a pipe streamrip prints no progress, so a
     terminal also gets a line every few seconds counting the tracks in
-    ``staging_dir``.
+    ``staging_dir``, and ``on_written`` gets the same count.
 
     start_new_session=True puts rip in its own process group so that on timeout
     OR Ctrl-C, os.killpg kills the entire tree (rip spawns its own downloader
@@ -305,7 +305,8 @@ def rip_url(url, timeout=None, live_output=False, quality=None,
         return _run_rip(
             [*cmd, "--config-path", str(config_path), "url", url],
             timeout, live_output,
-            heartbeat_dir=staging_dir if live_output else None)
+            heartbeat_dir=staging_dir if live_output else None,
+            on_written=on_written)
 
 
 # streamrip updating the run's copy of an older config; noted once instead.
@@ -332,7 +333,7 @@ def _tracks_written(folder):
     return count
 
 
-def _run_rip(cmd, timeout, live_output, heartbeat_dir=None):
+def _run_rip(cmd, timeout, live_output, heartbeat_dir=None, on_written=None):
     try:
         proc = subprocess.Popen(
             cmd,
@@ -448,6 +449,8 @@ def _run_rip(cmd, timeout, live_output, heartbeat_dir=None):
                 written = _tracks_written(heartbeat_dir)
                 console_line(fmt(C.GRAY,
                     f"    {plural(written, 'track')} downloaded so far…"))
+                if on_written is not None:
+                    on_written(written)
             poll_for = 1.0
             if deadline is not None:
                 remaining = deadline - time.monotonic()

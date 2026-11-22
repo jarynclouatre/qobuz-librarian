@@ -347,7 +347,7 @@ def scan_restore(job, snapshot, token):
 
     for done, entry in enumerate(artists, 1):
         if job.cancel_requested:
-            log.info("Cancelled. Stopping the check.")
+            log.info("Stopping the check.")
             break
         artist_name = (entry.get("name") or "").strip()
         if not artist_name:

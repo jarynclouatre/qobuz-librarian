@@ -215,8 +215,6 @@ TERMINAL = (JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELED)
 ACTIVE = (JobStatus.PENDING, JobStatus.SCANNING,
           JobStatus.AWAITING_REVIEW, JobStatus.RUNNING)
 
-CANCELLED_UNSTARTED = "Cancelled before it started."
-
 JOB_ADMISSION_ERROR = (
     "This job couldn't be saved to the data folder, so no work was started. "
     "Check the data volume, then restart Qobuz Librarian."
@@ -292,6 +290,9 @@ class Job:
     progress_current: int = 0
     progress_total: int   = 0
     progress_item: str    = ""
+    # "track 2 of 4" behind an album in a run of several, which a phone leaves
+    # out.
+    progress_track: str   = ""
     progress_found: int   = 0   # running tally of results found so far
     # Artists with at least one find so far, the server-side count behind the
     # scan page's "across N artists".
@@ -510,6 +511,7 @@ class Job:
         # Write the snapshot fields under the lock so a reconnecting subscriber
         # reading them via _progress_snapshot() (also under the lock) can't catch
         # a torn mix, e.g. the new phase label with the previous phase's counts.
+        track = ""
         with self._lock:
             # An execute loop can pin the counts to an overall scope (e.g. 3 of
             # 16 albums finished) so inner per-album phases don't reset the
@@ -517,23 +519,36 @@ class Job:
             scope = self._progress_scope
             if scope is not None:
                 done, scope_total, scope_unit, *album = scope
-                if album and not unit:
-                    # The album's own phases report without a unit. Its track
-                    # downloads move the bar, and no track title, file or
-                    # folder takes the album's place on the card.
+                inner = unit != scope_unit
+                if album and inner:
+                    # Track downloads move the bar across the album's share.
                     if phase == "Downloading" and total:
                         self._album_share = (current - 1) / total
-                        item = f"{album[0]} · track {current} of {total}"
-                    else:
-                        item = album[0]
                     fraction = (done + self._album_share) / scope_total
                 elif album:
                     self._album_share = 0.0
-                current, total, unit = done, scope_total, scope_unit
+                if album and "run_album" in self.execute_args:
+                    # A run of one album is listed under that album, so its
+                    # own steps and counts show, as a download from Search.
+                    if not inner:
+                        phase, current, total, unit = "Downloading", 0, 0, ""
+                        item = "" if item == album[0] else item
+                else:
+                    if album:
+                        # The album's own phases never count in albums, and
+                        # no track title, file or folder takes its place.
+                        if inner:
+                            item = album[0]
+                            if phase == "Downloading" and total:
+                                track = f"track {current} of {total}"
+                        if phase.startswith("Downloading"):
+                            phase = "Downloading"
+                    current, total, unit = done, scope_total, scope_unit
             self.progress_phase = phase
             self.progress_current = current
             self.progress_total = total
             self.progress_item = item
+            self.progress_track = track
             self.progress_found = found
             self.progress_unit = unit
             self.progress_fraction = fraction
@@ -549,6 +564,8 @@ class Job:
         # common case stays lean and existing consumers see no new field.
         if unit:
             payload["unit"] = unit
+        if track:
+            payload["track"] = track
         if fraction is not None:
             payload["fraction"] = fraction
         if hit:
@@ -587,6 +604,8 @@ class Job:
             "found": self.progress_found}
         if self.progress_unit:
             snap["unit"] = self.progress_unit
+        if self.progress_track:
+            snap["track"] = self.progress_track
         if self.progress_fraction is not None:
             snap["fraction"] = self.progress_fraction
         if self.progress_found_artists:
@@ -2032,6 +2051,12 @@ def approve(
             # back can give the review its own name again.
             job.execute_args = {**(job.execute_args or {}),
                                 "_review_title": job.title}
+            job.execute_args.pop("run_album", None)
+            chosen = [c for c in job.candidates if _will_select(c)]
+            if job.execute_kind == "library" and len(chosen) == 1:
+                job.execute_args["run_album"] = [
+                    chosen[0].get("artist") or "", chosen[0].get("title") or "?",
+                    (chosen[0].get("payload") or {}).get("version") or ""]
             job.title = run_title
             # The run's log starts empty; the scan's lines move with the
             # unticked picks to the review they stay in.
@@ -2050,6 +2075,7 @@ def approve(
         job.progress_current = 0
         job.progress_total = 0
         job.progress_item = ""
+        job.progress_track = ""
         job.progress_found = 0
         job.progress_unit = ""
         job.progress_fraction = None
@@ -2141,7 +2167,7 @@ def cancel_review(job: Job) -> Optional[bool]:
             canceled_at = time.time()
             job.status = JobStatus.CANCELED
             job.finished_at = canceled_at
-            job.summary = "Review discarded."
+            job.summary = job_persistence.DISCARDED
         if not job_persistence.persist(job):
             with job._lock:
                 if (
@@ -2968,7 +2994,7 @@ def request_cancel(job: Job) -> bool:
             job.cancel_requested = True
             job.status = JobStatus.CANCELED
             job.finished_at = canceled_at
-            job.summary = job.summary or CANCELLED_UNSTARTED
+            job.summary = job.summary or job_persistence.REMOVED
             if (
                 not job_persistence._persist_locked(job)
                 and job._durability_required

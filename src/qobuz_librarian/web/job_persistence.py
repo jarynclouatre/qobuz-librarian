@@ -2019,6 +2019,18 @@ ALBUMS_DONE = "_albums_done"
 ALBUMS_PICKED = "_albums_picked"
 
 
+REMOVED = "Removed before it started."
+DISCARDED = "Review discarded."
+
+
+def canceled_label(summary: str) -> str:
+    """What the user did to a canceled job: removed it while it waited,
+    discarded its review, or stopped it while it ran."""
+    if summary in (REMOVED, "Cancelled before it started."):
+        return "Removed"
+    return "Discarded" if summary == DISCARDED else "Stopped"
+
+
 def interrupted_by_restart(status: str, summary: str, error=None) -> bool:
     reason = summary if status == "canceled" else error
     return status in ("canceled", "failed") and (reason or "").startswith(

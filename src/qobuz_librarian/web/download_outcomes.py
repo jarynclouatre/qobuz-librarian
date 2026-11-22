@@ -53,7 +53,7 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "user_skipped": "Skipped at confirmation.",
     "lossy_only": "Qobuz only had lossy versions. Nothing downloaded.",
     "no_tracks": "Qobuz returned no tracks for this album.",
-    "cancelled": "Cancelled. Nothing was imported.",
+    "cancelled": "Stopped. Nothing was imported.",
     "incomplete": "Qobuz couldn't deliver the whole album. Nothing was imported.",
     "upgrade_aborted_backup_failed": "Upgrade aborted: couldn't back up the original.",
     "stale_candidate": (
@@ -128,7 +128,7 @@ def _download_summary(r):
         or r.get("recovery_unverified")
         or r.get("upgrade_unverified")
     ):
-        return "Cancelled. Nothing was imported. A backup was kept."
+        return "Stopped. Nothing was imported. A backup was kept."
     if kind == "partial":
         landed = plural(r.get("n_ok", 0), "track")
         if not r.get("imported"):

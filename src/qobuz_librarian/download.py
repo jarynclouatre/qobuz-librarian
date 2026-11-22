@@ -1351,7 +1351,13 @@ class _AlbumDownload:
         )
         vlog(f"  ⟳  {url}")
         self._back_up_present_tracks()
-        rc, out = self._rip(url, timeout=cfg.RIP_TIMEOUT, live_output=True, quality=self.quality)
+        total = self.n_tracks_total
+        rc, out = self._rip(
+            url, timeout=cfg.RIP_TIMEOUT, live_output=True, quality=self.quality,
+            on_written=lambda written: report_progress(
+                "Downloading", min(written + 1, total), total,
+                self.album.get("title") or "?", unit="track"),
+        )
         self.last_out = out
         self.full_album_rc = rc
         self.rate_limited = _check_rip_output(out) or self.rate_limited
@@ -1392,7 +1398,7 @@ class _AlbumDownload:
                 fmt(C.BLUE, f"\n  [{i}/{len(self.to_fetch)}]")
                 + f"  {fmt(C.WHITE, truncate(tnum_prefix + ttl, 60))}"
             )
-            report_progress("Downloading", i, len(self.to_fetch), ttl)
+            report_progress("Downloading", i, len(self.to_fetch), ttl, unit="track")
             rc, out, track_audio = self._rip_track(t)
             self.rip_identities.update(
                 _single_track_rip_identities(track_audio, t, self.qobuz_tracks))

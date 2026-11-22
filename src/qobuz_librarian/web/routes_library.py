@@ -403,6 +403,7 @@ def _library_page_context(page, tab, q):
 async def library_page(request: Request, page: int = 1, tab: str = "",
                        q: str = ""):
     notice_bits = []
+    queued_at = None
     skipped = request.query_params.get("skipped", "")
     if skipped.isdigit() and int(skipped):
         n = int(skipped)
@@ -413,7 +414,7 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
                            if notice_bits else
                            "Nothing is selected on that tab yet.")
     elif request.query_params.get("approved"):
-        notice_bits.append("Download queued.")
+        queued_at = len(notice_bits)
     # A refresh with nothing to read can end before this page loads, and only
     # the header's poll, which then never runs, says what it did.
     refreshed = job_mgr.registry.get(request.query_params.get("refreshed", ""))
@@ -430,6 +431,9 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
     loop = asyncio.get_running_loop()
     ctx, badge_ack = await loop.run_in_executor(
         None, lambda: _library_page_context(page, tab, q))
+    # The download's own row is the sign it is queued.
+    if queued_at is not None and ctx["library_download"] is None:
+        notice_bits.insert(queued_at, "Download queued.")
     if ctx["interrupted_download_note"]:
         notice_bits.append(ctx["interrupted_download_note"])
     ctx["library_notice"] = " ".join(notice_bits)

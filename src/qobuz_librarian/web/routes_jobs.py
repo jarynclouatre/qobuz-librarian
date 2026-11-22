@@ -2056,7 +2056,7 @@ async def job_cancel(
         elif job.status in job_mgr.TERMINAL:
             message = "That job had already finished."
         else:
-            message = "The cancel could not be saved to the data folder."
+            message = "The change could not be saved to the data folder."
         dest = "/queue" if return_to_queue else f"/jobs/{job_id}"
         return RedirectResponse(
             url=dest + "?error=" + rendering._notice_key(message),

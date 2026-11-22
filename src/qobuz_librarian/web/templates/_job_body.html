@@ -10,27 +10,44 @@
   {%- if embedded_surface|default(false) %} data-embedded="1"{% endif %}
   data-progress-item-singular="{{ labels.progress_item_singular(job) }}"
   data-progress-item-plural="{{ labels.progress_item_plural(job) }}"
-  {%- if job.status.value in ('scanning', 'running') and not embedded_surface|default(false) %} data-activity-chip="{{ labels.status_chip_label(job) }}"{% endif %}
+  {%- if job.status.value in ('scanning', 'running') %} data-job-status="{{ job.status.value }}"{% endif %}
+  {%- if job.title %} data-job-title="{{ job_own_title(job) }}"{% endif %}
   {%- if job.status.value == 'awaiting_review' %} data-job-view="review"
   {%- elif job.status.value in ('pending', 'scanning', 'running') %} data-job-view="progress"{% endif %}>
   {# The Library surface renders this body under its own "Library" heading, so
      it skips the job header. Everywhere else the header is de-jargoned: plain
      names, no job ids or scan-mode strings. #}
-  {% if not embedded_surface|default(false) and job.execute_kind == 'new_releases' and job.status.value == 'awaiting_review' %}
-  <header class="ql-page-header ql-page-header--split">
-    <h1>New releases</h1>
-    <a href="{{ job_return_href }}" class="ql-link-action ql-inline-link-hit">{{ job_return_label }}</a>
-  </header>
-  {% elif not embedded_surface|default(false) %}
-  <header class="ql-page-header ql-page-header--actions ql-job-header">
-    <div class="ql-job-heading">
+  {% if not embedded_surface|default(false) %}
+  <div>
+    <a href="{{ job_return_href }}" class="ql-search-back">&larr; {{ job_return_label }}</a>
+    {% if job.status.value == 'awaiting_review' and job.execute_kind == 'new_releases' %}
+    <header class="ql-page-header">
+      <h1>New releases</h1>
+    </header>
+    {% elif job.status.value == 'awaiting_review' %}
+    <header class="ql-page-header ql-job-header ql-job-heading">
       {% if job.execute_args.get('cover') %}<img src="{{ job.execute_args.cover }}" alt="" width="56" height="56" class="ql-job-cover ql-job-cover--page">{% endif %}
-      <h1 class="ql-job-title">{% if job.execute_kind == 'library' %}{{ job.display_title }}{% elif job.execute_kind == 'new_releases' %}New releases{% elif job.execute_kind == 'downsample' and job.status.value == 'awaiting_review' %}{{ labels.review_title(job) }}{% else %}{% if job.artist %}{{ job.artist }} · {% endif %}{{ job.display_title }}{% endif %}</h1>
-    </div>
-    {% if job.status.value == 'awaiting_review' %}
-    <a href="{{ job_return_href }}" class="ql-page-action ql-inline-link">{{ job_return_label }}</a>
+      <h1 class="ql-job-title">{% if job.execute_kind == 'downsample' %}{{ labels.review_title(job) }}{% else %}{% if job.artist and job.execute_kind != 'library' %}{{ job.artist }} · {% endif %}{{ job.display_title }}{% endif %}</h1>
+    </header>
     {% else %}
-    <span id="job-status-badge" class="ql-status-chip ql-job-status
+    <header class="ql-page-header ql-job-heading">
+      {% if job.execute_args.get('cover') %}<img src="{{ job.execute_args.cover }}" alt="" width="56" height="56" class="ql-job-cover ql-job-cover--page">{% endif %}
+      {% set _artist, _title = job_name(job) %}
+      {% set _title = 'New releases' if job.execute_kind == 'new_releases' else _title %}
+      <div class="ql-job-name">
+        {% if _artist and job.execute_kind != 'new_releases' %}<p>{{ _artist }}</p>{% endif %}
+        <h1 class="ql-job-title" title="{{ _title }}">{{ _title }}</h1>
+      </div>
+    </header>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% set s = job.status.value %}
+  {% if s != 'awaiting_review' and (not embedded_surface|default(false) or job.finished_at) %}
+  <p class="ql-job-when">
+    {% if not embedded_surface|default(false) %}
+    <span id="job-status-badge" class="ql-status-chip
       {%- if job.status.value == 'done' and _attention == 'cancel_late' %} is-warning
       {%- elif job.tracks_missing %} is-warning
       {%- elif job.status.value == 'done' %} is-success
@@ -38,14 +55,21 @@
       {%- elif job.status.value == 'failed' and job.execute_args.get('partly_done') %} is-warning
       {%- elif job.status.value == 'failed' %} is-error
       {%- elif job.status.value == 'canceled' %} is-neutral
-      {%- elif job.status.value == 'awaiting_review' %} is-info
-      {%- elif job.status.value == 'running' %} is-active
-      {%- else %} is-warning{% endif %}">{{ labels.status_chip_label(job) }}</span>
+      {%- elif job.status.value in ('running', 'scanning') %} is-active
+      {%- else %} is-neutral{% endif %}">{{ labels.status_chip_label(job) }}</span>
     {% endif %}
-  </header>
+    {% if s in ('scanning', 'running') %}
+    <span id="scan-elapsed" class="ql-job-elapsed" title="Elapsed" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>
+    {% elif job.finished_at %}
+    {# A review that ended unapproved took as long as its sweep, not the time
+       it then sat waiting. #}
+    {% set _swept = (job.execute_args or {}).get('_scan_finished_at') if job.phase == 'scan' else none %}
+    {% set _when, _when_exact = when_label(job.finished_at) %}
+    <span><span title="{{ _when_exact }}">{{ _when }}</span>{% if job.started_at %} · {{ fmt_elapsed((_swept or job.finished_at) - job.started_at) }}{% endif %}</span>
+    {% endif %}
+  </p>
   {% endif %}
 
-  {% set s = job.status.value %}
   {% set _review_thing = labels.discard_review_label(job) %}
   {% set _review_needs_qobuz = job.execute_kind in ('library', 'new_releases', 'upgrade', 'repair', 'collection_restore') %}
   {% set _review_qobuz_blocked = _review_needs_qobuz and not qobuz_ready %}
@@ -165,28 +189,35 @@
     {% endif %}
 
   {% elif s in ('pending', 'scanning', 'running') %}
+    {% set _embedded = embedded_surface|default(false) %}
+    {% set _live = s in ('scanning', 'running') %}
+    {% set _pc = job.progress_current %}
+    {% set _pt = job.progress_total %}
+    {# Drawn from the snapshot the server already holds, so a page opened
+       part-way through a long album shows the count before the first live
+       event. #}
+    {% set _count %}<span id="prog-count" class="tabular-nums">{% if _pt %}{{ "{:,}".format(_pc) }} / {{ "{:,}".format(_pt) }}{% endif %}</span> <span id="prog-unit">{% if _pt and job.progress_unit %}{{ job.progress_unit }}{{ 's' if _pt != 1 }}{% endif %}</span><span id="prog-item" class="ql-progress-item">{{ labels.progress_item(job) | trim }}</span><span id="prog-track" class="ql-progress-track">{{ job.progress_track }}</span>{% endset %}
     <div class="ql-job-progress-head">
       <p class="ql-job-activity-line">
         {% set _qw = queue_wait if queue_wait is defined else none %}
-        <span id="job-activity" aria-live="polite"{% if s == 'pending' %} data-queued{% endif %}>{% if job.execute_kind == 'repair' and s == 'scanning' %}Scan in progress{% elif job.execute_kind == 'repair' and s == 'running' %}Repair in progress{% elif s in ('scanning', 'running') and embedded_surface|default(false) %}{{ (job.progress_phase or '') | trim or labels.status_chip_label(job) }}{% elif s in ('scanning', 'running') %}{{ labels.phase_detail(job, labels.status_chip_label(job)) }}{% elif _qw and _qw.paused %}Waiting until downloads can run again.{% elif _qw and _qw.for_qobuz %}Waiting for Qobuz. <a href="/queue" class="ql-inline-link">Open Queue</a>{% elif _qw and _qw.position == 1 and _qw.ahead_title %}Behind “{{ _qw.ahead_title }}”.{% elif _qw %}Behind {{ _qw.position }} job{{ 's' if _qw.position != 1 }}.{% else %}Next.{% endif %}</span>
-        {% if job.cancel_requested %}<span class="ql-status-chip is-neutral ql-inline-status">Stopping</span>{% endif %}
-        <span id="sse-reconnect" class="ql-status-chip is-warning ql-inline-status hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
+        <span id="job-activity" aria-live="polite"{% if s == 'pending' %} data-queued{% endif %}>{% if _embedded and job.execute_kind == 'repair' and _live %}{{ 'Scan' if s == 'scanning' else 'Repair' }} in progress{% elif _embedded and _live %}{{ (job.progress_phase or '') | trim or labels.job_activity(job) }}{% elif _live %}{{ labels.progress_verb(job) }}{% elif _qw and _qw.paused %}Waiting until downloads can run again.{% elif _qw and _qw.for_qobuz %}Waiting for Qobuz. <a href="/queue" class="ql-inline-link">Open Queue</a>{% elif _qw and _qw.position == 1 and (_qw.ahead_title or _qw.starts_after) %}Starts after {{ _qw.ahead_title or _qw.starts_after }}.{% elif _qw %}Starts after {{ _qw.position }} job{{ 's' if _qw.position != 1 }}.{% else %}Starts next.{% endif %}</span>
+        {% if _live and not _embedded %}{{ _count }}{% endif %}
       </p>
-      {% if not job.cancel_requested %}
+      {% if job.cancel_requested %}
+      <span class="ql-status-chip is-neutral ql-job-import-chip" title="It stops as soon as it can.">Stopping</span>
+      {% else %}
       {% if s == 'pending' %}
       <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel" data-pending-cancel-form>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary"
-                data-confirm="Remove this waiting job from the queue?"
-                data-confirm-action="Remove">Remove</button>
+        <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost">Remove</button>
       </form>
       {% endif %}
       <form action="/jobs/{{ job.id }}/cancel" method="post" class="ql-job-cancel{% if s == 'pending' or job.importing %} hidden{% endif %}" data-cancel-form>
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-sm"
+        <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
                 data-cancel-button
                 data-confirm="{{ labels.cancel_confirm(job) }}"
-                data-confirm-action="Stop" data-confirm-dismiss="Keep running" data-irreversible>Stop</button>
+                data-confirm-action="Stop" data-confirm-dismiss="Keep running"{% if labels.stop_loses_scan(job) | trim %} data-irreversible{% endif %}>Stop</button>
       </form>
       {# Beets runs to its own end, so Stop would be a dead control here. Say
          what is happening, the way the Queue rows do, instead of greying a
@@ -195,23 +226,21 @@
             title="Import has started and cannot be stopped.">Finishing</span>
       {% endif %}
     </div>
+    <span id="sse-reconnect" class="ql-status-chip ql-status-chip--wrap is-warning hidden" role="status" aria-live="polite">connection lost, reconnecting…</span>
 
-    {# Render the card from the snapshot the server already holds, so a page
-       opened part-way through a long album shows the album and the count
-       before the first live event. #}
-    {% set _pc = job.progress_current %}
-    {% set _pt = job.progress_total %}
+    {% if _live %}
     <div>
       <div id="progress-card"{% if not job.progress_phase and not _pt %} class="hidden"{% endif %}>
         <progress id="prog-bar" class="ql-progress-bar" aria-label="Progress"{% if job.progress_fraction is not none %} max="100" value="{{ (job.progress_fraction * 100) | int }}"{% elif _pt %} max="100" value="{{ (_pc * 100 // _pt) }}"{% endif %}></progress>
       </div>
-      {% if s in ('scanning', 'running') %}
+      {% if _embedded %}
       <div class="ql-progress-meta">
-        <p class="ql-progress-meta-text"><span id="prog-count" class="ql-progress-count">{% if _pt %}{{ _pc }} / {{ _pt }}{% if job.progress_unit %} {{ job.progress_unit }}{{ 's' if _pt != 1 }}{% endif %}{% endif %}</span><span id="prog-item" class="ql-progress-item">{{ job.progress_item }}</span></p>
+        <p class="ql-progress-meta-text">{{ _count }}</p>
         <span id="scan-elapsed" class="ql-job-elapsed readout" title="Elapsed" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>
       </div>
       {% endif %}
     </div>
+    {% endif %}
 
     {% if job_pending_review and not _embedded %}
     <div class="ql-job-actions">
@@ -223,40 +252,27 @@
     <p id="scan-found" class="ql-scan-found" aria-live="polite"></p>
     {% endif %}
 
-    <details class="ql-job-log-details">
+    <details class="ql-job-log">
       <summary class="ql-disclosure-summary">Activity log</summary>
       <div class="log-console log-console--job" id="log"></div>
     </details>
-
-    {% if not embedded_surface|default(false) %}
-    <div class="ql-job-actions">
-      <a href="{{ job_return_href }}" class="ql-btn ql-btn-secondary ql-btn-sm ql-secondary-action">{{ job_return_label }}</a>
-    </div>
-    {% endif %}
   {% else %}
-    {% if job.finished_at %}
-    {# A review that ended unapproved took as long as its sweep, not the time
-       it then sat waiting. #}
-    {% set _swept = (job.execute_args or {}).get('_scan_finished_at') if job.phase == 'scan' else none %}
-    {% set _when, _when_exact = when_label(job.finished_at) %}
-    <p class="ql-job-finished">{{ 'Finished' if job.status.value == 'done' else 'Ended' }} <span title="{{ _when_exact }}">{{ _when }}</span>{% if job.started_at %} · took {{ fmt_elapsed((_swept or job.finished_at) - job.started_at) }}{% endif %}</p>
-    {% endif %}
     {# A partial run sets both: the summary is what it managed, the error is
-       what went wrong. #}
+       what went wrong. An album that landed nothing says it in the error. #}
     {% set _summary = without_old_advice(job.execute_kind, job.summary) %}
-    {% if _summary and job.summary != job.error %}
+    {% set _nothing_landed = s == 'failed' and job.error and job.album_id and not job.execute_args.get('partly_done') and not job.tracks_missing %}
+    {# The chip above already says Removed or Discarded. #}
+    {% set _in_chip = s == 'canceled' and canceled_label(job.summary) != 'Stopped' and not embedded_surface|default(false) %}
+    {% if _summary and job.summary != job.error and not _nothing_landed and not _in_chip %}
     {% set _put_back = _summary.split('Settings → Diagnostics', 1) if job.execute_kind == 'downsample' else [_summary] %}
-    <div class="ql-job-summary ql-job-summary--terminal"><span>{{ _put_back[0] }}{% if _put_back | length > 1 %}<a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>{{ _put_back[1] }}{% endif %}</span></div>
+    <p class="ql-job-result">{{ _put_back[0] }}{% if _put_back | length > 1 %}<a href="/settings#diagnostics" class="ql-inline-link">Settings → Diagnostics</a>{{ _put_back[1] }}{% endif %}</p>
     {% endif %}
     {% if job.execute_args.get('folder') %}
-    <p class="ql-job-finished ql-job-folder">{{ job.execute_args.folder }}</p>
+    <p class="ql-job-folder">{{ music_folder_label(job.execute_args.folder) }}</p>
     {% endif %}
     {% if _attention == 'cancel_late' %}
     <div class="ql-notice ql-notice-warning ql-job-banner" role="status">
-      <div class="ql-notice-copy">
-        <strong>Cancelled too late</strong>
-        <div>It finished before the stop could take effect.</div>
-      </div>
+      <span>It finished before the stop could take effect.</span>
     </div>
     {% endif %}
     {% set catalog_cleanup = job.single.get('catalog_cleanup') if job.single else none %}
@@ -306,18 +322,6 @@
       {% endif %}
     </div>
     {% endif %}
-    {% if job.log_lines %}
-    {# Collapsed by default: job.summary and job.error above already carry
-       the plain outcome, so the raw per-step lines (endpoint names, ids)
-       are here for whoever wants them, not the first thing on the page. #}
-    <details class="ql-job-log-details">
-      <summary class="ql-disclosure-summary">Activity log</summary>
-      <div class="log-console">
-        {%- for line in job.log_lines %}{{ line }}
-{% endfor -%}
-      </div>
-    </details>
-    {% endif %}
     <div class="ql-job-actions">
       {% if (s in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and job.attention != 'recovery' %}
       <form action="/jobs/{{ job.id }}/retry" method="post">
@@ -326,31 +330,40 @@
         {% if downloads_paused %}{% with writes_paused=downloads_paused, writes_paused_reason=downloads_paused_reason %}{% include "_writes_paused_reason.html" %}{% endwith %}{% endif %}
       </form>
       {% elif job.execute_args.get('retried_as') %}
-      <a href="/jobs/{{ job.execute_args.retried_as }}" class="ql-btn ql-btn-secondary ql-btn-sm">Open the retry</a>
+      <a href="/jobs/{{ job.execute_args.retried_as }}" class="ql-job-link">Open the retry</a>
       {% endif %}
       {% if s in ('done', 'failed') and catalog_cleanup and catalog_cleanup.get('pending') and not job._preserve_persisted_single and not job._single_undo_unavailable %}
       <form action="/jobs/{{ job.id }}/undo" method="post"
             hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Retry Beets cleanup</button>
+        <button type="submit" class="ql-job-link"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Retry Beets cleanup</button>
         {% include "_writes_paused_reason.html" %}
       </form>
       {% elif s in ('done', 'failed') and job.single and job.single.get('owned_path') and not job.single.get('removed') and not job._preserve_persisted_single and not job._single_undo_unavailable %}
       <form action="/jobs/{{ job.id }}/undo" method="post"
             hx-post="/jobs/{{ job.id }}/undo" hx-target="#job-content" hx-swap="outerHTML">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm" data-irreversible
+        <button type="submit" class="ql-job-link" data-irreversible
                 data-confirm="{% if single_kept_by_other %}Remove the downloaded track? Other tracks you took from this album stay.{% else %}Remove the downloaded track?{% endif %}"
-                data-confirm-action="Remove track"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Undo (removes track)</button>
+                data-confirm-action="Remove track"{% if writes_paused %} disabled title="{{ writes_paused_reason }}" aria-disabled="true"{% endif %}>Undo</button>
         {% include "_writes_paused_reason.html" %}
       </form>
       {% endif %}
-      {% if not embedded_surface|default(false) %}
-      {% if job_pending_review %}
-      <a href="{{ job_pending_review.href }}" class="ql-btn ql-btn-secondary ql-btn-sm">{{ job_pending_review.label }}</a>
-      {% endif %}
-      <a href="{{ job_return_href }}" class="ql-btn ql-btn-secondary ql-btn-sm ql-secondary-action">{{ job_return_label }}</a>
+      {% if job_pending_review and not embedded_surface|default(false) %}
+      <a href="{{ job_pending_review.href }}" class="ql-job-link">{{ job_pending_review.label }}</a>
       {% endif %}
     </div>
+    {% if job.log_lines %}
+    {# Collapsed by default: job.summary and job.error above already carry
+       the plain outcome, so the raw per-step lines (endpoint names, ids)
+       are here for whoever wants them, not the first thing on the page. #}
+    <details class="ql-job-log">
+      <summary class="ql-disclosure-summary">Activity log</summary>
+      <div class="log-console">
+        {%- for line in job.log_lines %}{{ line }}
+{% endfor -%}
+      </div>
+    </details>
+    {% endif %}
   {% endif %}
 </div>

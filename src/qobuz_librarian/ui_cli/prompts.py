@@ -27,7 +27,7 @@ from qobuz_librarian.ui_cli.sentinels import MORE, NO_ANSWER, URL_QUERY
 _STATUS_TAGS = {
     "done": (C.GREEN, "done"),
     "failed": (C.RED, "failed"),
-    "canceled": (C.YELLOW, "cancelled"),
+    "canceled": (C.YELLOW, "stopped"),
 }
 
 
@@ -45,6 +45,8 @@ def show_recent_downloads(limit=10):
         when = row["finished_at"] or row["created_at"]
         day = time.strftime("%Y-%m-%d", time.localtime(when)) if when else "?"
         color, word = _STATUS_TAGS.get(row["status"], (C.GRAY, row["status"]))
+        if row["status"] == "canceled":
+            word = job_persistence.canceled_label(row["summary"]).lower()
         tag = fmt(color, f" {word}")
         if row["tracks_missing"] > 0:
             tag += fmt(C.YELLOW, f" ({row['tracks_missing']} missing)")

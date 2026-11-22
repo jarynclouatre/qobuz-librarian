@@ -33,21 +33,12 @@ _QUEUE_FINISHED = 8
 _JOB_ID_RE = re.compile(r"[0-9a-f]{6,64}")
 
 
-# A cancelled row's chip already says these.
-_PLAIN_CANCELS = (
-    job_mgr.CANCELLED_UNSTARTED,
-    download_outcomes._DOWNLOAD_SUMMARY_LABELS["cancelled"],
-)
-
-
 def _stamp(rows):
     for r in rows:
         ts = r.get("finished_at") or r.get("created_at")
         r["when"], r["when_exact"] = job_labels._when_label(ts)
         r["download_notes"] = download_notes_in(r.get("summary"))
-        if r.get("status") == "canceled" and r.get("summary") in _PLAIN_CANCELS:
-            r["summary"] = ""
-        elif r.get("status") == "awaiting_review":
+        if r.get("status") == "awaiting_review":
             # A parked review's count changes as it is worked; its own
             # page has the live one.
             r["summary"] = review_pages.review_summary_without_count(
@@ -55,6 +46,12 @@ def _stamp(rows):
         else:
             r["summary"] = review_pages.summary_without_old_advice(
                 r.get("execute_kind"), r.get("summary"))
+        if r.get("status") == "canceled":
+            r["canceled_label"] = job_persistence.canceled_label(r["summary"])
+            # The chip already says these.
+            if (r["canceled_label"] != "Stopped" or r["summary"]
+                    == download_outcomes._DOWNLOAD_SUMMARY_LABELS["cancelled"]):
+                r["summary"] = ""
     return rows
 
 
@@ -243,7 +240,7 @@ async def queue_cancel_pending():
         if unsaved:
             noun = "job" if unsaved == 1 else "jobs"
             parts.append(
-                f"{unsaved} {noun} couldn't be cancelled because the update "
+                f"{unsaved} {noun} couldn't be removed because the update "
                 "couldn't be saved."
             )
         message = " ".join(parts)

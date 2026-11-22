@@ -34,7 +34,7 @@
 </section>
 {% endif %}
 {% if _launcher %}
-{# A failed or cancelled run stays on the page, but with the launcher under
+{# A failed or stopped run stays on the page, but with the launcher under
    it, so another scan can be started. #}
 {% if repair_job %}
 {% if repair_job.status.value == 'failed' and repair_resume and not repair_job.candidates %}
@@ -50,7 +50,7 @@
 {% elif repair_job.status.value == 'canceled' and (repair_job.phase == 'execute' or not repair_job.execute_args.get('_scan_finished_at')) %}
 {# A discarded review says so in its own summary. #}
 <div class="ql-work-status">
-  <span class="ql-status-chip is-neutral">{{ 'Repair' if repair_job.phase == 'execute' else 'Scan' }} cancelled</span>
+  <span class="ql-status-chip is-neutral">{{ 'Repair' if repair_job.phase == 'execute' else 'Scan' }} stopped</span>
 </div>
 {% endif %}
 {% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
