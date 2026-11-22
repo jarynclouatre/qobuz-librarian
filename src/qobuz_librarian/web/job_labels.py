@@ -17,29 +17,38 @@ def _queue_wait(job):
     how many run before it (the one holding the worker + any earlier-queued).
     One held because Qobuz rejected the token or could not be reached carries
     ``for_qobuz``, and one held while downloads are paused ``paused``.
+    ``starts_after`` names the job right before it when that is a different
+    kind of job, and is empty when it waits behind more of its own kind.
 
-    Returns {"ahead_title", "lane", "position", "paused", "for_qobuz"} or
-    None when nothing's ahead, i.e. it's about to start, so there's nothing to
-    explain."""
+    Returns {"ahead_title", "starts_after", "lane", "position", "paused",
+    "for_qobuz"} or None when nothing's ahead, i.e. it's about to start, so
+    there's nothing to explain."""
     if job.status != job_mgr.JobStatus.PENDING:
         return None
     holder = None
     ahead = 0
+    before = None
+    mine = job.queued_at or job.created_at or 0
     for j in job_mgr.registry.all():
         if j.id == job.id or j.kind != job.kind:
             continue
         if j.status in (job_mgr.JobStatus.SCANNING, job_mgr.JobStatus.RUNNING):
             holder = j
         elif (j.status == job_mgr.JobStatus.PENDING
-              and (j.queued_at or j.created_at or 0)
-              < (job.queued_at or job.created_at or 0)):
+              and (j.queued_at or j.created_at or 0) < mine):
             ahead += 1
+            if before is None or (j.queued_at or j.created_at or 0) > (
+                    before.queued_at or before.created_at or 0):
+                before = j
     for_qobuz = job_mgr.waiting_for_qobuz(job)
     paused = not for_qobuz and job_mgr.is_held(job)
     if holder is None and ahead == 0 and not paused and not for_qobuz:
         return None
+    before = before or holder
     return {
         "ahead_title": holder.title if holder else "",
+        "starts_after": before.title if before and (
+            (before.execute_kind, before.phase) != (job.execute_kind, job.phase)) else "",
         "lane": job.kind,
         "position": ahead + (1 if holder else 0),
         "paused": paused,

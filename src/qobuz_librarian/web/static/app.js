@@ -964,6 +964,64 @@
     });
   });
 
+  // Bring back and Remove reload the list they act on. The reload reopens
+  // the same groups and puts the row that was first on screen back where it
+  // was, since a notice or a removed row above can shift everything.
+  var KEEP_PLACE_KEY = "ql-keep-place";
+  function shownPlaces() {
+    return Array.prototype.filter.call(
+      document.querySelectorAll("[data-place]"),
+      function (el) { return el.getClientRects().length > 0; });
+  }
+  document.addEventListener("submit", function (evt) {
+    var form = evt.target;
+    if (!form || !form.matches || !form.matches("form[data-keep-place]")) return;
+    var own = form.closest("[data-place]");
+    var anchor = shownPlaces().filter(function (el) {
+      return !(own && own.contains(el)) && el.getBoundingClientRect().top >= 0;
+    })[0];
+    var open = [];
+    document.querySelectorAll("details[open][data-place]").forEach(function (d) {
+      open.push(d.dataset.place);
+    });
+    try {
+      sessionStorage.setItem(KEEP_PLACE_KEY, JSON.stringify({
+        path: location.pathname,
+        y: Math.round(window.scrollY || 0),
+        open: open,
+        place: anchor ? anchor.dataset.place : null,
+        top: anchor ? anchor.getBoundingClientRect().top : 0,
+      }));
+    } catch (e) {}
+  });
+
+  function restoreKeptPlace() {
+    var kept = null;
+    try {
+      kept = JSON.parse(sessionStorage.getItem(KEEP_PLACE_KEY) || "null");
+      sessionStorage.removeItem(KEEP_PLACE_KEY);
+    } catch (e) {}
+    if (!kept || kept.path !== location.pathname) return;
+    document.querySelectorAll("details[data-place]").forEach(function (d) {
+      if ((kept.open || []).indexOf(d.dataset.place) !== -1) d.open = true;
+    });
+    var anchor = shownPlaces().filter(function (el) {
+      return el.dataset.place === kept.place;
+    })[0];
+    if (!anchor) {
+      restoreNavPosition(kept.y);
+      return;
+    }
+    requestAnimationFrame(function () {
+      window.scrollTo(0, window.scrollY + anchor.getBoundingClientRect().top - kept.top);
+    });
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", restoreKeptPlace);
+  } else {
+    restoreKeptPlace();
+  }
+
   function restoreBusySubmitButtons(root) {
     (root || document).querySelectorAll("button[data-busy-html]").forEach(function (b) {
       b.disabled = false;
@@ -1067,6 +1125,10 @@
       delete el.dataset.confirmBypass;
       return;
     }
+    // Below data-confirm-min the count in the label is small enough to act on.
+    var min = parseInt(el.getAttribute("data-confirm-min") || "0", 10);
+    var shown = (el.textContent || "").match(/\d[\d.,\u00a0\u202f']*/);
+    if (min && shown && parseInt(shown[0].replace(/\D/g, ""), 10) < min) return;
     evt.preventDefault();
     evt.stopPropagation();
     var msg = el.getAttribute("data-confirm");
@@ -3991,7 +4053,12 @@
               var tabField = document.getElementById("review-tab-field");
               if (tabField) tabField.value = requestedTab;
               var tabConfirm = submit && submit.getAttribute("data-confirm-" + requestedTab);
-              if (tabConfirm) submit.setAttribute("data-confirm", tabConfirm);
+              if (tabConfirm) {
+                submit.setAttribute("data-confirm", tabConfirm);
+                var tabMin = submit.getAttribute("data-confirm-min-" + requestedTab);
+                if (tabMin) submit.setAttribute("data-confirm-min", tabMin);
+                else submit.removeAttribute("data-confirm-min");
+              }
               cont.querySelectorAll("[data-review-switches]").forEach(function (s) {
                 s.classList.toggle("hidden", s.getAttribute("data-review-switches") !== requestedTab);
               });

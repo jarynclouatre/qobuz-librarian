@@ -1,0 +1,6 @@
+{% from "_queue_row.html" import queue_job_row with context %}
+{# With no review left parked, the page body is the download's own job page. #}
+{% set _row = library_download if library_download and library_download is not sameas library_job else none %}
+<div id="library-download" class="ql-activity-list"{% if download_oob %} hx-swap-oob="true"{% endif %}{% if not _row %} hidden{% endif %}>
+  {% if _row %}{{ queue_job_row(_row, return_to='/library', streamed=False) }}{% endif %}
+</div>

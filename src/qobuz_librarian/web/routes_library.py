@@ -134,36 +134,54 @@ def _review_job_from_library_state():
         return job
 
 
+def _library_download_job():
+    """The picks approved from the Library review, while they wait for the
+    scan lane or download."""
+    for j in job_mgr.registry.pending_and_running():
+        if j.execute_kind != "library":
+            continue
+        if j.status == job_mgr.JobStatus.RUNNING or (
+                j.status == job_mgr.JobStatus.PENDING
+                and j.title == job_mgr.RUN_TITLES["library"]):
+            return j
+    return None
+
+
+def _queued_label(job):
+    """What a queued refresh is waiting behind, when the scan lane is busy."""
+    ahead = next((j for j in job_mgr.registry.executing()
+                  if j is not job and j.kind == "scan"), None)
+    if ahead is None:
+        return "Waiting to start"
+    if ahead.status == job_mgr.JobStatus.SCANNING:
+        return "Waiting for a scan to finish"
+    if ahead.execute_kind in ("library", "new_releases", "upgrade",
+                              "collection_restore"):
+        return "Waiting for a download to finish"
+    return "Waiting to start"
+
+
 def _library_header_note():
     """What the header note beside the Library title should say, or None when
     nothing library-side is in flight."""
-    job = scans._active_scan(
-        "library", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
-                             job_mgr.JobStatus.RUNNING))
+    download = _library_download_job()
+    job = next((j for j in job_mgr.registry.pending_and_running()
+                if j.execute_kind == "library" and j is not download
+                and j.status in (job_mgr.JobStatus.PENDING,
+                                 job_mgr.JobStatus.SCANNING)), None)
     if job is None:
         return None
     if job.status == job_mgr.JobStatus.PENDING:
-        return {"label": "Queued", "detail": "",
-                "title": "Waits for the running job to finish."}
-    if job.status == job_mgr.JobStatus.RUNNING:
-        return {"label": "Downloading…", "detail": "",
-                "title": "Downloading the albums selected in the review."}
+        return {"label": _queued_label(job), "detail": "", "title": ""}
     if job.progress_phase == flows.SETTINGS_WAIT:
         return {"label": "Waiting for the running job…", "detail": "",
                 "title": "The settings saved during it apply before the refresh."}
     total = int(job.progress_total or 0)
     current = int(job.progress_current or 0)
     unit = str(job.progress_unit or "").strip()
-    detail = ""
-    if total:
-        detail = f"{current:,} of {total:,}"
-        if unit:
-            detail += f" {unit}s"
-        # Each step of a scan counts the artists again from the start.
-        step = str(job.progress_phase or "").partition(":")[0]
-        if step.startswith("Step "):
-            detail = f"{step.lower()} · {detail}"
+    detail = f"{current:,} of {total:,}" if total else ""
     return {"label": "Refreshing…", "detail": detail,
+            "unit": f"{unit}s" if total and unit else "",
             "title": "Checking your folders for music added outside the app."}
 
 
@@ -275,6 +293,7 @@ def _library_header_context():
     """What the Library header and the failure notice under it read, for the
     page and for the header's poll alike."""
     library_generation = generation_state.load()
+    download = _library_download_job()
     return {
         "qobuz_ready": qobuz_access._qobuz_ready(),
         "library_scan_state": scans._library_scan_state(),
@@ -294,6 +313,8 @@ def _library_header_context():
             "library", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.SCANNING,
                                  job_mgr.JobStatus.RUNNING)) is not None,
         "library_header_note": _library_header_note(),
+        "library_download": download,
+        "queue_waits": {download.id: job_labels._queue_wait(download)} if download else {},
         "library_refresh_scanning": scans._active_scan(
             "library", statuses=(job_mgr.JobStatus.PENDING,
                                  job_mgr.JobStatus.SCANNING)) is not None,
@@ -445,6 +466,7 @@ async def library_refresh_note(request: Request):
                        if calm and header.get("library_baseline_exists")
                        and not header.get("library_refresh_running") else None),
             "census_oob": True,
+            "download_oob": True,
             "library_job": job,
             # Only the poll says this, so it lands once, when the work it was
             # watching ends. A page load has the review itself to read.

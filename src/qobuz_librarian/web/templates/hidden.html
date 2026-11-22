@@ -63,7 +63,7 @@
 {% if groups %}
 <div class="ql-hidden-groups">
   {% for g in groups %}
-  <details class="ql-review-group ql-hidden-group"{% if groups | length == 1 %} open{% endif %}>
+  <details class="ql-review-group ql-hidden-group" data-place="{{ g.artist }}"{% if groups | length == 1 %} open{% endif %}>
     <summary class="ql-hidden-summary">
       <span class="ql-review-chevron" aria-hidden="true"></span>
       <span class="ql-hidden-summary-copy">
@@ -87,7 +87,7 @@
            filter on, this takes the rows listed under it, not every album
            the artist has dismissed. #}
         {% set _g_noun = restore_all_label if g.rows == 1 else restore_all_label_plural %}
-        <form action="{{ restore_action }}" method="post">
+        <form action="{{ restore_action }}" method="post" data-keep-place>
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           {% if hidden_page and hidden_page > 1 %}<input type="hidden" name="p" value="{{ hidden_page }}">{% endif %}
           {% if hidden_q %}<input type="hidden" name="q" value="{{ hidden_q }}">{% for a in g.albums %}<input type="hidden" name="fingerprint" value="{{ a.fp }}">{% endfor %}{% else %}<input type="hidden" name="artist" value="{{ g.artist }}">{% endif %}
@@ -101,12 +101,12 @@
       {% endif %}
       <ul class="ql-hidden-list">
       {% for a in g.albums %}
-      <li class="ql-hidden-item">
+      <li class="ql-hidden-item" data-place="{{ a.fp }}">
         <span class="ql-hidden-title">
           <span class="ql-hidden-title-line"><span class="ql-hidden-name">{{ a.title }}</span>{% if a.gap_fill and not is_upgrade and not is_downsample %}<span class="ql-partial-label" title="You own this album; it returns to Gap Fill">Gap Fill</span>{% endif %}</span>{% if a.others %}
           <span class="ql-hidden-also">with {% for o in a.others %}{{ o.title }}{% if o.year %} ({{ o.year }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}{% if a.year or a.when %}
           <span class="ql-hidden-when">{{ a.year or '' }}{% if a.year and a.when %} · {% endif %}{% if a.when %}<span{% if a.when_exact %} title="{{ a.when_exact }}"{% endif %}>{{ 'Kept' if is_downsample else 'Dismissed' }} {{ a.when }}</span>{% endif %}</span>{% endif %}</span>
-        <form action="{{ restore_action }}" method="post" class="ql-hidden-restore">
+        <form action="{{ restore_action }}" method="post" class="ql-hidden-restore" data-keep-place>
           <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
           {% if hidden_page and hidden_page > 1 %}<input type="hidden" name="p" value="{{ hidden_page }}">{% endif %}
           {% if hidden_q %}<input type="hidden" name="q" value="{{ hidden_q }}">{% endif %}

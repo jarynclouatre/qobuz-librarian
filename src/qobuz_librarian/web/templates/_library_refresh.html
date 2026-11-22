@@ -1,34 +1,38 @@
 {% if library_baseline_exists and library_scan_state.ready and (not library_job or library_job.status == JobStatus.AWAITING_REVIEW) %}
 {# Both stay visible while a review is parked. New Releases skips the folders;
    refresh compares externally-added files with the Qobuz catalogue. #}
-<div id="library-refresh" class="flex items-center gap-3">
+<div id="library-refresh" class="flex items-center gap-3{% if library_refresh_running and not (library_download and not library_header_note) %} is-busy{% elif library_refresh_outcome %} has-outcome{% endif %}">
   {% if new_release_baseline_complete %}
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="new_releases">
-    <button type="submit" class="ql-link-action ql-inline-link-hit"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
+    <button type="submit" id="library-check-releases" class="ql-link-action ql-inline-link-hit"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
             title="{% if writes_paused %}{{ writes_paused_reason }}{% elif not qobuz_ready %}Connect Qobuz before checking new releases.{% else %}Checks Qobuz for albums by your artists that weren't there at the last Library scan or check.{% endif %}">Check new releases</button>
   </form>
-  {% else %}
+  {% elif not library_refresh_running %}
   <span class="ql-refresh-note" role="status">Refresh the Library before checking new releases</span>
   {% endif %}
-  {% if library_refresh_running %}
+  {% if library_download and not library_header_note %}
+  {# The download's own row under the header says what it is doing; this
+     only brings the refresh control back when it ends. #}
+  <span hx-get="/library/refresh-note" hx-trigger="every 4s" hx-target="#library-refresh" hx-swap="outerHTML"></span>
+  {% elif library_refresh_running %}
   {% set _note = library_header_note or {'label': 'Refreshing…', 'detail': '', 'title': 'Checking your folders for music added outside the app.'} %}
   {# The poll replaces the whole row, not just this note: the response is this
      same partial. #}
-  <span class="ql-refresh-note" role="status" title="{{ _note.title }}"
-        hx-get="/library/refresh-note" hx-trigger="every 4s" hx-target="#library-refresh" hx-swap="outerHTML">{{ _note.label }}{% if _note.detail %} <span class="readout">{{ _note.detail }}</span>{% endif %}</span>
+  <span class="ql-refresh-note" role="status"{% if _note.title %} title="{{ _note.title }}"{% endif %}
+        hx-get="/library/refresh-note" hx-trigger="every 4s" hx-target="#library-refresh" hx-swap="outerHTML">{{ _note.label }}{% if _note.detail %} <span class="readout">{{ _note.detail }}{% if _note.unit %}<span class="ql-refresh-unit"> {{ _note.unit }}</span>{% endif %}</span>{% endif %}</span>
   {% else %}
   {% if library_refresh_outcome %}
   {# Said once, by the poll, at the moment the work ends. #}
-  <span class="ql-refresh-note ql-flash-info" role="status" data-flash>{{ library_refresh_outcome }}</span>
+  <span class="ql-refresh-note ql-refresh-outcome" role="status" data-flash>{{ library_refresh_outcome }}</span>
   {% endif %}
   <form action="/library" method="post" data-busy-submit data-review-place>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="missing_albums">
     <input type="hidden" name="tab" value="">
     <input type="hidden" name="q" value="">
-    <button type="submit" class="ql-header-refresh"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
+    <button type="submit" id="library-refresh-button" class="ql-header-refresh"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
             title="{% if writes_paused %}{{ writes_paused_reason }}{% elif qobuz_ready %}Refresh: find music added outside the app{% else %}Connect Qobuz before refreshing{% endif %}"
             aria-label="Refresh: find music added outside the app">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
@@ -39,3 +43,4 @@
 {% endif %}
 {% if refresh_failure_oob %}{% include "_library_refresh_failure.html" %}{% endif %}
 {% if census_oob %}{% include "_census.html" %}{% endif %}
+{% if download_oob %}{% include "_library_download.html" %}{% endif %}

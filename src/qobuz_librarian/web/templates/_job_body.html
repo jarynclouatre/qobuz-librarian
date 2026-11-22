@@ -133,7 +133,8 @@
             {%- elif job.execute_kind == 'repair' %} data-confirm="Run {count} selected repair{s}? Your originals are removed once the replacement is verified, so a repair cannot be undone. If a replacement cannot be verified, your originals are kept and can be restored from Settings → Diagnostics."
             {%- elif job.execute_kind == 'upgrade' %} data-confirm="Replace {count} selected album{s} with a fresh Qobuz download? Your current files are set aside, re-downloaded at the higher quality, and removed once the replacement is verified. This cannot be undone."
             {%- else %}{% set _missing_confirm = "Download {count} selected album{s}?" %}{% set _gaps_confirm = "Download the missing tracks of {count} selected album{s}?" %} data-confirm="{{ _gaps_confirm if review_tab == 'gaps' else _missing_confirm }}"
-            {%- if review_tab %} data-confirm-missing="{{ _missing_confirm }}" data-confirm-gaps="{{ _gaps_confirm }}"{% endif %}
+            {%- if review_tab != 'gaps' %} data-confirm-min="25"{% endif %}
+            {%- if review_tab %} data-confirm-missing="{{ _missing_confirm }}" data-confirm-gaps="{{ _gaps_confirm }}" data-confirm-min-missing="25"{% endif %}
             {%- endif %}
             {%- if job.execute_kind == 'downsample' %} data-confirm-action="{% if downsample_originals_choice in ('keep', 'delete') %}Downsample{% else %}Continue{% endif %}"{% if downsample_originals_choice == 'delete' %} data-irreversible{% endif %}
             {%- elif job.execute_kind == 'migration' %} data-confirm-action="{{ job.review_verb }}"{% if job.review_verb == 'Move' %} data-irreversible{% endif %}
