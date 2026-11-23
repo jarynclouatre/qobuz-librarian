@@ -798,6 +798,11 @@ class _QueuedWalk:
         banner(f"Scanning: {artist_query}")
         try:
             decided, stop = self._scan(d, artist_query)
+        except QobuzUnavailable as e:
+            vlog(f"{artist_query}: {e}")
+            raise QobuzUnavailable(
+                f"Qobuz didn't answer, so the walk stopped at {artist_query}."
+            ) from e
         except KeyboardInterrupt:
             log.info(fmt(C.GRAY,
                 "\n  Artist scan interrupted; stopping the walk."))

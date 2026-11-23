@@ -1,7 +1,7 @@
 {% if library_baseline_exists and library_scan_state.ready and (not library_job or library_job.status == JobStatus.AWAITING_REVIEW) %}
 {# Both stay visible while a review is parked. New Releases skips the folders;
    refresh compares externally-added files with the Qobuz catalogue. #}
-<div id="library-refresh" class="flex items-center gap-3{% if library_refresh_running and not (library_download and not library_header_note) %} is-busy{% elif library_refresh_outcome %} has-outcome{% endif %}">
+<div id="library-refresh" class="flex items-center gap-3">
   {% if new_release_baseline_complete %}
   <form action="/library" method="post" data-busy-submit>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -21,7 +21,7 @@
   {# The poll replaces the whole row, not just this note: the response is this
      same partial. #}
   <span class="ql-refresh-note" role="status"{% if _note.title %} title="{{ _note.title }}"{% endif %}
-        hx-get="/library/refresh-note" hx-trigger="every 4s" hx-target="#library-refresh" hx-swap="outerHTML">{{ _note.label }}{% if _note.detail %} <span class="readout">{{ _note.detail }}{% if _note.unit %}<span class="ql-refresh-unit"> {{ _note.unit }}</span>{% endif %}</span>{% endif %}</span>
+        hx-get="/library/refresh-note" hx-trigger="every 4s" hx-target="#library-refresh" hx-swap="outerHTML">{{ _note.label }}{% if _note.detail %} <span class="readout">{{ _note.detail }}{% if _note.unit %} {{ _note.unit }}{% endif %}</span>{% endif %}</span>
   {% else %}
   {% if library_refresh_outcome %}
   {# Said once, by the poll, at the moment the work ends. #}

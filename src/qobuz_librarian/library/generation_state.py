@@ -291,6 +291,8 @@ def library_snapshot_available(state=None) -> bool:
     state = load() if state is None else state
     from qobuz_librarian.library import library_scan_state
 
+    # Read after ``state``: the snapshot is saved before its revision is
+    # recorded here, so one read in between is a revision ahead.
     snapshot = library_scan_state.kind_summary("missing")
     output = output_state("library", state)
     return bool(
@@ -300,7 +302,7 @@ def library_snapshot_available(state=None) -> bool:
         and int(snapshot.get("generation") or 0)
         == int(state.get("generation") or 0)
         and int(snapshot.get("revision") or 0)
-        == int(output.get("revision") or 0)
+        >= int(output.get("revision") or 0)
     )
 
 

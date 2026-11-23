@@ -49,11 +49,11 @@
 {% macro clear_queue(active_jobs, waiting_jobs) -%}
 {# What clearing does is spelled out by the confirm dialog the button opens. #}
 {% if (active_jobs | length) + (waiting_jobs | length) > 1 %}
-{% set _scan = active_jobs | selectattr('status.value', 'equalto', 'scanning') | selectattr('execute_kind', 'in', ['library', 'repair']) | first %}
+{% set _scan = active_jobs | selectattr('status.value', 'equalto', 'scanning') | selectattr('execute_kind', 'equalto', 'repair') | first %}
 <form action="/queue/cancel-pending" method="post" class="ql-activity-section-action">
   <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
   <button type="submit" class="ql-btn ql-btn-sm ql-btn-ghost"
-          data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The {{ 'Library' if _scan.execute_kind == 'library' else 'Repair' }} scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %}"
+          data-confirm="Clear the queue? Waiting jobs are removed and running jobs stop after their current step.{% if _scan %} The Repair scan loses its progress through the artists it has checked, and the next one starts from the beginning.{% endif %}"
           data-confirm-action="Clear queue" data-irreversible>Clear queue</button>
 </form>
 {% endif %}

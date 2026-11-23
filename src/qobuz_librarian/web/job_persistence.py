@@ -2037,13 +2037,16 @@ ALBUMS_PICKED = "_albums_picked"
 
 REMOVED = "Removed before it started."
 DISCARDED = "Review discarded."
+REPLACED = "Replaced by a new scan."
 
 
 def canceled_label(summary: str) -> str:
-    """What the user did to a canceled job: removed it while it waited,
-    discarded its review, or stopped it while it ran."""
+    """What ended a canceled job: removed while it waited, its review
+    discarded or replaced by a new scan, or stopped while it ran."""
     if summary in (REMOVED, "Cancelled before it started."):
         return "Removed"
+    if summary == REPLACED:
+        return "Replaced"
     return "Discarded" if summary == DISCARDED else "Stopped"
 
 

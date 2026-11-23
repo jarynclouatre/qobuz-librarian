@@ -58,22 +58,25 @@
      the server now and then whether it still stands, so a page left open on
      a phone follows a scan started somewhere else. #}
   {% if first_scan_offered %}
-  <section class="ql-scan-hero" hx-get="/library/scan-offer" hx-trigger="every 10s" hx-swap="none">
+  <section class="ql-scan-hero" hx-get="/library/scan-offer{% if library_resuming %}?starting=1{% endif %}" hx-trigger="every {{ '2s' if library_resuming else '10s' }}" hx-swap="none">
     <svg class="ql-scan-hero-mark" viewBox="0 0 96 96" fill="none" aria-hidden="true">
       <path d="M30 22v52M42 22v52" stroke="currentColor" stroke-opacity="0.5" stroke-width="2" stroke-linecap="round"/>
       <path d="M54 26l12 46" stroke="currentColor" stroke-opacity="0.5" stroke-width="2" stroke-linecap="round"/>
       <circle cx="70" cy="66" r="14" stroke="currentColor" stroke-width="2"/>
       <path d="M80.5 76.5 88 84" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
     </svg>
-    {% if library_resume %}
-    <p class="ql-scan-hero-title">Scan interrupted</p>
-    <p class="ql-scan-hero-meta">{{ library_resume.done }} of {{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} already checked</p>
+    {% if library_resuming or library_resume %}
+    {% set _done = (library_resuming or library_resume).done %}
+    <p class="ql-scan-hero-title">{{ 'Resuming scan' if library_resuming else 'Scan interrupted' }}</p>
+    {% if _done %}<p class="ql-scan-hero-meta">{{ _done }} of {{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} already checked</p>{% endif %}
+    {% if library_refresh_failure and qobuz_ready and not library_resuming %}<p class="ql-scan-hero-meta">{{ library_refresh_failure }}</p>{% endif %}
     {% else %}
     <p class="ql-scan-hero-title">Scan your library</p>
     <p class="ql-scan-hero-text">Finds missing albums, missing tracks, and quality upgrades.</p>
     <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan</p>
     {% endif %}
-    {% if qobuz_ready %}
+    {% if library_resuming %}
+    {% elif qobuz_ready %}
     <form action="/library" method="post" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="mode" value="{{ 'partial_fill' if library_resume and library_resume.kind == 'partial' else 'missing_albums' }}">
@@ -115,7 +118,7 @@
             d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
     </svg>
     <span class="min-w-0 flex-1 text-sm">
-      <strong>A library scan was interrupted.</strong> {{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked.
+      <strong>A library scan was interrupted.</strong>{% if library_resume.done %} {{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked.{% endif %}
     </span>
     <form action="/library" method="post" class="ml-auto shrink-0" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -162,7 +165,7 @@
   {% if library_resume %}
   <div class="ql-tool-note ql-tool-note-info">
     <p class="ql-tool-note-title">Scan can resume</p>
-    <p>{{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked.</p>
+    {% if library_resume.done %}<p>{{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked.</p>{% endif %}
     <form action="/library" method="post" class="ml-auto shrink-0" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="mode" value="{{ 'partial_fill' if library_resume.kind == 'partial' else 'missing_albums' }}">

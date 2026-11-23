@@ -437,10 +437,10 @@ def get_artist_release_types(artist_id, token, album_ids, fresh=False,
     catalogue's TTL, and reused only while every id in ``album_ids`` is one
     the cached answer was fetched for, so a new release fetches it again.
 
-    The artist page reads ``for_page``: its sections come from those lists,
-    and Qobuz can take seconds a page to answer for an artist it was not
-    asked about lately, so it reads them side by side. The answer with every
-    list serves it too."""
+    The artist page reads ``for_page``: its sections come from those lists.
+    The answer with every list serves it too. Qobuz can take seconds a page
+    to answer for an artist it was not asked about lately, so the lists are
+    read side by side."""
     album_ids = {str(album_id) for album_id in album_ids}
     cache_keys = [f"{artist_id}:release-lists"]
     if for_page:
@@ -459,11 +459,8 @@ def get_artist_release_types(artist_id, token, album_ids, fresh=False,
                 return types
     names = RELEASE_LISTS if for_page else RELEASE_LISTS + EXTRA_RELEASE_LISTS
     read = carry_deadline(lambda name: _release_list_ids(artist_id, token, name))
-    if for_page:
-        with ThreadPoolExecutor(max_workers=len(names)) as pool:
-            lists = list(pool.map(read, names))
-    else:
-        lists = map(read, names)
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        lists = list(pool.map(read, names))
     types = {}
     for name, (ids, whole) in zip(names, lists):
         if not whole and name in RELEASE_LISTS:

@@ -12,6 +12,7 @@ from qobuz_librarian.library import (
     generation_state,
     library_scan_state,
     new_releases,
+    scan_checkpoint,
 )
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import unreadable_artists as unreadable_artists_mod
@@ -209,21 +210,45 @@ def _library_refresh_outcome():
     return str(latest.summary or "").strip()
 
 
-def _scan_finished(job, tab_counts, notice_bits):
+def _left_unchecked(job):
+    """Whether a scan left artists unchecked or results unsaved."""
+    return job is not None and bool(
+        job.unchecked_artists or (job.execute_args or {}).get("_unchecked_attempt"))
+
+
+def _says_unchecked(job, generation):
+    """Whether a job's summary says what the newest attempt did not check."""
+    if job is None or not (job.status is job_mgr.JobStatus.AWAITING_REVIEW
+                           or (job.status is job_mgr.JobStatus.DONE
+                               and job.phase == "scan")):
+        return False
+    attempt = int(generation["latest_attempt"]["id"] or 0)
+    return bool(attempt and job.summary
+                and (job.execute_args or {}).get("_unchecked_attempt") == attempt)
+
+
+def _scan_finished(job, tab_counts, notice_bits, finished=None, incomplete=False):
     """What the Library scan that just ended found, for the first render after
     it, or None. A refresh folded into the open review has its own sentence,
-    the one History shows."""
-    folded = None
+    the one History shows, and so has a scan that left something unchecked,
+    unless another notice on the page says it."""
+    ended = None
     for j in job_mgr.registry.all():
         if (j.execute_kind == "library" and j.phase == "scan"
                 and j.status is job_mgr.JobStatus.DONE and j.summary
-                and (folded is None
-                     or (j.finished_at or 0) > (folded.finished_at or 0))):
-            folded = j
-    if (folded is not None and job is not None and job is not folded
-            and (folded.finished_at or 0) > (job.created_at or 0)):
-        summary = str(folded.summary).strip()
+                and (ended is None
+                     or (j.finished_at or 0) > (ended.finished_at or 0))):
+            ended = j
+    if not (ended is not None and job is not None and job is not ended
+            and (ended.finished_at or 0) > (job.created_at or 0)):
+        ended = finished if (
+            finished is not None and finished.status is job_mgr.JobStatus.DONE
+            and _left_unchecked(finished)) else None
+    if ended is not None:
+        summary = str(ended.summary).strip()
         return None if summary in notice_bits else {"summary": summary}
+    if incomplete or _left_unchecked(job):
+        return None
     tab_counts = tab_counts or {}
     missing = int(tab_counts.get("missing") or 0)
     gaps = int(tab_counts.get("gaps") or 0)
@@ -254,7 +279,10 @@ def _library_refresh_failure():
                 and max(j.created_at or 0, j.started_at or 0,
                         j.finished_at or 0) > since):
             return ""
-    return str(latest.error or latest.summary or "").strip()
+    error = str(latest.error or latest.summary or "").strip()
+    # A rejected token is the reconnect panel's to say, and once replaced it
+    # is not still rejected.
+    return "" if error == job_mgr.TOKEN_REJECTED else error
 
 
 def _library_current_job():
@@ -385,6 +413,9 @@ def _library_page_context(page, tab, q):
     # parked review can sit above it, so it is not tied to an idle surface.
     ctx["library_resume"] = scans._library_resume_offer(
         ctx["library_generation"])
+    ctx["library_resuming"] = (scan_checkpoint.pending()
+                               if scans._library_resume_starting.is_set()
+                               else None)
     if ljob is not None:
         ctx["queue_wait"] = job_labels._queue_wait(ljob)
         # A full load has to be able to land on either tab: the address is the
@@ -450,12 +481,26 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
     if finished is not None and not (finished.execute_kind == "library"
                                      and finished.phase == "scan"):
         finished = None
-    if (badge_ack and (badge_ack[1] or finished is ctx["library_job"])):
+    if (badge_ack and (badge_ack[1] or finished is ctx["library_job"])
+            or finished is not None
+            and finished.status is job_mgr.JobStatus.DONE):
         ctx["scan_finished"] = _scan_finished(
-            ctx["library_job"], ctx.get("review_tab_counts"), notice_bits)
-    elif (finished is not None
-          and finished.status is job_mgr.JobStatus.DONE):
-        ctx["scan_finished"] = _scan_finished(None, None, notice_bits)
+            ctx["library_job"], ctx.get("review_tab_counts"), notice_bits, finished,
+            bool(ctx["unreadable_artists"]
+                 or ctx["library_generation"]["latest_attempt"]["status"]
+                 in ("failed", "incomplete")))
+    shown = [ctx["library_notice"], (ctx["scan_finished"] or {}).get("summary", "")]
+    ctx["library_unchecked_said"] = any(
+        _says_unchecked(j, ctx["library_generation"]) for j in (
+            ctx["library_job"] if ctx.get("review_summary_line") else None,
+            finished if finished is not None and finished.summary in shown else None,
+            refreshed))
+    if ctx.get("review_summary_line") and any(
+            ctx["review_summary_line"] in said for said in shown):
+        ctx["review_summary_line"] = ""
+    if ctx.get("review_summary_line") and ctx["unreadable_artists"]:
+        ctx["review_summary_line"] = review_pages.without_left_out_note(
+            ctx["review_summary_line"])
     ctx["error"] = rendering._notice_text(request.query_params.get("error"))
     ctx["error_refresh"] = request.query_params.get("offer_refresh") == "1"
     return rendering._tr(request, "library.html", ctx, review_badge_ack=badge_ack)
@@ -472,8 +517,12 @@ async def library_refresh_note(request: Request):
         header = _library_header_context()
         job = _library_current_job()
         calm = job is None or job.status == job_mgr.JobStatus.AWAITING_REVIEW
+        outcome = _library_refresh_outcome()
         return {
             **header,
+            "library_unchecked_said": any(
+                _says_unchecked(j, header["library_generation"]) for j in (
+                    job, _last_finished_library_job() if outcome else None)),
             # The work that just ended may have changed what is on disk.
             "census": (storage._census_view()
                        if calm and header.get("library_baseline_exists")
@@ -483,7 +532,7 @@ async def library_refresh_note(request: Request):
             "library_job": job,
             # Only the poll says this, so it lands once, when the work it was
             # watching ends. A page load has the review itself to read.
-            "library_refresh_outcome": _library_refresh_outcome(),
+            "library_refresh_outcome": outcome,
             # A failure is not a passing note, so the poll delivers it out of
             # band into the page body and the page renders it on every load
             # until a refresh actually gets somewhere.
@@ -499,15 +548,16 @@ async def library_refresh_note(request: Request):
 
 
 @router.get("/library/scan-offer")
-async def library_scan_offer():
+async def library_scan_offer(starting: str = ""):
     """Polled by the first-scan offer, so a page left open on it follows a
     scan started from another tab or device: once the offer no longer
-    stands, the reply reloads the page."""
+    stands, or a resume the page showed starting has begun or been turned
+    down, the reply reloads the page."""
     loop = asyncio.get_running_loop()
     offered = await loop.run_in_executor(
         None, lambda: _first_scan_offered(_library_header_context(),
                                           _library_current_job()))
-    if offered:
+    if offered and scans._library_resume_starting.is_set() == bool(starting):
         return Response(status_code=204)
     return HTMLResponse("", headers={"HX-Refresh": "true"})
 

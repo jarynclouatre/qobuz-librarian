@@ -2570,9 +2570,8 @@ class _LibraryScan:
                         name = ad.name
                         log.info(f"    {name}: {e}")
                         raise QobuzUnavailable(
-                            f"Qobuz didn't answer for {name}, so the scan "
-                            "stopped there. The next scan picks up where it "
-                            "left off.") from e
+                            f"Qobuz didn't answer, so the scan stopped at "
+                            f"{name}.") from e
                     raise
                 except Exception as e:
                     # A per-artist failure (not auth/outage) is left unscanned so a
@@ -2842,19 +2841,29 @@ class _LibraryScan:
             self.job, self.owned_qobuz, self.snapshot_artist_ids)
 
     def _write_summary(self):
+        # Artists that errored or came back with a short catalog page aren't in
+        # state_artists; the checkpoint stays for them and the last-scan stamp is
+        # withheld.
+        unchecked = (len(self.artists) - len(self.state_artists)
+                     - len(self.left_out) + self.discovery_errors)
         if self.job.cancel_requested and any(
                 other.execute_kind == "library" and other is not self.job
                 for other in job_mgr.registry.awaiting_review()):
             # Its count holds the rows carried over from the saved scan, and a
             # stopped refresh folds none of it in.
             self.job.summary = "Stopped early. The open Library review is unchanged."
+        elif self.job.stopping_for_restart:
+            self.job.summary = job_persistence.RESTART_INTERRUPTED
         elif self.job.cancel_requested:
-            self.job.summary = (f"Stopped early. {plural(self.total, 'album')} found so far."
-                                if self.total else "Stopped before anything turned up.")
+            self.job.summary = "Stopped. Scan discarded."
         elif self.total:
             self.job.summary = library_review_summary(self.job.candidates) + "."
             if self.left_out:
                 self.job.summary += " " + left_out_note(self.left_out, self.job.CANDIDATE_CAP)
+        elif unchecked > 0:
+            self.job.summary = (
+                f"No {'albums with missing tracks' if self.partial_only else 'missing albums'} "
+                "found among the artists that could be checked.")
         elif self.partial_only:
             self.job.summary = "No owned albums are missing tracks."
         else:
@@ -2862,11 +2871,6 @@ class _LibraryScan:
         if getattr(self.job, "upgrade_finds", 0) and not self.job.cancel_requested:
             self.job.summary += " " + upgrade_finds_note(
                 self.job.upgrade_finds, first=getattr(self.job, "upgrade_finds_first", False))
-        # Artists that errored or came back with a short catalog page aren't in
-        # state_artists; the checkpoint stays for them and the last-scan stamp is
-        # withheld.
-        unchecked = (len(self.artists) - len(self.state_artists)
-                     - len(self.left_out) + self.discovery_errors)
         if not self.job.cancel_requested and not self.partial_only and self.publication is not None:
             unreadable_artists_mod.record(self.unreadable_artists)
         if (not self.job.cancel_requested and self.publication is not None
@@ -2929,6 +2933,9 @@ class _LibraryScan:
                            "before restarting the app.")
         # A refresh folded into an open review keeps these after its counts.
         self.job.scan_caveats = caveats
+        if self.job.unchecked_artists or caveats:
+            self.job.execute_args = {**(self.job.execute_args or {}),
+                                     "_unchecked_attempt": self.attempt_id}
         if caveats:
             self.job.summary += " " + " ".join(caveats)
         # The crawl is stamped complete before its saved views are written, so a
@@ -3271,18 +3278,7 @@ class _NewReleasesRun:
             self.skipped_note = _left_out_note(self.unreadable_artists)
 
     def _summarize_stop(self):
-        # A cancelled crawl only reached a fraction of the artists, so it can't
-        # claim "No new releases" or "First check recorded" definitively.
-        self.job.summary = (
-            f"Stopped early. {plural(self.total, 'new release')} found so far."
-            if self.total else "Stopped early. Nothing new found before the stop.")
-        if self.failed_count:
-            self.job.summary += (
-                f" {self.unchecked} couldn't be checked "
-                "before the stop."
-            )
-        if self.skipped_note:
-            self.job.summary += f" {self.skipped_note}"
+        self.job.summary = "Stopped. Scan discarded."
         log.info(self.job.summary)
 
     def _summarize(self):
@@ -4517,8 +4513,7 @@ def scan_downsamples(job):
     if not job.cancel_requested and refresh.complete:
         _flag_new_since_last_scan(job, "downsample")
     if job.cancel_requested:
-        job.summary = (f"Stopped early. {plural(total, 'album')} found so far."
-                       if total else "Stopped before anything turned up.")
+        job.summary = "Stopped. Scan discarded."
     elif unchecked:
         job.summary = (
             f"{plural(total, 'album')} stored above 48 kHz."
@@ -5304,13 +5299,7 @@ def _scan_repairs_impl(job, token, checkpoint):
             if job.cancel_requested:
                 for f in futures:
                     f.cancel()
-                stopped = (
-                    f"Stopped early. {plural(total, 'album')} flagged so far."
-                    if total else "Stopped before anything was flagged."
-                )
-                job.summary = stopped + _repair_scan_caveats(
-                    n_unverified, n_failed_albums,
-                    n_failed_artists - n_linked_artists, n_linked_artists)
+                job.summary = "Stopped. Scan discarded."
                 log.info("Stopping the scan.")
                 if job.stopping_for_restart:
                     save_checkpoint(force=True)
@@ -6380,9 +6369,7 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
     if len(unreadable) > 50:
         job.push_line(f"… and {len(unreadable) - 50} more")
     if job.cancel_requested:
-        n = len(items) if items else 0
-        job.summary = (f"Stopped early. {plural(n, 'file')} scanned so far."
-                       if n else "Stopped before anything was scanned.")
+        job.summary = "Stopped. Scan discarded."
         return
     if not items:
         # An empty source is nearly always the wrong folder or a share that

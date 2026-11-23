@@ -1,5 +1,6 @@
 """Finding, starting and deduplicating scan jobs."""
 import asyncio
+import threading
 import time
 from pathlib import Path
 
@@ -111,10 +112,11 @@ def _submit_scan_deduped(job, scan_fn, execute_fn, *kinds,
         submitted = job_mgr.submit_scan(job, scan_fn, execute_fn)
         if submitted is None:
             return None
-        # Only discard the prior review after the replacement has a durable
-        # owner row.
+        # Only close the prior review after the replacement has a durable
+        # owner row. The saved results outlive it: a scan that is stopped or
+        # fails leaves them as they were.
         for old in stale_reviews:
-            job_mgr.cancel_review(old)
+            job_mgr.cancel_review(old, replaced=True)
         return submitted
 
 
@@ -137,12 +139,22 @@ def _active_library_scan():
     return _active_scan("library")
 
 
+# Set from the moment a Search visit resumes an interrupted Library scan by
+# itself until the scan is queued or the live Qobuz check turns it down.
+_library_resume_starting = threading.Event()
+
+
+def _library_scan_under_way():
+    """Whether a Library scan is queued, crawling or resuming by itself."""
+    return (_library_resume_starting.is_set()
+            or _active_library_scan() is not None)
+
+
 def _library_resume_offer(generation):
     """The interrupted Library scan's checkpoint to offer a resume from, or
-    None. Offered while no Library scan is pending or crawling, when no
-    generation has finished or the latest attempt is running, failed or
-    incomplete."""
-    if _active_library_scan() is not None:
+    None. Offered while no Library scan is under way, when no generation has
+    finished or the latest attempt is running, failed or incomplete."""
+    if _library_scan_under_way():
         return None
     latest = (generation.get("latest_attempt") or {}).get("status")
     if (int(generation.get("generation") or 0)
@@ -305,7 +317,7 @@ def _start_library_scan(credentials, partial_only=False, force_full=False):
         )
 
 
-def _restate_parked_status(parked, unchecked, status):
+def _restate_parked_status(parked, unchecked, status, attempt=None):
     """Library shows the open review's summary, so it says what the newest
     scan left unchecked or unsaved, not what an earlier one did."""
     summary = str(parked.summary or "")
@@ -313,12 +325,14 @@ def _restate_parked_status(parked, unchecked, status):
     if count is None:
         return
     restated = " ".join([summary[:count.end()].rstrip(".") + "."] + status)
-    if restated == summary and parked.unchecked_artists == unchecked:
+    if (restated == summary and parked.unchecked_artists == unchecked
+            and (parked.execute_args or {}).get("_unchecked_attempt") == attempt):
         return
 
     def _restate():
         parked.summary = restated
         flows._record_unchecked_artists(parked, unchecked)
+        parked.execute_args["_unchecked_attempt"] = attempt
 
     with job_mgr._library_review_state_guard(parked):
         job_persistence.persist_review_mutation(parked, _restate)
@@ -420,7 +434,8 @@ def _fold_into_parked_library_review(job):
         status.append(flows.left_out_note(no_room, parked.CANDIDATE_CAP))
     status.extend(caveats)
     bits.extend(status)
-    _restate_parked_status(parked, unchecked, status)
+    _restate_parked_status(parked, unchecked, status,
+                           (job.execute_args or {}).get("_unchecked_attempt"))
     job.summary = " ".join(bits)
     job.push_line(job.summary)
     job.status = job_mgr.JobStatus.DONE

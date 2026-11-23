@@ -189,10 +189,11 @@
   {%- else -%}{{ {'done': 'Done', 'failed': 'Failed', 'canceled': canceled_label(job.summary), 'awaiting_review': 'Needs review', 'pending': 'Queued'}.get(job.status.value, job.status.value.replace('_', ' ')) }}{%- endif -%}
 {%- endmacro %}
 
-{# Stopping a library or repair scan clears its checkpoint so the next one
-   does not auto-resume. #}
+{# Stopping a repair scan clears its checkpoint, and every file is decoded
+   again by the next one. A stopped Library scan starts over too, but reuses
+   the Qobuz replies it cached. #}
 {% macro stop_loses_scan(job) -%}
-  {%- if (job.status.value == 'scanning' or (job.status.value == 'pending' and job.kind == 'scan' and job.phase != 'execute')) and job.execute_kind in ('library', 'repair') -%}1{%- endif -%}
+  {%- if (job.status.value == 'scanning' or (job.status.value == 'pending' and job.kind == 'scan' and job.phase != 'execute')) and job.execute_kind == 'repair' -%}1{%- endif -%}
 {%- endmacro %}
 
 {% macro cancel_confirm(job) -%}

@@ -2175,8 +2175,9 @@ def approve(
     return True
 
 
-def cancel_review(job: Job) -> Optional[bool]:
-    """Discard a waiting review, or return None when it could not be saved."""
+def cancel_review(job: Job, *, replaced: bool = False) -> Optional[bool]:
+    """Discard a waiting review, or close one a new scan has ``replaced``,
+    leaving its saved results. Returns None when it could not be saved."""
     # Flip under the job lock so this can't race approve() (which also flips
     # AWAITING_REVIEW under the lock); otherwise a cancel could land after an
     # approve already queued the execute phase, showing CANCELED while work
@@ -2195,7 +2196,8 @@ def cancel_review(job: Job) -> Optional[bool]:
             canceled_at = time.time()
             job.status = JobStatus.CANCELED
             job.finished_at = canceled_at
-            job.summary = job_persistence.DISCARDED
+            job.summary = (job_persistence.REPLACED if replaced
+                           else job_persistence.DISCARDED)
         if not job_persistence.persist(job):
             with job._lock:
                 if (
@@ -2206,7 +2208,7 @@ def cancel_review(job: Job) -> Optional[bool]:
                     job.finished_at = previous_finished_at
                     job.summary = previous_summary
             return None
-        if job.execute_kind == "library":
+        if job.execute_kind == "library" and not replaced:
             # Discarded. Retire the baseline's review so the saved-state
             # reconstruction doesn't immediately rebuild what was discarded.
             if not library_scan_state.mark_review_retired(
@@ -2219,7 +2221,7 @@ def cancel_review(job: Job) -> Optional[bool]:
                     job.summary = previous_summary
                 job_persistence.persist(job)
                 return None
-        elif job.execute_kind in ("upgrade", "downsample"):
+        elif job.execute_kind in ("upgrade", "downsample") and not replaced:
             review_badges.mark_discarded(job.execute_kind)
         _start_post_job_hook_for_job(job)
         job.end_stream()
@@ -2917,8 +2919,7 @@ def _interrupted_scan_summary(job: Job) -> str:
     if job.execute_kind == "library":
         if scan_checkpoint.pending() is None:
             return restart + "Start the scan again from the Library page."
-        return (restart + "The next Library scan continues from where it "
-                "stopped.")
+        return job_persistence.RESTART_INTERRUPTED
     if job.execute_kind == "repair":
         if scan_checkpoint.load("repair") is None:
             return restart + "Start the scan again from the Repair page."

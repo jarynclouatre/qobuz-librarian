@@ -162,6 +162,19 @@ _NO_ARTIST_NOTE = re.compile(
     r"downloads under the album's main artist\.)?"
 )
 _OLD_CHECK_AGAIN = "Run the scan again to retry."
+_OLD_LIBRARY_RESUME = " The next Library scan continues from where it stopped."
+
+
+# The Library page names unreadable artist folders in a notice of its own.
+_LEFT_OUT_NOTE = re.compile(
+    r"\s*[0-9][0-9,]* artist folders? couldn't be read and (?:was|were) left "
+    r"out: .*?\. (?:Each is checked by itself once it can be read|Scan again "
+    r"once (?:it|they) can be read)\."
+)
+
+
+def without_left_out_note(summary) -> str:
+    return _LEFT_OUT_NOTE.sub("", summary).strip()
 
 
 # The Library review shows the count Upgrade has when the page renders, so
@@ -177,6 +190,7 @@ def summary_without_old_advice(execute_kind, summary) -> str:
         summary = "Stopped" + summary.removeprefix("Cancelled")
     if execute_kind in ("library", "new_releases"):
         summary = _NO_ARTIST_NOTE.sub("", summary).strip()
+        summary = summary.removesuffix(_OLD_LIBRARY_RESUME)
     if execute_kind == "new_releases" and summary.endswith(_OLD_CHECK_AGAIN):
         summary = (summary[:-len(_OLD_CHECK_AGAIN)]
                    + "Check again from the Library page.")

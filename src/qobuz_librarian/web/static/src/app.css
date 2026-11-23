@@ -3627,9 +3627,8 @@ details.ql-mobile-drawer[open]::before {
 .ql-refresh-outcome {
   color: var(--ql-text-2);
 }
-/* On a phone the Library title keeps its row with the refresh icon. A note
-   about a refresh takes the place of "Check new releases" on that row, so
-   nothing below it moves. */
+/* On a phone the Library title keeps its row with "Check new releases" and
+   the refresh icon, and a note about a refresh has the line under it. */
 @media (max-width: 639.98px) {
   .ql-page-header--split {
     flex-wrap: wrap;
@@ -3643,18 +3642,10 @@ details.ql-mobile-drawer[open]::before {
   }
   .ql-page-header--split .ql-refresh-note {
     order: 1;
-  }
-  .ql-page-header--split .ql-refresh-outcome {
-    order: 0;
-    flex: 1 1 0;
-    min-width: 0;
+    flex: none;
+    width: 100%;
+    margin-bottom: -0.5rem;
     line-height: 1.25;
-    text-align: right;
-  }
-  #library-refresh.is-busy > form,
-  #library-refresh.has-outcome > form:not([data-review-place]),
-  .ql-refresh-unit {
-    display: none;
   }
 }
 .ql-page-header p {

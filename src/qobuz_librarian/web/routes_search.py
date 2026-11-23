@@ -170,9 +170,6 @@ def _start_due_jobs_in_background():
     live Qobuz check, which must never hold up the page. A token Qobuz
     rejected is asked about again every few minutes, so Search comes back by
     itself once it is accepted.
-
-    Returns whether an interrupted library scan is resuming, so the page that
-    started it does not also offer to resume it.
     """
     if (qobuz_access._token_valid_for() is False
             and qobuz_access._token_recheck_due()):
@@ -188,18 +185,20 @@ def _start_due_jobs_in_background():
     except OSError as e:
         _log.warning(
             "automatic start from the dashboard skipped: %s", e)
-        return False
-    if not due:
-        return False
-    resuming = resuming and not any(
-        j.status != job_mgr.JobStatus.AWAITING_REVIEW
-        for j in job_mgr.registry.pending_and_running())
-    if not _auto_start_busy.acquire(blocking=False):
-        return resuming
+        return
+    if not due or not _auto_start_busy.acquire(blocking=False):
+        return
+    if resuming and not any(
+            j.status != job_mgr.JobStatus.AWAITING_REVIEW
+            for j in job_mgr.registry.pending_and_running()):
+        scans._library_resume_starting.set()
 
     def run():
         try:
-            _maybe_resume_library_scan()
+            try:
+                _maybe_resume_library_scan()
+            finally:
+                scans._library_resume_starting.clear()
             new_release_checks._maybe_auto_check_new_releases()
         except Exception as e:
             _log.warning(
@@ -211,9 +210,8 @@ def _start_due_jobs_in_background():
         threading.Thread(target=run, name="dashboard-auto-start",
                          daemon=True).start()
     except RuntimeError:
+        scans._library_resume_starting.clear()
         _auto_start_busy.release()
-        return False
-    return resuming
 
 
 def _maybe_resume_library_scan():
@@ -269,7 +267,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         # These read state files, so they run here (off the event loop)
         # alongside the other disk work; any job they start is submitted from
         # a background thread.
-        resuming = _start_due_jobs_in_background()
+        _start_due_jobs_in_background()
         scan_state = scans._library_scan_state()
         library_generation = generation_state.load()
         return {
@@ -283,13 +281,11 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
             # seeded the new-release baseline.
             "baseline_complete": generation_state.baseline_complete(
                 library_generation),
-            "setup_scanning": (resuming
-                               or scans._active_library_scan() is not None),
+            "setup_scanning": scans._library_scan_under_way(),
             "library_scan_state": scan_state,
             # An interrupted gap-scan, surfaced on the dashboard the way
             # /library already does, gated on no scan running.
-            "library_resume": (None if resuming else
-                               scans._library_resume_offer(library_generation)),
+            "library_resume": scans._library_resume_offer(library_generation),
             # A fresh install has no credentials; the page says so up front.
             # Filesystem-only.
             "creds_ok": qobuz_access._creds_ok(),
