@@ -2,7 +2,7 @@
 #    uv pip compile pyproject.toml -o requirements.txt
 aiofiles==25.1.0
     # via qobuz-librarian (pyproject.toml)
-annotated-doc==0.0.6
+annotated-doc==0.0.7
     # via fastapi
 annotated-types==0.8.0
     # via pydantic
@@ -10,9 +10,9 @@ anyio==4.16.0
     # via
     #   starlette
     #   watchfiles
-certifi==2026.10.23
+certifi==2026.11.20
     # via requests
-charset-normalizer==3.5.2
+charset-normalizer==3.5.3
     # via requests
 click==8.5.1
     # via uvicorn
@@ -32,15 +32,15 @@ markupsafe==3.0.4
     # via jinja2
 mutagen==1.48.1
     # via qobuz-librarian (pyproject.toml)
-pydantic==2.14.3
+pydantic==2.14.4
     # via fastapi
-pydantic-core==2.50.4
+pydantic-core==2.50.5
     # via pydantic
 python-dotenv==1.2.4
     # via uvicorn
 python-multipart==0.0.34
     # via qobuz-librarian (pyproject.toml)
-pyyaml==6.0.3
+pyyaml==6.0.4
     # via uvicorn
 requests==2.34.2
     # via qobuz-librarian (pyproject.toml)
