@@ -67,6 +67,7 @@ from qobuz_librarian.library.backup import (
     unwritable_new_album_folder,
     upgrade_backup_restorable,
     warn_pin_failed,
+    without_unread_audio,
 )
 from qobuz_librarian.library.catalog import (
     _disc_scoped_match,
@@ -890,7 +891,8 @@ def _finish_upgrade(backup, album_dir, entries):
             backup,
             replacement_path=replacement_path,
             expected_replacement_receipt=replacement_receipt,
-            replacement_validator=_upgrade_trees_verified):
+            replacement_validator=without_unread_audio(
+                _upgrade_trees_verified, backup, replacement_receipt)):
         if not pin_unverified_upgrade_backup(
                 backup,
                 "upgrade kept; final exact replacement proof did not hold"):
@@ -2038,7 +2040,9 @@ class _AlbumRun:
                         self.upgrade_backup_path,
                         replacement_path=replacement_path,
                         expected_replacement_receipt=replacement_receipt,
-                        replacement_validator=validator,
+                        replacement_validator=without_unread_audio(
+                            validator, self.upgrade_backup_path,
+                            replacement_receipt),
                     ):
                         if self.auto_upgrade_active and not self.upgrade_only:
                             log.info(fmt(C.GRAY,

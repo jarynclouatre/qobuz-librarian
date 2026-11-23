@@ -11,7 +11,8 @@ Targets (preserves integer-ratio family for clean math):
 Quality settings:
   - Resampler: soxr at precision 28 if available, else swresample with
     filter_size=512, phase_shift=20 (very high quality).
-  - Triangular high-pass dither (decorrelates quantization noise).
+  - Triangular high-pass dither on 16-bit output (decorrelates quantization
+    noise).
   - Source bit depth preserved (16-bit stays 16-bit, 24-bit stays 24-bit).
   - FLAC compression level 5 (default, lossless, fast encode).
 """
@@ -86,8 +87,11 @@ def human(b):
 
 _RESAMPLER_FILTER = None
 
-_SOXR_FILTER = "aresample=resampler=soxr:precision=28:dither_method=triangular_hp"
-_SWR_FILTER  = "aresample=filter_size=512:phase_shift=20:dither_method=triangular_hp"
+_SOXR_FILTER = "aresample=resampler=soxr:precision=28"
+_SWR_FILTER  = "aresample=filter_size=512:phase_shift=20"
+# At 24 bits the rounding error sits below -140 dBFS, and dither there turns
+# digital silence into noise that takes far more room than the silence did.
+_DITHER = ":dither_method=triangular_hp"
 
 
 def _soxr_available():
@@ -101,7 +105,7 @@ def _soxr_available():
         r = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
              "-f", "lavfi", "-i", "anullsrc=r=96000:cl=stereo",
-             "-af", _SOXR_FILTER, "-ar", "48000", "-t", "0.05", "-f", "null", "-"],
+             "-af", _SOXR_FILTER + _DITHER, "-ar", "48000", "-t", "0.05", "-f", "null", "-"],
             capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
             env=cfg.child_env(),
             start_new_session=True,
@@ -491,7 +495,7 @@ def _encode_opts_for_bps(bps, af_filter):
     (af, sample_fmt, depth_args).
     """
     if bps == 16:
-        return af_filter, "s16", []
+        return af_filter + _DITHER, "s16", []
     if bps in (8, 24, 32):
         return (f"{af_filter},aformat=sample_fmts=s32", "s32",
                 ["-bits_per_raw_sample", str(bps)])
@@ -642,10 +646,13 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             return (rel, sr, rate, None,
                     f"resampled file came out {abs(gap) * 1000 / rate:.0f} ms "
                     f"{'short' if gap < 0 else 'long'} (the source may be damaged)")
-        # With art copied bit-for-bit a real downsample always shrinks the file;
-        # if it somehow didn't, replacing the source only churns it (and a
-        # larger output would drive saved_bytes negative), so keep the original.
-        if out_size >= in_size:
+        # A real downsample always shrinks the audio; if it somehow didn't,
+        # replacing the source only churns it, so keep the original. Tags, art
+        # and the room left for the seek table are not audio, and outweigh it
+        # on a silent track.
+        in_audio = in_size - flac_audio_offset(None, descriptor=binding.track_fd)
+        out_audio = out_size - flac_audio_offset(None, descriptor=temp_fd)
+        if out_audio >= in_audio:
             return (rel, sr, rate, None,
                     "resampled output not smaller than source")
         # The exclusive temp starts at 0o600 in the app's group; carry the

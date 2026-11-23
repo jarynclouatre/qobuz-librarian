@@ -30,6 +30,7 @@ from qobuz_librarian.library.backup import (
     settle_library_backup_intent,
     unread_audio,
     warn_pin_failed,
+    without_unread_audio,
 )
 from qobuz_librarian.library.candidate_premise import (
     durable_receipts_match,
@@ -474,6 +475,8 @@ def finish_library_backup_settlement(
     authority_check()
 
     if backup is not None:
+        if data["carrier"]["kind"] == "upgrade":
+            validator = without_unread_audio(validator, backup, current_receipt)
         disposed = dispose_backup(
             backup,
             replacement_path=replacement,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from qobuz_librarian import config as cfg
@@ -91,6 +92,16 @@ def queue_item_may_create_library_backup(item) -> bool:
     )
 
 
+def _gone(path):
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        pass
+    return False
+
+
 def plan_durable_new_album(
     item, args, *, check_beets=True,
 ) -> DurableNewAlbumPlan | None:
@@ -157,10 +168,13 @@ def plan_durable_new_album(
     targets = [album_max_quality(track, 2) for track in tracks]
     targets = [(b, r) if b and r else floor for b, r in targets]
     # The lane only completes once the backup is gone, and audio the album
-    # reader skips stays in it.
-    if whole_upgrade and unread_audio(
-            capture_album_tree_identity(item["album_dir"]), item["album_dir"]):
-        return None
+    # reader skips stays in it. A folder it cannot read may hold some; once
+    # the backup has moved it away, there is nothing left to check.
+    if whole_upgrade:
+        unread = unread_audio(
+            capture_album_tree_identity(item["album_dir"]), item["album_dir"])
+        if unread or (unread is None and not _gone(item["album_dir"])):
+            return None
     if check_beets:
         # Late: only an album that qualifies so far needs the Beets
         # integration, whose check runs Beets to read its config.

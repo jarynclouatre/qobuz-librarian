@@ -1038,7 +1038,9 @@ def _undo_state(undo, tok, path, origin, restorable, name, dest, album):
             f'<input type="hidden" name="backup" value="{name}">'
             f'<button type="submit" class="ql-btn ql-btn-sm ql-btn-secondary" '
             f'data-confirm="Put the hi-res originals of '
-            f'{album or dest} back? This undoes the downsample." '
+            f'{album or dest} back? This undoes the downsample and '
+            f'loses changes made since to tags, ratings and embedded covers. '
+            f'Lyrics added since are kept." '
             f'data-confirm-action="Restore">Restore</button>'
             f'</form>')
         what = "hi-res originals"

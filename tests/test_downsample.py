@@ -53,7 +53,7 @@ def test_resample_preserves_source_bit_depth():
     assert depth == ["-bits_per_raw_sample", "24"]
     assert af.endswith("aformat=sample_fmts=s32")
 
-    assert _encode_opts_for_bps(16, base) == (base, "s16", [])
+    assert _encode_opts_for_bps(16, base) == (base + de._DITHER, "s16", [])
 
     assert _encode_opts_for_bps(0, base) == (base, "s32", [])
 

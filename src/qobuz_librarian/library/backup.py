@@ -3075,6 +3075,15 @@ def unread_audio(source_receipt, folder, replacement_receipt=None):
         return None
 
 
+def without_unread_audio(validator, backup, replacement_receipt):
+    """``validator``, and no audio in ``backup`` that the album reader
+    skips: the proof an upgrade's backup is disposed on."""
+    return lambda replacement, held: (
+        validator(replacement, held)
+        and unread_audio(backup.receipt, held, replacement_receipt) == []
+    )
+
+
 def _downsample_encode(path):
     from qobuz_librarian.integrations import downsample_engine
 

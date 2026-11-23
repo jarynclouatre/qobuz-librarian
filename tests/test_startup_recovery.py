@@ -503,6 +503,58 @@ def test_restart_reconciles_exact_backup_disposal_quarantine(
         assert not backup.path.exists()
 
 
+def test_a_settlement_sealed_before_the_hidden_audio_check_keeps_it(
+    tmp_path,
+    monkeypatch,
+):
+    # An earlier version sealed the settlement without looking for audio the
+    # album reader skips, and the next start removed the backup holding it.
+    import qobuz_librarian.library.backup as backup_module
+    from qobuz_librarian.queue import library_backup_recovery
+
+    music = tmp_path / "music"
+    album = music / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "01.flac").write_bytes(b"original")
+    (album / ".Demo.flac").write_bytes(b"demo")
+    monkeypatch.setattr(backup_module.cfg, "MUSIC_ROOT", music)
+    monkeypatch.setattr(backup_module.cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    owner = RecoveryOwner("a" * 64, "b" * 64)
+    backup = backup_module.backup_album_dir(
+        album, owner=owner.to_record(), on_intent=lambda _record: None)
+    album.mkdir()
+    (album / "01.flac").write_bytes(b"replacement")
+    settlement = journal.RecoveryReference(
+        "library-backup",
+        "library-backup-settlement",
+        {
+            "version": 2,
+            "owner": owner.to_record(),
+            "carrier": backup_module.library_backup_record(
+                backup, expected_owner=owner.to_record()),
+            "replacement_path": str(album),
+            "replacement_receipt": (
+                backup_module.capture_album_source_receipt(album)),
+            "disposal": backup_module.library_backup_disposal_record(
+                backup, expected_owner=owner.to_record()),
+        },
+    )
+    held = SimpleNamespace(items=[SimpleNamespace(
+        item_id=owner.item_id, recovery_references=(settlement,))])
+    monkeypatch.setattr(library_backup_recovery, "_replacement_validator",
+                        lambda _kind, _album: lambda *_paths: True)
+    monkeypatch.setattr(library_backup_recovery, "retire_replaced_entries",
+                        lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(library_backup_recovery.queue_state,
+                        "finish_library_backup_settlement",
+                        lambda current, *_args: current)
+
+    library_backup_recovery.finish_library_backup_settlement(
+        held, owner.item_id, owner, {}, authority_check=lambda: None)
+
+    assert (backup.path / ".Demo.flac").read_bytes() == b"demo"
+
+
 def test_startup_recovery_is_fail_closed_and_settles_exact_work(
     tmp_path,
     monkeypatch,

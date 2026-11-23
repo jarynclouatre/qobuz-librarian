@@ -155,7 +155,8 @@ class _DownsampleWalk:
                 "restorable copy of each original is kept for "
                 f"{plural(cfg.UPGRADE_BACKUP_RETENTION_DAYS, 'day')}; a rewrite "
                 "can be undone from Settings → Diagnostics in the web app until "
-                "then.")))
+                "then. Undoing loses changes made since to tags, ratings and "
+                "embedded covers.")))
         elif cfg.DOWNSAMPLE_KEEP_ORIGINALS == "delete":
             log.info(block(fmt(C.YELLOW,
                 "  ⚠  This rewrites hi-res files in place to 44.1/48kHz. The "

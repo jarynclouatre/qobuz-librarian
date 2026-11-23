@@ -93,6 +93,7 @@ from qobuz_librarian.library.backup import (
     unwritable_folder,
     unwritable_new_album_folder,
     warn_pin_failed,
+    without_unread_audio,
 )
 from qobuz_librarian.library.candidate_premise import (
     CandidateStale,
@@ -1441,7 +1442,9 @@ class _ItemResolution:
                     self.bp,
                     replacement_path=replacement_path,
                     expected_replacement_receipt=replacement_receipt,
-                    replacement_validator=_upgrade_trees_verified,
+                    replacement_validator=without_unread_audio(
+                        _upgrade_trees_verified, self.bp,
+                        replacement_receipt),
                 ):
                     self.item["upgrade_unverified"] = True
                     _pin_or_warn(
