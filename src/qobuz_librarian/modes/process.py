@@ -101,8 +101,10 @@ from qobuz_librarian.modes.consolidate import (
 from qobuz_librarian.quality.decision import (
     compare_album_quality,
     existing_track_quality,
+    lossy_label,
     mark_local_album_capped,
     quality_relation,
+    track_relation,
 )
 from qobuz_librarian.quality.verify import (
     quality_below_line,
@@ -332,10 +334,11 @@ def _upgrade_track_identity_matches(original, replacement):
     new_mbid = _recording_identity(replacement, "mb_trackid")
     if None in (old_isrc, new_isrc, old_mbid, new_mbid):
         return False
-    if old_isrc or new_isrc:
+    if tags.isrc_on_one_side(original, replacement):
+        return False
+    if old_isrc:
         return bool(
-            old_isrc
-            and old_isrc == new_isrc
+            old_isrc == new_isrc
             and not (old_mbid and new_mbid and old_mbid != new_mbid)
         )
     if old_mbid or new_mbid:
@@ -469,7 +472,10 @@ def _upgrade_trees_verified(post_dir, backup_path, damaged=()):
                 f"  ⚠  Upgrade matched {title} to a different recording "
                 "identity."))
             return False
-        relation = quality_relation(nq, oq)
+        if ot.get("lossy") and not nt.get("lossy"):
+            relation = "higher" if track_relation(ot, nq) == "lower" else "unknown"
+        else:
+            relation = quality_relation(nq, oq)
         if relation not in ("equal", "higher"):
             detail = (
                 "trades bit depth for sample rate"
@@ -567,6 +573,41 @@ def _missing_track_pictures(source, target):
     ]
 
 
+def _annotations_to_carry(old, target):
+    """The original track's own tags and pictures that ``target`` lacks. A
+    lossy original gives the tags mutagen's easy interface reads and its
+    lyrics; its pictures are not carried."""
+    import mutagen
+    from mutagen.flac import FLAC
+
+    if not old.get("lossy"):
+        source = FLAC(old["path"])
+        return (_carried_track_tags(source, target),
+                _missing_track_pictures(source, target))
+    easy = mutagen.File(old["path"], easy=True)
+    tags = [
+        (key, value) for key, values in (easy.tags or {}).items()
+        for value in values
+        if isinstance(value, str)
+        and key.lower() not in _REPLACEMENT_OWNED_TAGS
+        and not key.lower().startswith(_REPLACEMENT_OWNED_PREFIXES)
+    ]
+    rank = ("none", "plain", "synced").index
+    lyrics = max(lyric_fetch.tag_lyric_values(mutagen.File(old["path"])),
+                 key=lambda value: rank(lyric_fetch.classify(value)), default=None)
+    kind = lyric_fetch.classify(lyrics)
+    if kind != "none" and rank(kind) >= rank(lyric_fetch.classify(
+            lyric_fetch.get_existing_lyrics(target))):
+        tags.append(("lyrics", lyrics))
+    return tags, []
+
+
+def _carries_annotations(old, new):
+    return (Path(new["path"]).suffix.lower() == ".flac"
+            and (bool(old.get("lossy"))
+                 or Path(old["path"]).suffix.lower() == ".flac"))
+
+
 def _track_annotations_preserved(backup_path, replacement_path):
     from mutagen.flac import FLAC
 
@@ -577,14 +618,12 @@ def _track_annotations_preserved(backup_path, replacement_path):
     if pairs is None:
         return False
     for old, new in pairs:
-        if (Path(old["path"]).suffix.lower() != ".flac"
-                or Path(new["path"]).suffix.lower() != ".flac"):
+        if not _carries_annotations(old, new):
             return False
         try:
-            source = FLAC(old["path"])
             target = FLAC(new["path"])
-            if (not _tags_present(_carried_track_tags(source, target), target)
-                    or _missing_track_pictures(source, target)):
+            tags, pictures = _annotations_to_carry(old, target)
+            if not _tags_present(tags, target) or pictures:
                 return False
         except Exception:
             return False
@@ -627,17 +666,14 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None,
     carried_to = 0
     for old, new in pairs:
         target_path = Path(new["path"])
-        if (Path(old["path"]).suffix.lower() != ".flac"
-                or target_path.suffix.lower() != ".flac"):
+        if not _carries_annotations(old, new):
             continue
         try:
-            source = FLAC(old["path"])
             target = FLAC(str(target_path))
             if target.tags is None:
                 target.add_tags()
             lyric_keys = _LYRIC_TAGS
-            tags = _carried_track_tags(source, target)
-            pictures = _missing_track_pictures(source, target)
+            tags, pictures = _annotations_to_carry(old, target)
             if not pictures and _tags_present(tags, target):
                 continue
             if any(key.lower() in lyric_keys for key, _value in tags):
@@ -1167,6 +1203,11 @@ class _AlbumRun:
                         "quality and would be replaced unverified; "
                         f"filling gaps only."))
                     # Fall through to plain gap-fill; do NOT set auto_upgrade_active.
+                elif tags.upgrade_unprovable(self.existing, self.qobuz_tracks):
+                    log.info(fmt(C.YELLOW,
+                        "\n  ⚠  Not upgrading: ISRC tags are missing from these "
+                        "files or from Qobuz's copy, so the new copy can't be "
+                        "matched to them track by track."))
                 elif extras and self.missing and self.already_confirmed:
                     # User already okayed a gap-fill.
                     _exp, _exp_extras, _exp_qual = _offer_expanded_edition(
@@ -1300,6 +1341,7 @@ class _AlbumRun:
                 existing_label = "mostly " + existing_label
         else:
             existing_label = "lower-quality"
+        existing_label = lossy_label(self.existing) or existing_label
         self.upgrade_existing_label = existing_label
         _fill = f" +{len(self.missing)} gap-fill" if self.missing else ""
         if not self.already_confirmed:

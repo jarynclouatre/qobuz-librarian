@@ -189,3 +189,45 @@ def test_upgrade_scan_offers_only_the_edition_on_disk(tmp_path, monkeypatch):
         local["title"] = song
     assert decision.scan_artist_for_upgrades(
         "The Beatles", album_dir.parent, "tok", args, capped={}) == []
+
+
+def test_an_mp3_album_qobuz_has_in_flac_is_offered_as_an_upgrade(tmp_path, monkeypatch):
+    # An MP3 album counted as owned, yet Upgrade read its quality as unknown
+    # and never offered the FLAC Qobuz has of the same edition.
+    from mutagen.easyid3 import EasyID3
+
+    from qobuz_librarian import config as cfg
+    from qobuz_librarian.library import catalog, discovery, scanner
+    from qobuz_librarian.quality import decision
+
+    monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
+    album_dir = tmp_path / "Nova" / "Glass (2001)"
+    album_dir.mkdir(parents=True)
+    songs = ["Glass", "Shore", "Lantern"]
+    for i, song in enumerate(songs):
+        path = album_dir / f"0{i + 1} - {song}.mp3"
+        path.write_bytes((b"\xff\xfb\x90\x64" + bytes(413)) * 40)
+        tags = EasyID3()
+        tags.update(title=song, album="Glass", artist="Nova",
+                    tracknumber=str(i + 1), isrc=f"GBAYE010000{i}")
+        tags.save(path)
+    scanner.clear_scan_caches()
+    album = {
+        "id": "glass", "title": "Glass", "artist": {"name": "Nova"},
+        "release_date_original": "2001-05-01", "maximum_bit_depth": 16,
+        "maximum_sampling_rate": 44.1, "tracks_count": len(songs),
+        "streamable": True,
+        "tracks": {"items": [
+            {"id": f"glass-{i}", "title": song, "isrc": f"GBAYE010000{i}",
+             "track_number": i + 1}
+            for i, song in enumerate(songs)]},
+    }
+    monkeypatch.setattr(decision, "list_artist_album_dirs", lambda _d: [album_dir])
+    monkeypatch.setattr(discovery, "resolve_artist", lambda *a: ("7", "Nova"))
+    monkeypatch.setattr(decision, "get_artist_albums", lambda *a, **k: ([album], 1))
+    monkeypatch.setattr(catalog, "find_qobuz_album_for_dir", lambda *a, **k: album)
+    args = type("Args", (), {"prefer_hires": False, "no_upgrade": False})()
+
+    found = decision.scan_artist_for_upgrades(
+        "Nova", album_dir.parent, "tok", args, capped={})
+    assert [c["qobuz_album"]["id"] for c in found] == ["glass"]

@@ -62,7 +62,9 @@ log = logging.getLogger("qobuz_librarian")
 
 try:
     import mutagen
+    from mutagen.easymp4 import EasyMP4Tags
     HAVE_MUTAGEN = True
+    EasyMP4Tags.RegisterFreeformKey("isrc", "ISRC")
 except ImportError:
     mutagen = None
     HAVE_MUTAGEN = False
@@ -87,6 +89,16 @@ def parse_track_num(s):
 # every scan. Self-invalidates with mtime/size like any cache row.
 _NEG_META = {"__neg__": True}
 
+_LOSSY_INFO = {"MPEGInfo": "MP3", "OggVorbisInfo": "Vorbis", "OggOpusInfo": "Opus"}
+
+
+def _lossy_format(info):
+    """The lossy codec's name, or "" for a lossless file."""
+    name = type(info).__name__
+    if name == "MP4Info":
+        return "" if getattr(info, "codec", "") == "alac" else "AAC"
+    return _LOSSY_INFO.get(name, "")
+
 
 def read_audio_meta(path: Path):
     """Read tags and audio info via mutagen. Returns dict or None.
@@ -100,7 +112,10 @@ def read_audio_meta(path: Path):
     if not HAVE_MUTAGEN:
         return None
     cached = flac_cache.get(path)
-    if cached is not None:
+    # Files other than FLAC cached before the "lossy" key existed are read
+    # again once, so an MP3 or AAC album is not taken for a lossless one.
+    if cached is not None and ("lossy" in cached or cached.get("__neg__")
+                               or path.suffix.lower() in (".flac", ".wav")):
         # A cached negative result (unparseable / title-less file): return None
         # without re-parsing - these otherwise pay a full mutagen parse on every
         # scan even though they always fall back to the filename.
@@ -148,6 +163,7 @@ def read_audio_meta(path: Path):
         "sample_rate": getattr(info, "sample_rate", 0) if info else 0,
         "channels":    getattr(info, "channels", 0) if info else 0,
         "length":      getattr(info, "length", 0.0) if info else 0.0,
+        "lossy":       _lossy_format(info),
         "path":        str(path),
         # Carry the size from the signature so read_album_dir doesn't have to
         # re-stat every audio file just for its size (a second stat per file

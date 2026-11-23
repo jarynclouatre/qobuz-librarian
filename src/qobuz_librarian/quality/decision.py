@@ -25,7 +25,11 @@ from qobuz_librarian.library.scanner import (
     drop_artist_subdirs_cache,
     list_artist_album_dirs,
 )
-from qobuz_librarian.library.tags import similarity, strip_album_decorations
+from qobuz_librarian.library.tags import (
+    similarity,
+    strip_album_decorations,
+    upgrade_unprovable,
+)
 from qobuz_librarian.quality.tiers import (
     delivered_rate,
     downsample_target_rate,
@@ -123,6 +127,28 @@ def quality_relation(left, right):
     return "incomparable"
 
 
+def track_relation(track, target):
+    """How an existing track's quality relates to a lossless ``target``: a
+    lossy track (MP3, AAC, Vorbis, Opus) is below any lossless format."""
+    if track.get("lossy"):
+        known = None not in (_known_positive_int(target[0]),
+                             _known_positive_int(target[1]))
+        return "lower" if known else "unknown"
+    return quality_relation(existing_track_quality(track), target)
+
+
+def lossy_label(existing_tracks):
+    """Name the lossy files among ``existing_tracks`` ("MP3", "mixed, down
+    to MP3"), or "" when every file is lossless."""
+    formats = sorted({t["lossy"] for t in existing_tracks if t.get("lossy")})
+    if not formats:
+        return ""
+    named = " and ".join(formats)
+    if all(t.get("lossy") for t in existing_tracks):
+        return named
+    return f"mixed, down to {named}"
+
+
 def compare_album_quality(existing_tracks, qobuz_album):
     """Classify per-track quality of existing tracks vs what Qobuz offers for
     each (track_targets), at the rate Downsample keeps while it is on;
@@ -151,8 +177,7 @@ def compare_album_quality(existing_tracks, qobuz_album):
     n_below = n_at = n_above = n_unknown = n_incomparable = 0
 
     for t, target in zip(existing_tracks, targets):
-        ebits, erate = existing_track_quality(t)
-        relation = quality_relation((ebits, erate), target)
+        relation = track_relation(t, target)
         if relation == "unknown":
             n_unknown += 1
         elif relation == "lower":
@@ -564,16 +589,15 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
 
     # Pre-fetch artist catalog once so per-folder matching stays local. The
     # artist is the one the Library pass resolves, so both passes of a scan
-    # read the same catalog. Failure here is non-fatal;
+    # read the same catalog under the same name. Failure here is non-fatal;
     # find_qobuz_album_for_dir falls back to search. A folder named for
     # several artists is matched under the first-named one standing in.
     catalog = []
     try:
-        artist_id, resolved_name, by_lead = discovery.resolve_folder_artist(
+        artist_id, resolved_name, _by_lead = discovery.resolve_folder_artist(
             artist_name, token, album_dirs)
-        if by_lead:
-            artist_name = resolved_name
         if artist_id:
+            artist_name = resolved_name or artist_name
             catalog, _ = get_artist_albums(artist_id, token, limit=cfg.ARTIST_CATALOG_LIMIT)
     except (QobuzError, discovery.ArtistSearchUnavailable):
         pass
@@ -689,18 +713,26 @@ def scan_artist_for_upgrades(artist_name, artist_dir, token, args, capped=None):
                 track.get("streamable") is False for track in present):
             vlog(f"    {album_dir.name}: Qobuz doesn't stream it")
             continue
+        if upgrade_unprovable(existing, qobuz_tracks):
+            vlog(f"    {album_dir.name}: ISRC tags missing on one side")
+            continue
 
         # Build human-readable quality labels for the upgrade summary.
         qbits, qrate = qual["qobuz_quality"]
         target_label = (f"{qbits}-bit/{qrate / 1000:g}kHz"
                         if qbits and qrate else "Qobuz quality")
+        lossy = lossy_label(existing)
+        if lossy:
+            target_label = f"FLAC {target_label}"
 
         _qcounts: dict = {}
         for t in existing:
             bb, rr = existing_track_quality(t)
             if bb and rr:
                 _qcounts[(bb, rr)] = _qcounts.get((bb, rr), 0) + 1
-        if len(_qcounts) > 1:
+        if lossy:
+            existing_label = lossy
+        elif len(_qcounts) > 1:
             # Mixed qualities on disk. A majority label can EQUAL the target
             # (one stray CD track in a hi-res album), which reads as a no-op
             # upgrade - name the low end instead, since that's what the

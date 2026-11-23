@@ -41,6 +41,22 @@ def canonical_recording_id(value, field):
     return None
 
 
+def isrc_on_one_side(track, other):
+    """True when only one of two tracks carries an ISRC, so neither can be
+    proven the other's recording."""
+    return (bool(canonical_recording_id(track.get("isrc"), "isrc"))
+            != bool(canonical_recording_id(other.get("isrc"), "isrc")))
+
+
+def upgrade_unprovable(existing, qobuz_tracks):
+    """True when a file on disk differs from every Qobuz track in carrying an
+    ISRC, so an upgrade could never pair that file with its replacement."""
+    return any(
+        all(isrc_on_one_side(track, other) for other in qobuz_tracks)
+        for track in existing
+    )
+
+
 def canonical_track_slot(track, disc_field, number_field):
     """Return a strict positive ``(disc, track)`` pair, or ``None``.
 

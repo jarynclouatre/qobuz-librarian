@@ -47,7 +47,7 @@ from qobuz_librarian.library.scanner import (
     list_artist_album_dirs,
     read_album_dir,
 )
-from qobuz_librarian.library.tags import VA_NORMALIZED, normalize
+from qobuz_librarian.library.tags import VA_NORMALIZED, normalize, upgrade_unprovable
 from qobuz_librarian.modes.process import (
     _fmt_quality,
     _track_quality,
@@ -570,7 +570,8 @@ class _ArtistGapFill:
         if (existing and not getattr(self.args, "no_upgrade", False)
                 and not getattr(self.args, "dry_run", False)):
             qual = compare_album_quality(existing, album)
-            if qual["classification"] in ("all_lower", "mixed_below"):
+            if (qual["classification"] in ("all_lower", "mixed_below")
+                    and not upgrade_unprovable(existing, qobuz_tracks)):
                 extra_albums = find_extras_in_existing(qobuz_tracks, existing)
                 has_extras = bool(extra_albums)
         if has_extras:

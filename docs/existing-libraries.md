@@ -112,6 +112,10 @@ An album whose only missing tracks are other versions of songs you have, such as
 
 Other pressings fold under **N other versions**. **Download** adds an edition's missing tracks to the folder that holds its other tracks; when no folder holds that edition, it downloads as a separate copy beside the version you have.
 
+Upgrade also offers an album you have as MP3, AAC, Ogg Vorbis or Opus when Qobuz has the same edition in FLAC, and replaces those files with FLACs.
+
+Upgrade replaces files only once each one is matched to its new copy, so it does not offer a folder where a file has no ISRC while Qobuz's tracks have one, or the other way round.
+
 ## The first scan on a big library
 
 A library-wide scan fetches artist matches, catalogue pages and owned-album tracklists from Qobuz, with caches reducing repeat requests. It scans a few artists at once (`ARTIST_SCAN_WORKERS`, default 4). Qobuz rate limits are handled by automatic retry and back-off. After the first scan, use the Library refresh for music added outside the app.
