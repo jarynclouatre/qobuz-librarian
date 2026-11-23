@@ -6,7 +6,9 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.routing import Match
 
 from qobuz_librarian import config as cfg
@@ -51,6 +53,19 @@ def _not_a_passing_health_check(record: logging.LogRecord) -> bool:
 logging.getLogger("uvicorn.access").addFilter(_not_a_passing_health_check)
 
 
+class _OwnPagesGZip(GZipMiddleware):
+    """Compresses only what the app's own pages ask for, or an address typed
+    in. A compressed page holding the CSRF token and text from the request
+    lets another site that loads it guess the token from its size (BREACH)."""
+
+    async def __call__(self, scope, receive, send):
+        site = Headers(scope=scope).get("sec-fetch-site") if scope["type"] == "http" else None
+        if site in ("same-origin", "none"):
+            await super().__call__(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
 app = FastAPI(title="Qobuz Librarian", docs_url=None, redoc_url=None,
               openapi_url=None, lifespan=lifespan._lifespan)
 
@@ -62,6 +77,12 @@ app.add_middleware(CSRFMiddleware)
 app.add_middleware(RequestBodyLimitMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(StripServerHeaderMiddleware)
+
+# Pages and fragments only. Event streams, downloads, images and the static
+# files go out as they are.
+app.add_middleware(_OwnPagesGZip, compresslevel=6, exclude_content_types=(
+    "application/*", "audio/*", "font/*", "image/*", "video/*",
+    "text/css", "text/event-stream", "text/javascript", "text/plain"))
 
 app.include_router(routes_auth.router)
 app.include_router(routes_discover.router)

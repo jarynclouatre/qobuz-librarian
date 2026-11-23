@@ -16,6 +16,7 @@ Things worth knowing if you edit this:
   untagged bonus tracks (mp3, m4a from older rips) stay visible to
   `find_extras_in_existing`.
 """
+import contextlib
 import logging
 import os
 import re
@@ -100,7 +101,7 @@ def _lossy_format(info):
     return _LOSSY_INFO.get(name, "")
 
 
-def read_audio_meta(path: Path):
+def read_audio_meta(path: Path, *, sig=None):
     """Read tags and audio info via mutagen. Returns dict or None.
 
     Works for any format mutagen understands (FLAC, MP3, M4A, …) through its
@@ -111,7 +112,11 @@ def read_audio_meta(path: Path):
     """
     if not HAVE_MUTAGEN:
         return None
-    cached = flac_cache.get(path)
+    # Capture the file signature before parsing so a file edited mid-scan isn't
+    # cached with its new mtime but these now-stale tags.
+    if sig is None:
+        sig = flac_cache.signature(path)
+    cached = flac_cache.get(path, sig)
     # Files other than FLAC cached before the "lossy" key existed are read
     # again once, so an MP3 or AAC album is not taken for a lossless one.
     if cached is not None and ("lossy" in cached or cached.get("__neg__")
@@ -120,9 +125,6 @@ def read_audio_meta(path: Path):
         # without re-parsing - these otherwise pay a full mutagen parse on every
         # scan even though they always fall back to the filename.
         return None if cached.get("__neg__") else cached
-    # Capture the file signature before parsing so a file edited mid-scan isn't
-    # cached with its new mtime but these now-stale tags.
-    sig = flac_cache.signature(path)
     try:
         f = mutagen.File(str(path), easy=True)
     except OSError:
@@ -238,11 +240,14 @@ def _undecodable(path) -> bool:
     return False
 
 
-def _is_type(path, predicate):
+def _is_type(path, predicate, signatures=None):
     try:
-        return predicate(path.stat().st_mode)
+        st = path.stat()
     except (FileNotFoundError, NotADirectoryError):
         return False
+    if signatures is not None:
+        signatures[path] = st.st_mtime_ns, st.st_size
+    return predicate(st.st_mode)
 
 
 def read_album_dir(album_dir: Path, walk_errors=None):
@@ -270,6 +275,8 @@ def read_album_dir(album_dir: Path, walk_errors=None):
         return []
 
     audio_files = []
+    # The tag cache checks each file against the stat taken here.
+    signatures = {}
     _exts = set(config.AUDIO_EXTS)
     try:
         for f in iter_tree_no_symlinks(album_dir, errors=walk_errors):
@@ -280,7 +287,7 @@ def read_album_dir(album_dir: Path, walk_errors=None):
                 if (f.suffix.lower() in _exts
                         and not in_system_folder(f, album_dir)
                         and not _undecodable(f.parent) and not _undecodable(f)
-                        and _is_type(f, stat.S_ISREG)):
+                        and _is_type(f, stat.S_ISREG, signatures)):
                     audio_files.append(f)
             except OSError as e:
                 if walk_errors is None:
@@ -298,7 +305,7 @@ def read_album_dir(album_dir: Path, walk_errors=None):
     tracks = []
     for f in audio_files:
         try:
-            tags = read_audio_meta(f)
+            tags = read_audio_meta(f, sig=signatures.get(f))
         except OSError as e:
             # The file is listed but can't be read: drop it AND mark the walk
             # degraded.
@@ -568,31 +575,58 @@ def list_artist_album_dirs(artist_dir: Path, walk_errors=None):
 # stays bounded.
 _ARTIST_SUBDIRS_CACHE: dict = {}
 _scan_caches_cleared = 0
+_held = threading.local()
+
+
+@contextlib.contextmanager
+def listings_held():
+    """Inside the block, compare each folder's cached listing with the disk
+    once. A page of Search results asks about the music folder and the same
+    artist folders for every result."""
+    outer = getattr(_held, "checked", None)
+    _held.checked = set()
+    try:
+        yield
+    finally:
+        _held.checked = outer
+
+
+def listing_checked(folder) -> bool:
+    """Whether the folder's listing was compared with the disk, and so the
+    folder existed, inside the current listings_held() block."""
+    checked = getattr(_held, "checked", None)
+    return checked is not None and str(folder) in checked
 
 
 def _list_artist_subdirs_cached(artist_dir: Path):
     key = str(artist_dir)
+    checked = getattr(_held, "checked", None)
     try:
+        # Atomic get (see _has_audio_anywhere): an `in`/`[]` pair could
+        # KeyError if a concurrent clear_scan_caches() empties the dict
+        # between them.
+        cached = _ARTIST_SUBDIRS_CACHE.get(key)
+        if cached is not None and checked is not None and key in checked:
+            return cached[1]
         # A folder's mtime moves whenever an entry in it is added, removed or
         # renamed, so a listing taken before the user deleted an album outside
         # the app is not used after it. Search keeps this cache between
         # requests, and a removed folder still listed here would be taken
         # for another version of the album.
         stamp = artist_dir.stat().st_mtime_ns
-        # Atomic get (see _has_audio_anywhere): an `in`/`[]` pair could
-        # KeyError if a concurrent clear_scan_caches() empties the dict
-        # between them.
-        cached = _ARTIST_SUBDIRS_CACHE.get(key)
-        if cached is not None and cached[0] == stamp:
-            return cached[1]
-        folders = [d for d in artist_dir.iterdir() if _is_type(d, stat.S_ISDIR)]
-        subdirs = sorted((d for d in folders if not _undecodable(d)),
-                         key=lambda p: p.name.lower())
+        if cached is None or cached[0] != stamp:
+            folders = [d for d in artist_dir.iterdir()
+                       if _is_type(d, stat.S_ISDIR)]
+            subdirs = sorted((d for d in folders if not _undecodable(d)),
+                             key=lambda p: p.name.lower())
+            cached = (stamp, subdirs, len(folders) > len(subdirs))
+            _ARTIST_SUBDIRS_CACHE[key] = cached
     except OSError as e:
         vlog(f"  iterdir failed for {artist_dir}: {e}")
         raise
-    _ARTIST_SUBDIRS_CACHE[key] = (stamp, subdirs, len(folders) > len(subdirs))
-    return subdirs
+    if checked is not None:
+        checked.add(key)
+    return cached[1]
 
 
 def has_undecodable_subdirs(artist_dir: Path) -> bool:

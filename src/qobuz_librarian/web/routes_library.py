@@ -461,7 +461,7 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
     if (refreshed is not None and refreshed.execute_kind == "library"
             and refreshed.status is job_mgr.JobStatus.DONE and refreshed.summary):
         notice_bits.append(refreshed.summary)
-    # The page that watched a scan to its end asks for itself again with it.
+    # The page reloads with ?finished=<job id> when the scan it was showing ends.
     finished = job_mgr.registry.get(request.query_params.get("finished", ""))
     # Bring all back redirects here with what happened, a store-write failure
     # included.

@@ -220,6 +220,20 @@ def read_sample_rate(path: Path, *, pass_fds=()) -> int:
     return _metaflac_int(path, "--show-sample-rate", pass_fds)
 
 
+def _scan_sample_rate(path: Path) -> int:
+    """read_sample_rate through the library's tag reader, so the tag pass that
+    follows a first scan finds the file already parsed instead of opening it
+    again."""
+    if cfg.FLAC_CACHE_ENABLED:
+        try:
+            meta = scanner.read_audio_meta(path)
+        except OSError:
+            meta = None
+        if meta and meta.get("sample_rate"):
+            return int(meta["sample_rate"])
+    return read_sample_rate(path)
+
+
 def parse_flac_total_samples(data: bytes) -> int:
     """Return the 36-bit total_samples from FLAC STREAMINFO bytes, or 0.
 
@@ -285,7 +299,7 @@ def scan_dir_for_hires(directory):
                 or p.suffix.lower() != ".flac"):
             continue
         n_flac += 1
-        sr = read_sample_rate(p)
+        sr = _scan_sample_rate(p)
         rate = target_rate(sr)
         if not rate:
             continue

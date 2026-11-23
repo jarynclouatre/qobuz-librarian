@@ -50,8 +50,9 @@ def signature(path):
         return None
 
 
-def get(path) -> dict | None:
+def get(path, sig=None) -> dict | None:
     """Cached tags for ``path`` if the file is unchanged since they were stored.
+    ``sig`` is the file's signature when the caller has just read it.
 
     Checks the in-memory write buffer first: a ``put()`` between two scan
     passes hasn't been flushed yet, but the second pass shouldn't have to
@@ -59,7 +60,8 @@ def get(path) -> dict | None:
     """
     if not _db.ensure():
         return None
-    sig = signature(path)
+    if sig is None:
+        sig = signature(path)
     if sig is None:
         return None
     mtime_ns, size = sig
@@ -166,6 +168,25 @@ def _gone(path) -> bool:
     return False
 
 
+def _gone_from(listing, path) -> bool:
+    """_gone() with the parent folder listed once for all its rows. Only a
+    name the listing lacks is looked up on its own."""
+    parent, _, name = path.rpartition("/")
+    if listing.get("folder") != parent:
+        listing["folder"] = parent
+        try:
+            listing["names"] = set(os.listdir(parent))
+        except (FileNotFoundError, NotADirectoryError):
+            listing["names"] = None
+            listing["gone"] = True
+        except OSError:
+            listing["names"] = None
+            listing["gone"] = False
+    if listing["names"] is None:
+        return listing["gone"] or _gone(path)
+    return name not in listing["names"] and _gone(path)
+
+
 def _library_folders():
     """The names at the top of MUSIC_ROOT other than NAS and Windows system
     folders, or None when it can't be listed."""
@@ -206,15 +227,17 @@ def prune_missing(force: bool = False) -> int:
     flush_pending()
     root = str(cfg.MUSIC_ROOT).rstrip("/") + "/"
     listed = _library_folders()
+    listing = {}
 
     def stale(path):
         unlisted = (listed is not None and path.startswith(root)
                     and path[len(root):].split("/", 1)[0] not in listed)
-        return unlisted or _gone(path)
+        return unlisted or _gone_from(listing, path)
 
     try:
         conn = _db.conn()
-        gone = [(p,) for (p,) in conn.execute("SELECT path FROM files")
+        gone = [(p,) for (p,) in
+                conn.execute("SELECT path FROM files ORDER BY path")
                 if stale(p)]
         if gone:
             conn.executemany("DELETE FROM files WHERE path = ?", gone)

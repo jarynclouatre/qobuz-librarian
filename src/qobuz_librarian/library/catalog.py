@@ -39,6 +39,7 @@ from qobuz_librarian.library.scanner import (
     has_undecodable_subdirs,
     is_library_system_folder,
     iter_tree_no_symlinks,
+    listing_checked,
     read_album_dir,
 )
 from qobuz_librarian.library.tags import (
@@ -176,10 +177,14 @@ def _listed_root_dir(name):
         return None
 
 
+def _music_root_exists():
+    return listing_checked(config.MUSIC_ROOT) or config.MUSIC_ROOT.exists()
+
+
 def _find_multi_artist_dirs(qartist):
     """Return MUSIC_ROOT children whose name is 'qartist<sep><other>'.
     Uses the scan cache so artist-mode runs don't re-iterdir."""
-    if not qartist or not config.MUSIC_ROOT.exists():
+    if not qartist or not _music_root_exists():
         return []
     return _root_dirs_matching(
         ("multi", qartist), lambda name: _is_multi_artist_subset(name, qartist))
@@ -377,7 +382,7 @@ def _artist_search_dirs(artist):
     # 'Motörhead' vs 'Motorhead'); the exact .exists() checks above miss
     # those, so also take any artist folder whose ASCII-folded name matches.
     artist_norms = {normalize(av) for av in artist_variants if normalize(av)}
-    if artist_norms and config.MUSIC_ROOT.exists():
+    if artist_norms and _music_root_exists():
         for d in _root_dirs_matching(
                 ("folded", frozenset(artist_norms)),
                 lambda name: normalize(name) in artist_norms):
@@ -545,7 +550,7 @@ def _artist_dirs_for_track_signatures(signatures):
             _push(direct)
 
     wanted_norms = {normalize(a) for a in artist_names if normalize(a)}
-    if wanted_norms and config.MUSIC_ROOT.exists():
+    if wanted_norms and _music_root_exists():
         for d in _root_dirs_matching(
                 ("folded", frozenset(wanted_norms)),
                 lambda name: normalize(name) in wanted_norms):

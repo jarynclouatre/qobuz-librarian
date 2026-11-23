@@ -66,8 +66,8 @@ def _last_finished(kind, statuses=job_mgr.TERMINAL):
 
 def _ended_run(request, kind, statuses=(job_mgr.JobStatus.DONE,
                                         job_mgr.JobStatus.FAILED)):
-    """The ``kind`` run whose page watched it to its end and now asks for
-    itself again with it, or None."""
+    """The ``kind`` run named in ?finished=, which its page adds when it
+    reloads after that run ends, or None."""
     job = job_mgr.registry.get(request.query_params.get("finished", ""))
     if (job is not None and job.execute_kind == kind and job.phase == "execute"
             and job.status in statuses):

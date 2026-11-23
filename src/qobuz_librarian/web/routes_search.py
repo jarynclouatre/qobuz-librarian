@@ -35,6 +35,7 @@ from qobuz_librarian.library import (
     generation_state,
     new_releases,
     scan_checkpoint,
+    scanner,
     tags,
 )
 from qobuz_librarian.library import hidden as hidden_mod
@@ -646,6 +647,7 @@ async def _track_results(raw, query, token, queued_tracks):
     if _track_raws:
         stop = threading.Event()
 
+        @scanner.listings_held()
         def _annotate_owned_tracks():
             albums = {}
             for res, track in zip(results, _track_raws):
@@ -746,6 +748,7 @@ async def _album_results(raw, query, token, queued_albums, scanning_albums):
         annotations = []
         stop = threading.Event()
 
+        @scanner.listings_held()
         def _annotate_owned():
             unreachable = []
 

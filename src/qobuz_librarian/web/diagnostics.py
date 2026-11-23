@@ -353,6 +353,14 @@ def _size_note(path) -> str:
     return f" · {format_size(size)}" if size else ""
 
 
+def _is_dir(entry):
+    # A link that cannot be followed is not counted, as Path.is_dir() has it.
+    try:
+        return entry.is_dir()
+    except OSError:
+        return False
+
+
 def _dir_check(checks, label, path, *, want_writable, skip_names=(),
                unit=("entry", "entries"), show_size=False,
                dirs_only=False, note=""):
@@ -390,9 +398,10 @@ def _dir_check(checks, label, path, *, want_writable, skip_names=(),
                        f"{display} is not writable by the user running the app"})
         return
     try:
-        n = sum(1 for entry in p.iterdir()
-                if entry.name not in skip_names
-                and (not dirs_only or entry.is_dir()))
+        with os.scandir(p) as entries:
+            n = sum(1 for entry in entries
+                    if entry.name not in skip_names
+                    and (not dirs_only or _is_dir(entry)))
     except OSError as e:
         checks.append({"label": label, "ok": False,
                        "detail": f"{display} unreadable: {e}"})

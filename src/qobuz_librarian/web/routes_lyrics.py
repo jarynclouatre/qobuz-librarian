@@ -4,6 +4,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.integrations import lyric_fetch
+from qobuz_librarian.library import lyrics as library_lyrics
 from qobuz_librarian.web import (
     flows,
     job_labels,
@@ -21,8 +22,8 @@ def _stopped_line(summary):
     """A stopped scan's summary without the "Stopped" the chip beside it
     already says."""
     line = (summary or "").removeprefix(job_persistence.RESTART_INTERRUPTED).strip()
-    for said, plain in (("Stopped after checking ", "Checked "),
-                        ("Stopped after reading ", "Read ")):
+    for said, plain in ((f"{library_lyrics.STOPPED}checking ", "Checked "),
+                        (f"{library_lyrics.STOPPED}reading ", "Read ")):
         if line.startswith(said):
             return f"{plain}{line[len(said):]} The next scan carries on from there."
     return line or "The next scan carries on from where this one stopped."
