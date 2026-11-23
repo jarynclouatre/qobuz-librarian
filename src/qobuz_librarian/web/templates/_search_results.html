@@ -413,7 +413,7 @@
 
 {% if error %}
 <div class="ql-notice ql-notice-warning ql-search-error" data-flash>
-  <span>{% if not guidance %}Search error: {% endif %}{{ error }}{% if not error.endswith('.') %}.{% endif %}</span>
+  <span>{% if not guidance %}Search error: {% endif %}{{ error | link_settings }}{% if not error.endswith('.') %}.{% endif %}</span>
 </div>
 {% endif %}
 

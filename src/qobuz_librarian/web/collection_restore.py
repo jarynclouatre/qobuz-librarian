@@ -418,9 +418,9 @@ def scan_restore(job, snapshot, token):
         parts.append(f"{plural(owned, 'album')} already in your library.")
     if unresolved:
         parts.append(f"{plural(len(unresolved), 'album')} couldn't be matched "
-                     "on Qobuz; see the job log.")
+                     "on Qobuz; the Activity log names them.")
     if unlisted:
         parts.append("Qobuz no longer lists the missing tracks of "
-                     f"{plural(unlisted, 'album')}; see the job log.")
+                     f"{plural(unlisted, 'album')}; the Activity log names them.")
     job.summary = " ".join(parts)
     log.info(job.summary)

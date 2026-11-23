@@ -194,12 +194,18 @@ def _last_finished_library_job():
 
 
 def _library_refresh_outcome():
-    """What the library work that just ended actually did, or ""."""
+    """What the library work that just ended actually did, or "". A failed
+    scan has its own notice on the page; a failed download says what it got
+    and what it did not."""
     latest = _last_finished_library_job()
-    if latest is None or latest.status is job_mgr.JobStatus.FAILED:
+    if latest is None or time.time() - (latest.finished_at or 0) > 300:
         return ""
-    if time.time() - (latest.finished_at or 0) > 300:
-        return ""
+    if latest.status is job_mgr.JobStatus.FAILED:
+        if latest.phase != "execute":
+            return ""
+        return " ".join(dict.fromkeys(
+            part for part in (str(latest.summary or "").strip(),
+                              str(latest.error or "").strip()) if part))
     return str(latest.summary or "").strip()
 
 

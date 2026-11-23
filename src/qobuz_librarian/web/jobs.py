@@ -28,6 +28,7 @@ import uuid
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Callable, Optional
 
 from qobuz_librarian import config as cfg
@@ -1175,6 +1176,9 @@ def staging_holder() -> Optional[str]:
         return _staging_holder
 
 
+TOKEN_REJECTED = "Qobuz rejected the saved token. Reconnect in Settings."
+
+
 def qobuz_action_error_message(exc) -> str:
     """Short action-gate copy shared by scans and review approvals."""
     if isinstance(exc, NoCredsError):
@@ -1182,7 +1186,7 @@ def qobuz_action_error_message(exc) -> str:
     elif isinstance(exc, DownloadsRefused):
         message = str(exc)
     elif isinstance(exc, AuthLost):
-        message = "Qobuz rejected the saved token. Reconnect in Settings."
+        message = TOKEN_REJECTED
     elif isinstance(exc, DownloaderNotReady):
         message = (
             "Your Qobuz token works, but downloads also need your Qobuz "
@@ -1209,11 +1213,11 @@ def _friendly_job_error(exc, fallback: str) -> str:
     if isinstance(exc, DownloadsRefused):
         return str(exc)
     if isinstance(exc, AuthLost):
-        return "Token is expired or invalid. Update it in Settings."
+        return TOKEN_REJECTED
     if isinstance(exc, QobuzUnavailable):
         return str(exc)
     if isinstance(exc, QobuzError):
-        return "Qobuz answered with an error. The job log has the response."
+        return "Qobuz answered with an error. The Activity log has the response."
     if isinstance(exc, CandidateStale):
         return str(exc)
     if isinstance(exc, FileNotFoundError):
@@ -1223,13 +1227,22 @@ def _friendly_job_error(exc, fallback: str) -> str:
         if exc.filename:
             shown, _is_host = storage._resolve_host_path(str(exc.filename))
             named = f": {shown}"
-        return f"A file or tool the job needed is missing{named}. See job log."
+        return (f"A file or tool the job needed is missing{named}. The Activity "
+                "log says why.")
     if isinstance(exc, beets.MusicDiskFull):
         return f"{exc.strerror}."
     if isinstance(exc, OSError):
         import errno
         if exc.errno == errno.ENOSPC:
-            return "Out of disk space. Free space and retry."
+            where = ""
+            if exc.filename:
+                folder = Path(os.fsdecode(exc.filename))
+                for root in (cfg.STAGING_DIR, cfg.MUSIC_ROOT):
+                    if folder.is_relative_to(root):
+                        folder = Path(root)
+                shown, _is_host = storage._resolve_host_path(str(folder))
+                where = f" in {shown}"
+            return f"Out of disk space{where}. Free space there and retry."
         if exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
             return ("Permission denied writing to the staging or music dir. "
                     "Check PUID/PGID match the volume owner.")

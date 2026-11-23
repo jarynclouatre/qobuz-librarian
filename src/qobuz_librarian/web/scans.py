@@ -211,8 +211,19 @@ def _check_library_folders():
             "message": problem,
         }
     unreadable = []
-    artists = scanner.list_library_artists(
-        on_artist_error=lambda path, error: unreadable.append(path.name))
+    try:
+        artists = scanner.list_library_artists(
+            on_artist_error=lambda path, error: unreadable.append(path.name))
+    except OSError as e:
+        if not isinstance(e, PermissionError):
+            message = f"{root} could not be read. {storage._music_root_hint()}"
+        else:
+            shown, _is_host = storage._resolve_host_path(str(root))
+            message = (f"Qobuz Librarian can't open the music folder {shown}. "
+                       "Give the user it runs as (PUID and PGID in Docker) "
+                       "read and write access to it.")
+        return {"ready": False, "empty": False, "count": 0,
+                "message": message}
     if unreadable:
         return {
             "ready": bool(artists), "empty": False, "count": len(artists),
@@ -231,6 +242,7 @@ def _check_library_folders():
                 "count": 0,
                 "message": storage._music_write_target_message(
                     write_state, recorded, diagnostic=True),
+                "backup": write_state == "recorded_empty",
             }
         if storage._docker_made_folder(root):
             return {

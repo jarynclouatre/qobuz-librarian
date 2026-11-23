@@ -316,17 +316,21 @@
     {% endif %}
     {% if job.error %}
     <div class="ql-notice {{ 'ql-notice-warning' if job.tracks_missing or job.interrupted_by_restart or job.execute_args.get('partly_done') else 'ql-notice-error' }} ql-job-error">
-      <span>{{ job.error | strip_log_pointer(job.log_lines) }}</span>
+      <span>{{ job.error | strip_log_pointer(job.log_lines) | link_settings }}</span>
       {% if job.execute_args.get('retry_disabled') == 'backup' %}
       <a href="/settings#diagnostics" class="ql-btn ql-btn-secondary ql-btn-sm">Open Diagnostics</a>
       {% endif %}
     </div>
     {% endif %}
     <div class="ql-job-actions">
+      {% set _token_failed = job.error == token_rejected and health_token_invalid %}
+      {% if _token_failed %}
+      <a href="/settings#qobuz" class="ql-btn ql-btn-primary ql-btn-sm">Open Settings</a>
+      {% endif %}
       {% if (s in ('failed', 'canceled') or job.tracks_missing) and job.album_id and not job.execute_args_unreadable and not job.execute_args.get('retry_disabled') and not job._preserve_persisted_single and not job._single_undo_unavailable and job.attention != 'recovery' %}
       <form action="/jobs/{{ job.id }}/retry" method="post">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-        <button type="submit" class="ql-btn ql-btn-primary ql-btn-sm"{% if downloads_paused %} disabled title="{{ downloads_paused_reason }}" aria-disabled="true"{% endif %}>Retry</button>
+        <button type="submit" class="ql-btn {{ 'ql-btn-secondary' if _token_failed else 'ql-btn-primary' }} ql-btn-sm"{% if downloads_paused %} disabled title="{{ downloads_paused_reason }}" aria-disabled="true"{% endif %}>Retry</button>
         {% if downloads_paused %}{% with writes_paused=downloads_paused, writes_paused_reason=downloads_paused_reason %}{% include "_writes_paused_reason.html" %}{% endwith %}{% endif %}
       </form>
       {% elif job.execute_args.get('retried_as') %}

@@ -339,18 +339,20 @@
         </p>
       </div>
       {% endset %}
-      {% if auth_token_set %}
-      {{ user_field }}
-      {% else %}
+      {% set _token_rejected = token_verified is sameas false and not creds_from_env %}
+      {% if not auth_token_set or _token_rejected %}
       <ol class="ql-step-list max-w-lg">
         <li><span class="ql-step-number">1</span><span>On a computer, sign in at <a href="https://play.qobuz.com" target="_blank" rel="noopener" class="ql-inline-link">play.qobuz.com</a>.</span></li>
         <li><span class="ql-step-number">2</span><span>Open developer tools (F12) and go to Local Storage → play.qobuz.com (Application tab in Chrome and Edge, Storage tab in Firefox).</span></li>
         <li><span class="ql-step-number">3</span><span>Open the <code>localuser</code> entry. Copy <code>token</code> into Auth token. <code>id</code> is your user ID.</span></li>
       </ol>
       {% endif %}
+      {% if auth_token_set %}{{ user_field }}{% endif %}
       <div class="ql-field">
         <label class="ql-field-label" for="auth_token">Auth token{% if not creds_from_env %} <span class="ql-required" aria-hidden="true">*</span>{% endif %}</label>
-        {% if auth_token_set %}
+        {% if _token_rejected %}
+        <p class="ql-field-help">Qobuz rejected the saved token. Paste a new one.</p>
+        {% elif auth_token_set and not creds_from_env %}
         <p class="ql-field-state">Token saved. Leave this field blank to keep it.</p>
         {% endif %}
         <div class="relative max-w-lg">

@@ -101,9 +101,10 @@
 
   {% if library_job %}
   {% set _root_gone = not library_scan_state.ready and not library_scan_state.empty %}
-  {% if _root_gone %}
-  <div class="ql-notice ql-notice-warning" role="status">
+  {% if _root_gone and not (writes_paused_notice and writes_paused_notice.music) %}
+  <div class="ql-notice ql-notice-warning flex-wrap" role="status">
     <span class="ql-notice-copy"><strong>Music library unavailable.</strong> {{ library_scan_state.message }}</span>
+    {% if library_scan_state.backup %}<a href="/settings#collection-backup" class="ql-btn ql-btn-sm ql-btn-secondary ql-notice-action">Open Settings</a>{% endif %}
   </div>
   {% endif %}
   {% if library_resume and library_baseline_exists %}
@@ -134,6 +135,7 @@
           downloads_paused_reason = downloads_paused_reason or 'The music library is unavailable.' %}{% include "_job_body.html" %}{% endwith %}
 
   {% elif not library_scan_state.ready %}
+  {% if library_scan_state.empty or not (writes_paused_notice and writes_paused_notice.music) %}
   <section class="ql-work-card">
     <div class="ql-notice {% if library_scan_state.empty %}ql-notice-info{% else %}ql-notice-warning{% endif %} ql-tool-notice">
       <svg xmlns="http://www.w3.org/2000/svg" class="ql-notice-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
@@ -144,9 +146,10 @@
         {% endif %}
       </svg>
       <span class="ql-notice-copy"><strong>{% if library_scan_state.empty %}No music yet.{% else %}Music library unavailable.{% endif %}</strong> {{ library_scan_state.message }}</span>
-      {% if library_scan_state.empty %}{% if qobuz_ready %}<a href="/" class="ql-btn ql-btn-sm ql-btn-primary ql-notice-action">Search</a>{% endif %}{% else %}<a href="/settings" class="ql-btn ql-btn-sm ql-btn-primary ql-notice-action">Open Settings</a>{% endif %}
+      {% if library_scan_state.empty %}{% if qobuz_ready %}<a href="/" class="ql-btn ql-btn-sm ql-btn-primary ql-notice-action">Search</a>{% endif %}{% elif library_scan_state.backup %}<a href="/settings#collection-backup" class="ql-btn ql-btn-sm ql-btn-secondary ql-notice-action">Open Settings</a>{% else %}<a href="/settings#diagnostics" class="ql-btn ql-btn-sm ql-btn-secondary ql-notice-action">Open Diagnostics</a>{% endif %}
     </div>
   </section>
+  {% endif %}
 
 
   {% elif library_baseline_exists %}

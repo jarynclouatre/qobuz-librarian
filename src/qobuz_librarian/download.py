@@ -239,7 +239,7 @@ def _check_rip_output(out) -> bool:
     if detect_auth_lost(out):
         raise AuthLost("rip output contained auth-lost markers")
     if detect_disk_full(out):
-        raise OSError(28, f"No space left on device at {cfg.STAGING_DIR}")
+        raise OSError(28, "No space left on device", str(cfg.STAGING_DIR))
     return detect_rate_limited(out)
 
 

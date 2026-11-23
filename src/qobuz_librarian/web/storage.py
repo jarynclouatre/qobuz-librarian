@@ -60,12 +60,14 @@ def _unwritable_volumes() -> list[str]:
         unreachable = not p.exists()
         not_a_dir = p.exists() and not p.is_dir()
         unwritable = p.exists() and p.is_dir() and not os.access(str(p), os.W_OK)
+        unopenable = unwritable and not os.access(str(p), os.R_OK | os.X_OK)
         if unreachable or not_a_dir or unwritable:
             display, _ = _resolve_host_path(str(path))
             problems.append(
                 f"{friendly} ({display})"
                 + (" is missing" if unreachable
                    else " is not a folder" if not_a_dir
+                   else " can't be opened" if unopenable
                    else f" {DOCKER_MADE}" if _docker_made_folder(p)
                    else " is read-only"))
     return problems
@@ -116,14 +118,16 @@ def _music_write_target_message(state: str, recorded_albums: int = 0, *,
             "mounted and that the collection-backup folder is readable."
         )
     if state == "recorded_empty":
-        return finish(
+        message = (
             f"No artist folders were found in {root}, but the last collection "
             f"backup recorded {recorded_albums:,} "
             f"{'album' if recorded_albums == 1 else 'albums'}. Check that the "
-            "music folder is mounted. If those albums really are gone, open "
-            "Settings → Collection backup, choose Back up now, then Replace "
-            "anyway before retrying."
+            "music folder is mounted."
         )
+        if diagnostic:
+            message += (" If those albums are gone, choose Back up now, then "
+                        "Replace anyway, in Settings → Collection backup.")
+        return finish(message)
     return ""
 
 

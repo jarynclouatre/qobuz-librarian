@@ -28,7 +28,8 @@
     {% endif %}
 
     {% include "_writes_paused_notice.html" %}
-    {% include "_qobuz_hold_notice.html" %}
+    {% set _hold_in_panel = creds_token_valid == False and qobuz_hold and qobuz_hold.reason == 'rejected' %}
+    {% if not _hold_in_panel %}{% include "_qobuz_hold_notice.html" %}{% endif %}
 
     {% if restored_albums %}
     <div class="ql-notice ql-notice-info flex items-start gap-3 p-4" role="status">
@@ -101,7 +102,10 @@
     </div>
     {% endif %}
 
-    {% if qobuz_ready and not baseline_complete and (setup_scanning or not library_scan_state.ready or offer_baseline or library_resume) %}
+    {% set _music_gated = writes_paused_notice and writes_paused_notice.music %}
+    {% set _root_gone = not library_scan_state.ready and not library_scan_state.empty %}
+    {% if qobuz_ready and (not baseline_complete or _root_gone) and (setup_scanning or not library_scan_state.ready or offer_baseline or library_resume)
+          and (setup_scanning or not _root_gone or not _music_gated) %}
     <div class="ql-notice {% if not setup_scanning and not library_scan_state.ready and not library_scan_state.empty %}ql-notice-warning{% else %}ql-notice-info{% endif %} flex items-start flex-wrap gap-3 p-4">
       <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 shrink-0 {% if not setup_scanning and not library_scan_state.ready and not library_scan_state.empty %}text-warning{% else %}text-info{% endif %}" fill="none"
            viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
@@ -129,7 +133,11 @@
       {# Settings carries no music-folder field, so there is nothing to send
          them to; the message names the folder and where it is set. #}
       {% elif not library_scan_state.ready %}
-      <a href="/settings" class="ql-btn ql-btn-primary ql-btn-sm w-full shrink-0 sm:ml-auto sm:w-auto">Open Settings</a>
+      {% if library_scan_state.backup %}
+      <a href="/settings#collection-backup" class="ql-btn ql-btn-secondary ql-btn-sm w-full shrink-0 sm:ml-auto sm:w-auto">Open Settings</a>
+      {% else %}
+      <a href="/settings#diagnostics" class="ql-btn ql-btn-secondary ql-btn-sm w-full shrink-0 sm:ml-auto sm:w-auto">Open Diagnostics</a>
+      {% endif %}
       {% else %}
       <div class="flex gap-2 w-full shrink-0 sm:ml-auto sm:w-auto">
         <form action="/library" method="post" class="flex-1 sm:flex-none" data-busy-submit>
@@ -212,7 +220,7 @@
       {% elif creds_token_valid == False %}
       <div class="ql-panel-header">
         <h2>Reconnect Qobuz</h2>
-        <p>{{ qobuz_check_result or "Your saved token was rejected." }}</p>
+        <p>{{ qobuz_check_result or "Your saved token was rejected." }}{% if _hold_in_panel and qobuz_hold.waiting %} {{ qobuz_hold.waiting }} {{ 'download waits' if qobuz_hold.waiting == 1 else 'downloads wait' }} until Qobuz accepts it.{% endif %}</p>
       </div>
       <div class="ql-panel-actions">
         <div class="flex flex-wrap gap-2">

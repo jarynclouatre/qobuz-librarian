@@ -3639,15 +3639,15 @@ class _AlbumsRun:
             messages.append(
                 f"{plural(self.attention_counts['processing'], 'imported album')} "
                 f"{'has' if self.attention_counts['processing'] == 1 else 'have'} "
-                "a step after the download that did not finish; see the "
-                "job log."
+                "a step after the download that did not finish; the "
+                "Activity log says which."
             )
             if not self.job.attention:
                 self.job.attention = "processing"
         if self.attention_counts["partial"]:
             messages.append(
                 f"{plural(self.attention_counts['partial'], 'imported album')} "
-                "reported unfinished work; see the job log."
+                "reported unfinished work; the Activity log says which."
             )
             if not self.job.attention:
                 self.job.attention = "partial"
@@ -3982,8 +3982,8 @@ class _AlbumsRun:
                 outcome = (f"{'It' if one else 'They'} could not be saved "
                            f"back to {destination}.")
             else:
-                pronoun = "It is" if one else "They are"
-                outcome = f"{pronoun} selected in {destination} for retry."
+                pronoun = "It was" if one else "They were"
+                outcome = f"{pronoun} left selected in {destination}."
             # A fetch failure has no useful detail beyond "Qobuz didn't answer for
             # it"; the raw exception (endpoint name, ids) stays in the activity
             # log for anyone who needs it, not in the sentence the user reads.
@@ -4318,7 +4318,8 @@ class _UpgradesRun:
             self.job.error = "An album remained below the target quality."
         elif self.processing_attention:
             self.job.attention = "processing"
-            self.job.error = "A step after the download did not finish; see the job log."
+            self.job.error = ("A step after the download did not finish; the "
+                              "Activity log says which.")
         elif self.failed:
             self.job.error = f"{self._not_upgraded()}."
         elif self.changed:

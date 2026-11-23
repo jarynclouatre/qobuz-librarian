@@ -969,7 +969,7 @@ def _search_error(exc, query):
     if isinstance(exc, NoCredsError):
         return "No Qobuz credentials set. Visit Settings."
     if isinstance(exc, AuthLost):
-        return "Token is expired or invalid. Update it in Settings."
+        return job_mgr.TOKEN_REJECTED
     if isinstance(exc, QobuzUnavailable):
         return str(exc)
     if not isinstance(exc, QobuzError):
@@ -1308,7 +1308,7 @@ async def search_album_tracks(request: Request, album_id: str = ""):
     except asyncio.TimeoutError:
         error = "Timed out reaching the Qobuz API."
     except AuthLost:
-        error = "Token is expired or invalid. Update it in Settings."
+        error = job_mgr.TOKEN_REJECTED
     except QobuzUnavailable as exc:
         error = str(exc)
     except QobuzError:
@@ -1366,6 +1366,7 @@ async def queue_download(request: Request, album_id: str = Form(""),
         None, disk_support.refusal, "downloads")
     if root_state != "ready" or disk_refusal:
         msg = (storage._music_write_target_message(root_state, recorded_albums)
+               + " Nothing was queued."
                if root_state != "ready" else disk_refusal)
         if rendering._is_htmx(request):
             return _download_fragment("error", html.escape(msg), "failed")

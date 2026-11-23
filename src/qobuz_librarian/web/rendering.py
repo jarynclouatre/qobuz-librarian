@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi.responses import FileResponse, Response
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup, escape
 
 from qobuz_librarian import __version__, disk_support
 from qobuz_librarian import config as cfg
@@ -217,8 +218,8 @@ def _quality_shortfall_view(record):
     }
 
 
-_LOG_POINTER_RE = re.compile(r"\s*[;.]?\s*(see the log|see job log)\.?\s*$",
-                             re.IGNORECASE)
+_LOG_POINTER_RE = re.compile(
+    r"\s*[;.]?\s*(see the log|see job log|the activity log says why)\.?\s*$", re.IGNORECASE)
 
 
 def _strip_log_pointer(message, log_lines):
@@ -226,6 +227,15 @@ def _strip_log_pointer(message, log_lines):
     if log_lines:
         return message
     return _LOG_POINTER_RE.sub(".", message or "").strip() or message
+
+
+def _link_settings(message):
+    """A rejected token's "Settings" as a link to the Qobuz section."""
+    if message != job_mgr.TOKEN_REJECTED:
+        return message
+    head = escape(message.removesuffix("Settings."))
+    return Markup(f'{head}<a href="/settings#qobuz" class="ql-inline-link">'
+                  'Settings</a>.')
 
 
 _LONG_QUALITY_RE = re.compile(r"(\d+)-bit/([\d.]+)kHz(?: \(hi-res\))?")
@@ -264,6 +274,8 @@ templates.env.globals["canceled_label"] = job_persistence.canceled_label
 templates.env.globals["quality_shortfall_view"] = _quality_shortfall_view
 templates.env.filters["strip_log_pointer"] = _strip_log_pointer
 templates.env.filters["known_year"] = known_year
+templates.env.filters["link_settings"] = _link_settings
+templates.env.globals["token_rejected"] = job_mgr.TOKEN_REJECTED
 templates.env.filters["quality_readout"] = _quality_readout
 templates.env.filters["rate_readout"] = _rate_readout
 # Worded at render time, so a review saved before a wording change reads

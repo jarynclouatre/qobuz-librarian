@@ -26,7 +26,7 @@ def _download_error_message(exc, fallback: str) -> str:
     if isinstance(exc, DownloadsRefused):
         return str(exc)
     if isinstance(exc, AuthLost):
-        return "Qobuz rejected the saved token. Reconnect in Settings."
+        return job_mgr.TOKEN_REJECTED
     if isinstance(exc, DownloaderNotReady):
         return (
             "Your Qobuz token works, but downloads also need your Qobuz "
@@ -74,7 +74,10 @@ _UPGRADE_REFUSED = (
 
 
 def _folder_denied_text(folder):
-    folder, _is_host = storage._resolve_host_path(folder)
+    folder = str(storage._resolve_host_path(folder)[0])
+    label = storage.music_folder_label(folder)
+    if label != folder:
+        folder = f"the {label} folder"
     return (f"Nothing was downloaded: the app can't write to {folder}. "
             "Check that folder's permissions, then retry.")
 
@@ -307,7 +310,7 @@ def download_error(result, *, job_controls=True):
         detail = "; ".join(messages) or "a step after the download did not finish"
         return (
             f"The album imported, but {detail}."
-            + hint("Check the job log before retrying.")
+            + hint("Check the Activity log before retrying.")
         )
     if kind == "lossy":
         kept = (" Your original album was kept."
@@ -320,7 +323,7 @@ def download_error(result, *, job_controls=True):
         if not retryable:
             return (
                 "The album imported, but the download reported unfinished "
-                "work." + hint("Check the job log before retrying.")
+                "work." + hint("Check the Activity log before retrying.")
             )
         damaged = result.get("n_broken", 0)
         not_arrived = retryable - damaged
@@ -357,25 +360,28 @@ def download_error(result, *, job_controls=True):
         other = beyond_retry(lossy_only, unavailable)
         other = f" {other}." if other else ""
         if n_failed:
-            return (f"{plural(n_failed, 'track')} failed."
-                    + hint("See job log.") + other)
+            nothing = (", so nothing was imported"
+                       if result.get("result") == "failed" else "")
+            return (f"{plural(n_failed, 'track')} failed{nothing}."
+                    + hint("The Activity log says why.") + other)
         if result.get("folder_denied"):
             return _folder_denied_text(result["folder_denied"])
         if result.get("import_denied"):
             return import_denied_text(result["import_denied"])
         if result.get("n_ok"):
-            return "Downloaded, but the import failed." + hint("See job log.")
+            return ("Downloaded, but the import failed."
+                    + hint("The Activity log says why."))
         if retryable:
             return (
                 f"{plural(retryable, 'track')} did not arrive as a "
                 "complete file, so nothing was added to your library."
-                + hint("The job log names them.") + other)
+                + hint("The Activity log names them.") + other)
         if result.get("result") in _DOWNLOAD_SUMMARY_LABELS:
             return _DOWNLOAD_SUMMARY_LABELS[result["result"]]
-        return "No tracks were retrieved." + hint("The job log says why.")
+        return "No tracks were retrieved." + hint("The Activity log says why.")
     if result.get("imported") and result.get("n_fail", 0) > 0:
         return (f"{plural(result['n_fail'], 'track')} failed."
-                + hint("See job log."))
+                + hint("The Activity log says why."))
     return None
 
 

@@ -301,9 +301,9 @@ def _rest_of_album_note(landed_dir, token):
 
 
 _SINGLE_TRACK_FAILURES = {
-    "disk_full": "Out of disk space before the track landed. The job log says where.",
+    "disk_full": "Out of disk space before the track landed. The Activity log says where.",
     "io_error": (
-        "A storage error stopped the track before it landed. The job log has "
+        "A storage error stopped the track before it landed. The Activity log has "
         "the error."
     ),
     "incomplete": (
@@ -404,12 +404,12 @@ def _make_single_track_run(album, track, token):
                 j.error = download_outcomes.import_denied_text(qi["import_denied"])
             elif not j.error or broken and qi.get("result") == "incomplete":
                 j.error = (
-                    "Downloaded, but the import failed. See job log."
+                    "Downloaded, but the import failed. The Activity log says why."
                     if qi.get("n_ok")
                     else "Qobuz sent a broken file at this quality, so the "
                     "track was not added."
                     if broken
-                    else "The track was not retrieved. The job log says why."
+                    else "The track was not retrieved. The Activity log says why."
                 )
             return
         j.landed_complete = True

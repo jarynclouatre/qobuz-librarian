@@ -23,6 +23,7 @@ from qobuz_librarian.web import (
     runtime,
     storage,
 )
+from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
 
@@ -225,7 +226,7 @@ async def discover_artist_albums(request: Request, artist_id: str = "",
     except asyncio.TimeoutError:
         error = "Timed out reaching the Qobuz API."
     except AuthLost:
-        error = "Token is expired or invalid. Update it in Settings."
+        error = job_mgr.TOKEN_REJECTED
     except QobuzUnavailable as exc:
         error = str(exc)
     except QobuzError:

@@ -24,6 +24,7 @@ durable first.
 """
 import bisect
 import copy
+import errno
 import hashlib
 import json
 import logging
@@ -53,6 +54,8 @@ _previous_write_at: Optional[float] = None
 # jobs.db itself is not a readable database, as opposed to a folder that
 # can't be written.
 _damaged = False
+# The last write failed because the disk is full.
+_full = False
 # The db opened fine but a write later failed (typically a full disk).
 _warned_write_failure = False
 
@@ -297,7 +300,8 @@ def _decode_timestamp(value) -> float | None:
 
 
 def _note_write_failure(what: str, e: Exception) -> None:
-    global _warned_write_failure
+    global _warned_write_failure, _full
+    _full = _is_full(e)
     if not _warned_write_failure:
         _warned_write_failure = True
         _log.info("job persistence write failed (%s); jobs may not survive a "
@@ -345,7 +349,7 @@ def _get_conn() -> Optional[sqlite3.Connection]:
     on every status change.
     """
     global _disabled, _conn, _schema_ready, _admission_ready, _previous_write_at
-    global _damaged
+    global _damaged, _full
     if _disabled:
         return None
     if _conn is not None:
@@ -382,6 +386,7 @@ def _get_conn() -> Optional[sqlite3.Connection]:
             return None
         _log.info("job persistence disabled (%s); jobs won't survive restart.", e)
         _damaged = _is_damage(e)
+        _full = _is_full(e)
         _disabled = True
         return None
 
@@ -513,7 +518,7 @@ def scrub_stored_secrets() -> int | None:
 
 def init() -> None:
     """Create the schema (and run additive migrations). Safe to call repeatedly."""
-    global _schema_ready, _admission_ready, _damaged
+    global _schema_ready, _admission_ready, _damaged, _full
     with _lock:
         conn = _get_conn()
         if conn is None:
@@ -588,6 +593,7 @@ def init() -> None:
             _schema_ready = False
             _admission_ready = False
             _damaged = _is_damage(e)
+            _full = _is_full(e)
             # A transient/locked/full/corrupt jobs.db here would otherwise
             # propagate out of restore_jobs() into the caller's broad
             # "couldn't restore prior jobs; starting fresh" handler, masking
@@ -639,9 +645,19 @@ def _note_damage(exc) -> None:
         _admission_ready = False
 
 
+def _is_full(exc) -> bool:
+    return (getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_FULL
+            or getattr(exc, "errno", None) == errno.ENOSPC)
+
+
 def database_damaged() -> bool:
     """Whether jobs.db failed to open because the file itself is damaged."""
     return _damaged
+
+
+def database_full() -> bool:
+    """Whether the last failed write to jobs.db found the disk full."""
+    return _full
 
 
 def database_path():

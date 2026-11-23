@@ -77,6 +77,7 @@ def _writes_paused_notice(*, log_details: bool = False,
         queue_recovery._await_recovery_refresh()
     reason = ""
     action = None
+    music = False
     if runtime._CLI_MODE:
         reason = "Terminal mode is holding the library."
         msg = ("Terminal (CLI) mode is on, so downloads and scans are paused "
@@ -93,9 +94,22 @@ def _writes_paused_notice(*, log_details: bool = False,
             advice = ("Check the folder paths in your .env, then run "
                       "docker compose up -d.")
         else:
-            reason = "A folder Qobuz Librarian must write to is read-only."
-            advice = ("On a NAS, set PUID/PGID to the share owner and "
-                      "confirm the host directories exist.")
+            gone = [p for p in unwritable
+                    if p.endswith((" is missing", " is not a folder"))]
+            if len(gone) == len(unwritable):
+                reason = "A folder Qobuz Librarian must write to is missing."
+            elif any(p.endswith(" can't be opened") for p in unwritable):
+                reason = "A folder Qobuz Librarian must write to can't be opened."
+            else:
+                reason = "A folder Qobuz Librarian must write to is read-only."
+            steps = []
+            if gone:
+                steps.append("Check the folder path and that its drive is "
+                             "mounted.")
+            if len(gone) < len(unwritable):
+                steps.append("On a NAS, set PUID/PGID to the share owner.")
+            advice = " ".join(steps)
+        music = any(p.startswith("Music library") for p in unwritable)
         msg = ("Qobuz Librarian can't write where it needs to: "
                f"{'; '.join(unwritable)}. {advice} Downloads can't run "
                "until fixed.")
@@ -148,6 +162,12 @@ def _writes_paused_notice(*, log_details: bool = False,
                 "beside it, out of the data folder and restart Qobuz "
                 "Librarian; History and any review waiting in it will be lost."
             )
+        elif job_mgr.job_persistence.database_full():
+            shown, _is_host = storage._resolve_host_path(str(cfg.DATA_DIR))
+            reason = "The data folder ran out of space."
+            msg = (f"The data folder {shown} ran out of space, so downloads "
+                   "and scans are paused before any work starts. Free space "
+                   "there, then restart Qobuz Librarian.")
         else:
             reason = "Queue and History cannot be saved to the data folder."
             action = {"href": "/settings#diagnostics",
@@ -225,7 +245,7 @@ def _writes_paused_notice(*, log_details: bool = False,
         return _read_only_library_notice() if downloads else None
     else:
         return None
-    return {"reason": reason, "msg": msg, "action": action}
+    return {"reason": reason, "msg": msg, "action": action, "music": music}
 
 
 def _web_writes_paused() -> bool:
