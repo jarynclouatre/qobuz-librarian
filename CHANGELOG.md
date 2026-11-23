@@ -2,6 +2,21 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.6.1] - 2026-11-23
+
+Tool pages that show their own runs, one-press downloads from Search, upgrades from MP3 and AAC to FLAC, and plain words for what a stopped scan or download left.
+
+- **Search** downloads a plain result on one press and shows **Queued** in place of its arrow. Tracklists mark the tracks owned, an album owned as another version says **Other version owned**, an empty album or track search offers an artist search, and a pasted Qobuz artist link opens that artist.
+- **Lyrics**, **Upgrade**, **Downsample** and **Repair** show their scans and runs on their own pages and say there how each ended. The Upgrade and Downsample reviews open on their own pages, dated from the scan that made them, and Repair history lists one row per album.
+- **Upgrade** offers an album held as MP3, AAC, Ogg Vorbis or Opus when Qobuz has the same edition in FLAC. It leaves out a folder where ISRCs are on one side only, and keeps the backup of an album that holds audio it did not compare, such as a track with a hidden file name.
+- A **Library** scan fills one progress bar and ends with a line saying what it found. A stopped scan says what it keeps, a first scan that was cut short offers **Resume scan**, and a Library download shows its Queue row on the Library page.
+- Albums are told from namesake folders by their songs, and another recording under the same track titles by its track lengths. A versioned album is found in a folder named for its version, an album kept one disc per folder counts as one album, and the explicit edition wins a tie with the clean one.
+- Job pages have fewer frames, progress bars name the album, and History rows share one shape. A failure names the locked folder, the disk that ran out of space or the missing music folder and points at the Activity log, and a rejected token links to Settings with the steps to get a new one.
+- **Settings** opens on the Qobuz account while no token works, closed sections show their state, and Diagnostics folds the checks that passed. A Last.fm key works while its account has Last.fm Pro, which Last.fm requires from 1 December 2026, and Settings and Discover name Pro when Last.fm rejects a key.
+- After a stop or restart in the middle of a download, leftover staging groups, import folders and empty backup markers are cleared at the next start, and the restart says when it puts waiting work back.
+- Text, placeholders and outlines meet contrast targets, forced colours show ticks and switches, and keyboard focus stays in place through dismissals. The offline page is one sentence above **Retry**.
+- In the terminal, a refusal from Qobuz returns to the menu and says why, `q` means no at yes/no questions, and a typo at Download quality asks again. The docs add a post-job hook that asks Plex, Jellyfin or Navidrome to rescan, and the Docker image takes soupsieve 4.1.3 and pydantic 2.14.4.
+
 ## [1.6.0] - 2026-11-21
 
 A Queue page that shows what needs attention, what is running and what just finished, History as one list, shorter text on every page, and runs that check a folder before they download into it.
