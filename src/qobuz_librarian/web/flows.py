@@ -597,6 +597,29 @@ def fold_key(c):
     return artist, (c.get("title") or "").lower()
 
 
+def _filing_rank(c):
+    """How closely a missing album's artist folder is named for its Qobuz
+    artist, closest first. A download files the album under that name."""
+    folder = str((c.get("payload") or {}).get("_artist_dir") or "")
+    artist = c.get("artist") or ""
+    return (folder != artist, folder.casefold() != artist.casefold(),
+            normalize(folder) != normalize(artist), folder)
+
+
+def one_row_per_album(specs):
+    """``specs`` with each missing album once. Two artist folders, "The X"
+    and "X", can resolve to one Qobuz artist and both offer its albums; the
+    row kept is the one whose folder is named closest to that artist."""
+    best = {}
+    for spec in specs:
+        if not is_gap_candidate(spec):
+            key = fold_key(spec)
+            if key not in best or _filing_rank(spec) < _filing_rank(best[key]):
+                best[key] = spec
+    return [spec for spec in specs
+            if is_gap_candidate(spec) or best[fold_key(spec)] is spec]
+
+
 def _fold_row(c):
     """Candidate content a refresh owns, excluding review identity and tick."""
     return {
@@ -814,9 +837,10 @@ class _CandidateFold:
             self.updated += 1
 
     def _drop_duplicates(self):
-        # Older builds matched rows by album id alone and could leave an
-        # album listed under two artists as two missing-album rows under one
-        # of them. Keep the first, with either row's tick.
+        # Older builds could save one missing album as two rows: they matched
+        # rows by album id alone, and listed an album once per artist folder
+        # when "The X" and "X" resolve to one artist. Keep the first, with
+        # either row's tick.
         first_at = {}
         unique = []
         for c in self.keep:
@@ -1005,7 +1029,7 @@ def refold_restored_missing(artists, fingerprints):
                 specs.append(spec)
     if not specs:
         return 0
-    folded = fold_new_candidates(parked, specs)
+    folded = fold_new_candidates(parked, one_row_per_album(specs))
     if folded is False:
         return False
     if folded is None:
@@ -2223,6 +2247,7 @@ class _LibraryScan:
 
     def _choose_refresh(self):
         self.total = 0
+        self.row_cids = {}
         # Artist folders whose finds the review had no room for, with how many
         # each lost. They are not saved as scanned, so a later refresh checks
         # them again.
@@ -2260,6 +2285,27 @@ class _LibraryScan:
             # A refresh needs no starting checkpoint: interrupted before it
             # saves progress, the next one reuses the saved scan again.
             self.checkpoint.save(self.scanned, self.baseline_seen)
+
+    def _add_row(self, spec, listed):
+        """Add a find to the review and return its cid, or None when the
+        review had no room. A missing album another artist folder already
+        added returns "", and its row moves to whichever folder
+        one_row_per_album would keep."""
+        if is_gap_candidate(spec):
+            return _add_candidate_spec(self.job, spec, listed=listed)
+        key = fold_key(spec)
+        cid = self.row_cids.get(key)
+        if cid is None:
+            cid = _add_candidate_spec(self.job, spec, listed=listed)
+            if cid is not None:
+                self.row_cids[key] = cid
+            return cid
+        with self.job._lock:
+            # Gone if the user dismissed it while the scan ran.
+            row = next((c for c in self.job.candidates if c["cid"] == cid), None)
+            if row is not None and _filing_rank(spec) < _filing_rank(row):
+                row["payload"] = spec.get("payload") or {}
+        return ""
 
     def _step(self, name):
         return f"Step {self._passes.index(name) + 1} of {len(self._passes)}: {name}"
@@ -2389,9 +2435,10 @@ class _LibraryScan:
                     if _spec_dismissed(c, self.hidden):
                         continue
                     listed = self._listed(c)
-                    if _add_candidate_spec(self.job, c, listed=listed) is None:
+                    cid = self._add_row(c, listed)
+                    if cid is None:
                         dropped += 1
-                    elif listed:
+                    elif cid and listed:
                         self.total += 1
                 if dropped:
                     self.left_out[name] = dropped
@@ -2450,9 +2497,10 @@ class _LibraryScan:
                     if _spec_dismissed(c, self.hidden):
                         continue
                     listed = self._listed(c)
-                    if _add_candidate_spec(self.job, c, listed=listed) is None:
+                    cid = self._add_row(c, listed)
+                    if cid is None:
                         dropped += 1
-                    elif listed:
+                    elif cid and listed:
                         shown += 1
                 self.total += shown
                 self.scanned.add(artist_dir.name)
@@ -2560,11 +2608,12 @@ class _LibraryScan:
                         artist_candidates.append(spec)
                         continue
                     listed = self._listed(spec)
-                    if _add_candidate_spec(self.job, spec, listed=listed) is None:
+                    cid = self._add_row(spec, listed)
+                    if cid is None:
                         dropped += 1
                         continue
                     artist_candidates.append(spec)
-                    if listed:
+                    if cid and listed:
                         self.total += 1
                         shown += 1
                 if catalog_ids is not None and dropped:

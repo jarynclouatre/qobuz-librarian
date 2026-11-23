@@ -47,8 +47,11 @@ from qobuz_librarian.library.tags import (
     canonical_track_slot,
     canonical_track_title,
     differs_by_album_variant,
+    disc_folders,
     folder_title_forms,
+    is_edition_wording,
     known_year,
+    names_rerecording,
     normalize,
     similarity,
     strip_album_decorations,
@@ -56,6 +59,7 @@ from qobuz_librarian.library.tags import (
     strip_edition_suffix,
     strip_leading_article,
     strip_year_decoration,
+    title_key,
 )
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.errors import plural
@@ -394,15 +398,15 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
     """
     title = qobuz_album.get("title") or ""
     version = (qobuz_album.get("version") or "").strip()
-    labelled = bool(version) and version.casefold() not in title.casefold()
+    labelled = {**qobuz_album, "title": f"{title} ({version})"}
     if exact_edition:
-        if labelled:
-            qobuz_album = {**qobuz_album, "title": f"{title} ({version})"}
-    elif labelled:
+        if version and version not in title:
+            qobuz_album = labelled
+    elif version and f"({version.casefold()})" not in title.casefold():
         # A folder named for this version is its own, even beside the plain
         # one: "Lost Boys (Acoustic)" is never filed in "Lost Boys". One of
         # another year gives way to the folder the release's download got.
-        own = find_album_dir_filesystem(qobuz_album, exact_edition=True,
+        own = find_album_dir_filesystem(labelled, exact_edition=True,
                                         audio_only=audio_only)
         if own is not None and (
                 _decoration_year(own.name) in ("", _listed_year(qobuz_album))
@@ -428,9 +432,9 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
     # Kept whole, the title must match the folder name exactly.
     title_forms = [(strip_album_decorations(title), False)]
     full_title = strip_album_decorations_strict(title)
-    if normalize(full_title) != normalize(title_forms[0][0]):
+    if title_key(full_title) != title_key(title_forms[0][0]):
         title_forms.append((full_title, True))
-    edition_title = canonical_track_title(beets_sanitize(title))
+    edition_title = _exact_title(beets_sanitize(title))
     # Folder names often leave out a bracketed "(Live)" or the version, so
     # only the rest of the title has to agree with the folder name.
     title_words = _other_release_words(_TRAILING_BRACKETS_RE.sub("", title))
@@ -448,7 +452,7 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
         # artist dir that is the real match.
         for d in subdirs:
             if exact_edition:
-                folder_title = canonical_track_title(_DECORATION_YEAR_RE.sub("", d.name))
+                folder_title = _exact_title(_DECORATION_YEAR_RE.sub("", d.name))
                 if (edition_title and folder_title == edition_title
                         and (not audio_only or _holds_audio(d))):
                     return d
@@ -466,8 +470,8 @@ def find_album_dir_filesystem(qobuz_album, *, exact_edition=False,
                 # the titles to be close in length - that keeps an extra word
                 # ('Live', 'Tour') from resolving to the base album's folder on
                 # prefix alone.
-                norm_dir = normalize(dir_bare)
-                norm_title = normalize(stripped_title)
+                norm_dir = title_key(dir_bare)
+                norm_title = title_key(stripped_title)
                 coverage = (min(len(norm_dir), len(norm_title))
                             / max(len(norm_dir), len(norm_title))
                             if norm_dir and norm_title else 0.0)
@@ -604,6 +608,10 @@ def _norm_isrc(value):
     return (value or "").strip().replace("-", "").upper()
 
 
+def _exact_title(text):
+    return canonical_track_title(text) or title_key(text)
+
+
 def _track_key(title_raw, disc, isrc, *, disc_scoped=True):
     """Identity keys for one track: ISRC plus the (optionally disc-scoped) title
     in both its full and edition-stripped forms. Titles are compared
@@ -612,7 +620,7 @@ def _track_key(title_raw, disc, isrc, *, disc_scoped=True):
     scope = disc if disc_scoped else None
 
     def _scoped(text):
-        norm = canonical_track_title(text)
+        norm = _exact_title(text)
         return (scope, norm) if norm else None
 
     title_raw = title_raw or ""
@@ -675,20 +683,24 @@ def _pair_tracks(claim_keys, slot_keys):
     return [si is not None for si in _pair_indices(claim_keys, slot_keys)]
 
 
-def _disc_count(tracks, field):
-    return len({(t.get(field, 1) or 1) for t in tracks})
+def _discs(tracks, field):
+    return {(t.get(field, 1) or 1) for t in tracks}
 
 
 def _disc_scoped_match(qobuz_tracks, existing_tracks):
-    """Scope title matching by disc only when BOTH sides span multiple discs.
+    """Scope title matching by disc only when BOTH sides span multiple discs
+    and every disc the files name is one the release has.
 
     If either side is entirely on disc 1 - a single-disc album, or a flat folder
     whose tracks carry no DISCNUMBER tag and so all default to 1 - disc scoping
     can only invent false gaps (a later-disc Qobuz track never finding its
-    disc-1 file). Matching disc-agnostically then is safe: one-to-one pairing
-    still keeps two same-titled tracks from collapsing onto a single file."""
-    return (_disc_count(qobuz_tracks, "media_number") > 1
-            and _disc_count(existing_tracks, "discnumber") > 1)
+    disc-1 file). So can files laid out another way, such as a vinyl rip
+    numbered by side or three discs against the release's two. Matching
+    disc-agnostically then is safe: one-to-one pairing still keeps two
+    same-titled tracks from collapsing onto a single file."""
+    qobuz_discs = _discs(qobuz_tracks, "media_number")
+    local_discs = _discs(existing_tracks, "discnumber")
+    return len(qobuz_discs) > 1 and len(local_discs) > 1 and local_discs <= qobuz_discs
 
 
 def _qobuz_keys(qobuz_tracks, disc_scoped=True):
@@ -778,7 +790,7 @@ def _edition_title_parts(title, version="", *, folder=False, known_versions=()):
         seen.add(key)
         labels |= _label_parts(label)
         title = title[:match.start()].strip()
-    return canonical_track_title(beets_sanitize(title)), frozenset(labels)
+    return _exact_title(beets_sanitize(title)), frozenset(labels)
 
 
 def edition_album_title(album, *, separate=False):
@@ -817,9 +829,27 @@ def _version_in_title(track):
                 and canonical_track_title(version) in _edition_title_parts(title)[0])
 
 
+def _other_recording(tracks, existing, pairs):
+    """Whether most of the pairs no ISRC proves and whose lengths both sides
+    know are more than ten seconds apart, as another performance under the
+    same titles is."""
+    gaps = [abs(qobuz - local) for i, j in pairs.items()
+            if not _same_isrc(tracks[i], existing[j])
+            and (qobuz := _strict_track_duration(tracks[i], "duration"))
+            and (local := _strict_track_duration(existing[j], "length"))]
+    return sum(gap > 10 for gap in gaps) * 2 > len(gaps)
+
+
+def _same_isrc(track, local):
+    isrc = canonical_recording_id(track.get("isrc"), "isrc")
+    return bool(isrc) and isrc == _norm_isrc(local.get("isrc"))
+
+
 def _edition_pairs(album, existing, folder, *, album_folder=None):
     """Pair Qobuz tracks with files of this edition. A shared ISRC is the same
-    recording; without one, the title and its mix or master labels decide."""
+    recording; without one, the title and its mix or master labels decide,
+    unless the files lack some of the titles and the lengths say most of
+    those pairs are another recording."""
     tracks = (album.get("tracks") or {}).get("items") or []
     album_key, album_version = _edition_title_parts(
         _release_title(album), album.get("version"), folder=album_folder is not None)
@@ -853,6 +883,7 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
             pairs[index] = picked
     if len(pairs) == len(tracks) or len(used) == len(existing):
         return pairs
+    identified = dict(pairs)
 
     track_labels = [_label_parts(t["version"]) if t.get("version") else frozenset()
                     for t in tracks]
@@ -897,6 +928,8 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
                 (track.get("media_number") or 1) == (existing[i].get("discnumber") or 1)))
             used.add(picked)
             pairs[index] = picked
+    if len(pairs) < len(tracks) and _other_recording(tracks, existing, pairs):
+        return identified
     return pairs
 
 
@@ -989,7 +1022,7 @@ def same_edition(album, existing, folder, token=None, *, fill=False):
     tracks = (album.get("tracks") or {}).get("items") or []
     pairs = _edition_pairs(album, existing, folder)
     missing = [t for i, t in enumerate(tracks) if i not in pairs]
-    if not pairs:
+    if not pairs or _other_recording(tracks, existing, pairs):
         return False
     others = held_by_other_versions(album, existing, folder, missing)
     if others and (not fill or len(others) * 9 > len(pairs)):
@@ -1163,8 +1196,83 @@ def bears_album_title(album, folder):
     and a leading article are stripped, reading "&" as "and"."""
     def bare(name):
         name = strip_leading_article(strip_album_decorations(name or ""))
-        return canonical_track_title(re.sub(r"\s*&\s*", " and ", name))
+        return _exact_title(re.sub(r"\s*&\s*", " and ", name))
     return bare(folder.name) == bare(album.get("title"))
+
+
+def _identity_title(name):
+    """A title or folder name as a key, without years and edition labels but
+    with the brackets that name the album, such as "(Part One)"."""
+    name = re.sub(r"\[([^\[\]]*)\]", r"(\1)", name or "")
+    return _exact_title(re.sub(
+        r"\s*&\s*", " and ",
+        strip_leading_article(strip_album_decorations_strict(name))))
+
+
+def may_be_another_album(album, folder):
+    """Whether a folder that bears the album's title may still be named for
+    another album: the brackets bears_album_title drops tell them apart, or
+    one is a re-recording and they are dated years apart, or they are
+    self-titled and dated apart at all. A year missing on either side may
+    be any year."""
+    title = album.get("title") or ""
+    artist = (album.get("artist") or {}).get("name") or ""
+    year, folder_year = album_year_int(album, None), _dir_year(folder.name)
+    gap = None if year is None or folder_year is None else abs(year - folder_year)
+    if names_rerecording(title) != names_rerecording(folder.name):
+        return gap is None or gap > 3
+    return _identity_title(folder.name) != _identity_title(title) or (
+        gap != 0 and normalize(strip_leading_article(title))
+        == normalize(strip_leading_article(artist)))
+
+
+def is_another_album(album, existing, folder):
+    """Whether may_be_another_album holds and the songs bear it out."""
+    tracks = (album.get("tracks") or {}).get("items") or []
+    return bool(tracks and existing and may_be_another_album(album, folder)
+                and not _holds_album_songs(album, existing, folder))
+
+
+def _holds_album_songs(album, existing, folder):
+    """Whether the files hold the album's songs. A reissue under another
+    label shares at least half of them, by name or by length; a re-recording
+    shares both, so only its own recordings count."""
+    tracks = (album.get("tracks") or {}).get("items") or []
+    if names_rerecording(album.get("title")) != names_rerecording(folder.name):
+        shared = len(edition_missing(album, existing, folder)[1])
+    else:
+        shared = max(len(compute_missing(tracks, existing)[1]),
+                     _same_lengths(tracks, existing))
+    return (shared * 2 >= min(len(tracks), len(existing))
+            or holds_recordings(tracks, existing))
+
+
+def _same_lengths(tracks, existing):
+    held = {_strict_track_slot(t, "discnumber", "tracknumber"):
+            _strict_track_duration(t, "length") for t in existing}
+    wanted = ((_strict_track_slot(t, "media_number", "track_number"),
+               _strict_track_duration(t, "duration")) for t in tracks)
+    return sum(1 for slot, length in wanted
+               if length and held.get(slot) and abs(length - held[slot]) <= 2)
+
+
+def same_album_folder(album, existing, folder):
+    """(files, folder) for ``folder``, or for one filed under the same title
+    by the artist that holds the album's songs, or ([], None)."""
+    if not is_another_album(album, existing, folder):
+        return existing, folder
+    artist = (album.get("artist") or {}).get("name") or ""
+    bare = title_key(strip_leading_article(strip_album_decorations(album.get("title") or "")))
+    for parent in dict.fromkeys([folder.parent, *_artist_search_dirs(artist)]):
+        for other in _list_artist_subdirs_cached(parent):
+            if other == folder or bare not in (
+                    title_key(strip_leading_article(form))
+                    for form in folder_title_forms(other.name, parent.name, artist)):
+                continue
+            files = read_album_dir(other)
+            if files and _holds_album_songs(album, files, other):
+                return files, other
+    return [], None
 
 
 def holds_recordings(tracks, existing):
@@ -1257,6 +1365,8 @@ def search_result_ownership(album, fetch_album):
     # offer; the mark says how many there are.
     res["unavailable"] = sum(1 for t in gaps if unstreamable(t))
     gaps = [t for t in gaps if not unstreamable(t)]
+    if gaps:
+        gaps = _missing_from_title_siblings(gaps, matched_folder)
     bonus = bonus_versions(gaps, present)
     if gaps and len(bonus) == len(gaps):
         # Only other versions of songs on disk are missing: the album is
@@ -1279,15 +1389,27 @@ def search_result_ownership(album, fetch_album):
     return res
 
 
+def _missing_from_title_siblings(tracks, folder):
+    """The tracks the album's other disc folders do not hold, for an album
+    kept one disc per folder."""
+    held = [track for other in _list_artist_subdirs_cached(folder.parent)
+            if other != folder and disc_folders(folder.name, other.name)
+            for track in read_album_dir(other)]
+    return compute_missing(tracks, held)[0] if held else tracks
+
+
 def find_album_folder(album):
     """(files, folder) for the folder that holds the album or another
     version of it, or ([], None). The folder the album's name finds counts
     when it bears the album's title, when the album's songs make up most of
     its files, or when it holds every recording on the album; a folder
-    holding another album, such as "Illmatic" for "Stillmatic", does not."""
+    holding another album, such as "Illmatic" for "Stillmatic" or the first
+    "Weezer" for the third, does not."""
     existing, folder = find_existing_tracks(album)
-    if folder is None or bears_album_title(album, folder):
+    if folder is None:
         return existing, folder
+    if bears_album_title(album, folder):
+        return same_album_folder(album, existing, folder)
     tracks = (album.get("tracks") or {}).get("items") or []
     if tracks and existing:
         present = compute_missing(tracks, existing)[1]
@@ -1704,7 +1826,8 @@ def _best_edition(group, prefer_hires):
     modes target the standard track count so a padded deluxe/anniversary
     edition never wins on track count alone. prefer_hires then takes the
     best resolution at that count; otherwise it takes the original
-    (untagged) edition without chasing a remaster's higher resolution.
+    (untagged) edition without chasing a remaster's higher resolution. An
+    explicit edition wins a tie with its clean one.
     """
     if len(group) > 1:
         group = _without(_without(group, is_derivative_release), _other_performance)
@@ -1721,14 +1844,79 @@ def _best_edition(group, prefer_hires):
             -(a.get("maximum_bit_depth") or 0),
             -(a.get("maximum_sampling_rate") or 0),
             album_year_int(a),
+            not a.get("parental_warning"),
             str(a.get("id") or ""),
         ))
     return min(group, key=lambda a: (
         off_standard(a),
         not _is_plain_release(a),
         album_year_int(a),
+        not a.get("parental_warning"),
         str(a.get("id") or ""),
     ))
+
+
+def owned_titles_like(album, owned_bare_titles):
+    """The owned titles filter_owned_albums' fuzzy fallback weighs for an
+    album: one title starts with the other, the names are close and the
+    years near. A dict of each to whether the rest of the longer title is
+    edition words or a subtitle, which counts it owned by name alone."""
+    bare = strip_leading_article(strip_album_decorations(album.get("title") or ""))
+    key = normalize(bare)
+    cat_yr = album_year_int(album, None)
+    found = {}
+    for owned, owned_years in owned_bare_titles.items():
+        if not (key and owned) or not (key.startswith(owned) or owned.startswith(key)):
+            continue
+        # The extra text on the longer title is what one release has and
+        # the other doesn't.
+        shorter, longer = sorted((key, owned), key=len)
+        if differs_by_album_variant(shorter, longer) or _numbered_apart(key, owned):
+            continue
+        if similarity(key, owned) < config.CONSOLIDATE_THRESH:
+            continue
+        if (cat_yr is None or None in owned_years
+                or any(abs(oy - cat_yr) <= 3
+                       for oy in owned_years if oy is not None)):
+            found[owned] = (is_edition_wording(longer[len(shorter):])
+                            or owned in _titles_before_a_break(bare))
+    return found
+
+
+def names_owned_edition(album, owned_bare_titles):
+    """Whether an owned title is the album's with edition words or a
+    subtitle more or less (owned_titles_like)."""
+    return any(owned_titles_like(album, owned_bare_titles).values())
+
+
+def held_under_owned_title(album, titles):
+    """Whether a folder by the album's artist filed under one of ``titles``
+    (owned-title keys) holds its songs, by name or by length: they make up
+    half its files, and are two or more unless the album has one song, so
+    a single does not hold the album its song is on."""
+    tracks = (album.get("tracks") or {}).get("items") or []
+    artist = (album.get("artist") or {}).get("name") or ""
+    for parent in _artist_search_dirs(artist):
+        for folder in _list_artist_subdirs_cached(parent):
+            if not any(title_key(strip_leading_article(form)) in titles
+                       for form in folder_title_forms(folder.name, parent.name)):
+                continue
+            existing = read_album_dir(folder)
+            if not existing:
+                continue
+            shared = max(len(compute_missing(tracks, existing)[1]),
+                         _same_lengths(tracks, existing))
+            if (shared * 2 >= len(existing) and shared >= min(2, len(tracks))
+                    or holds_recordings(tracks, existing)):
+                return True
+    return False
+
+
+def _titles_before_a_break(title):
+    """The normalized titles a title has before each colon, slash, bracket or
+    dash: 'Metropolis, Pt. 2' of 'Metropolis, Pt. 2: Scenes from a Memory'."""
+    return {normalize(title[:found.start()])
+            for found in re.finditer(r"[:/(\[]|\s[-\u2013]\s", title)}
 
 
 def filter_owned_albums(catalog_pairs, owned_bare_titles, artist_name=None):
@@ -1744,7 +1932,9 @@ def filter_owned_albums(catalog_pairs, owned_bare_titles, artist_name=None):
     instead of silently hidden. ``artist_name`` enables that exception; without
     it the year-blind exact-own behaviour is unchanged. Falls back to a fuzzy
     match at CONSOLIDATE_THRESH for edition variants the decoration stripper
-    didn't fully normalize, with a nearby-year guard separating distinct names.
+    didn't fully normalize, with a nearby-year guard separating distinct names:
+    one title is the other plus edition words or a subtitle, so 'Harvest Moon'
+    is not 'Harvest'.
     """
     self_titled_key = (normalize(strip_leading_article(artist_name))
                        if artist_name else None)
@@ -1753,7 +1943,7 @@ def filter_owned_albums(catalog_pairs, owned_bare_titles, artist_name=None):
     missing = []
     for album, n_versions in catalog_pairs:
         bare = strip_leading_article(strip_album_decorations(album.get("title") or ""))
-        key = normalize(bare)
+        key = title_key(bare)
         if not key:
             missing.append((album, n_versions))
             continue
@@ -1774,25 +1964,7 @@ def filter_owned_albums(catalog_pairs, owned_bare_titles, artist_name=None):
             )
             if not distinct_self_titled:
                 continue
-        # Fuzzy fallback for edition variants the stripper didn't fully
-        # normalize.
-        owned_fuzzy = False
-        for owned, owned_years in owned_bare_titles.items():
-            if not owned or not (key.startswith(owned) or owned.startswith(key)):
-                continue
-            # The extra text on the longer title is what one release has and
-            # the other doesn't.
-            shorter, longer = sorted((key, owned), key=len)
-            if differs_by_album_variant(shorter, longer) or _numbered_apart(key, owned):
-                continue
-            if similarity(key, owned) < config.CONSOLIDATE_THRESH:
-                continue
-            if (cat_yr is None or None in owned_years
-                    or any(abs(oy - cat_yr) <= 3
-                           for oy in owned_years if oy is not None)):
-                owned_fuzzy = True
-                break
-        if owned_fuzzy:
+        if names_owned_edition(album, owned_bare_titles):
             continue
         missing.append((album, n_versions))
     return missing
@@ -2063,15 +2235,18 @@ def _year_proximity_bonus(dir_year, album):
 
 def _sort_by_match(candidates, prefer_hires):
     """Sort (score, year_bonus, album) tuples best-first in place: combined
-    score descending, then resolution descending when prefer_hires."""
+    score descending, then resolution descending when prefer_hires, then
+    explicit before clean."""
     if prefer_hires:
         candidates.sort(key=lambda x: (
             -(x[0] + x[1]),
             -(x[2].get("maximum_bit_depth") or 0),
             -(x[2].get("maximum_sampling_rate") or 0),
+            not x[2].get("parental_warning"),
         ))
     else:
-        candidates.sort(key=lambda x: -(x[0] + x[1]))
+        candidates.sort(key=lambda x: (-(x[0] + x[1]),
+                                       not x[2].get("parental_warning")))
 
 
 def _catalog_candidates_for_dir(album_dir, catalog, artist_name, prefer_hires=False):
@@ -2099,7 +2274,7 @@ def _catalog_candidates_for_dir(album_dir, catalog, artist_name, prefer_hires=Fa
         title = r.get("title", "")
         version = (r.get("version") or "").strip()
         names = [title]
-        if version and version.casefold() not in title.casefold():
+        if version and f"({version.casefold()})" not in title.casefold():
             # Its own folder may name the version: "Lost Boys (Acoustic)".
             names.append(f"{title} ({version})")
         scores = []

@@ -101,6 +101,7 @@ def _review_job_from_library_state():
                 ):
                     continue
                 specs.append(spec)
+        specs = flows.one_row_per_album(specs)
         if not specs:
             return None
         existing = _library_current_job()  # re-check under the lock

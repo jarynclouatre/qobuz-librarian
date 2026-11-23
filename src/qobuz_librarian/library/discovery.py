@@ -62,8 +62,12 @@ from qobuz_librarian.library.catalog import (
     find_existing_tracks,
     find_qobuz_album_for_dir,
     held_by_other_versions,
+    held_under_owned_title,
     holds_recordings,
     is_lossless_album,
+    may_be_another_album,
+    owned_titles_like,
+    same_album_folder,
     same_edition,
     unstreamable,
 )
@@ -566,13 +570,13 @@ def owned_title_key(name):
     a title out of a collection backup, say - keys it exactly the way the
     folders were keyed.
     """
-    return normalize(strip_leading_article(tags.strip_album_decorations(name or "")))
+    return tags.title_key(strip_leading_article(tags.strip_album_decorations(name or "")))
 
 
 def _record_owned_title(owned_titles, album_dir):
     year = _dir_year(album_dir.name)
     for bare in tags.folder_title_forms(album_dir.name, album_dir.parent.name):
-        key = normalize(strip_leading_article(bare))
+        key = tags.title_key(strip_leading_article(bare))
         if key:
             owned_titles.setdefault(key, set()).add(year)
 
@@ -790,18 +794,33 @@ def match_album_dir(album_dir, artist_name, token, *, catalog, prefer_hires):
 def _gap_held_by_siblings(m, matches):
     """True when every track missing from a partial folder is in another folder
     of the same album: one matched to the same release, or one with the same
-    title, like a second copy or another edition. A Gap Fill there would only
-    download tracks already on disk."""
-    key = owned_title_key(m.album_dir.name)
+    title, like a second copy, another edition or the album's other disc. A
+    Gap Fill there would only download tracks already on disk. A folder with
+    the same title matched to a release whose songs only overlap with this
+    one's, as a best-of of another year, is another album and does not
+    count."""
+    key = tags.folder_title_key(m.album_dir.name)
     held = []
     for other in matches:
         if other is m:
             continue
         same_release = (other.qobuz_album is not None and other.qobuz_album.get("id")
                         == m.qobuz_album.get("id"))
-        if same_release or owned_title_key(other.album_dir.name) == key:
+        if (same_release or tags.disc_folders(m.album_dir.name, other.album_dir.name)
+                or (tags.folder_title_key(other.album_dir.name) == key
+                    and (other.status not in ("complete", "partial")
+                         or _editions_of_one_album(m.qobuz_album, other.qobuz_album)))):
             held.extend(other.existing or read_album_dir(other.album_dir))
     return bool(held) and not compute_missing(m.missing, held)[0]
+
+
+def _editions_of_one_album(album, other):
+    """Whether one release's track list holds every song of the other's."""
+    def songs(release):
+        return {tags.canonical_track_title(t.get("title"))
+                for t in ((release or {}).get("tracks") or {}).get("items") or []}
+    mine, theirs = songs(album), songs(other)
+    return bool(mine and theirs) and (mine <= theirs or theirs <= mine)
 
 
 def _short(album):
@@ -903,8 +922,9 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
     pass the older compilation, length and live-title filters and carry no
     type. The track gaps always do.
 
-    quick=True is the new-release path: only fully-missing albums are returned
-    and no track lists are fetched, so the cost stays at the catalog list alone.
+    quick=True is the new-release path: only fully-missing albums are returned,
+    and a track list is fetched only for an album whose name finds a folder
+    that may hold another album.
 
     include_hidden=True still consults ``hidden`` for the collecting/singles
     rules but returns dismissed albums as gaps, so a caller that saves a
@@ -950,14 +970,19 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
         if not include_hidden and _is_hidden(hidden, artist_name, album):
             continue
         existing, album_dir = find_existing_tracks(album)
+        bears = album_dir is not None and bears_album_title(album, album_dir)
+        another = False
+        if bears and existing and may_be_another_album(album, album_dir):
+            album, _tracks = _materialize_tracks(album, token)
+            existing, album_dir = same_album_folder(album, existing, album_dir)
+            another = album_dir is None
         resolved = album_dir is not None and str(album_dir) in resolved_dirs
-        if resolved and bears_album_title(album, album_dir):
+        if resolved and bears:
             held(album)
             continue
-        if existing and quick:
-            # New-release check: a catalog entry that resolves to a folder the
-            # user already has (even partially) isn't new - skip it without the
-            # track-list fetch the gap path below would need.
+        if existing and quick and bears:
+            # New-release check: an album with a folder of its own (even a
+            # partial one) isn't new.
             continue
         if existing:
             # Resolves to a folder the owned pass didn't walk (e.g. a
@@ -976,7 +1001,8 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
             # (an "Intro") can land here.
             if (len(present) * 2 >= len(existing)
                     or holds_recordings(tracks, existing)):
-                if key in fill_keys and missing and present and not resolved:
+                if (key in fill_keys and missing and present
+                        and not resolved and not quick):
                     edition, missed, _closest = _held_edition(
                         album, existing, album_dir, artist_name, token, catalog,
                         opts.prefer_hires)
@@ -996,9 +1022,19 @@ def discover_fully_missing(artist_name, catalog, opts, *, hidden=None,
                 held(album)
                 continue
         # Not resolved, or resolved to a wrong folder.
-        if _owned_by_name(owned_titles, album, artist_name):
+        named = owned_titles
+        if another:
+            named = {title: years for title, years in owned_titles.items()
+                     if title != owned_title_key(album.get("title"))}
+        if _owned_by_name(named, album, artist_name):
             held(album)
             continue
+        like = owned_titles_like(album, named)
+        if like:
+            album, tracks = _materialize_tracks(album, token)
+            if not tracks or held_under_owned_title(album, like):
+                held(album)
+                continue
         if key not in types:
             continue
         gaps.append(AlbumGap(album, None, release_type=types[key]))
@@ -1252,11 +1288,12 @@ def find_new_releases_for_artist(query, *, token, opts=None, seen_by_id=None,
     user doesn't own and hasn't hidden - the cheap "what's new" path.
 
     Unlike find_missing_for_artist this skips the owned-folder matching pass and
-    never fetches track lists (a fully-missing album is read straight off the
-    catalog list). An artist checked before costs one call for their newest
-    releases; only one with a recent release the last check did not see has
-    the whole catalog read, plus the release lists. A new release is listed
-    only when its type is among opts.included_types(), as in Missing Albums.
+    reads a fully-missing album straight off the catalog list, fetching a track
+    list only to tell it from an owned album of a like name. An artist checked
+    before costs one call for their newest releases; only one with a recent
+    release the last check did not see has the whole catalog read, plus the
+    release lists. A new release is listed only when its type is among
+    opts.included_types(), as in Missing Albums.
 
     A catalog past the fetch limit can't be diffed whole, so its newest
     releases are added to the baseline instead; once they are (its id is in

@@ -151,10 +151,21 @@ def key_similarity(na, nb):
     return SequenceMatcher(None, na, nb).ratio()
 
 
+def title_key(text):
+    """normalize(), or the text as beets would file it when it is emoji or
+    punctuation alone, so a title such as "÷" or "..." still has a key."""
+    return normalize(text) or "".join(beets_sanitize(text).casefold().split())
+
+
 @lru_cache(maxsize=8192)
 def similarity(a, b):
-    """Normalized similarity score [0.0, 1.0] between two strings."""
-    return key_similarity(normalize(a), normalize(b))
+    """Normalized similarity score [0.0, 1.0] between two strings. Two of
+    emoji or punctuation alone match only when they are the same."""
+    na, nb = normalize(a), normalize(b)
+    if not na and not nb:
+        key = title_key(a)
+        return 1.0 if key and key == title_key(b) else 0.0
+    return key_similarity(na, nb)
 
 
 _LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
@@ -313,6 +324,13 @@ _BRACKET_FORMAT_MARK_RE = re.compile(
     rf"\b(?:{_FORMAT_MARK})\b|bits?\b|khz\b|kbps\b|{_BIT_RATE_PAIR}",
     re.IGNORECASE)
 _DASH_YEAR_TAIL_RE = re.compile(r"(?<!\d)\s+[-–]\s+(?:19|20)\d\d\s*$")
+# One disc of an album in a folder of its own: "Album CD1", "Album - Disc 2",
+# "Album, Disc One".
+_DISC_TAIL_RE = re.compile(
+    r"(?:\s*[-\u2013,]\s*|\s+)(?:cd|dis[ck])\s*(?:\d{1,2}|one|two|three|four|five|six)\s*$",
+    re.IGNORECASE)
+_DISC_LABEL_RE = re.compile(
+    r"\b(?:cd|dis[ck])\s*(?:\d{1,2}|one|two|three|four|five|six)\b", re.IGNORECASE)
 
 
 def _strip_trailing_bracket_tag(s):
@@ -408,6 +426,23 @@ def differs_by_album_variant(shorter, longer):
     return False
 
 
+# Edition wording with normalize() applied, as in "deluxeedition",
+# "50thanniversary" or "originalmotionpicturesoundtrack".
+_EDITION_WORDS_RE = re.compile(
+    r"(?:(?:19|20)\d\d|\d{1,3}(?:st|nd|rd|th)|(?:re)?master(?:ed)?|reissued?|"
+    r"anniversary|super|deluxe|expanded|extended|special|collectors?|limited|"
+    r"legacy|definitive|complete|platinum|bonus|tracks?|tour(?=edition)|"
+    r"edition|version|original|recording|mono|stereo|explicit|clean|digital|"
+    r"hires|hd|flac|web|\d*cd\d*|dis[ck]\d+|vinyl|lp|ep|single|the|album|"
+    r"box(?:set)?|japan(?:ese)?|international|ost|soundtrack|motionpicture|"
+    r"musicfrom)+")
+
+
+def is_edition_wording(text):
+    """Whether normalized text is nothing but edition wording."""
+    return bool(_EDITION_WORDS_RE.fullmatch(text))
+
+
 @lru_cache(maxsize=2048)
 def strip_album_decorations(name):
     """Strip trailing edition decorations iteratively from an album name.
@@ -425,7 +460,7 @@ def strip_album_decorations(name):
     return _strip_decorations(name)
 
 
-def _strip_decorations(name, folder=False):
+def _strip_decorations(name, folder=False, discs=False):
     s = name
     for _ in range(8):
         new = _LEADING_YEAR_RE.sub("", s).strip()
@@ -439,6 +474,8 @@ def _strip_decorations(name, folder=False):
             new = _strip_trailing_format_tag(s)
         if folder and new == s:
             new = _DASH_YEAR_TAIL_RE.sub("", s).strip()
+        if discs and new == s:
+            new = _DISC_TAIL_RE.sub("", s).strip()
         if new == s or not new:
             break
         s = new
@@ -450,6 +487,20 @@ def strip_folder_decorations(name):
     """strip_album_decorations for an album folder name, which may also end
     in a format tag ("[WEB FLAC]", "[24-96]") or " - 2014"."""
     return _strip_decorations(name, folder=True)
+
+
+def folder_title_key(name):
+    """The key two folders filed under the same album title share, the disc
+    label of an album kept one disc per folder (" CD1", " - Disc 2") aside."""
+    return title_key(strip_leading_article(
+        _strip_decorations(name, folder=True, discs=True)))
+
+
+def disc_folders(name, other):
+    """Whether two folder names are discs of one album kept one disc per
+    folder: filed under the same title, and one of them named for its disc."""
+    return (folder_title_key(name) == folder_title_key(other)
+            and any(map(_DISC_LABEL_RE.search, (name, other))))
 
 
 def folder_title_forms(name, *artists):
@@ -476,6 +527,11 @@ _DECOR_PAREN_KEYWORD_RE = re.compile(
 _YEAR_SPAN_RE = re.compile(r"\d{4}\s*[-–/]\s*\d{4}")
 _POSSESSIVE_VERSION_RE = re.compile(r"\b(?!collector)\w+'s\s+version\b",
                                     re.IGNORECASE)
+
+
+def names_rerecording(title):
+    """Whether a title carries a possessive version ("Taylor's Version")."""
+    return bool(_POSSESSIVE_VERSION_RE.search(title or ""))
 
 
 def _paren_tag_is_decoration(tag):

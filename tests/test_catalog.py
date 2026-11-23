@@ -79,9 +79,10 @@ def _qalbum(title, year, bd=16, sr=44.1, tc=10):
 def test_track_matching_by_disc_edition_title_and_isrc():
     """Discs, remasters and recording versions decide what is missing, and a
     rip that tags both discs as disc 1 is still complete. Non-Latin titles
-    match on their text, not an empty normalization. The title fallback
-    cannot hand one ISRC twin's file to another track. Bonus tracks on disk
-    are flagged as extras before an upgrade."""
+    match on their text, not an empty normalization. A vinyl rip numbered
+    by side is complete too. The title fallback cannot hand one ISRC twin's
+    file to another track. Bonus tracks on disk are flagged as extras before
+    an upgrade."""
     qobuz = [_qt("Intro", disc=1), _qt("Theme", disc=1),
              _qt("Intro", disc=2), _qt("Theme", disc=2)]
     owned = [_et("Intro", disc=1), _et("Theme", disc=1),
@@ -89,6 +90,8 @@ def test_track_matching_by_disc_edition_title_and_isrc():
     assert not compute_missing(qobuz, owned)[0]
     m, _ = compute_missing(qobuz, owned[:2])
     assert sorted(t["media_number"] for t in m) == [2, 2]
+    by_side = [_et("Intro", disc=1), _et("Theme", disc=2), _et("Intro", disc=3), _et("Theme", disc=4)]
+    assert not compute_missing(qobuz, by_side)[0]
     m, p = compute_missing([_qt("Song (2014 Remaster)")], [_et("Song")])
     assert len(p) == 1 and not m
     m, p = compute_missing([_qt("Song")], [_et("Song (Acoustic)")])
@@ -169,6 +172,13 @@ def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
     live = {**_qalbum("War All the Time", 2003, bd=24, sr=48, tc=11), "version": "Live"}
     [(picked, _)] = dedup_album_versions([live, studio], prefer_hires=True)
     assert picked is studio
+    # The explicit edition wins a tie with the clean one whatever their ids.
+    for ids in (("1", "2"), ("2", "1")):
+        clean = {**_qalbum("Album", 2012), "id": ids[0]}
+        explicit = {**_qalbum("Album", 2012), "id": ids[1], "parental_warning": True}
+        for hires in (False, True):
+            [(picked, _)] = dedup_album_versions([clean, explicit], prefer_hires=hires)
+            assert picked is explicit
     # An instrumental release never stands for the album, even when only its
     # tracks say so.
     deluxe = _qalbum("Criminal Minded (Deluxe)", 1987, tc=26)
@@ -213,6 +223,11 @@ def test_album_lists_collapse_editions_but_keep_sequels_and_distinct_years():
     pairs = [({"title": "Van Halen II", "release_date_original": "1979"}, 1)]
     assert [a["title"] for a, _ in
             filter_owned_albums(pairs, {"vanhalen": [1978]})] == ["Van Halen II"]
+
+    pairs = [({"title": "Harvest Moon", "release_date_original": "1992"}, 1),
+             ({"title": "Harvest Deluxe", "release_date_original": "1972"}, 1)]
+    assert [a["title"] for a, _ in
+            filter_owned_albums(pairs, {"harvest": [None]})] == ["Harvest Moon"]
 
 
 def test_a_japanese_title_matches_its_folder_and_not_a_near_miss(tmp_path, monkeypatch):
@@ -313,6 +328,11 @@ def test_album_folders_are_found_by_what_they_hold(tmp_path, monkeypatch, tagged
                     artist / name, [acoustic, plain], "Phoebe Bridgers"),
                 artist / name)
             assert found["id"] == ("A" if "Acoustic" in name else "P")
+    # The version is a word of its own, not the letters of one in the title.
+    alive = {**acoustic, "id": "L", "title": "Alive", "version": "Live"}
+    (artist / "Alive (Live) (2026)").mkdir()
+    scanner.clear_scan_caches()
+    assert find_album_dir_filesystem(alive).name == "Alive (Live) (2026)"
     # One named for the version but of another year doesn't take the
     # release from the folder its download got.
     deluxe = {"id": "R", "artist": {"name": "Fleetwood Mac"}, "title": "Rumours",
@@ -541,3 +561,23 @@ def test_edition_ownership_keeps_recording_versions(tmp_path, monkeypatch):
               {"title": "Footprints (Remastered Version)"},
               {"title": "Footprints", "version": "Stereo Mix 2015"}]
     assert catalog.bonus_versions(wanted, held) == wanted[:3]
+
+
+def test_another_recording_under_the_same_titles_is_not_the_edition(tmp_path):
+    # No ISRCs: a conductor's 1977 Ninth beside the 1963 one on disk.
+    movements = ["I. Allegro ma non troppo", "II. Molto vivace", "III. Adagio molto", "IV. Presto"]
+    files = [{"title": title, "album": "Symphony No. 9", "length": 900.0 + i}
+             for i, title in enumerate(movements)]
+
+    def release(*seconds):
+        return {"title": "Symphony No. 9", "tracks": {"items": [
+            {"id": str(i), "title": title, "isrc": "", "duration": seconds[i]}
+            for i, title in enumerate(movements)]}}
+
+    folder = tmp_path / "Symphony No. 9 (1963)"
+    assert not catalog.same_edition(release(990, 991, 992, 903), files, folder)
+    assert not catalog.same_edition(release(990, 991, 992, 903), files[:2], folder, fill=True)
+    assert catalog.same_edition(release(897, 903, 905, 902), files, folder)
+    assert catalog.same_edition(release(990, 991, 902, 903), files, folder)
+    assert catalog.same_edition(release(990, 991, 992, 903), [
+        {**f, "length": 0.0} for f in files], folder)
