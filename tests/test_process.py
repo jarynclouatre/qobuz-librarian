@@ -514,6 +514,57 @@ def test_upgrade_carries_hand_added_tags_to_the_replacement(
     assert not proc._track_annotations_preserved(backup.path, album_dir)
 
 
+def test_upgrade_keeps_audio_the_album_reader_skips(
+        monkeypatch, tmp_path, tagged_flac):
+    # The new album was checked only against the tracks the reader returns, so
+    # a hidden FLAC went with the old album's backup. A macOS "._" file beside
+    # a track is no reason to keep one.
+    from qobuz_librarian.library import backup as backup_mod
+
+    album_dir = tmp_path / "music" / "Artist" / "Album"
+    tagged_flac(album_dir / "01 Song.flac", TITLE="Song", TRACKNUMBER=1)
+    (album_dir / "._01 Song.flac").write_bytes(b"\x00\x05\x16\x07finder")
+    tagged_flac(album_dir / ".Demo.flac", TITLE="Demo", TRACKNUMBER=2)
+    monkeypatch.setattr(proc.cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(proc.cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    backup = backup_mod.backup_album_dir(album_dir)
+    assert backup is not None and backup.complete
+    tagged_flac(album_dir / "01 Song.flac", TITLE="Song", TRACKNUMBER=1,
+                COMMENT="new")
+
+    _, _, left = proc._carry_non_audio_from_backup(
+        {"id": "x"}, album_dir, backup, replacement_dir=album_dir)
+    assert left == [".Demo.flac"]
+
+
+def test_upgrade_keeps_the_original_a_stopped_downsample_swapped_out(
+        monkeypatch, tmp_path, tagged_flac):
+    # Downsample swaps its encode in, then removes the original from the
+    # temp name. A stop in between left the only copy of the hi-res master
+    # there, and it went with the old album's backup. An encode the stop
+    # left under that name is no reason to keep one.
+    from qobuz_librarian.library import backup as backup_mod
+
+    album_dir = tmp_path / "music" / "Artist" / "Album"
+    tagged_flac(album_dir / "01 Song.flac", TITLE="Song", TRACKNUMBER=1)
+    streaminfo = bytearray(34)
+    streaminfo[10:18] = ((96000 << 44) | (1 << 41) | (23 << 36) | 1).to_bytes(
+        8, "big")
+    master = album_dir / f".compress-{'a' * 32}.flac"
+    master.write_bytes(b"fLaC\x80\x00\x00\x22" + streaminfo + b"master")
+    tagged_flac(album_dir / f".compress-{'b' * 32}.flac", TITLE="Song")
+    monkeypatch.setattr(proc.cfg, "MUSIC_ROOT", tmp_path / "music")
+    monkeypatch.setattr(proc.cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    backup = backup_mod.backup_album_dir(album_dir)
+    assert backup is not None and backup.complete
+    tagged_flac(album_dir / "01 Song.flac", TITLE="Song", TRACKNUMBER=1,
+                COMMENT="new")
+
+    _, _, left = proc._carry_non_audio_from_backup(
+        {"id": "x"}, album_dir, backup, replacement_dir=album_dir)
+    assert left == [master.name]
+
+
 def test_upgrade_files_the_albums_own_cover_instead_of_qobuzs(
         monkeypatch, tmp_path):
     # Qobuz's cover.jpg replaced a scanned one, and the old album then stayed

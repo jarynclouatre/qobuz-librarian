@@ -89,6 +89,7 @@ from qobuz_librarian.library.backup import (
     restore_gap_fill_backup,
     restore_upgrade_backup,
     some_names,
+    unread_audio,
     unwritable_folder,
     unwritable_new_album_folder,
     warn_pin_failed,
@@ -1165,7 +1166,8 @@ class _ItemResolution:
         else:
             for sib_dir, receipt in zip(self._sibs, receipts):
                 sibling_path = Path(sib_dir)
-                name = sibling_path.name
+                name = os.fsencode(sibling_path.name).decode(
+                    errors="backslashreplace")
                 if receipt is None:
                     log.info(fmt(
                         C.YELLOW,
@@ -1196,7 +1198,19 @@ class _ItemResolution:
                 held = capture_album_source_receipt(sibling_path)
                 clashes = None if held is None else companions_in_the_way(
                     held, replacement_receipt)
-                if clashes is None:
+                unread = None if held is None else unread_audio(
+                    held, sibling_path, replacement_receipt)
+                if unread:
+                    self.item["_siblings_preserved"].remove(
+                        os.fspath(sibling_path))
+                    self.item["_siblings_kept"].append(name)
+                    log.info(fmt(
+                        C.GRAY,
+                        f"  ·  Kept {name}; {self.post_dir.name} has no "
+                        f"copy of its {some_names(unread)}.",
+                    ))
+                    continue
+                if clashes is None or unread is None:
                     log.info(fmt(
                         C.YELLOW,
                         f"  ⚠  Kept sibling {name}; its other files "
@@ -2296,6 +2310,11 @@ class _QueueFlush:
             self.web_album_id,
             self.external_acknowledge_completion,
         ) = _durable_execution_origin()
+        self.note_saved_queue = (
+            getattr(sys.modules.get("qobuz_librarian.web.jobs"),
+                    "note_current_job_saved_queue", None)
+            if self.execution_mode.startswith("web-job:") else None
+        )
         self.items = list(self.queue)
         self.n_items = len(self.items)
         self.interrupted = False
@@ -2822,6 +2841,7 @@ class _QueueFlush:
                     resume_owner=self.resume_owner,
                     prepare_staged=_prepare_staged,
                     acknowledge_completion=self.external_acknowledge_completion,
+                    note_saved_queue=self.note_saved_queue,
                 )
             except (KeyboardInterrupt, AuthLost) as exc:
                 # The album is back in the queue or parked for recovery as it

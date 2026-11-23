@@ -62,6 +62,7 @@ from qobuz_librarian.library.backup import (
     restore_gap_fill_backup,
     restore_incomplete_upgrade_backup,
     restore_upgrade_backup,
+    unread_audio,
     unwritable_folder,
     unwritable_new_album_folder,
     upgrade_backup_restorable,
@@ -705,12 +706,12 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
                                  replacement_dir=None, damaged=()):
     """Carry companions and the user's own track tags between exact trees.
 
-    Returns the exact replacement path, its updated receipt, and the
-    companions left in the backup because the replacement has a different
-    file of that name. Callers must use the path and receipt for the final
-    held-view disposal decision, and keep the backup while anything was left
-    in it. Any changed name, symlink, changed file, or uncertain durability
-    keeps the backup and returns ``None``.
+    Returns the exact replacement path, its updated receipt, and the names
+    left in the backup: companions the replacement has a different file for,
+    and audio the album reader skips. Callers must use the path and receipt
+    for the final held-view disposal decision, and keep the backup while
+    anything was left in it. Any changed name, symlink, changed file, or
+    uncertain durability keeps the backup and returns ``None``.
     """
     dest = replacement_dir
     if dest is None:
@@ -735,9 +736,10 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
     if updated is None:
         return None
     left = companion_conflicts(backup_path, updated, renamed)
-    if left is None:
+    unread = unread_audio(backup_path.receipt, backup_path, updated)
+    if left is None or unread is None:
         return None
-    return dest, updated, left
+    return dest, updated, sorted(left + unread)
 
 
 def _lyrics_follow_tracks(backup_path, replacement_path, damaged=()):
@@ -806,7 +808,7 @@ def _keep_own_cover(backup, staged_dirs):
 
 
 def _keep_backup_for_companions(backup_path, left):
-    """Pin a backup that holds the only copy of companions it could not carry.
+    """Pin a backup that holds the only copy of files it could not carry.
 
     Returns the log line naming them and where they are.
     """
@@ -815,13 +817,11 @@ def _keep_backup_for_companions(backup_path, left):
     one = len(left) == 1
     _pin_or_warn(
         backup_path,
-        f"kept for the original {names}, which the new album holds a "
-        "different file for")
+        f"kept for the original {names}, which the new album does not hold")
     return (
-        f"  ⚠  The original {names} {'differs' if one else 'differ'} from "
-        f"the new album's, so the new {'one stays' if one else 'ones stay'} "
-        f"in the album and the original {'is' if one else 'are'} kept in "
-        f"the backup at {backup_path}.")
+        f"  ⚠  The original {names} {'is' if one else 'are'} not in the new "
+        f"album, so {'it is' if one else 'they are'} kept in the backup at "
+        f"{backup_path}.")
 
 
 def _put_original_back(backup, album_dir):

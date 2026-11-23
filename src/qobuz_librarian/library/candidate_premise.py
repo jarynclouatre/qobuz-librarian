@@ -151,10 +151,73 @@ def _normalised_generation_evidence(receipt: dict):
     return path_generations, directory_generations
 
 
+def _renumbered_devices(pairs) -> dict:
+    """The new number of each device a restart numbered again, from pairs
+    of one folder's saved and current generation.
+
+    A reboot can give a ZFS, btrfs or network filesystem another device
+    number. A folder whose inode, birth time and mount all still match is
+    the same folder, so its device's new number stands for the old one.
+    Every file and folder must still match under the new numbers. Nothing
+    is renumbered when any folder differs, or two old numbers would share
+    one new number.
+    """
+    devices = {}
+    for old, new in pairs:
+        if [old[0], *old[2:]] != [new[0], *new[2:]]:
+            return {}
+        if devices.setdefault(old[1], new[1]) != new[1]:
+            return {}
+    if len(set(devices.values())) != len(devices):
+        return {}
+    return {old: new for old, new in devices.items() if old != new}
+
+
+def _receipt_renumbered_devices(saved: dict, current: dict) -> dict:
+    saved_paths, saved_folders = _normalised_generation_evidence(saved)
+    current_paths, current_folders = _normalised_generation_evidence(current)
+    if (len(saved_paths) != len(current_paths)
+            or set(saved_folders) != set(current_folders)):
+        return {}
+    return _renumbered_devices([
+        *zip(saved_paths, current_paths),
+        *((saved_folders[relative], current_folders[relative])
+          for relative in saved_folders)])
+
+
+def _with_devices(receipt: dict, devices: dict) -> dict:
+    def moved(identity):
+        return [identity[0], devices.get(identity[1], identity[1]),
+                *identity[2:]]
+
+    tree = receipt["tree"]
+    return {
+        **receipt,
+        "path_generations": [moved(identity)
+                             for identity in receipt["path_generations"]],
+        "directory_generations": {
+            relative: moved(identity)
+            for relative, identity in receipt["directory_generations"].items()
+        },
+        "tree": {
+            **tree,
+            "root_identity": moved(tree["root_identity"]),
+            "directories": {relative: moved(identity) for relative, identity
+                            in tree["directories"].items()},
+            "files": {relative: {**value, "identity": moved(value["identity"])}
+                      for relative, value in tree["files"].items()},
+        },
+    }
+
+
 def durable_receipts_match(saved: dict, current: dict) -> bool:
-    """Compare durable folder identities while allowing mount-ID renumbering."""
+    """Compare durable folder identities while allowing mount-ID and device
+    renumbering."""
     stable_fields = ("version", "origin", "tree")
     try:
+        devices = _receipt_renumbered_devices(saved, current)
+        if devices:
+            saved = _with_devices(saved, devices)
         return (
             all(saved[field] == current[field] for field in stable_fields)
             and _normalised_generation_evidence(saved)
@@ -183,14 +246,20 @@ def same_files(first, second) -> bool:
 
 
 def _durable_generations_match(saved, current) -> bool:
-    """Compare path generations while preserving mount boundaries."""
+    """Compare path generations while preserving mount boundaries and
+    allowing device renumbering."""
     def normalise(generations):
         mount_labels = {}
         return [_durable_identity(identity, mount_labels)
                 for identity in generations]
 
     try:
-        return normalise(saved) == normalise(current)
+        saved, current = normalise(saved), normalise(current)
+        if len(saved) == len(current):
+            devices = _renumbered_devices(zip(saved, current))
+            saved = [[old[0], devices.get(old[1], old[1]), *old[2:]]
+                     for old in saved]
+        return saved == current
     except (IndexError, TypeError):
         return False
 

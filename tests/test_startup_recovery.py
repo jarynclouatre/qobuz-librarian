@@ -1,6 +1,7 @@
 """Restart recovery settles only work backed by live, exact evidence."""
 
 import os
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -1055,6 +1056,28 @@ def test_user_discard_clears_the_blocked_download_operation(tmp_path, monkeypatc
         authority.close()
 
     assert settled.status is startup_recovery.BlockedItemSettlementStatus.DISCARDED
+    assert not retained.path.exists()
+    assert journal.load_queue_journal(operation_id).status is journal.QueueLoadStatus.ABSENT
+
+
+def test_a_stop_between_emptying_and_removing_a_staging_group_settles(
+    tmp_path, monkeypatch,
+):
+    # Killed after a set-aside download's files were removed but before its
+    # manifest and folder were, which blocked every later start.
+    operation_id, item_id, retained = _blocked_download_journal(
+        tmp_path, monkeypatch, label="Emptied Album"
+    )
+    shutil.rmtree(retained.trees[0].path)
+
+    authority = run_lock.acquire()
+    try:
+        result = startup_recovery.recover_startup_state(
+            authority=authority, settle=True)
+    finally:
+        authority.close()
+
+    assert result.status is startup_recovery.StartupRecoveryStatus.CLEAR
     assert not retained.path.exists()
     assert journal.load_queue_journal(operation_id).status is journal.QueueLoadStatus.ABSENT
 

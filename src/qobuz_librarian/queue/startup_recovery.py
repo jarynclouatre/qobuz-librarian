@@ -32,6 +32,7 @@ from qobuz_librarian.integrations.beets import (
     inspect_managed_carrier,
     inspect_managed_reservation,
     managed_sources_untouched,
+    remove_unwritten_managed_carrier,
     reopen_managed_evidence,
     retire_backup_beets_entries,
     retire_prelaunch_managed_carrier,
@@ -47,10 +48,12 @@ from qobuz_librarian.integrations.staging import (
     inspect_staging_run_reference,
     isolated_staging_run_names,
     retain_staging_run,
+    retire_spent_staging_group,
     staging_run_from_record,
 )
 from qobuz_librarian.library.backup import (
     capture_album_source_receipt,
+    clear_unwritten_backup_markers,
     companion_conflicts,
     library_backup_record,
     library_backup_record_absent,
@@ -568,6 +571,13 @@ def _reconcile_item_staging(
         _require_authority(authority)
         inspection = _staging_inspection(reference, owner)
         _require_authority(authority)
+        if (
+            reference.kind == _STAGING_GROUP_KIND
+            and getattr(inspection, "status", None) is StagingReferenceStatus.CHANGED
+            and retire_spent_staging_group(reference.data, owner)
+        ):
+            inspection = _staging_inspection(reference, owner)
+            _require_authority(authority)
         if getattr(inspection, "status", None) is StagingReferenceStatus.ABSENT:
             absent.append(reference)
         else:
@@ -930,6 +940,18 @@ def _recover_active_reservations(authority, journals):
             _require_authority(authority)
             changed = True
     return changed
+
+
+def _clear_unwritten_backup_files(authority, journals):
+    for journal in journals:
+        for item in journal.items:
+            owner = {"operation_id": journal.operation_id, "item_id": item.item_id}
+            for reference in _references(item, _LIBRARY_BACKUP_KINDS):
+                record = reference.data.get("carrier", reference.data)
+                _require_authority(authority)
+                clear_unwritten_backup_markers(
+                    record.get("path", ""), expected_owner=owner)
+    _require_authority(authority)
 
 
 def _recover_active_library_backups(authority, journals):
@@ -1771,6 +1793,8 @@ def settle_blocked_item(
         reservation = None
         if reference is not None and reference.kind == _MANAGED_RESERVATION_KIND:
             _require_authority(authority)
+            remove_unwritten_managed_carrier(reference.data, owner)
+            _require_authority(authority)
             reservation = inspect_managed_reservation(reference.data, owner)
             _require_authority(authority)
             if reservation.outcome is ManagedReservationInspectionOutcome.ACTIVITY:
@@ -2209,7 +2233,7 @@ class _StartupRecovery:
                     Path(path) for loaded in blocked for path in loaded.paths)),
             )
         self.journals = _sorted_journals(loads)
-        _require_authority(self.authority)
+        _clear_unwritten_backup_files(self.authority, self.journals)
         if _recover_active_library_backups(self.authority, self.journals):
             return True
 

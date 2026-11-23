@@ -568,7 +568,8 @@ class _DurableAlbumRun:
     """One album's journal-owned download, import and completion."""
 
     def __init__(self, queue, item, args, *, plan, origin, mode, authority,
-                 resume_owner, prepare_staged, acknowledge_completion):
+                 resume_owner, prepare_staged, acknowledge_completion,
+                 note_saved_queue):
         self.queue = queue
         self.item = item
         self.args = args
@@ -579,6 +580,7 @@ class _DurableAlbumRun:
         self.resume_owner = resume_owner
         self.prepare_staged = prepare_staged
         self.acknowledge_completion = acknowledge_completion
+        self.note_saved_queue = note_saved_queue
         self.backup_intent = None
         self.backup_carrier = None
         self.reservation = None
@@ -606,6 +608,8 @@ class _DurableAlbumRun:
             authority=self.authority,
             resume_owner=self.resume_owner,
         )
+        if self.note_saved_queue is not None:
+            self.note_saved_queue()
         self.owner = RecoveryOwner(self.journal.operation_id, journal_item.item_id)
         self.initial = initial_completion_input(self.plan, self.owner, self.origin)
         if journal_item.phase is queue_state.QueuePhase.ACTIVE:
@@ -1555,6 +1559,7 @@ def execute_durable_new_album(
     resume_owner: RecoveryOwner | None = None,
     prepare_staged=None,
     acknowledge_completion=None,
+    note_saved_queue=None,
 ) -> DurableAlbumResult:
     """Run one exact full-album replacement without ambiguous replay."""
     return _DurableAlbumRun(
@@ -1562,4 +1567,5 @@ def execute_durable_new_album(
         authority=authority, resume_owner=resume_owner,
         prepare_staged=prepare_staged,
         acknowledge_completion=acknowledge_completion,
+        note_saved_queue=note_saved_queue,
     ).run()

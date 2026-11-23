@@ -354,7 +354,7 @@ def _resampled_peak_dbfs(src, af_filter, rate, *, pass_fds=()):
 # beside the source, then atomically exchanged with the exact held master. The
 # dot keeps the library scanner from indexing an in-flight encode.
 _TMP_PREFIX = ".compress-"
-_TMP_NAME = re.compile(r"\.compress-[0-9a-f]{32}\.flac")
+TEMP_NAME = re.compile(r"\.compress-[0-9a-f]{32}\.flac")
 
 # ffmpeg's FLAC muxer writes no seek table, so one is built on the encode.
 _SEEKPOINT_SECONDS = 10
@@ -759,7 +759,7 @@ def settle_interrupted_downsample():
         return
     for folder, _dirs, names in os.walk(album):
         for name in names:
-            if not _TMP_NAME.fullmatch(name):
+            if not TEMP_NAME.fullmatch(name):
                 continue
             path = Path(folder) / name
             try:

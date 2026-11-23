@@ -107,6 +107,21 @@ def current_job_album_id() -> str | None:
     )
 
 
+def note_current_job_saved_queue() -> None:
+    """Save that the current download holds a saved queue entry, once it
+    does."""
+    job = getattr(_TLS, "current_job", None)
+    marker = job_persistence.SAVED_QUEUE
+    if type(job) is not Job or (job.execute_args or {}).get(marker):
+        return
+    with job._lock:
+        job.execute_args = {**(job.execute_args or {}), marker: True}
+    if job_persistence.persist(job) is not True:
+        raise RuntimeError(
+            "The download could not be saved to History, so it was not "
+            "started.")
+
+
 def acknowledge_current_job_durable_completion(
     origin,
     owner,
@@ -2491,10 +2506,37 @@ def _review_restore_error(job, row, execute_registry):
     return None
 
 
+_PUT_BACK_PAGES = {"library": "Library", "new_releases": "New releases",
+                   "upgrade": "Upgrade", "downsample": "Downsample",
+                   "repair": "Repair",
+                   "collection_restore": "the restore review"}
+
+
+def _note_put_back_run(review, title, picks):
+    """Leave a History row for a run a restart put back in its review
+    before it started. The row dates from just before the review, so a
+    page that shows its newest job still shows the review."""
+    from qobuz_librarian.web import flows
+    kind = review.execute_kind
+    names = flows.named_albums(picks)
+    verb = "is" if len(picks) == 1 else "are"
+    registry.add(Job(
+        title=title, kind="scan", execute_kind=kind,
+        phase="execute", status=JobStatus.CANCELED,
+        created_at=review.created_at - 0.001, finished_at=time.time(),
+        attention="interrupted" if kind == "library" else "",
+        summary=(f"{job_persistence.RESTART_INTERRUPTED} {names} had not "
+                 f"started and {verb} back in {_PUT_BACK_PAGES[kind]}, "
+                 "ticked."),
+    ))
+
+
 def _put_back_pending_reviews(pending_reviews) -> int:
     """Put saved reviews back; returns how many could not be."""
     failed = 0
     for job in pending_reviews:
+        picks = [c for c in job.candidates if c.get("selected")]
+        title = job.title
         if not _restore_untouched_review(job, status=JobStatus.PENDING):
             failed += 1
             with job._lock:
@@ -2506,6 +2548,8 @@ def _put_back_pending_reviews(pending_reviews) -> int:
                     "not be put back in the review. Run the scan again."
                 )
             job_persistence.persist(job)
+        elif job.execute_kind in _PUT_BACK_PAGES:
+            _note_put_back_run(job, title, picks)
     return failed
 
 

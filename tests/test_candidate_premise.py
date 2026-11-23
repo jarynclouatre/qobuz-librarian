@@ -124,6 +124,33 @@ def test_candidate_receipt_survives_mount_namespace_renumbering(
         validate(candidate)
 
 
+def test_same_files_on_a_renumbered_device_still_match_their_review(
+        tmp_path, monkeypatch):
+    import qobuz_librarian.library.candidate_premise as candidate_premise
+
+    _root, album, _track = _music_album(tmp_path, monkeypatch)
+    premise = capture("upgrade", album)
+    current = _renumber_mount_ids(premise)
+    receipt = current["receipt"]
+    tree = receipt["tree"]
+    identities = [*receipt["path_generations"],
+                  *receipt["directory_generations"].values(),
+                  tree["root_identity"], *tree["directories"].values(),
+                  *(value["identity"] for value in tree["files"].values())]
+    for identity in identities:
+        identity[1] += 7
+    monkeypatch.setattr(
+        candidate_premise, "capture", lambda _kind, _path: current)
+
+    assert validate_premise(premise) == current
+    # Another file under the old name, or another album folder, is refused.
+    for identity in (identities[-1], receipt["path_generations"][-1]):
+        identity[2] += 1
+        with pytest.raises(CandidateStale):
+            validate_premise(premise)
+        identity[2] -= 1
+
+
 def test_missing_candidate_binds_the_reviewed_artist_tree(tmp_path, monkeypatch):
     import qobuz_librarian.library.backup as backup
     import qobuz_librarian.library.candidate_premise as candidate_premise

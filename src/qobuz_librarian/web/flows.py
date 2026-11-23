@@ -4864,7 +4864,7 @@ def _folders_denied_note(failed, denied):
 
 
 def _kept_companions_note(notes):
-    """Where an upgrade left original files the new album has its own copy of.
+    """Where an upgrade left original files the new album does not hold.
 
     ``notes`` pairs each album's label with the files kept in its backup.
     """
@@ -4874,11 +4874,11 @@ def _kept_companions_note(notes):
         label, names = notes[0]
         one = len(names) == 1
         return (f" {label}: the original {', '.join(names)} "
-                f"{'differs' if one else 'differ'} from the new album's and "
-                f"{'is' if one else 'are'} kept in a backup under Settings → "
-                "Diagnostics.")
-    return (f" {plural(len(notes), 'album')} had original files that differ "
-            "from the new album's; they are kept in backups under Settings → "
+                f"{'is' if one else 'are'} not in the new album, so "
+                f"{'it is' if one else 'they are'} kept in a backup under "
+                "Settings → Diagnostics.")
+    return (f" {plural(len(notes), 'album')} had original files that are not "
+            "in the new albums; they are kept in backups under Settings → "
             "Diagnostics.")
 
 
@@ -5702,9 +5702,8 @@ class _RedownloadRun:
             self._checkpoint_recovery(
                 "verification",
                 "The re-download verified. The original album's "
-                f"{', '.join(left)} {'differs' if one else 'differ'} "
-                "from the new album's and "
-                f"{'is' if one else 'are'} kept here.",
+                f"{', '.join(left)} {'is' if one else 'are'} not in the new "
+                f"album, so {'it is' if one else 'they are'} kept here.",
             )
         elif backup_mod.retire_verified_repair_backup(self.backup):
             self._checkpoint_recovery(

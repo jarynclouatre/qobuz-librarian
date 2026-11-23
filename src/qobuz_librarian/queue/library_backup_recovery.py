@@ -28,9 +28,11 @@ from qobuz_librarian.library.backup import (
     restore_gap_fill_backup,
     restore_upgrade_backup,
     settle_library_backup_intent,
+    unread_audio,
     warn_pin_failed,
 )
 from qobuz_librarian.library.candidate_premise import (
+    durable_receipts_match,
     resealed_after_put_back,
     resealed_after_tracks_put_back,
 )
@@ -110,6 +112,25 @@ def _pin(backup, owner, reason, authority_check):
     authority_check()
     if not pinned:
         warn_pin_failed(backup.path)
+
+
+def _same_album(saved, current):
+    """Whether two source receipts seal the same album, however the mounts
+    were numbered when each was taken."""
+    def fixed(receipt):
+        return (
+            {key: value for key, value in receipt.items()
+             if key not in ("path_generations", "directory_generations")},
+            [identity[3] for identity in receipt["path_generations"]],
+            {relative: identity[3] for relative, identity
+             in receipt["directory_generations"].items()},
+        )
+
+    return (
+        current is not None
+        and durable_receipts_match(saved, current)
+        and fixed(saved) == fixed(current)
+    )
 
 
 def _replacement_validator(kind, album):
@@ -282,11 +303,12 @@ def prepare_library_backup_settlement(
             renamed=process._lyrics_follow_tracks(backup.path, replacement),
         )
         authority_check()
-        if replacement_receipt is None:
+        if replacement_receipt is None or unread_audio(
+                backup.receipt, backup.path, replacement_receipt) != []:
             _pin(
                 backup,
                 owner_data,
-                "queue backup kept; companion files could not be carried exactly",
+                "queue backup kept; its own files could not be carried exactly",
                 authority_check,
             )
             return _attention(journal, "library-backup-companions-unsettled")
@@ -370,7 +392,7 @@ def finish_library_backup_settlement(
     authority_check()
     current_receipt = capture_album_source_receipt(replacement)
     authority_check()
-    if current_receipt != data["replacement_receipt"]:
+    if not _same_album(data["replacement_receipt"], current_receipt):
         backup = load_library_backup_record(
             data["carrier"],
             expected_owner=owner_data,
@@ -437,7 +459,7 @@ def finish_library_backup_settlement(
 
     retired = retire_replaced_entries(
         current, owner, data["carrier"], replacement,
-        data["replacement_receipt"], authority_check=authority_check,
+        current_receipt, authority_check=authority_check,
     )
     if not retired:
         authority_check()
@@ -455,7 +477,7 @@ def finish_library_backup_settlement(
         disposed = dispose_backup(
             backup,
             replacement_path=replacement,
-            expected_replacement_receipt=data["replacement_receipt"],
+            expected_replacement_receipt=current_receipt,
             replacement_validator=validator,
             expected_owner=owner_data,
             expected_disposal_record=data.get("disposal"),

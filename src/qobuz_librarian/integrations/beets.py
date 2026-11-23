@@ -1194,13 +1194,23 @@ def _write_managed_snapshot(descriptor, payload):
     current_size = os.fstat(descriptor).st_size
     if current_size + len(encoded) > _OWNERSHIP_MAX_BYTES:
         raise OSError("managed beets evidence is too large")
-    offset = 0
-    while offset < len(encoded):
-        written = os.pwrite(descriptor, encoded[offset:], current_size + offset)
-        if written <= 0:
-            raise OSError("managed beets evidence write failed")
-        offset += written
-    os.fsync(descriptor)
+    try:
+        offset = 0
+        while offset < len(encoded):
+            written = os.pwrite(descriptor, encoded[offset:], current_size + offset)
+            if written <= 0:
+                raise OSError("managed beets evidence write failed")
+            offset += written
+        os.fsync(descriptor)
+    except BaseException:
+        # A line that did not reach the disk whole is taken back, so the
+        # next one follows the last that did.
+        try:
+            os.ftruncate(descriptor, current_size)
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        raise
     return payload["hash"]
 
 
@@ -1977,6 +1987,16 @@ def _open_managed_carrier_file(parent_fd, name):
     return open(name, "rb", buffering=0, opener=opener)
 
 
+def _whole_managed_lines(raw):
+    """The carrier's lines up to the last newline. A stop part way through
+    an append leaves the start of one more line, which is dropped; the
+    history is what was written whole before it."""
+    whole, newline, torn = raw.rpartition(b"\n")
+    if torn and (not torn.startswith(b"{") or not torn.isascii()):
+        return []
+    return (whole + newline).splitlines()
+
+
 def _managed_carrier_history(
     manifest,
     *,
@@ -2003,9 +2023,9 @@ def _managed_carrier_history(
             return None
         raw = os.pread(descriptor, before[5] + 1, 0)
         after = _managed_carrier_stat(manifest)
-        if before != after or len(raw) != before[5] or not raw.endswith(b"\n"):
+        if before != after or len(raw) != before[5]:
             return None
-        lines = raw.splitlines()
+        lines = _whole_managed_lines(raw)
         if not lines or len(lines) > 10_000 or any(not line for line in lines):
             return None
         snapshots = [decode_recovery_json(line, max_bytes=_OWNERSHIP_MAX_BYTES) for line in lines]
@@ -2541,6 +2561,65 @@ def inspect_managed_reservation(reservation, expected_owner):
             return ManagedReservationInspectionResult(
                 ManagedReservationInspectionOutcome.UNAVAILABLE
             )
+
+
+def _remove_unwritten_managed_carrier(reservation, expected_owner):
+    parameters = _managed_reservation_parameters(reservation, expected_owner)
+    if parameters is None:
+        return False
+    reservation, _owner, carrier_path, parent = parameters
+    parent_chain = []
+    carrier = None
+    try:
+        parent_chain, parent_names = _open_absolute_merge_chain(parent)
+        parent_stat = os.fstat(parent_chain[-1])
+        if (
+            int(parent_stat.st_dev) != reservation["parent_device"]
+            or int(parent_stat.st_ino) != reservation["parent_inode"]
+            or not _merge_chain_is_named(parent_chain, parent_names)
+        ):
+            return False
+        carrier = _open_managed_carrier_file(parent_chain[-1], carrier_path.name)
+        held = os.fstat(carrier.fileno())
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or held.st_uid != os.geteuid()
+            or stat.S_IMODE(held.st_mode) != 0o600
+            or held.st_nlink != 1
+            or held.st_size > _OWNERSHIP_MAX_BYTES
+        ):
+            return False
+        raw = os.pread(carrier.fileno(), held.st_size + 1, 0)
+        if (
+            len(raw) != held.st_size
+            or b"\n" in raw
+            or raw and not (raw.startswith(b"{") and raw.isascii())
+            or os.fstat(carrier.fileno()).st_size != held.st_size
+            or not named_entry_matches(
+                parent_chain[-1], carrier_path.name, carrier.fileno(), directory=False
+            )
+        ):
+            return False
+        os.unlink(carrier_path.name, dir_fd=parent_chain[-1])
+        os.fsync(parent_chain[-1])
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        if carrier is not None:
+            carrier.close()
+        for descriptor in reversed(parent_chain):
+            os.close(descriptor)
+
+
+def remove_unwritten_managed_carrier(reservation, expected_owner):
+    """Remove the reserved carrier a stop left before its first line was
+    whole: empty, or the start of one line. Beets cannot have started from
+    it. True once it is gone."""
+    with _MANAGED_CARRIER_RETIREMENT_LOCK:
+        return _run_managed_sigint_deferred(
+            lambda: _remove_unwritten_managed_carrier(reservation, expected_owner)
+        )
 
 
 def _retire_managed_carrier(
@@ -3354,8 +3433,9 @@ _UNPUBLISHED_OWNERSHIP_NAME = re.compile(r"\.qobuz-ownership-[0-9a-f]{16}-[0-9a-
 def _remove_unpublished_marker(directory_fd, expected_token=None):
     """Remove the marker of a folder an import made but never renamed into
     place, proved by its token, or by holding only a token without one.
-    Its times are not compared: a disk that can't do that rename, such as
-    rclone, reports other ones for the marker until it is written back."""
+    With the token, an empty marker the import stopped before writing goes
+    too. Its times are not compared: a disk that can't do that rename, such
+    as rclone, reports other ones for the marker until it is written back."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
         marker_fd = os.open(_OWNERSHIP_MARKER, flags, dir_fd=directory_fd)
@@ -3368,7 +3448,7 @@ def _remove_unpublished_marker(directory_fd, expected_token=None):
         if (
             not stat.S_ISREG(held.st_mode)
             or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
-            or not (raw == (expected_token + "\n").encode("ascii")
+            or not (raw in (b"", (expected_token + "\n").encode("ascii"))
                     if expected_token is not None
                     else re.fullmatch(rb"[0-9a-f]{64}\n", raw))
         ):

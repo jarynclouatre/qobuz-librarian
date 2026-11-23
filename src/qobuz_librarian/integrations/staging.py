@@ -1660,6 +1660,68 @@ def inspect_staging_group_reference(reference, expected_owner):
     return StagingReferenceInspection(StagingReferenceStatus.MATCH, evidence=evidence)
 
 
+def _is_spent_tree(tree):
+    current = capture_tree(tree.path)
+    recorded = dict(tree.directories)
+    return current is not None and not current.files and all(
+        relative in recorded and _same_node(identity, recorded[relative])
+        for relative, identity in current.directories
+    )
+
+
+def retire_spent_staging_group(reference, expected_owner):
+    """Remove an owned retry group a stop left with nothing set aside in
+    it: the manifest the journal sealed, empty folders that manifest
+    recorded, or no entry at all. True once the folder is gone."""
+    parameters = _staging_group_reference_parameters(reference, expected_owner)
+    if parameters is None:
+        return False
+    group, expected_kind, expected_owner, expected_manifest = parameters
+    chain = []
+    try:
+        _staging, _candidate, _relative, chain, _ = _open_staging_chain(group, directory=True)
+        names = set(os.listdir(chain[-1]))
+        if names:
+            if _MANIFEST not in names:
+                return False
+            status, payload, sealed, _reason = _inspect_group_manifest_payload(group)
+            if (
+                status is not StagingReferenceStatus.MATCH
+                or sealed["sha256"] != expected_manifest["sha256"]
+                or sealed["identity"][1:] != expected_manifest["identity"][1:]
+            ):
+                return False
+            tree_plan = _tree_plan_from_payload(group, payload)
+            file_plan = _file_plan_from_payload(group, payload)
+            if (tree_plan is None) == (file_plan is None):
+                return False
+            plan = tree_plan or file_plan
+            if plan.kind != expected_kind or not recovery_owner_matches(
+                plan.owner, expected_owner
+            ):
+                return False
+            parked = {tree.path.name: tree for tree in getattr(plan, "trees", ())}
+            leftovers = names - {_MANIFEST}
+            if leftovers - set(parked) or not all(
+                _is_spent_tree(parked[name]) for name in leftovers
+            ):
+                return False
+            if not all(_prune_tree_directories(parked[name]) for name in sorted(leftovers)):
+                return False
+            manifest = capture_file(group / _MANIFEST, expected=tuple(sealed["identity"]))
+            if manifest is None or not remove_file(manifest):
+                return False
+        if os.listdir(chain[-1]):
+            return False
+        os.rmdir(group.name, dir_fd=chain[-2])
+        os.fsync(chain[-2])
+        return True
+    except (OSError, TypeError, ValueError, RecursionError):
+        return False
+    finally:
+        _close_chain(chain)
+
+
 def _load_tree_plan(group):
     loaded = _read_manifest_payload(group)
     if loaded is None:

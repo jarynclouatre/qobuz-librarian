@@ -108,6 +108,18 @@ def _only_retimed(descriptor, held, expected, digest):
         return False
 
 
+def _unlink_created_marker(directory_fd, marker_fd):
+    try:
+        held = os.fstat(marker_fd)
+        named = os.stat(
+            _OWNERSHIP_MARKER, dir_fd=directory_fd, follow_symlinks=False
+        )
+        if (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino):
+            os.unlink(_OWNERSHIP_MARKER, dir_fd=directory_fd)
+    except OSError:
+        pass
+
+
 def _album_scope_parts(item, destination_parts):
     """Derive the album directory from Beets' exact item destination."""
     if not isinstance(destination_parts, (list, tuple)):
@@ -791,6 +803,9 @@ class QobuzOwnershipPlugin(BeetsPlugin):
                     offset += written
                 os.fsync(marker_fd)
                 record["marker"] = _ownership_identity(os.fstat(marker_fd))
+            except Exception:
+                _unlink_created_marker(child, marker_fd)
+                raise
             finally:
                 os.close(marker_fd)
             os.fsync(child)
@@ -1467,10 +1482,10 @@ class QobuzOwnershipPlugin(BeetsPlugin):
         if not self._root_chain_is_named_locked():
             raise OSError("library root changed while writing ownership evidence")
         if getattr(self, "_managed", False):
-            self._managed_generation += 1
+            generation = self._managed_generation + 1
             payload = {
                 "version": _MANAGED_SNAPSHOT_VERSION,
-                "generation": self._managed_generation,
+                "generation": generation,
                 "previous_hash": self._managed_previous_hash,
                 "nonce": self._nonce,
                 "owner": self._managed_owner,
@@ -1483,6 +1498,7 @@ class QobuzOwnershipPlugin(BeetsPlugin):
             }
             self._managed_previous_hash = _write_managed_snapshot(
                 self._fd, payload)
+            self._managed_generation = generation
             return
         payload = {
             "version": 1,

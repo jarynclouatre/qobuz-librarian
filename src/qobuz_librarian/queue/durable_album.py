@@ -21,6 +21,7 @@ from qobuz_librarian.completion import (
     normalise_album_id,
 )
 from qobuz_librarian.download import album_track_slots, downloads_whole_album
+from qobuz_librarian.library.backup import capture_album_tree_identity, unread_audio
 from qobuz_librarian.library.catalog import is_lossless_album, unstreamable
 from qobuz_librarian.quality.decision import album_max_quality
 
@@ -155,6 +156,11 @@ def plan_durable_new_album(
     floor = album_max_quality(album, 2)
     targets = [album_max_quality(track, 2) for track in tracks]
     targets = [(b, r) if b and r else floor for b, r in targets]
+    # The lane only completes once the backup is gone, and audio the album
+    # reader skips stays in it.
+    if whole_upgrade and unread_audio(
+            capture_album_tree_identity(item["album_dir"]), item["album_dir"]):
+        return None
     if check_beets:
         # Late: only an album that qualifies so far needs the Beets
         # integration, whose check runs Beets to read its config.

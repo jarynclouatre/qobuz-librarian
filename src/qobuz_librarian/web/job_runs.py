@@ -167,14 +167,14 @@ def _make_download_run(
                 )
                 if not separate and durable_album.plan_durable_new_album(candidate, args) is not None:
                     durable_item = candidate
-            saved_queue = durable_item is not None
             marker = job_persistence.SAVED_QUEUE
-            if bool((j.execute_args or {}).get(marker)) != saved_queue:
+            if (j.execute_args or {}).get(marker):
+                # A queued download keeps the mark from its last try; the
+                # executor sets it again once this try's entry is saved.
                 with j._lock:
                     marked = dict(j.execute_args or {})
                     marked.pop(marker, None)
-                    j.execute_args = (
-                        {**marked, marker: True} if saved_queue else marked)
+                    j.execute_args = marked
                 if job_persistence.persist(j) is not True:
                     raise RuntimeError(
                         "The download could not be saved to History, so it "

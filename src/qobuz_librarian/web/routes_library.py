@@ -280,14 +280,16 @@ def _library_current_job():
 def _interrupted_download_note():
     """What a Library download cut short by a restart did, said on the first
     Library visit after it and then not again."""
+    notes = []
     for j in job_mgr.registry.all():
         if j.execute_kind == "library" and j.attention == "interrupted":
             if job_persistence.acknowledge_attention(j.id, "interrupted"):
                 with j._lock:
                     if j.attention == "interrupted":
                         j.attention = ""
-            return j.summary
-    return ""
+            notes.append(j.summary if not notes else j.summary.removeprefix(
+                job_persistence.RESTART_INTERRUPTED).strip())
+    return " ".join(notes)
 
 
 def _library_header_context():

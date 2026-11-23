@@ -1234,6 +1234,7 @@ _COMPANION_CARRY_COMMITTED_SENTINEL = ".ql_companion_carry_committed"
 # copied or replaced tree therefore cannot borrow a stale receipt and be
 # mistaken for the backup this process created.
 _RECEIPT_SIDECAR = ".ql_backup_receipt"
+_RECEIPT_REWRITE = re.compile(r"\.ql-receipt-[0-9a-f]{24}\Z")
 # A receipt takes about 750 bytes a file, so this fits albums of some 80,000
 # files, while a damaged one is still not read whole into memory.
 _RECORD_READ_BYTES = 64 * 1024 * 1024
@@ -1695,7 +1696,7 @@ def _backup_receipt_value_schema_valid(receipt) -> bool:
     )
 
 
-def _read_backup_receipt(directory_fd):
+def _read_backup_receipt(directory_fd, *, ignore=()):
     descriptor = None
     try:
         descriptor = _open_regular_file_at(
@@ -1722,7 +1723,7 @@ def _read_backup_receipt(directory_fd):
         current = _exact_tree_snapshot(
             directory_fd,
             ignore_root_names=(
-                _RECEIPT_SIDECAR, *_OPTIONAL_RECEIPT_MARKERS),
+                _RECEIPT_SIDECAR, *_OPTIONAL_RECEIPT_MARKERS, *ignore),
             sealed=receipt["tree"],
         )
         reopened = dict(
@@ -1775,6 +1776,81 @@ def _seal_backup_result(path, directory_fd, origin, *, kind, complete,
         requested=int(requested),
         backed_up=int(backed_up),
     )
+
+
+def clear_unwritten_backup_markers(path, *, expected_owner) -> None:
+    """Settle the empty files a stop left in a backup this owner holds: a
+    marker created but not yet written, or a receipt rewrite that never got
+    its first byte. An empty marker that keeps the backup is written again
+    in place; the others are removed. A file with anything in it stays."""
+    try:
+        expected_owner = normalise_recovery_owner(expected_owner)
+    except ValueError:
+        return
+    if expected_owner is None:
+        return
+    opened = _open_rooted_directory(cfg.UPGRADE_BACKUP_DIR, Path(path))
+    if opened is None:
+        return
+    _public, _root, _parts, descriptors = opened
+    directory_fd = descriptors[-1]
+    try:
+        empty = {}
+        for name in os.listdir(directory_fd):
+            if (name not in _OPTIONAL_RECEIPT_MARKERS
+                    and _RECEIPT_REWRITE.fullmatch(name) is None):
+                continue
+            value = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (stat.S_ISREG(value.st_mode) and value.st_size == 0
+                    and value.st_nlink == 1 and value.st_uid == os.geteuid()):
+                empty[name] = stat_identity(value)
+        if not empty:
+            return
+        receipt = _read_backup_receipt(directory_fd, ignore=tuple(empty))
+        if receipt is None or not recovery_owner_matches(
+                receipt.get("owner"), expected_owner):
+            return
+        for name, identity in empty.items():
+            if name in _KEEP_MARKERS:
+                _rewrite_empty_keep_marker(
+                    directory_fd, name, identity, receipt)
+                continue
+            descriptor = _open_regular_file_at(directory_fd, name)
+            try:
+                if stat_identity(os.fstat(descriptor)) != identity:
+                    continue
+                os.unlink(name, dir_fd=directory_fd)
+            finally:
+                os.close(descriptor)
+        _fsync_directory_fds(directory_fd)
+    except OSError:
+        return
+    finally:
+        close_descriptors(descriptors)
+
+
+def _rewrite_empty_keep_marker(directory_fd, name, identity, receipt):
+    descriptor = os.open(
+        name, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+        dir_fd=directory_fd)
+    try:
+        if (
+            stat_identity(os.fstat(descriptor)) != identity
+            or not _named_entry_matches(directory_fd, name, descriptor)
+        ):
+            return
+        data = _marker_text(
+            receipt, "kept; written again after a stop left it empty"
+        ).encode("utf-8")
+        offset = 0
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                raise OSError("metadata write made no progress")
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def load_backup_result(path, *, expected_owner=None):
@@ -2955,6 +3031,70 @@ def companions_in_the_way(source_receipt, replacement_receipt):
         return sorted(clashes)
     except (AttributeError, KeyError, TypeError):
         return None
+
+
+# The content of a macOS "._" file, which holds a file's metadata apart from it.
+_APPLE_DOUBLE = b"\x00\x05\x16\x07"
+
+
+def unread_audio(source_receipt, folder, replacement_receipt=None):
+    """The audio files ``source_receipt`` seals in ``folder`` that the album
+    reader skips, as a hidden name or one that isn't UTF-8, so no track was
+    compared with them. None when the folder can't be read.
+
+    Judged by content, not by name: left out are only empty and macOS "._"
+    files, a Downsample's unfinished encodes, and copies of a track that was
+    read or of a file in the replacement. A file under a Downsample's temp
+    name at a rate Downsample reads rather than writes is the original it
+    swapped out, and counts.
+    """
+    folder = Path(os.fspath(folder))
+    errors = []
+    tracks = scanner.read_album_dir(folder, walk_errors=errors)
+    if errors:
+        return None
+    try:
+        files = source_receipt["tree"]["files"]
+        read = {os.path.relpath(track["path"], folder) for track in tracks}
+        copies = {files[name].get("sha256") for name in read if name in files}
+        if replacement_receipt is not None:
+            copies.update(
+                held["sha256"]
+                for held in replacement_receipt["tree"]["files"].values())
+        return sorted(
+            os.fsencode(name).decode(errors="backslashreplace")
+            for name, held in files.items()
+            if Path(name).suffix.lower() in cfg.AUDIO_EXTS
+            and name not in read
+            and held["size"]
+            and not _downsample_encode(folder / name)
+            and (held.get("sha256") is None or held["sha256"] not in copies)
+            and not _is_apple_double(folder / name)
+        )
+    except (KeyError, TypeError):
+        return None
+
+
+def _downsample_encode(path):
+    from qobuz_librarian.integrations import downsample_engine
+
+    if not downsample_engine.TEMP_NAME.fullmatch(path.name):
+        return False
+    try:
+        with open(path, "rb") as file:
+            rate, _bits = downsample_engine.parse_flac_info(
+                file.read(downsample_engine.PROBE_BYTES))
+    except OSError:
+        return False
+    return bool(rate) and downsample_engine.target_rate(rate) is None
+
+
+def _is_apple_double(path):
+    try:
+        with open(path, "rb") as file:
+            return file.read(len(_APPLE_DOUBLE)) == _APPLE_DOUBLE
+    except OSError:
+        return False
 
 
 def _write_backup_origin(bp: Path, origin: Path) -> bool:
@@ -5938,20 +6078,21 @@ class BackupClassification:
 
     @property
     def detail(self):
+        name = os.fsencode(self.file).decode(errors="backslashreplace")
         return {
             "identical": "Removable: every file matches its album copy. Removal checks again.",
             "replacement": "Removable: the album holds a verified copy of every track. Removal checks again.",
             "compare": "Not checked yet: Remove first checks that the album's copy of each track has the same audio."
-            + (f" Then it copies the lyrics of this backup's {self.file} onto the same track in the album, so they are kept." if self.file else ""),
-            "other_audio": f"Not removable: the album's copy of {self.file} has different audio from this backup's.",
-            "lyrics": f"Removable: the album holds a verified copy of every track. Remove first copies the lyrics of this backup's {self.file} onto the same track in the album, so they are kept.",
-            "missing": f"Not removable: {self.file} is missing from the album.",
-            "unrecorded": f"Not removable: {self.file} is not one of the files this backup was made with.",
-            "different": f"Not removable: {self.file} differs from the album copy.",
-            "audio": f"Not removable: the album's {self.file} does not decode cleanly.",
-            "length": f"Not removable: the length of {self.file} can't be read in the backup or the album.",
-            "shorter": f"Not removable: the album's {self.file} is shorter than this backup's.",
-            "smaller": f"Not removable: the album's {self.file} is smaller than this backup's.",
+            + (f" Then it copies the lyrics of this backup's {name} onto the same track in the album, so they are kept." if name else ""),
+            "other_audio": f"Not removable: the album's copy of {name} has different audio from this backup's.",
+            "lyrics": f"Removable: the album holds a verified copy of every track. Remove first copies the lyrics of this backup's {name} onto the same track in the album, so they are kept.",
+            "missing": f"Not removable: {name} is missing from the album.",
+            "unrecorded": f"Not removable: {name} is not one of the files this backup was made with.",
+            "different": f"Not removable: {name} differs from the album copy.",
+            "audio": f"Not removable: the album's {name} does not decode cleanly.",
+            "length": f"Not removable: the length of {name} can't be read in the backup or the album.",
+            "shorter": f"Not removable: the album's {name} is shorter than this backup's.",
+            "smaller": f"Not removable: the album's {name} is smaller than this backup's.",
             "origin": "Not removable: the original album folder is unavailable.",
             "origin_missing": "Not removable: the original album folder is missing.",
             "album_metadata": "Not removable: the album contains backup recovery metadata.",
