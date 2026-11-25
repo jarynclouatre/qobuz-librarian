@@ -2051,6 +2051,7 @@ def approve(
             return APPROVAL_NO_SELECTION
         previous = {
             "status": job.status,
+            "phase": job.phase,
             "finished_at": job.finished_at,
             "started_at": job.started_at,
             "title": job.title,
@@ -2071,6 +2072,7 @@ def approve(
             if parked is not None and type(parked) is not Job:
                 raise TypeError("split_review must return a Job or None")
         job.status = JobStatus.PENDING
+        job.phase = "execute"
         job.finished_at = None
         # Renamed here rather than by the worker: the worker gets there after
         # the redirect has rendered, and the tab that pressed the button
@@ -2138,7 +2140,6 @@ def approve(
         # start the work.
         if j.cancel_requested:
             return
-        j.phase = "execute"
         # Read the selection at run time, not at approve time.
         with j._lock:
             chosen = j.selected_candidates()

@@ -10,7 +10,6 @@ import errno
 import hashlib
 import json
 import os
-import re
 import shutil
 import threading
 import time
@@ -1124,6 +1123,7 @@ def _park_library_failures(failed_cands, execute_kind="library",
                           status=job_mgr.JobStatus.AWAITING_REVIEW)
     job.execute_args = dict(execute_args or {})
     job.execute_args.pop("_credential_generation", None)
+    job.execute_args.pop("downsample_backups", None)
 
     def fresh_download_token():
         return api_client.authorize_qobuz_action(QobuzAccess.DOWNLOAD_ACTION).token
@@ -1212,10 +1212,9 @@ def _return_upgrade_picks(retry, refused, execute_args):
 
 def return_interrupted_picks(job):
     """Put the ticked albums of a run the app stopped mid-way back in its
-    review, ticked. Any of them may already be done, so one whose files no
-    longer match the review is left out, and so is its saved results row,
-    as the review would only refuse it. A missing album is not left out
-    for a change the run made itself, a download into its artist folder.
+    review, ticked. A changed album loses its tick. Downsample checks the
+    artist again for remaining hi-res tracks. Other reviews drop the stale
+    row unless the run itself added a download to a missing album's artist.
     Returns a sentence naming where they went, or "" for none."""
     with job._lock:
         picks = [c for c in job.candidates if c.get("selected")]
@@ -1245,10 +1244,18 @@ def return_interrupted_picks(job):
             unfinished.append(c)
     unfinished = _resealed_past_own_imports(job, unfinished)
     surface = job.execute_kind
+    if surface == "downsample" and left_out and generation_state.output_is_current(surface):
+        # The run may have rewritten only part of an album. Check what still
+        # needs converting without carrying the old tick to changed files.
+        artists = {Path(candidate_premise.expected_path(c)).parent for c in left_out}
+        for artist in artists:
+            if artist.parent != cfg.MUSIC_ROOT or artist.is_symlink():
+                generation_state.mark_output_status(
+                    surface, "stale", reason="The artist folder changed during Downsample.")
+                break
+            saved_views.refresh_downsample_artist(artist)
     remove = {
         "upgrade": lambda p: upgrade_state.remove_album_dir(p.get("album_dir")),
-        "downsample": lambda p: downsample_state.remove_album_dir(
-            p.get("album_dir")),
         "library": lambda p: library_scan_state.remove_album(p.get("album_id")),
     }.get(surface)
     if (left_out and remove is not None
@@ -1260,8 +1267,12 @@ def return_interrupted_picks(job):
                    "results could not be updated.")
     if left_out:
         n = len(left_out)
-        job.push_line(f"{plural(n, 'ticked album')} changed on disk and left "
-                      f"the review: {named_albums(left_out)}.")
+        if surface == "downsample":
+            job.push_line("Previous selection cleared for changed files: "
+                          f"{named_albums(left_out)}.")
+        else:
+            job.push_line(f"{plural(n, 'ticked album')} changed on disk and left "
+                          f"the review: {named_albums(left_out)}.")
     saved = True
     if unfinished:
         saved = _return_picks(
@@ -1282,7 +1293,7 @@ def return_interrupted_picks(job):
     if unfinished:
         return (f"{named_albums(unfinished)} could not be put back in the "
                 "review.")
-    if left_out:
+    if left_out and surface != "downsample":
         return f"{named_albums(left_out)} changed on disk and left the review."
     return ""
 
@@ -1307,41 +1318,27 @@ def note_upgrades_put_back(origins):
         job_persistence.persist(job)
 
 
-_KEPT_ORIGINALS = re.compile(
-    r" The originals are kept for [^.]*\."
-    r"| Your hi-res originals are kept for [^.]*\. Until then you can put "
-    r"them back from Settings[^.]*\.")
-
-
-def note_downsample_put_back(origin):
-    """Say on the page of the last Downsample run that rewrote ``origin``
-    that its originals were put back, and drop the offer to put them back
-    once none of that run's albums has originals left."""
+def note_downsample_put_back(origin, backup_name):
+    """Update the receipt of the run whose originals were restored."""
     folder = os.fspath(origin)
-    runs = [job for job in job_mgr.registry.all()
-            if job.execute_kind == "downsample" and job.phase == "execute"
-            and job.status in job_mgr.TERMINAL
-            and any(c.get("selected")
-                    and (c.get("payload") or {}).get("album_dir") == folder
-                    for c in job.candidates)]
-    if not runs:
+    job_id = job_persistence.downsample_job_for_backup(backup_name, folder)
+    if not job_id:
         return
-    job = max(runs, key=lambda j: j.finished_at or j.created_at or 0)
-    kept = {os.fspath(other) for _path, other, _ok
-            in backup_mod.list_undo_copies() if other}
+    job = job_mgr.registry.get(job_id) or job_mgr.load_historical_job(job_id)
+    if job is None or job.status not in job_mgr.TERMINAL:
+        return
+    kept = {path.name for path, _origin, _ok in backup_mod.list_undo_copies()}
     with job._lock:
-        picked = [c for c in job.candidates if c.get("selected")]
-        albums = [c for c in picked
-                  if (c.get("payload") or {}).get("album_dir") == folder]
-        note = f"{named_albums(albums)} was put back as it was."
+        albums = [c for c in job.candidates if c.get("selected")
+                  and (c.get("payload") or {}).get("album_dir") == folder]
+        album = named_albums(albums) or f"{Path(folder).parent.name} · {Path(folder).name}"
+        note = f"{album} was put back as it was."
         summary = job.summary or ""
-        if note in summary:
-            return
-        if not any((c.get("payload") or {}).get("album_dir") in kept
-                   for c in picked):
-            summary = _KEPT_ORIGINALS.sub("", summary)
-        job.summary = f"{summary} {note}" if summary else note
-    job_persistence.persist(job)
+        if not kept.intersection(job.execute_args["downsample_backups"]):
+            summary = job_persistence.DOWNSAMPLE_RESTORE_OFFER.sub("", summary)
+        if note not in summary:
+            summary = f"{summary} {note}".strip()
+    job_persistence.update_downsample_receipt(job, summary=summary)
 
 
 def reseal_put_back_album(backup_receipt):
@@ -4638,6 +4635,7 @@ class _DownsamplesRun:
         self.shrunk = 0
         self.total_saved = 0
         self.interrupted_saved = 0
+        self.interrupted_files = 0
         self.total_errors = 0
         self.total_flush_warns = 0
         self.state_refresh_warnings = 0
@@ -4708,6 +4706,11 @@ class _DownsamplesRun:
                 saved_views.sync_badge("downsample")
             return _NEXT_ALBUM
 
+    def _record_backup(self, backup):
+        if not job_persistence.update_downsample_receipt(
+                self.job, backup=(backup.name, os.fspath(self.album_dir))):
+            log.info("  Couldn't save the original backup's name in this run's history.")
+
     def _downsample_album(self):
         _note_staging_wait(self.job, "Downsampling albums", self.i - 1, len(self.chosen))
         try:
@@ -4731,7 +4734,8 @@ class _DownsamplesRun:
                 self.res = downsample_engine.downsample_dir(self.album_dir, verbose=True,
                                      base_dir=self.album_dir, log=log.info,
                                      keep_originals=self.keep_originals,
-                                     cancel_check=lambda: self.job.cancel_requested)
+                                     cancel_check=lambda: self.job.cancel_requested,
+                                     on_backup=self._record_backup)
                 try:
                     quality_decision.seal_local_album_cap(self.album_dir)
                 except Exception as e:
@@ -4752,6 +4756,7 @@ class _DownsamplesRun:
             # refresh below re-lists that album so the run can be finished later.
             self.interrupted += 1
             self.interrupted_saved += self.res.get("saved_bytes", 0)
+            self.interrupted_files += self.res.get("resampled", 0)
             self.stopped_early = True
         elif self.res.get("resampled"):
             self.shrunk += 1
@@ -4772,11 +4777,16 @@ class _DownsamplesRun:
         for entry in self.res.get("flushed_files") or []:
             self.flushed_files.append(dict(entry, album=self.label))
 
+    def _converted(self):
+        return downsample_engine.downsampled_count(
+            self.shrunk, self.resampled_files - self.interrupted_files,
+            partial=self.total_errors or self.read_only_tracks)
+
     def _finish_stopped_early(self):
         parts = []
         if self.shrunk:
             parts.append(
-                f"Downsampled {plural(self.shrunk, 'album')} "
+                f"Downsampled {self._converted()} "
                 f"({format_size(self.total_saved)} smaller)")
         if self.failed_albums:
             parts.append(f"{plural(self.failed_albums, 'album')} failed")
@@ -4812,7 +4822,7 @@ class _DownsamplesRun:
         self.went_wrong = bool(
             self.total_errors or self.total_flush_warns or self.errored_albums)
         if self.shrunk:
-            summary = (f"Downsampled {plural(self.shrunk, 'album')}, "
+            summary = (f"Downsampled {self._converted()}, "
                        f"{format_size(self.total_saved)} smaller."
                        + _kept_originals_note(self.resampled_files, self.keep_originals))
         else:

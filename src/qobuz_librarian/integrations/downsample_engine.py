@@ -17,6 +17,7 @@ Quality settings:
   - FLAC compression level 5 (default, lossless, fast encode).
 """
 import copy
+import json
 import os
 import re
 import secrets
@@ -27,17 +28,26 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.integrations import downsample_index
 from qobuz_librarian.integrations.lyric_fetch import (
     _BoundTrack,
     _exchange_existing,
+    _stable_identity,
     _unlink_held_name,
 )
 from qobuz_librarian.integrations.rip import flac_audio_offset
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import flac_cache, scanner
-from qobuz_librarian.safefile import copy_owner, fsync_dir
+from qobuz_librarian.safefile import (
+    copy_owner,
+    fsync_dir,
+    identity_record,
+    named_entry_missing,
+    write_json,
+)
 from qobuz_librarian.safefile import digest_fd as _sha256_fd
 from qobuz_librarian.ui_cli.errors import plural
+from qobuz_librarian.ui_cli.logging import log as logger
 
 
 def _discard_unused_stash(kept_dir, log):
@@ -400,14 +410,32 @@ def _descriptor_path(descriptor: int) -> Path:
     return Path(f"/proc/self/fd/{descriptor}")
 
 
-def _make_encode_temp(parent_fd: int):
+def _record_encode(note, binding, descriptor, *, verified=False):
+    if note is not None:
+        write_json(note, {"track": str(binding.path.relative_to(cfg.MUSIC_ROOT)),
+                          "original": binding.identity, "encode": identity_record(os.fstat(descriptor)),
+                          "verified": verified}, indent=None, strict=True)
+
+
+def _make_encode_temp(binding):
     flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
     for _ in range(16):
         name = f"{_TMP_PREFIX}{secrets.token_hex(16)}.flac"
         try:
-            return name, os.open(name, flags, 0o600, dir_fd=parent_fd)
+            descriptor = os.open(name, flags, 0o600, dir_fd=binding.parent_fd)
         except FileExistsError:
             continue
+        note = None
+        if (binding.path.is_relative_to(cfg.MUSIC_ROOT)
+                and not binding.path.is_relative_to(cfg.STAGING_DIR)):
+            note = Path(cfg.DATA_DIR) / (name + ".json")
+        try:
+            _record_encode(note, binding, descriptor)
+        except BaseException:
+            _unlink_held_name(binding.parent_fd, name, descriptor)
+            os.close(descriptor)
+            raise
+        return name, descriptor, note
     raise FileExistsError("couldn't reserve a downsample temporary file")
 
 
@@ -449,14 +477,23 @@ def _copy_source_metadata(source_fd: int, target_fd: int):
     offsets are counted in samples, so they are rescaled to the new rate.
     Returns None when it worked, or why it did not.
     """
-    from mutagen.flac import FLAC
+    from mutagen.flac import FLAC, VCFLACDict
     try:
+        if os.pread(source_fd, 3, 0) == b"ID3":
+            return "couldn't preserve the leading ID3 tag"
         source = FLAC(f"/proc/self/fd/{source_fd}")
         target = FLAC(f"/proc/self/fd/{target_fd}")
         if target.tags is None:
             target.add_tags()
         target.tags.clear()
-        target.tags.extend(list(source.tags or []))
+        for block in source.metadata_blocks:
+            if isinstance(block, VCFLACDict):
+                target.tags.extend(block)
+            elif block.code == 2:
+                # Application blocks can contain the original recording's RIFF header.
+                return "couldn't preserve the FLAC application metadata"
+            elif block.code > 6:
+                return f"couldn't preserve FLAC metadata block type {block.code}"
         target.clear_pictures()
         for picture in source.pictures:
             target.add_picture(picture)
@@ -473,9 +510,9 @@ def _copy_source_metadata(source_fd: int, target_fd: int):
     except Exception as e:
         # The reader is handed descriptor paths, so its message names them.
         reason = (str(e) or e.__class__.__name__)
-        return (reason
-                .replace(f"/proc/self/fd/{source_fd}", "the source file")
-                .replace(f"/proc/self/fd/{target_fd}", "the resampled file"))
+        reason = (reason.replace(f"/proc/self/fd/{source_fd}", "the source file")
+                  .replace(f"/proc/self/fd/{target_fd}", "the resampled file"))
+        return f"couldn't preserve the source metadata ({reason})"
     return None
 
 
@@ -529,6 +566,8 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
     binding = None
     temp_fd = None
     temp_name = None
+    note = None
+    folder_synced = False
     try:
         binding = _BoundTrack(src, root)
         if (
@@ -582,7 +621,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
             return (rel, sr, rate, None,
                     "source changed while it was being checked")
 
-        temp_name, temp_fd = _make_encode_temp(binding.parent_fd)
+        temp_name, temp_fd, note = _make_encode_temp(binding)
         temp_path = _descriptor_path(temp_fd)
 
         subprocess.run(
@@ -616,10 +655,10 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         )
         carry_error = _copy_source_metadata(binding.track_fd, temp_fd)
         if carry_error is not None:
-            return (rel, sr, rate, None,
-                    "couldn't carry the source tags and artwork onto the "
-                    f"resampled file ({carry_error})")
+            return (rel, sr, rate, None, carry_error)
+        _record_encode(note, binding, temp_fd)
         _write_seektable(temp_fd)
+        _record_encode(note, binding, temp_fd)
         out_size = os.fstat(temp_fd).st_size
         # Verify the encode decodes before it overwrites the source. A
         # downsample has no re-download to fall back on, so a corrupt encode
@@ -688,6 +727,7 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         if not binding.exact_track_is_named():
             return (rel, sr, rate, None,
                     "source or resampled output changed before replacement")
+        _record_encode(note, binding, temp_fd, verified=True)
         _exchange_existing(
             binding.parent_fd,
             temp_name,
@@ -702,7 +742,8 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         # valid file either way, but a directory flush that genuinely fails
         # means the swap may quietly revert on a crash while the run reports
         # it done. Nothing here can be undone; say so instead of staying quiet.
-        if not fsync_dir(_descriptor_path(binding.parent_fd)):
+        folder_synced = fsync_dir(_descriptor_path(binding.parent_fd))
+        if not folder_synced:
             return (rel, sr, rate, in_size - out_size,
                     "resampled, but the folder couldn't be confirmed written to disk; "
                     "the swap may not survive a power loss; check the drive")
@@ -717,9 +758,16 @@ def resample_one(rel, sr, rate, af_filter, *, base_dir=None,
         return (rel, sr, rate, None, str(e))
     finally:
         if temp_name is not None:
-            _unlink_held_name(binding.parent_fd, temp_name, temp_fd)
+            removed = _unlink_held_name(binding.parent_fd, temp_name, temp_fd)
+            if removed and note is not None:
+                folder_synced = fsync_dir(_descriptor_path(binding.parent_fd))
         if temp_fd is not None:
             os.close(temp_fd)
+        if note is not None and folder_synced and named_entry_missing(binding.parent_fd, note.stem):
+            try:
+                note.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Couldn't clear the Downsample record %s: %s", note, exc)
         if binding is not None:
             binding.close()
 
@@ -744,6 +792,13 @@ def _read_only_track(path: Path) -> bool:
             or not os.access(path.parent, os.W_OK | os.X_OK))
 
 
+def downsampled_count(albums, tracks, *, partial):
+    changed = plural(albums, "album")
+    if partial and tracks:
+        return f"{plural(tracks, 'track')} in {changed}"
+    return changed
+
+
 def read_only_note(count):
     """The summary clause for ``count`` read-only tracks left alone."""
     one = count == 1
@@ -753,7 +808,7 @@ def read_only_note(count):
 
 
 def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
-                   keep_originals=False, cancel_check=None):
+                   keep_originals=False, cancel_check=None, on_backup=None):
     """Resample any high-sample-rate FLACs inside `directory` (recursive). Probes
     each file's sample rate, resamples the ones above CD rate, and leaves the
     rest untouched. `base_dir` is the root paths are taken relative to
@@ -764,34 +819,81 @@ def downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
     try:
         return _downsample_dir(
             directory, verbose=verbose, base_dir=base_dir, log=log,
-            keep_originals=keep_originals, cancel_check=cancel_check)
+            keep_originals=keep_originals, cancel_check=cancel_check, on_backup=on_backup)
     finally:
         if keep_originals:
-            settle_interrupted_downsample()
+            backup_mod.record_interrupted_downsample()
+
+
+def _settle_encode(note):
+    name = note.stem
+    if not TEMP_NAME.fullmatch(name):
+        return
+    record = json.loads(note.read_text(encoding="utf-8"))
+    source = Path(record["track"])
+    if (source.is_absolute() or ".." in source.parts or source.suffix.lower() != ".flac"
+            or source.name == name):
+        raise ValueError("invalid Downsample track path")
+    artist = Path(cfg.MUSIC_ROOT) / source.parts[0]
+    source = Path(cfg.MUSIC_ROOT) / source
+    work = source.with_name(name)
+    try:
+        with _BoundTrack(source, cfg.MUSIC_ROOT) as track:
+            if named_entry_missing(track.parent_fd, name):
+                note.unlink()
+                return
+            with _BoundTrack(work, cfg.MUSIC_ROOT) as temp:
+                original, encode = record["original"], record["encode"]
+                untouched = track.identity == original
+                # An exchange changes both ctimes together. A later edit to either
+                # file must keep the former master, even when its mtime was put back.
+                swapped = (record["verified"] is True
+                           and _stable_identity(track.identity) == _stable_identity(encode)
+                           and _stable_identity(temp.identity) == _stable_identity(original)
+                           and track.identity["changed_ns"] == temp.identity["changed_ns"])
+                if not (untouched and temp.identity == encode or swapped):
+                    if untouched:
+                        logger.warning("The original %s is unchanged. Check %s before removing it; "
+                                       "the unfinished encode could not be verified.", source, work)
+                    else:
+                        logger.warning("Downsample couldn't verify the two files. Check %s against %s "
+                                       "before removing either file.", source, work)
+                    return
+                if (not track.exact_track_is_named() or not temp.exact_track_is_named()
+                        or not _unlink_held_name(temp.parent_fd, name, temp.track_fd)):
+                    raise OSError(f"couldn't remove {work}")
+            fsync_dir(_descriptor_path(track.parent_fd), strict=True)
+        note.unlink()
+        if artist != source:
+            return artist
+    except OSError as exc:
+        logger.warning("Couldn't settle %s. Check it against %s before removing either file: %s",
+                       work, source, exc)
 
 
 def settle_interrupted_downsample():
-    """Finish what a Downsample with originals kept left when it did not
-    end normally: record what the album holds for their Restore, and
-    remove its encodes left beside the tracks. Its originals are in their
-    undo copy, so even a temporary holding one just swapped out goes."""
+    from qobuz_librarian import saved_views
+
+    changed_artists = set()
+    for note in sorted(Path(cfg.DATA_DIR).glob(".compress-*.flac.json")):
+        try:
+            if artist := _settle_encode(note):
+                changed_artists.add(artist)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("Couldn't resolve the unfinished Downsample in %s: %s", note, exc)
+    downsample_index.finish_pending()
+    for artist in changed_artists:
+        saved_views.refresh_downsample_artist(artist)
     album = backup_mod.record_interrupted_downsample()
-    if album is None:
-        return
-    for folder, _dirs, names in os.walk(album):
-        for name in names:
-            if not TEMP_NAME.fullmatch(name):
-                continue
-            path = Path(folder) / name
-            try:
-                if stat.S_ISREG(os.lstat(path).st_mode):
-                    path.unlink()
-            except OSError:
-                pass
+    if album is not None and album.parent not in changed_artists:
+        for path in album.rglob(".compress-*.flac"):
+            if TEMP_NAME.fullmatch(path.name) and not (Path(cfg.DATA_DIR) / (path.name + ".json")).exists():
+                logger.warning("Couldn't identify %s in the interrupted Downsample folder. "
+                               "Check it before removing it.", path)
 
 
 def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
-                    keep_originals=False, cancel_check=None):
+                    keep_originals=False, cancel_check=None, on_backup=None):
     directory = Path(directory)
     if not directory.exists() or not directory.is_dir():
         return {"resampled": 0, "errors": 0, "saved_bytes": 0}
@@ -893,6 +995,8 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                     "failed_files": uncopied_files,
                     "read_only": n_read_only}
         backup_mod.note_downsample_running(kept_dir)
+        if on_backup is not None:
+            on_backup(kept_dir)
 
     saved_total = 0
     errors = 0
@@ -942,6 +1046,16 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
                 "then stopping.")
         return running
 
+    try:
+        index_note = downsample_index.before_rewrite(_bd / rel for rel, _, _ in candidates)
+    except OSError as exc:
+        reason = f"couldn't record the pending beets update ({exc})"
+        log(f"  ✗ {reason}; no files were rewritten.")
+        _discard_unused_stash(kept_dir, log)
+        return {"resampled": 0, "errors": len(candidates) + n_uncopied, "saved_bytes": 0,
+                "failed_files": uncopied_files + [{"name": Path(rel).name, "reason": reason}
+                                                 for rel, _, _ in candidates],
+                "read_only": n_read_only}
     futs = {}
     with ThreadPoolExecutor(max_workers=RESAMPLE_WORKERS) as ex:
         for rel, sr, rate in candidates:
@@ -972,6 +1086,7 @@ def _downsample_dir(directory, *, verbose=True, base_dir=None, log=print,
             wait(pending)
             interrupted = exc
             cancelled = True
+    downsample_index.finish(index_note)
     if cancelled:
         for fut in futs:
             if fut not in tallied and fut.done() and not fut.cancelled():

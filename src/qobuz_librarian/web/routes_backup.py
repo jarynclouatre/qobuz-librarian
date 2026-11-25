@@ -545,7 +545,7 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
             if n and not carried.exists():
                 if job_mgr.resolve_recovery_resolution(resolution_plan):
                     if kind == "downsample":
-                        flows.note_downsample_put_back(origin)
+                        flows.note_downsample_put_back(origin, carried.name)
                     note = _diagnostics_result_notice(
                         "warning" if unwritten else "success",
                         f"Restored {plural(n, 'file')} to "

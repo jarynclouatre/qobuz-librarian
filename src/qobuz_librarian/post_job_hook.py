@@ -78,7 +78,7 @@ def run(payload: dict) -> None:
 
 
 def report_terminal_run(*, kind, title, status, summary, started_at,
-                        error=None):
+                        error=None, partly_done=False):
     """Give a finished terminal Upgrade, Repair or Downsample run the History
     card and hook report its web run gets. Bookkeeping never changes the
     run's outcome, so a failure to write is logged for --verbose only."""
@@ -89,7 +89,8 @@ def report_terminal_run(*, kind, title, status, summary, started_at,
     try:
         job_id = job_persistence.record_terminal_run(
             kind=kind, title=title, status=status, summary=summary,
-            error=error, started_at=started_at, finished_at=finished)
+            error=error, started_at=started_at, finished_at=finished,
+            partly_done=partly_done)
         if job_id:
             job_persistence.prune_finished(job_persistence.FINISHED_HISTORY_KEEP)
     except Exception as exc:

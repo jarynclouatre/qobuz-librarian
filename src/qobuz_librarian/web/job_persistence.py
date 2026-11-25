@@ -1156,13 +1156,16 @@ def record_terminal_download(
 
 
 def record_terminal_run(*, kind, title, status, summary, started_at,
-                        finished_at, error=None):
+                        finished_at, error=None, partly_done=False):
     """Add one finished terminal Upgrade, Repair or Downsample run to the
     activity record, as the card its web run leaves, and return its id."""
+    args = {"retry_disabled": "terminal"}
+    if partly_done:
+        args["partly_done"] = True
     return _insert_terminal_record((
         str(title or ""), "", "", "scan", kind, status, str(summary or ""),
         error, started_at, finished_at, "", "", "{}",
-        json.dumps({"retry_disabled": "terminal"}), 0,
+        json.dumps(args), 0,
     ), kind)
 
 
@@ -1933,6 +1936,20 @@ def load_one(job_id: str) -> Optional[dict]:
     return _decode_row(row, decode_logs=True, stored=stored)
 
 
+DOWNSAMPLE_RESTORE_OFFER = re.compile(
+    r" The originals are kept for [^.]*\."
+    r"| Your hi-res originals are kept for [^.]*\. Until then you can put "
+    r"them back from Settings[^.]*\.")
+
+
+def _saved_summary(summary, kind, args):
+    if summary and kind == "downsample" and not args.get("downsample_backups"):
+        # Older receipts have no record of which backup belonged to the run.
+        return DOWNSAMPLE_RESTORE_OFFER.sub(
+            " See Settings → Diagnostics for any remaining originals.", summary)
+    return summary or ""
+
+
 def _decode_row(r, *, decode_logs, stored=_NO_ROWS):
     """One saved row as a job dict, or None when its recoveries are unreadable.
 
@@ -1950,7 +1967,8 @@ def _decode_row(r, *, decode_logs, stored=_NO_ROWS):
         "kind": r[4], "status": r[5], "phase": r[6],
         "candidates": candidates,
         "candidates_unreadable": candidates_unreadable,
-        "error": r[8], "summary": r[9] or "", "review_verb": r[10] or "Download",
+        "error": r[8], "summary": _saved_summary(r[9], r[11], execute_args),
+        "review_verb": r[10] or "Download",
         "execute_kind": r[11] or "",
         "execute_args": execute_args,
         "execute_args_unreadable": execute_args_unreadable,
@@ -2190,7 +2208,7 @@ def history_page(limit: int, offset: int,
         result.append({
             "id": row[0], "title": row[1] or "", "artist": row[2] or "",
             "album_id": row[3] or "", "status": row[4], "error": row[5],
-            "summary": row[6] or "", "execute_kind": row[7] or "",
+            "summary": _saved_summary(row[6], row[7], execute_args), "execute_kind": row[7] or "",
             "interrupted_by_restart": interrupted_by_restart(
                 row[4], row[6], row[5]),
             "execute_args": execute_args,
@@ -2263,6 +2281,55 @@ def recovery_history(*, attention_only: bool = False, listed: bool = False,
             "single_unreadable": single_unreadable,
         })
     return result
+
+
+def update_downsample_receipt(job, *, backup=None, summary=None) -> bool:
+    """Update a Downsample receipt without recreating a cleared History row."""
+    with job._lock, _lock:
+        conn = _get_conn()
+        if job._retired or conn is None:
+            return False
+        if backup is not None:
+            name, folder = backup
+            backups = {**job.execute_args.get("downsample_backups", {}), name: folder}
+            sql = ("UPDATE jobs SET execute_args=json_set(execute_args, "
+                   "'$.downsample_backups', json(?)) WHERE id=? AND json_valid(execute_args)")
+            value = json.dumps(backups)
+        else:
+            sql = "UPDATE jobs SET summary=? WHERE id=?"
+            value = summary
+        try:
+            with conn:
+                if conn.execute(sql, (value, job.id)).rowcount != 1:
+                    return False
+        except sqlite3.Error as exc:
+            _note_write_failure(f"update Downsample receipt {job.id}", exc)
+            return False
+        job._persist_serial += 1
+        if backup is not None:
+            job.execute_args["downsample_backups"] = backups
+        else:
+            job.summary = summary
+        return True
+
+
+def downsample_job_for_backup(name: str, folder: str) -> Optional[str]:
+    with _lock:
+        conn = _get_conn()
+        if conn is None:
+            return None
+        try:
+            rows = conn.execute(
+                f"SELECT id FROM jobs WHERE {_TERMINAL_SQL} "
+                "AND execute_kind = 'downsample' AND phase = 'execute' "
+                "AND EXISTS (SELECT 1 FROM json_each("
+                "CASE WHEN json_valid(execute_args) THEN execute_args END, "
+                "'$.downsample_backups') WHERE key = ? AND value = ?) LIMIT 2",
+                (name, folder)).fetchall()
+        except sqlite3.Error as exc:
+            _log.warning("Couldn't find the Downsample run for %s: %s", name, exc)
+            return None
+    return rows[0][0] if len(rows) == 1 else None
 
 
 def last_finished_at(execute_kind: str) -> Optional[float]:

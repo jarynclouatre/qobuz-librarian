@@ -54,13 +54,15 @@ def _connect(database):
 
 
 @contextmanager
-def transaction(database):
+def transaction(database, *, wait=True):
     """One write transaction, committed when the block ends.
 
     The block checks the rows it changes and raises to refuse; anything
     raised rolls back, and so does a block that rolls back itself."""
     connection = _connect(database)
     try:
+        if not wait:
+            connection.execute("PRAGMA busy_timeout = 0")
         connection.execute("BEGIN IMMEDIATE")
         yield connection
         if connection.in_transaction:

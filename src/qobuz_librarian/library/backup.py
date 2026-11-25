@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import disk_support
+from qobuz_librarian.integrations import downsample_index
 from qobuz_librarian.integrations.rip import flac_audio_ok
 from qobuz_librarian.library import scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
@@ -4563,6 +4564,15 @@ def restore_gap_fill_backup(backup, album_dir: Path,
         return 0
     payload = backup_payload(backup.receipt)
     found = {}
+    index_note = None
+    if backup.receipt["kind"] == "downsample":
+        try:
+            index_note = downsample_index.before_rewrite(
+                album / relative for relative in payload if relative not in keep)
+        except OSError as exc:
+            log.warning("  Couldn't record the pending beets update (%s). "
+                        "The originals are still in the backup.", exc)
+            return 0
     for relative, (size, digest) in sorted(payload.items()):
         if relative in keep:
             continue
@@ -4583,6 +4593,7 @@ def restore_gap_fill_backup(backup, album_dir: Path,
                 C.YELLOW,
                 f"  ⚠  Couldn't restore {PurePosixPath(relative).name}: "
                 f"{exc.strerror or exc}."))
+    downsample_index.finish(index_note)
     try:
         intact = all(stat_identity(os.lstat(album / relative)) == identity
                      for relative, identity in found.items())

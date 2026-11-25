@@ -33,9 +33,10 @@ async def downsample_page(request: Request, page: int = 1, q: str = "",
         None, lambda: saved_reviews.page_review("downsample"))
     state = saved_reviews._downsample_state_summary()
     latest = scans._last_finished("downsample")
-    if (latest and state["complete"]
-            and (state.get("updated_at") or 0) > (latest.finished_at or latest.created_at)):
-        latest = None
+    if latest and state["complete"]:
+        stamp = "scanned_at" if latest.interrupted_by_restart else "updated_at"
+        if (state.get(stamp) or 0) > (latest.finished_at or latest.created_at):
+            latest = None
     failed = (latest if latest and latest.status == job_mgr.JobStatus.FAILED
               and not latest.interrupted_by_restart else None)
     stopped = (latest if latest and (

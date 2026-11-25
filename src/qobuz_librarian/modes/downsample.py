@@ -16,6 +16,7 @@ from qobuz_librarian.integrations.downsample_engine import (
     HAVE_DOWNSAMPLE,
     DownsampleInterrupted,
     downsample_dir,
+    downsampled_count,
     read_only_note,
 )
 from qobuz_librarian.library import downsample_state, generation_state
@@ -255,6 +256,7 @@ class _DownsampleWalk:
                               if name not in self.refresh.errors])
         self.albums_unsaved = 0
         self.n_albums_done = 0
+        self.n_tracks_done = 0
         self.n_attempted = 0
         self.total_saved = 0
         # A preview never reaches the counters below, so it keeps its own running
@@ -356,6 +358,7 @@ class _DownsampleWalk:
         seal_local_album_cap(c.album_dir)
         if res.get("resampled"):
             self.n_albums_done += 1
+            self.n_tracks_done += res["resampled"]
         self.total_saved += res.get("saved_bytes", 0)
         self.total_errors += res.get("errors", 0)
         self.total_damaged += sum(
@@ -366,6 +369,10 @@ class _DownsampleWalk:
         if stopped:
             self.interrupted = True
             return _STOP_WALK
+
+    def _converted(self):
+        return downsampled_count(self.n_albums_done, self.n_tracks_done,
+                                 partial=self.total_errors or self.total_read_only or self.interrupted)
 
     def _print_summary(self):
         log.info("")
@@ -381,7 +388,7 @@ class _DownsampleWalk:
         else:
             log.info(fmt(C.GRAY,
                 f"     Checked {plural(self.n_scanned, 'artist')}; downsampled "
-                f"{plural(self.n_albums_done, 'album')}, "
+                f"{self._converted()}, "
                 f"{format_size(self.total_saved)} smaller."))
             if self.keep_originals and self.n_albums_done:
                 log.info(block(fmt(C.GRAY,
@@ -430,7 +437,7 @@ class _DownsampleWalk:
     def _report_to_history(self):
         if self.n_attempted or self.total_errors:
             stopped = self.interrupted or self.no_answer
-            parts = [f"{plural(self.n_albums_done, 'album')} downsampled, "
+            parts = [f"{self._converted()} downsampled, "
                      f"{format_size(self.total_saved)} smaller"]
             for count, what in ((self.albums_unsaved, "album"),
                                 (self.total_errors - self.albums_unsaved, "file")):
@@ -454,6 +461,7 @@ class _DownsampleWalk:
                 summary=(("Stopped early. " if stopped else "")
                          + ", ".join(parts) + "."),
                 error=None if stopped else error,
+                partly_done=bool(failed and self.n_tracks_done and not stopped),
                 started_at=self.started)
 
     def _exit_code(self):

@@ -167,7 +167,8 @@ def _album_name(path):
     folder = Path(str(path))
     try:
         first = min((f for f in folder.rglob("*")
-                     if f.suffix.lower() in cfg.AUDIO_EXTS and f.is_file()),
+                     if f.suffix.lower() in cfg.AUDIO_EXTS
+                     and not scanner.in_system_folder(f, folder) and f.is_file()),
                     default=None)
         meta = scanner.read_audio_meta(first) if first is not None else None
     except OSError:
