@@ -6,6 +6,7 @@ import shutil
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from starlette.datastructures import URL, QueryParams
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian import run_lock, state_file
@@ -246,7 +247,17 @@ _QOBUZ_CHECK_PAGES = ("/", "/queue", "/library", "/upgrade", "/repair",
 async def check_qobuz_again(request: Request, return_to: str = Form("/")):
     """Ask Qobuz again whether the saved token works, from the page that
     reported it rejected or unreachable."""
-    destination = return_to if return_to in _QOBUZ_CHECK_PAGES else "/"
+    destination = URL(return_to if return_to in _QOBUZ_CHECK_PAGES else "/")
+    current = URL(web_auth.safe_current_path(
+        request.headers.get("referer"), request.headers.get("host", "")))
+    if current.path == destination.path:
+        place = QueryParams(current.query)
+        destination = destination.include_query_params(**{
+            key: place[key] for key in (
+                "tab", "q", "page", "tag", "kind", "artist_id", "artist_name",
+                "album_id", "back_kind", "back_q", "back_album_id", "back_track_q",
+            ) if key in place
+        })
     if not qobuz_access._creds_ok():
         return RedirectResponse(url="/settings#qobuz", status_code=303)
     loop = asyncio.get_running_loop()
@@ -268,7 +279,7 @@ async def check_qobuz_again(request: Request, return_to: str = Form("/")):
     else:
         msg = "Qobuz still can't be reached."
     return RedirectResponse(
-        url=f"{destination}?qobuz_check={rendering._notice_key(msg)}",
+        url=destination.include_query_params(qobuz_check=rendering._notice_key(msg)),
         status_code=303,
     )
 

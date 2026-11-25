@@ -194,7 +194,7 @@ def _last_finished_library_job():
         "library", (job_mgr.JobStatus.DONE, job_mgr.JobStatus.FAILED))
 
 
-def _library_refresh_outcome():
+def _library_refresh_outcome(unreadable_artists):
     """What the library work that just ended actually did, or "". A failed
     scan has its own notice on the page; a failed download says what it got
     and what it did not."""
@@ -207,7 +207,10 @@ def _library_refresh_outcome():
         return " ".join(dict.fromkeys(
             part for part in (str(latest.summary or "").strip(),
                               str(latest.error or "").strip()) if part))
-    return str(latest.summary or "").strip()
+    summary = str(latest.summary or "").strip()
+    if latest.phase == "scan" and unreadable_artists:
+        return review_pages.without_left_out_note(summary)
+    return summary
 
 
 def _left_unchecked(job):
@@ -356,6 +359,8 @@ def _library_header_context():
             "library", statuses=(job_mgr.JobStatus.PENDING,
                                  job_mgr.JobStatus.SCANNING)) is not None,
         "library_refresh_failure": _library_refresh_failure(),
+        "unreadable_artists": unreadable_artists_mod.load(),
+        "auto_library_scan": cfg.AUTO_LIBRARY_SCAN,
     }
 
 
@@ -387,8 +392,6 @@ def _library_page_context(page, tab, q):
         # Why a finished review retired ("discarded" / "worked_through" / ""),
         # so the finished-state card reads right.
         "library_review_retired_reason": "",
-        "unreadable_artists": unreadable_artists_mod.load(),
-        "auto_library_scan": cfg.AUTO_LIBRARY_SCAN,
         "interrupted_download_note": _interrupted_download_note(),
     }
     # Single-surface rule (same as /repair): a scan in flight or a parked
@@ -498,10 +501,17 @@ async def library_page(request: Request, page: int = 1, tab: str = "",
     if ctx.get("review_summary_line") and any(
             ctx["review_summary_line"] in said for said in shown):
         ctx["review_summary_line"] = ""
-    if ctx.get("review_summary_line") and ctx["unreadable_artists"]:
-        ctx["review_summary_line"] = review_pages.without_left_out_note(
-            ctx["review_summary_line"])
+    if ctx["unreadable_artists"]:
+        for key in ("library_notice", "review_summary_line"):
+            if ctx.get(key):
+                ctx[key] = review_pages.without_left_out_note(ctx[key])
+        finished_note = ctx["scan_finished"]
+        if finished_note and finished_note.get("summary"):
+            summary = review_pages.without_left_out_note(finished_note["summary"])
+            ctx["scan_finished"] = {"summary": summary} if summary else None
     ctx["error"] = rendering._notice_text(request.query_params.get("error"))
+    if ctx["error"] == job_mgr.TOKEN_REJECTED and not ctx["qobuz_ready"]:
+        ctx["error"] = ""
     ctx["error_refresh"] = request.query_params.get("offer_refresh") == "1"
     return rendering._tr(request, "library.html", ctx, review_badge_ack=badge_ack)
 
@@ -517,7 +527,7 @@ async def library_refresh_note(request: Request):
         header = _library_header_context()
         job = _library_current_job()
         calm = job is None or job.status == job_mgr.JobStatus.AWAITING_REVIEW
-        outcome = _library_refresh_outcome()
+        outcome = _library_refresh_outcome(header["unreadable_artists"])
         return {
             **header,
             "library_unchecked_said": any(
@@ -580,7 +590,16 @@ async def library_scan(
     # single scan surface); only a refusal that starts nothing sends them back
     # to where they clicked from instead of bouncing them off Settings with an
     # error about a page they weren't on.
-    error_home = "/settings" if return_to == "/settings" else "/library"
+    place = review_pages.library_place(tab, q)
+    library_home = "/library" + ("?" + place if place else "")
+    error_home = "/settings" if return_to == "/settings" else library_home
+
+    def error_redirect(message):
+        sep = "&" if "?" in error_home else "?"
+        return RedirectResponse(
+            url=error_home + sep + "error=" + rendering._notice_key(message),
+            status_code=303)
+
     # Run the submit off the event loop: it takes _auto_check_lock, which the
     # dashboard auto-triggers can hold across small data-volume reads, and the
     # loop shouldn't block on a (possibly NAS) mount, same reason the dashboard
@@ -597,8 +616,7 @@ async def library_scan(
                 return HTMLResponse(
                     f'<div class="ql-flash ql-flash-warning" data-flash><span>{html.escape(msg)}</span></div>',
                     status_code=200)
-            return RedirectResponse(
-                url="/library?error=" + rendering._notice_key(msg), status_code=303)
+            return error_redirect(msg)
         existing = new_release_checks._active_new_release_check()
         if existing is not None:
             # A check already crawling. Land on it rather than starting a
@@ -616,10 +634,7 @@ async def library_scan(
                     rendering._ql_notice_html("error", html.escape(msg)),
                     status_code=200,
                 )
-            return RedirectResponse(
-                url="/library?error=" + rendering._notice_key(msg),
-                status_code=303,
-            )
+            return error_redirect(msg)
         # Same job the dashboard auto-check submits; its own execute_kind so
         # the review screen badges the new releases (left un-ticked).
         job = await loop.run_in_executor(
@@ -627,7 +642,7 @@ async def library_scan(
             lambda: new_release_checks._start_new_release_check(credentials),
         )
         if job is None:
-            return scans._scan_submission_failure_response(request, "/library")
+            return scans._scan_submission_failure_response(request, error_home)
         return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)
     scan_state = scans._library_scan_state()
     if not scan_state["ready"]:
@@ -636,8 +651,7 @@ async def library_scan(
             return HTMLResponse(
                 f'<div class="ql-flash ql-flash-warning" data-flash><span>{html.escape(msg)}</span></div>',
                 status_code=200)
-        return RedirectResponse(
-            url=error_home + "?error=" + rendering._notice_key(msg), status_code=303)
+        return error_redirect(msg)
     force_full_scan = str(force_full or "").strip().lower() in {
         "1", "true", "yes", "on",
     }
@@ -648,12 +662,8 @@ async def library_scan(
         return RedirectResponse(
             url="/library?notice=" + rendering._notice_key(msg),
             status_code=303)
-    # The refresh icon sends the review's tab and filter, so the page comes
-    # back on them.
-    place = review_pages.library_place(tab, q)
     if existing is not None:
-        return RedirectResponse(url="/library" + ("?" + place if place else ""),
-                                status_code=303)
+        return RedirectResponse(url=library_home, status_code=303)
     try:
         credentials = await qobuz_access._authorize_qobuz_for_web(
             QobuzAccess.CATALOGUE_ACTION
@@ -665,8 +675,7 @@ async def library_scan(
                 rendering._ql_notice_html("error", html.escape(msg)),
                 status_code=200,
             )
-        return RedirectResponse(
-            url=error_home + "?error=" + rendering._notice_key(msg), status_code=303)
+        return error_redirect(msg)
     # "library" (not "album") so the review screen knows this is the paced triage
     # surface; both modes run the same album executor and resume from a matching
     # checkpoint if one's waiting (see _start_library_scan / scan_library).

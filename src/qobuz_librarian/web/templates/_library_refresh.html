@@ -3,9 +3,11 @@
    refresh compares externally-added files with the Qobuz catalogue. #}
 <div id="library-refresh" class="flex items-center gap-3">
   {% if new_release_baseline_complete %}
-  <form action="/library" method="post" data-busy-submit>
+  <form action="/library" method="post" data-busy-submit data-review-place>
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="mode" value="new_releases">
+    <input type="hidden" name="tab" value="">
+    <input type="hidden" name="q" value="">
     <button type="submit" id="library-check-releases" class="ql-link-action ql-inline-link-hit"{% if writes_paused or not qobuz_ready %} disabled aria-disabled="true"{% endif %}
             title="{% if writes_paused %}{{ writes_paused_reason }}{% elif not qobuz_ready %}Connect Qobuz before checking new releases.{% else %}Checks Qobuz for albums by your artists that weren't there at the last Library scan or check.{% endif %}">Check new releases</button>
   </form>
@@ -41,6 +43,9 @@
   {% endif %}
 </div>
 {% endif %}
-{% if refresh_failure_oob %}{% include "_library_refresh_failure.html" %}{% endif %}
+{% if refresh_failure_oob %}
+{% include "_library_refresh_failure.html" %}
+{% include "_library_folder_notice.html" %}
+{% endif %}
 {% if census_oob %}{% include "_census.html" %}{% endif %}
 {% if download_oob %}{% include "_library_download.html" %}{% endif %}

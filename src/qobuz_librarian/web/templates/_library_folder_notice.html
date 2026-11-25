@@ -1,0 +1,9 @@
+{% set _folder_message = library_scan_state.message if library_scan_state.ready else '' %}
+<div id="library-folder-notice"{% if refresh_failure_oob %} hx-swap-oob="true"{% endif %}{% if unreadable_artists or _folder_message %} class="ql-notice ql-notice-warning" role="status"{% else %} hidden{% endif %}>
+  {% if unreadable_artists %}
+  {% set _n = unreadable_artists|length %}
+  <span class="ql-notice-copy">The last completed scan couldn't read {{ _n }} artist folder{{ 's' if _n != 1 }}: {{ unreadable_artists[:5]|join(', ') }}{% if _n > 5 %} and {{ _n - 5 }} more{% endif %}. {% if auto_library_scan %}Check folder permissions. The app retries automatically.{% else %}Check folder permissions, then refresh Library.{% endif %}</span>
+  {% elif _folder_message %}
+  <span class="ql-notice-copy">{{ _folder_message }}</span>
+  {% endif %}
+</div>

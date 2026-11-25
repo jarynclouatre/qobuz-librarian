@@ -153,8 +153,8 @@ _OLD_LIBRARY_RESUME = " The next Library scan continues from where it stopped."
 # The Library page names unreadable artist folders in a notice of its own.
 _LEFT_OUT_NOTE = re.compile(
     r"\s*[0-9][0-9,]* artist folders? couldn't be read and (?:was|were) left "
-    r"out: .*?\. (?:Each is checked by itself once it can be read|Scan again "
-    r"once (?:it|they) can be read)\."
+    r"out(?:\.|: .*?\. (?:Each is checked by itself once it can be read|Scan again "
+    r"once (?:it|they) can be read)\.)"
 )
 
 

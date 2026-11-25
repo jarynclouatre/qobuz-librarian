@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_clear_field.html" import clear_field %}
+{% from "_job_labels.html" import library_scan_scope %}
 {% block title %}Search - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-6xl{% endblock %}
 {% block content %}
@@ -119,13 +120,13 @@
       </svg>
       <span class="min-w-0 flex-1 text-sm">
         {% if setup_scanning %}
-        <strong>Library scan running.</strong> Looking for missing albums, missing tracks, and quality upgrades.
+        <strong>Library scan running.</strong> Looking for {{ library_scan_scope(upgrade_available) }}.
         {% elif not library_scan_state.ready %}
         <strong>{% if library_scan_state.empty %}No music yet.{% else %}Music library unavailable.{% endif %}</strong> {{ library_scan_state.message }}
         {% elif library_resume %}
         <strong>A library scan was interrupted.</strong>{% if library_resume.done %} {{ library_resume.done }} artist{{ 's' if library_resume.done != 1 }} already checked.{% endif %}
         {% else %}
-        <strong>Scan your library.</strong> Finds missing albums, missing tracks, and quality upgrades.
+        <strong>Scan your library.</strong> Finds {{ library_scan_scope(upgrade_available) }}.
         {% endif %}
       </span>
       {% if setup_scanning %}

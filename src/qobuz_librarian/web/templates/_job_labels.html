@@ -2,6 +2,10 @@
   {{- "{:,}".format(n | int) -}}
 {%- endmacro %}
 
+{% macro library_scan_scope(upgrade_available) -%}
+  {{- 'missing albums, missing tracks, and quality upgrades' if upgrade_available else 'missing albums and tracks' -}}
+{%- endmacro %}
+
 {% macro review_title(job) -%}
   {%- if job.execute_kind == 'new_releases' -%}
     New releases

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_job_labels.html" import library_scan_scope %}
 {% block title %}Library - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-6xl{% endblock %}
 {% block content %}
@@ -26,7 +27,9 @@
     </form>
     {% endif %}
   </div>
-  {% elif error %}<div class="ql-flash ql-flash-warning" data-flash><span>{{ error }}</span></div>{% endif %}
+  {% elif error and (error != library_scan_state.message or (library_job and library_scan_state.empty)) %}
+  <div class="ql-flash ql-flash-warning" data-flash><span>{{ error }}</span></div>
+  {% endif %}
   {% if library_notice %}<div class="ql-flash ql-flash-info" data-flash><span>{{ library_notice }}</span></div>{% endif %}
   {% if scan_finished %}
   {% set _up = '<a href="/upgrade" class="ql-inline-link">%s to upgrade</a>'|format('{:,}'.format(scan_finished.upgrades))|safe if scan_finished.upgrades else '' %}
@@ -72,7 +75,7 @@
     {% if library_refresh_failure and qobuz_ready and not library_resuming %}<p class="ql-scan-hero-meta">{{ library_refresh_failure }}</p>{% endif %}
     {% else %}
     <p class="ql-scan-hero-title">Scan your library</p>
-    <p class="ql-scan-hero-text">Finds missing albums, missing tracks, and quality upgrades.</p>
+    <p class="ql-scan-hero-text">Finds {{ library_scan_scope(upgrade_available) }}.</p>
     <p class="ql-scan-hero-meta">{{ library_scan_state.count }} artist folder{% if library_scan_state.count != 1 %}s{% endif %} to scan</p>
     {% endif %}
     {% if library_resuming %}
@@ -89,18 +92,7 @@
   </section>
   {% endif %}
 
-  {% if unreadable_artists %}
-  {% set _n = unreadable_artists|length %}
-  <div class="ql-notice ql-notice-warning" role="status">
-    <span class="ql-notice-copy">{{ _n }} artist folder{{ 's' if _n != 1 }} couldn't be read and {{ 'is' if _n == 1 else 'are' }} left out of these results: {{ unreadable_artists[:5]|join(', ') }}{% if _n > 5 %} and {{ _n - 5 }} more{% endif %}. Check {{ 'its' if _n == 1 else 'their' }} permissions; {% if auto_library_scan %}{{ 'it is' if _n == 1 else 'each is' }} checked by itself once it can be read.{% else %}scan again once {{ 'it' if _n == 1 else 'they' }} can be read.{% endif %}</span>
-  </div>
-  {% endif %}
-
-  {% if library_scan_state.ready and library_scan_state.message and not unreadable_artists %}
-  <div class="ql-notice ql-notice-warning" role="status">
-    <span class="ql-notice-copy">{{ library_scan_state.message }}</span>
-  </div>
-  {% endif %}
+  {% include "_library_folder_notice.html" %}
 
   {% if library_job %}
   {% set _root_gone = not library_scan_state.ready and not library_scan_state.empty %}
