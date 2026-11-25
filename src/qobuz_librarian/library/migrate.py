@@ -181,6 +181,7 @@ class ExecResult:
     # Companion work has its own count and must not distort the track summary,
     # but every attempt still belongs in the durable results evidence.
     companion_outcomes: list = field(default_factory=list)
+    in_place: bool = False
 
     @property
     def failures(self) -> list:
@@ -2155,15 +2156,22 @@ def space_estimate(plan: MigrationPlan, *, in_place: bool = False,
         resume_entries = verified_resume_entries(plan)
     # Cover art, booklets and sidecars are always copied, even by a move, so
     # their bytes count for every folder that receives them.
-    owners = _companion_owners([*plan.placed, *resume_entries])
+    entries = [*plan.placed, *resume_entries]
+    owners = _companion_owners(plan.entries)
+    carrying = _companion_owners(entries)
+    lyrics = _lyric_destinations(entries)
     for receipt in plan.companion_receipts:
         try:
-            folders = owners.get(tuple(receipt["relative"][:-1]), {})
+            folders = carrying.get(tuple(receipt["relative"][:-1]), {})
             size = int(receipt["file"]["size"])
         except (KeyError, TypeError, ValueError):
             continue
-        need += size * sum(
-            _companion_belongs(receipt, folder, owners) for folder in folders)
+        targets = {target for folder in folders for _, target in
+                   _companion_targets([receipt], folder, lyrics, owners)}
+        relative = Path(*receipt["relative"])
+        orphan = (folders and relative.suffix.lower() == ".lrc"
+                  and _folded_stem(relative.with_suffix("")) not in owners.stems)
+        need += size * (1 if orphan else len(targets))
     return need, free
 
 
@@ -2342,15 +2350,12 @@ def _earlier_lyric_destinations(plan, source_root_binding,
     Such a track is no longer in the source, so this run has no entry for
     it; the plan that run recorded beside the destination says where it
     went. A target is kept only while that track is still there."""
-    planned = {
-        Path(*entry.source_receipt["relative"]).with_suffix("")
-        for entry in plan.entries if entry.source_receipt is not None
-    }
+    owners = _companion_owners(plan.entries)
     orphans = {
-        Path(*receipt["relative"]).with_suffix("")
-        for receipt in plan.companion_receipts
-        if Path(receipt["relative"][-1]).suffix.lower() == ".lrc"
-    } - planned
+        Path(*r["relative"]).with_suffix("") for r in plan.companion_receipts
+        if Path(r["relative"][-1]).suffix.lower() == ".lrc" and not r.get("ambiguous_lyric")
+    }
+    orphans = {stem for stem in orphans if _folded_stem(stem) not in owners.stems}
     if not orphans:
         return {}
     earlier = {}
@@ -2368,15 +2373,24 @@ def _earlier_lyric_destinations(plan, source_root_binding,
                             _csv_cell_text(row["destination"]))
         except (OSError, ValueError, csv.Error):
             continue
-    targets = {}
+    spellings = {}
+    wanted = {_folded_stem(stem) for stem in orphans}
     for source, destination in earlier.items():
         try:
             relative = Path(source).relative_to(source_root_binding.path)
         except (TypeError, ValueError):
             continue
         stem = relative.with_suffix("")
-        if stem not in orphans or relative.suffix.lower() not in config.AUDIO_EXTS:
+        key = _folded_stem(stem)
+        if key in wanted and relative.suffix.lower() in config.AUDIO_EXTS:
+            spellings.setdefault(key, {}).setdefault(stem.name, set()).add(destination)
+    targets = {}
+    for stem in orphans:
+        matches = spellings.get(_folded_stem(stem), {})
+        name = _unique_track_name(stem.name, matches)
+        if name is None:
             continue
+        destination = next(iter(matches[name]))
         # The folder may be one this run does not otherwise touch, as when
         # one mixed source folder is moved in parts; the run trusts it as it
         # is now, so a later swap of it is still refused.
@@ -2407,13 +2421,14 @@ def _earlier_lyric_destinations(plan, source_root_binding,
 
 
 def _ambiguous_lyric_targets(plan, entries):
+    owners = _companion_owners(plan.entries)
     targets = _lyric_destinations(entries)
     sources, destinations = {}, {}
     for receipt in plan.companion_receipts:
         relative = Path(*receipt["relative"])
         if relative.suffix.lower() != ".lrc":
             continue
-        for target in targets.get(relative.with_suffix(""), ()):
+        for target in targets.get(owners.lyric_stem(receipt), ()):
             key = _destination_collision_key(target, plan.destination_name_semantics)
             sources.setdefault(key, set()).add(relative)
             destinations.setdefault(key, set()).add(target)
@@ -2421,45 +2436,73 @@ def _ambiguous_lyric_targets(plan, entries):
             for target in paths}
 
 
-def _companion_owners(entries) -> dict:
-    """``{source folder: {destination folder: track name stems}}`` for the
-    folders whose cover art and sidecars go with the tracks of ``entries``."""
-    owners: dict = {}
-    for entry in entries:
-        if entry.dest_rel is None or entry.source_receipt is None:
-            continue
-        relative = entry.source_receipt["relative"]
-        stem = Path(relative[-1]).stem.casefold()
-        for source_folder, destination in zip(
-                companion_folders(relative[:-1]),
-                _companion_destinations(entry.dest_rel)):
-            owners.setdefault(source_folder, {}).setdefault(
-                destination, set()).add(stem)
-    return owners
+def _folded_stem(stem):
+    return stem.with_name(_fold_name(stem.name))
 
 
-def _companion_belongs(receipt, folder, owners) -> bool:
-    """Whether a cover or sidecar goes to the destination ``folder``.
+def _unique_track_name(name, matches):
+    if name not in matches:
+        if len(matches) != 1:
+            return None
+        name = next(iter(matches))
+    return name if len(matches[name]) == 1 else None
 
-    A source folder that holds one album gives all of them to that album. A
-    folder mixing albums gives each album only the files named after one of
-    its tracks or after the album itself."""
-    destinations = owners.get(tuple(receipt["relative"][:-1]), {})
-    if len({Path(*Path(each).parts[:2]) for each in destinations}) <= 1:
-        return True
-    stem = Path(receipt["relative"][-1]).stem.casefold()
-    album = Path(*Path(folder).parts[1:2]).name
-    return (
-        stem in destinations.get(Path(folder), ())
-        or stem in (album.casefold(), strip_year_decoration(album).casefold())
-    )
+
+class _CompanionOwners(dict):
+    def __init__(self, entries):
+        super().__init__()
+        self.stems = {}
+        for entry in entries:
+            if entry.source_receipt is not None:
+                self.add(Path(*entry.source_receipt["relative"]), entry.dest_rel)
+
+    def add(self, relative, dest_rel):
+        key = _folded_stem(relative.with_suffix(""))
+        self.stems.setdefault(key, {}).setdefault(relative.stem, set()).add(
+            Path(dest_rel).with_suffix("") if dest_rel is not None else None)
+        if dest_rel is not None:
+            for source, dest in zip(companion_folders(relative.parts[:-1]),
+                                    _companion_destinations(dest_rel)):
+                self.setdefault(source, {}).setdefault(dest, set()).add(relative.stem)
+
+    def lyric_stem(self, receipt):
+        if receipt.get("ambiguous_lyric"):
+            return None
+        stem = Path(*receipt["relative"]).with_suffix("")
+        names = self.stems.get(_folded_stem(stem))
+        if not names:
+            return stem
+        name = _unique_track_name(stem.name, names)
+        return stem.with_name(name) if name is not None else None
+
+
+def _companion_owners(entries):
+    return _CompanionOwners(entries)
+
+
+def _sidecar_destination(receipt, folder, owners):
+    relative = Path(*receipt["relative"])
+    destinations = owners.get(relative.parts[:-1], {})
+    stem = _fold_name(relative.stem)
+    album = Path(*folder.parts[:2])
+    names = owners.stems.get(_folded_stem(relative.with_suffix("")))
+    if names:
+        name = _unique_track_name(relative.stem, names)
+        return folder / relative.name if name in destinations.get(folder, ()) else None
+    if (len({Path(*dest.parts[:2]) for dest in destinations}) > 1
+            and stem not in (_fold_name(album.name), _fold_name(strip_year_decoration(album.name)))
+            and not any(stem == _fold_name(name) for name in destinations.get(folder, ()))):
+        return None
+    if folder != album and not _folder_disc(relative.parent.name):
+        return album / relative.name
+    return folder / relative.name
 
 
 def album_companion_receipts(plan, entries, owners) -> list:
     """The cover art and sidecars of ``plan`` that go with one album's
     ``entries`` when a review splits the plan by album: a lyrics file named
     after one of its tracks (or after no track in the plan, which an earlier
-    run may have moved), and the rest as ``_companion_belongs`` judges them
+    run may have moved), and the rest as ``_sidecar_destination`` places them
     for the album's destination folders against the ``owners`` of the whole
     plan, so what a reviewer ticks never changes where a cover goes."""
     folders, destinations, tracks = set(), set(), set()
@@ -2470,19 +2513,20 @@ def album_companion_receipts(plan, entries, owners) -> list:
         folders.update(companion_folders(relative[:-1]))
         destinations.update(_companion_destinations(entry.dest_rel))
         tracks.add(Path(*relative).with_suffix(""))
-    planned = {
-        Path(*entry.source_receipt["relative"]).with_suffix("")
-        for entry in plan.entries if entry.source_receipt is not None}
+    folded_tracks = {_folded_stem(stem) for stem in tracks}
     kept = []
     for receipt in plan.companion_receipts:
         relative = Path(*receipt["relative"])
         if tuple(receipt["relative"][:-1]) not in folders:
             continue
         if relative.suffix.lower() == ".lrc":
-            stem = relative.with_suffix("")
-            if stem in tracks or stem not in planned:
+            stem = owners.lyric_stem(receipt)
+            if stem is None:
+                if _folded_stem(relative.with_suffix("")) in folded_tracks:
+                    kept.append({**receipt, "ambiguous_lyric": True})
+            elif stem in tracks or _folded_stem(stem) not in owners.stems:
                 kept.append(receipt)
-        elif any(_companion_belongs(receipt, folder, owners)
+        elif any(_sidecar_destination(receipt, folder, owners)
                  for folder in destinations):
             kept.append(receipt)
     return kept
@@ -2492,10 +2536,11 @@ def _companion_targets(companions, folder, lyric_destinations, owners):
     for receipt in companions:
         relative = Path(*receipt["relative"])
         if relative.suffix.lower() == ".lrc":
-            for target in sorted(lyric_destinations.get(relative.with_suffix(""), ())):
+            stem = owners.lyric_stem(receipt)
+            for target in sorted(lyric_destinations.get(stem, ())):
                 yield receipt, target
-        elif _companion_belongs(receipt, folder, owners):
-            yield receipt, folder / relative.name
+        elif target := _sidecar_destination(receipt, folder, owners):
+            yield receipt, target
 
 
 def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
@@ -2508,7 +2553,7 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
                            copied_companions,
                            lyric_conflicts,
                            owners,
-                           retired=None,
+                           before_retire, retired=None,
                            ) -> None:
     """Copy each migrated album folder's non-audio companions into the
     destination folder(s) that received its audio. Always a copy (never a
@@ -2628,6 +2673,8 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
                     kept = ("the existing copy may be the original itself, "
                             "seen through another folder, so the original "
                             "was kept")
+                elif not before_retire(entry):
+                    kept = _COMPANIONS_NOT_CARRIED
                 else:
                     finished = _retire_source(
                         opened_source, entry.source_receipt, published,
@@ -2701,7 +2748,7 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
     for src_folder, dst_folders in folder_map.items():
         if _cancelled():
             return
-        if not _copy_companions(
+        _copy_companions(
                 result, receipts_by_folder.get(src_folder, ()), dst_folders,
                 progress=progress, cancelled=_cancelled,
                 source_root_binding=source_root_binding,
@@ -2709,11 +2756,11 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
                 lyric_destinations=lyric_destinations,
                 copied_companions=copied_companions,
                 lyric_conflicts=lyric_conflicts,
-                owners=owners):
-            return
+                owners=owners)
 
 
 SAME_COMPANION = "destination already holds the same file"
+_COMPANIONS_NOT_CARRIED = "the original was kept because its cover art or sidecars could not be carried"
 
 
 def _destination_holds(binding, destination_path, receipt) -> bool:
@@ -2744,17 +2791,18 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
                      source_root_binding, destination_root_binding,
                      lyric_destinations, copied_companions, lyric_conflicts,
                      owners) -> bool:
-    """Copy one source folder's companions into each of ``dst_folders``.
-    Returns False once the run has been cancelled."""
+    """Return whether every intended companion was copied or already matches."""
+    all_present = True
     for dst_folder in dst_folders:
         for receipt, destination_path in _companion_targets(
                 companions, Path(dst_folder), lyric_destinations, owners):
             key = (tuple(receipt["relative"]), destination_path)
             if key in copied_companions:
+                all_present = all_present and copied_companions[key]
                 continue
             if cancelled():
                 return False
-            copied_companions.add(key)
+            copied_companions[key] = False
             opened = None
             published = None
             discard_publication = False
@@ -2777,17 +2825,18 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
                     destination_root_binding,
                     destination_path,
                 )
+                copied_companions[key] = True
                 result.companions += 1
                 result.companion_outcomes.append((
                     source_path, destination_path, COPIED, ""))
             except FileExistsError:
+                copied_companions[key] = _destination_holds(
+                    destination_root_binding, destination_path, receipt)
                 result.companion_outcomes.append((
                     source_path,
                     destination_path,
                     SKIPPED,
-                    SAME_COMPANION if _destination_holds(
-                        destination_root_binding, destination_path, receipt)
-                    else "destination already exists",
+                    SAME_COMPANION if copied_companions[key] else "destination already exists",
                 ))
             except KeyboardInterrupt:
                 discard_publication = published is not None
@@ -2830,8 +2879,9 @@ def _copy_companions(result, companions, dst_folders, *, progress, cancelled,
                 _close_published_file(published)
                 if opened is not None:
                     opened.close()
+            all_present = all_present and copied_companions[key]
 
-    return True
+    return all_present
 
 
 def skipped_folders_note(items) -> str:
@@ -3895,7 +3945,7 @@ def execute_plan(plan: MigrationPlan, *, in_place: bool = False,
     Copy mode never alters the source. A destination that turns up after
     planning is skipped (not overwritten), and a per-file failure is recorded
     and stepped over so one bad file can't abort the run."""
-    result = ExecResult()
+    result = ExecResult(in_place=in_place)
     try:
         supplied_resume_entries = list(resume_entries or ())
     except (TypeError, ValueError) as exc:
@@ -4033,10 +4083,10 @@ class _PlanRun:
             each for entry in self.placed
             for each in companion_folders(self.source_folder(entry)))
         self.retired_by_folder: dict = {}
-        self.copied_companions = set()
+        self.copied_companions = {}
         self.lyric_conflicts = _ambiguous_lyric_targets(
             self.plan, [*self.placed, *self.resume_entries])
-        self.owners = _companion_owners([*self.placed, *self.resume_entries])
+        self.owners = _companion_owners(self.plan.entries)
 
     def _place_all(self):
         total = len(self.placed)
@@ -4133,6 +4183,11 @@ class _PlanRun:
         if self.in_place:
             published_identity = stat_identity(
                 os.fstat(self.published[0]))
+            if not self._copy_track_companions(entry):
+                self.result.lingered += 1
+                self.result.failed += 1
+                self.result.outcomes.append((src, entry.dest_rel, FAILED, _COMPANIONS_NOT_CARRIED))
+                return
             if not _retire_source(
                     self.opened_source,
                     entry.source_receipt,
@@ -4170,6 +4225,24 @@ class _PlanRun:
         if self.opened_source is not None:
             self.opened_source.close()
 
+    def _copy_track_companions(self, entry):
+        # A new preview cannot associate a sidecar with a track that has
+        # already left the source.
+        for folder, destination in zip(companion_folders(self.source_folder(entry)),
+                                       _companion_destinations(entry.dest_rel)):
+            companions = self.companions_by_folder.get(folder)
+            if companions and not _copy_companions(
+                    self.result, companions, [destination], progress=None,
+                    cancelled=lambda: self.result.cancelled,
+                    source_root_binding=self.source_root,
+                    destination_root_binding=self.destination_root,
+                    lyric_destinations=_lyric_destinations([entry]),
+                    copied_companions=self.copied_companions,
+                    lyric_conflicts=self.lyric_conflicts,
+                    owners=self.owners):
+                return False
+        return True
+
     def _settle_source_folder(self, entry):
         folder = self.source_folder(entry)
         folders = companion_folders(folder)
@@ -4177,20 +4250,8 @@ class _PlanRun:
         if self.moved:
             self.retired_by_folder.setdefault(folder, []).append(
                 entry.source_receipt)
-            for each, destination in zip(
-                    folders, _companion_destinations(entry.dest_rel)):
-                self.folder_chains[each] = \
-                    entry.source_receipt["parents"][:len(each)]
-                _copy_companions(
-                    self.result, self.companions_by_folder.get(each, ()),
-                    [destination], progress=None,
-                    cancelled=lambda: self.result.cancelled,
-                    source_root_binding=self.source_root,
-                    destination_root_binding=self.destination_root,
-                    lyric_destinations=_lyric_destinations([entry]),
-                    copied_companions=self.copied_companions,
-                    lyric_conflicts=self.lyric_conflicts,
-                    owners=self.owners)
+            for each in folders:
+                self.folder_chains[each] = entry.source_receipt["parents"][:len(each)]
         if not self.waiting[folder] and not self.result.cancelled:
             _prune_retired_source_parents(
                 self.source_root,
@@ -4214,7 +4275,7 @@ class _PlanRun:
                     copied_companions=self.copied_companions,
                     lyric_conflicts=self.lyric_conflicts,
                     owners=self.owners,
-                    retired=finished_moves)
+                    before_retire=self._copy_track_companions, retired=finished_moves)
             finally:
                 for receipt in finished_moves or ():
                     self.retired_receipts.append(receipt)
@@ -4357,6 +4418,19 @@ def _not_carried_rows(result, plan, left_behind) -> list:
             "",
             "",
         ])
+    owners = _companion_owners(plan.entries)
+    selected = {_folded_stem(Path(*e.source_receipt["relative"]).with_suffix(""))
+                for e in plan.entries if e.source_receipt is not None
+                and (e.status == PLACE or os.fspath(e.source) in done)}
+    for receipt in plan.companion_receipts:
+        relative = Path(*receipt["relative"])
+        if (relative.suffix.lower() == ".lrc"
+                and _folded_stem(relative.with_suffix("")) in selected
+                and owners.lyric_stem(receipt) is None):
+            path = plan.source_root / relative
+            known.add(os.fspath(path))
+            rows.append(["companion", SKIPPED, _csv_safe_cell(path, path=True),
+                         "", "multiple tracks match this lyric filename", "", ""])
     root = os.fspath(plan.source_root) if plan.source_root is not None else ""
     for folder, names, _carried in result.left_in_source:
         for name in names:
@@ -4384,7 +4458,9 @@ def _results_rows(result, *, plan=None, left_behind=()) -> list:
     summary = {
         "state": state,
         "cancelled": bool(result.cancelled),
-        "copied": int(result.copied),
+        "mode": "move" if result.in_place else "copy",
+        "moved": int(result.copied) if result.in_place else 0,
+        "copied": 0 if result.in_place else int(result.copied),
         "skipped": int(result.skipped),
         "failed": int(result.failed),
         "lingered": int(result.lingered),
@@ -4417,7 +4493,7 @@ def _results_rows(result, *, plan=None, left_behind=()) -> list:
         for source, destination, status, reason in outcomes:
             rows.append([
                 record,
-                status,
+                "moved" if result.in_place and record == "track" and status == COPIED else status,
                 _csv_safe_cell(source, path=True),
                 _csv_safe_cell(destination, path=True)
                 if destination is not None else "",

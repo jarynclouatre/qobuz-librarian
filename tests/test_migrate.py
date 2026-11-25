@@ -482,7 +482,9 @@ def test_rerun_carries_lyrics_of_a_track_the_stopped_move_already_moved(
     assert m.execute_plan(plan, in_place=True).interrupted
     monkeypatch.setattr(m, "_retire_source", retire_source)
     moved = plan.dest_root / plan.placed[0].dest_rel
-    assert not moved.with_suffix(".lrc").exists()
+    assert moved.with_suffix(".lrc").read_text() == "track0.flac"
+    # An earlier version could leave the sidecar at the source after this cut.
+    moved.with_suffix(".lrc").unlink()
 
     rerun = m.build_plan([second], plan.dest_root)
     m.write_manifest(rerun)

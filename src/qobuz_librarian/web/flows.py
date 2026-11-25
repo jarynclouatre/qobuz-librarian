@@ -6146,6 +6146,18 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
     if job.cancel_requested:
         job.summary = "Stopped. Scan discarded."
         return
+    leftovers = engine.interrupted_migration_leftovers(src, dest)
+    if leftovers:
+        job.push_line(
+            "Hidden items named .qobuz-migrate-copy-, -dir- or -name-probe- "
+            "are unfinished copies you can delete. The others may hold a "
+            "track that was being moved: check it is in the new library "
+            "before you delete one.")
+        for path in leftovers[:50]:
+            shown, _ = storage._resolve_host_path(str(path))
+            job.push_line(f"left by an interrupted migration: {shown}")
+        if len(leftovers) > 50:
+            job.push_line(f"… and {len(leftovers) - 50} more")
     if not items:
         # An empty source is nearly always the wrong folder or a share that
         # did not mount, so it is an error, not a finished scan with an
@@ -6157,6 +6169,8 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
             "No music files were found in the source folder. Check that it is "
             "the folder you meant and that its drive or share is attached, "
             "then scan again.")
+        if leftovers:
+            job.error += " See the activity log for files left by the interrupted migration."
         job.summary = job.error
         _mark_job_failed(job)
         return
@@ -6171,11 +6185,18 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
     job.execute_args["fingerprinted"] = [
         str(entry.source) for entry in plan.placed + resume_entries
         if entry.source_of_truth == "acoustid"]
+    left_behind = [entry for entry in plan.entries if id(entry) not in reviewed]
     job.execute_args["left_behind"] = [
         [entry.status, entry.source_of_truth, str(entry.source),
          str(entry.dest_rel) if entry.dest_rel is not None else "",
          entry.reason]
-        for entry in plan.entries if id(entry) not in reviewed]
+        for entry in left_behind]
+    excluded = [entry for entry in left_behind if not entry.reason.startswith(engine.UNREADABLE)]
+    for entry in excluded[:50]:
+        target = f" → {dest / entry.dest_rel}" if entry.dest_rel else ""
+        job.push_line(f"{entry.source}{target}: {entry.reason}")
+    if len(excluded) > 50:
+        job.push_line(f"… and {len(excluded) - 50} more")
 
     groups: dict = {}
     for kind, plan_entries in (
@@ -6187,7 +6208,7 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
             group = groups.setdefault(
                 key, {"entries": [], "resume_entries": []})
             group[kind].append(entry)
-    owners = engine._companion_owners(plan.placed + resume_entries)
+    owners = engine._companion_owners(plan.entries)
     for (artist, album), group in sorted(groups.items()):
         entries = group["entries"]
         resumes = group["resume_entries"]
@@ -6265,25 +6286,16 @@ def scan_migration(job, src, dest, *, use_acoustid, in_place=False):
                      f"The {'in-place move' if in_place else 'copy'} stays "
                      "blocked until you confirm the low-space risk below")
         parts.append(space)
-    leftovers = engine.interrupted_migration_leftovers(src, dest)
     if leftovers:
         parts.append(
             "an earlier migration was cut off and left "
             f"{plural(len(leftovers), 'hidden item')}, listed in the activity "
             "log; this run leaves them alone")
-        job.push_line(
-            "Hidden items named .qobuz-migrate-copy-, -dir- or -name-probe- "
-            "are unfinished copies you can delete. The others may hold a "
-            "track that was being moved: check it is in the new library "
-            "before you delete one.")
-        for path in leftovers[:50]:
-            shown, _ = storage._resolve_host_path(str(path))
-            job.push_line(f"left by an interrupted migration: {shown}")
-        if len(leftovers) > 50:
-            job.push_line(f"… and {len(leftovers) - 50} more")
-    job.summary = ("; ".join(parts) + ". Unidentified and skipped files stay "
-                   "where they are. The full plan is saved at the destination "
-                   f"when you start the {verb}.")
+    job.summary = "; ".join(parts) + "."
+    if excluded:
+        job.summary += " See the activity log for skipped files."
+    if groups:
+        job.summary += f" The full plan is saved at the destination when you start the {verb}."
     # Not logged here: job.summary already renders on the job page, and the
     # activity log below it would otherwise repeat the exact same sentence.
 
@@ -6440,9 +6452,9 @@ class _MigrationRun:
         with job_mgr.staging_lock():
             job_mgr.set_staging_holder("Library migration")
             try:
+                self._gather_left_behind()
                 if not self._space_allowed():
                     return False
-                self._gather_left_behind()
                 if not self._write_plan():
                     return False
                 self._run_plan()
@@ -6495,6 +6507,16 @@ class _MigrationRun:
                                          else "tags"),
                         dest_rel=Path(raw[1]),
                         reason="not selected in the review"))
+        root = self.plan.source_root
+        if root and self.left_behind and self.plan.companion_receipts:
+            # Older previews can include another album's artwork when its
+            # tracks collided. Use their saved paths to check ownership.
+            owners = migrate_engine._companion_owners(self.entries)
+            for entry in self.left_behind:
+                if entry.dest_rel and entry.source.is_relative_to(root):
+                    owners.add(entry.source.relative_to(root), entry.dest_rel)
+            self.plan.companion_receipts = migrate_engine.album_companion_receipts(
+                self.plan, self.entries, owners)
 
     def _write_plan(self):
         try:

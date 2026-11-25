@@ -34,8 +34,11 @@ from qobuz_librarian.web import jobs as job_mgr
 _ANY_TARGET = object()
 
 
-def _scan_target(job) -> str:
-    """The artist a scan covers, or "" for the whole library."""
+def _scan_target(job):
+    if job.execute_kind == "migration":
+        args = job.execute_args or {}
+        return (args.get("src"), args.get("dest"),
+                bool(args.get("in_place")), bool(args.get("use_acoustid")))
     return (job.artist or "").strip().casefold()
 
 
@@ -120,9 +123,10 @@ def _submit_scan_deduped(job, scan_fn, execute_fn, *kinds,
         return submitted
 
 
-def _scan_submission_failure_response(request, destination):
+def _scan_submission_failure_response(request, destination, *, keep_form_options=False):
     """Explain a refused durable admission unless the CLI owns the lock."""
-    busy = refusals._lock_busy_response(request)
+    busy = refusals._lock_busy_response(
+        request, form_page=destination if keep_form_options else "")
     if busy is not None:
         return busy
     separator = "&" if "?" in destination else "?"

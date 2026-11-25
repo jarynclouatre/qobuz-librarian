@@ -3,6 +3,7 @@ import hashlib
 import math
 import time
 from datetime import datetime
+from urllib.parse import urlencode
 
 from qobuz_librarian.ui_cli import colors
 from qobuz_librarian.web import job_persistence, runtime
@@ -97,9 +98,22 @@ _JOB_NAV_SURFACES = {
 }
 
 
+def migration_url(in_place, use_acoustid):
+    options = {}
+    if in_place is True:
+        options["in_place"] = 1
+    if use_acoustid is True:
+        options["acoustid"] = 1
+    return "/migrate?" + urlencode(options) if options else "/migrate"
+
+
 def _job_nav_destination(job) -> tuple[str, str, str]:
     destination = _JOB_NAV_SURFACES.get(job.execute_kind)
     if destination is not None:
+        if job.execute_kind == "migration":
+            args = job.execute_args or {}
+            url = migration_url(args.get("in_place"), args.get("use_acoustid"))
+            return destination[0], url, destination[2]
         if destination[0] == "upgrade" and not runtime._upgrade_available():
             return "queue", "/queue/history", "History"
         return destination

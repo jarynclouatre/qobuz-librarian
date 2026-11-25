@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.library import migrate as migrate_engine
-from qobuz_librarian.web import flows, refusals, rendering, scans
+from qobuz_librarian.web import flows, job_labels, refusals, rendering, scans
 from qobuz_librarian.web import jobs as job_mgr
 
 router = APIRouter()
@@ -53,6 +53,8 @@ async def migrate_page(request: Request):
         # stays lit. The paths surface through migrate_checks, not directly.
         "page": "settings",
         "configured": bool(src and dest),
+        "in_place": request.query_params.get("in_place") == "1",
+        "use_acoustid": request.query_params.get("acoustid") == "1",
         "migrate_checks": _migrate_checks(src, dest),
     })
 
@@ -60,13 +62,14 @@ async def migrate_page(request: Request):
 @router.post("/migrate")
 async def migrate_scan(request: Request):
     # No credential check: migration only reads and reorganises local files.
-    busy = refusals._lock_busy_response(request)
-    if busy is not None:
-        return busy
-    src, dest = cfg.MIGRATE_SRC, cfg.MIGRATE_DEST
     form = await request.form()
     use_acoustid = form.get("acoustid") == "on"
     in_place = form.get("in_place") == "on"
+    form_page = job_labels.migration_url(in_place, use_acoustid)
+    busy = refusals._lock_busy_response(request, form_page=form_page)
+    if busy is not None:
+        return busy
+    src, dest = cfg.MIGRATE_SRC, cfg.MIGRATE_DEST
     if not src or not dest:
         err = ("Set MIGRATE_SRC and MIGRATE_DEST: the source library and "
                "the destination for the organised copy, then try again.")
@@ -84,7 +87,8 @@ async def migrate_scan(request: Request):
     # src is persisted so a resume after restart can still prune the emptied
     # source folders on an in-place move (the live execute below gets it too).
     job.execute_args = {"dest": str(dest), "in_place": bool(in_place),
-                        "src": str(src), "allow_low_space": False}
+                        "src": str(src), "use_acoustid": use_acoustid,
+                        "allow_low_space": False}
     job = await scans._submit_scan_deduped_async(
         job,
         lambda j: flows.scan_migration(j, src, dest, use_acoustid=use_acoustid,
@@ -94,5 +98,5 @@ async def migrate_scan(request: Request):
                                                   allow_low_space=False),
         "migration")
     if job is None:
-        return scans._scan_submission_failure_response(request, "/migrate")
+        return scans._scan_submission_failure_response(request, form_page, keep_form_options=True)
     return RedirectResponse(url=f"/jobs/{job.id}", status_code=303)

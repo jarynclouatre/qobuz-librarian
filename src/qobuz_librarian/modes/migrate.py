@@ -239,6 +239,7 @@ class _MigrateRun:
                 f"  ✗  No music files were found in {self.src}. Check that it is the "
                 "folder you meant and that its drive or share is attached, then "
                 "run this again."))
+            _print_leftovers(engine.interrupted_migration_leftovers(self.src, self.dest))
             return EXIT_GENERAL
         return None
 
