@@ -4910,11 +4910,12 @@ def relocate_disc_album_artwork(album_dir) -> bool:
 
 def beets_import_paths(
     consolidate=True, *, album_dirs, source_files_out=None, album_dir=None,
-    protected_paths=None, folder=None, repair_token=None,
+    protected_paths=None, folder=None, repair_token=None, added_paths=None,
 ):
     """Run beets on explicit staged albums and return a success bool, or
     raise MusicDiskFull when beets stopped on a full disk.
 
+    When supplied, ``added_paths`` receives the filed paths proved by beets.
     The fold after the import leaves ``protected_paths`` alone. ``folder`` is
     the library folder the album is filed in whether or not it exists yet.
     """
@@ -4924,8 +4925,10 @@ def beets_import_paths(
     if album_dir is None and folder is None:
         forget_deleted_copies(roots)
     prepared_sources = source_files_out if source_files_out is not None else []
+    ownership = {} if added_paths is not None else None
     override_path, cleanup, runtime = _prepare_for_beets_run(
         roots=roots, source_files_out=prepared_sources, album_dir=album_dir,
+        ownership_out=ownership,
         folder=folder, **({"repair_token": repair_token} if repair_token else {}),
     )
     if cleanup is None:
@@ -4940,6 +4943,7 @@ def beets_import_paths(
         cleanup,
         [str(directory) for directory in roots],
         intended_audio=intended_audio,
+        ownership_capture=ownership,
         beets_runtime=runtime,
     )
     if not ok:
@@ -4957,6 +4961,19 @@ def beets_import_paths(
         _consolidate_duplicate_albums(
             protected_paths=protected_paths, folders=[album_dir],
             last_old_id=last_old_id)
+    if ok and ownership:
+        files, directories = {}, {}
+        for item in ownership.get("result", {}).get("items", ()):
+            for entry in (item, *item.get("companions", ())):
+                relative = entry.get("relative")
+                if _ownership_relative_parts(relative) and _valid_ownership_identity(entry.get("file")):
+                    files[str(cfg.MUSIC_ROOT / relative)] = (None, entry["file"])
+            for entry in item.get("created_directories", ()):
+                relative = entry.get("relative")
+                if _ownership_relative_parts(relative) and _valid_ownership_identity(entry):
+                    directories[str(cfg.MUSIC_ROOT / relative)] = entry
+        if files:
+            added_paths.update(files=files, directories=directories)
     return ok
 
 

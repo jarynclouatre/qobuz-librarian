@@ -710,7 +710,7 @@ def sealer_after_writes(writes):
     return lambda value: resealed_after_writes(value, writes, captures)
 
 
-def resealed_after_writes(value, writes, captures):
+def resealed_after_writes(value, writes, captures, *, created_dirs=None):
     """A fresh seal for a row whose folder changed only by ``writes``, the
     app's own file writes as ``{path: (before, after)}``, or None.
 
@@ -747,8 +747,26 @@ def resealed_after_writes(value, writes, captures):
                 files[relative] = _sealed_file(after)
     except (KeyError, TypeError, ValueError):
         return None
+    current = fresh["receipt"]
     expected = {**sealed, "tree": {**sealed["tree"], "files": files}}
-    return fresh if durable_receipts_match(expected, fresh["receipt"]) else None
+    if created_dirs:
+        # A gap fill can file the first track on a new disc. Accept only
+        # the directories beets created, with every file inside accounted for.
+        directories = dict(sealed["tree"]["directories"])
+        generations = dict(sealed["directory_generations"])
+        for folder, identity in created_dirs.items():
+            path = Path(folder)
+            if not path.is_relative_to(root) or path == root:
+                continue
+            relative = path.relative_to(root).as_posix()
+            entry = current["tree"]["directories"].get(relative)
+            if relative in directories or entry != [stat.S_IFDIR, identity["device"], identity["inode"]]:
+                return None
+            directories[relative] = entry
+            generations[relative] = current["directory_generations"][relative]
+        expected["tree"]["directories"] = directories
+        expected["directory_generations"] = generations
+    return fresh if durable_receipts_match(expected, current) else None
 
 
 def _names_sizes_times(tree):

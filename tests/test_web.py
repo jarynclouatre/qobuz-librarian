@@ -3707,7 +3707,7 @@ def _restore_stack(monkeypatch, tmp_path, albums):
     monkeypatch.setattr(cfg, "COLLECTION_BACKUP_DIR", str(tmp_path / "backups"))
     monkeypatch.setattr(collection_restore.scanner, "clear_scan_caches",
                         lambda: None)
-    monkeypatch.setattr(collection_restore, "get_album",
+    monkeypatch.setattr(collection_restore, "fetch_album",
                         lambda album_id, _t: albums[str(album_id)])
     monkeypatch.setattr(collection_restore, "find_qobuz_track_by_isrc",
                         lambda *_a: None)

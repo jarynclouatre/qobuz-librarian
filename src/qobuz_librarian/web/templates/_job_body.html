@@ -320,7 +320,7 @@
     {% endif %}
     {% if job.error %}
     <div class="ql-notice {{ 'ql-notice-warning' if job.tracks_missing or job.interrupted_by_restart or job.execute_args.get('partly_done') else 'ql-notice-error' }} ql-job-error">
-      <span>{{ job.error | strip_log_pointer(job.log_lines) | link_settings }}</span>
+      <span>{{ job.error | strip_log_pointer(job.log_lines) | link_job_action }}</span>
       {% if job.execute_args.get('retry_disabled') == 'backup' %}
       <a href="/settings#diagnostics" class="ql-btn ql-btn-secondary ql-btn-sm">Open Diagnostics</a>
       {% endif %}

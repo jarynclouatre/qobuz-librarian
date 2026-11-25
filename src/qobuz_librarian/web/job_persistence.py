@@ -2050,6 +2050,7 @@ _HISTORY_SQL = (
 # keeps a Retry, and only the opening of its summary or error tells it apart
 # from a stop or failure of its own.
 RESTART_INTERRUPTED = "Interrupted by a restart."
+RESTORE_UPLOAD_AGAIN = "Upload the backup again from Settings."
 REPAIR_CHECK_ORIGINALS = "The original files were kept; check them before retrying."
 
 # Saved with a Search download while it holds a saved queue entry, which the

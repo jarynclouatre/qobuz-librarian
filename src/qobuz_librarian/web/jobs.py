@@ -2413,7 +2413,7 @@ def _fail_interrupted_run(job, *, unsettled, finished_upgrades, returns_picks):
     """Mark a job a restart stopped as failed, saying how far it got and
     where to start it again."""
     job.status = JobStatus.FAILED
-    if job.execute_kind in ("upgrade", "downsample", "repair"):
+    if job.execute_kind in ("upgrade", "downsample", "repair", "collection_restore"):
         # A run keeps its review's job, and with it the review's
         # summary, which no longer describes this run.
         job.summary = ""
@@ -2434,7 +2434,12 @@ def _fail_interrupted_run(job, *, unsettled, finished_upgrades, returns_picks):
         done = (done or 0) + finished
         job.execute_args = {**(job.execute_args or {}),
                             job_persistence.ALBUMS_DONE: done}
-    if done and verb:
+    if done and job.execute_kind == "collection_restore":
+        # A partly filed album counts here too. Its remaining tracks can
+        # still be waiting in Gap Fill.
+        total = (job.execute_args or {}).get(job_persistence.ALBUMS_PICKED) or done + picked
+        restart += f"Tracks from {done} of {plural(max(total, done), 'album')} were saved before it stopped. "
+    elif done and verb:
         restart += (f"{done} of {plural(max(picked, done), 'album')} "
                     f"{verb}")
         restart += ("; the one it was upgrading when it stopped was "
@@ -2931,6 +2936,8 @@ def _interrupted_scan_summary(job: Job) -> str:
         return restart + "Start it again from Downsample."
     if job.execute_kind == "new_releases":
         return restart + "Check again from the Library page."
+    if job.execute_kind == "collection_restore":
+        return restart + job_persistence.RESTORE_UPLOAD_AGAIN
     return restart + "Run the scan again to retry."
 
 

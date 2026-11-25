@@ -238,6 +238,15 @@ def _link_settings(message):
                   'Settings</a>.')
 
 
+def _link_job_action(message):
+    instruction = "can be retried from Library Gap Fill."
+    if instruction not in (message or ""):
+        return _link_settings(message)
+    before, after = message.split(instruction, 1)
+    return Markup('{}can be retried from <a href="/library?tab=gaps" class="ql-inline-link">'
+                  'Library Gap Fill</a>.{}').format(before, after)
+
+
 _LONG_QUALITY_RE = re.compile(r"(\d+)-bit/([\d.]+)kHz(?: \(hi-res\))?")
 
 
@@ -275,6 +284,7 @@ templates.env.globals["quality_shortfall_view"] = _quality_shortfall_view
 templates.env.filters["strip_log_pointer"] = _strip_log_pointer
 templates.env.filters["known_year"] = known_year
 templates.env.filters["link_settings"] = _link_settings
+templates.env.filters["link_job_action"] = _link_job_action
 templates.env.globals["token_rejected"] = job_mgr.TOKEN_REJECTED
 templates.env.filters["quality_readout"] = _quality_readout
 templates.env.filters["rate_readout"] = _rate_readout

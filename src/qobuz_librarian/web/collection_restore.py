@@ -1,10 +1,10 @@
 """Build a download review from a collection snapshot."""
 from __future__ import annotations
 
-from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
+from qobuz_librarian.api.auth import QobuzError, QobuzUnavailable
 from qobuz_librarian.api.search import (
+    fetch_album,
     find_qobuz_track_by_isrc,
-    get_album,
     search_albums,
 )
 from qobuz_librarian.library import candidate_premise, catalog, discovery, scanner
@@ -12,7 +12,7 @@ from qobuz_librarian.library.catalog import is_lossless_album
 from qobuz_librarian.library.tags import normalize
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import log
-from qobuz_librarian.web import flows
+from qobuz_librarian.web import flows, job_persistence
 
 ISRC_OWNED_RATIO = 0.5
 ISRC_SHARED_ENOUGH = 3
@@ -22,9 +22,9 @@ ISRC_SHARED_ENOUGH = 3
 ISRC_LOOKUP_TRIES = 3
 
 NO_QOBUZ_ALBUM = "not available on Qobuz"
-NO_ISRC_MATCH = "no track matched by ISRC"
-NO_SEARCH_MATCH = "no album matched by name"
-NO_QOBUZ_TRACKS = "its missing tracks are not on Qobuz"
+NO_ISRC_MATCH = "no available album matched by ISRC or name"
+NO_SEARCH_MATCH = "no available album matched by name"
+NO_QOBUZ_TRACKS = "its missing tracks are unavailable on Qobuz"
 UNSAFE_NAME = "the backup names a folder the library can't hold"
 
 
@@ -58,6 +58,11 @@ def _name_key(value) -> str:
     return normalize(text) or text.casefold()
 
 
+def _saved_titles(album):
+    return [catalog._edition_title_parts(text, folder=True, known_versions={"explicit", "clean"})
+            for text in (album.get("name"), album.get("title")) if text]
+
+
 def _matches_snapshot(found, album, artist_name) -> bool:
     found_artist = found.get("artist") or {}
     if isinstance(found_artist, dict):
@@ -67,18 +72,26 @@ def _matches_snapshot(found, album, artist_name) -> bool:
         and _name_key(found_artist) == _name_key(artist_name)
     ):
         return False
-    saved = _snapshot_release(album)
-    if not saved["tracks"]["items"]:
+    release_title = catalog._release_title(found)
+    if found.get("parental_warning") and any(
+            "explicit" in labels for _, labels in _saved_titles(album)):
+        release_title += " (Explicit)"
+    if not album.get("tracks"):
         return catalog._edition_title_parts(
-            catalog._release_title(found)) == catalog._edition_title_parts(
-                album.get("name") or saved["title"], folder=True)
+            release_title, known_versions={"explicit", "clean"}) == catalog._edition_title_parts(
+                album.get("name") or _snapshot_album_title(album), folder=True,
+                known_versions={"explicit", "clean"})
+    return _matches_snapshot_tracks(found, album, release_title)
+
+
+def _matches_snapshot_tracks(found, album, release_title):
     available = [{
         "title": catalog._release_title(t), "isrc": t.get("isrc"),
         "discnumber": t.get("media_number"),
-        "album": catalog._release_title(found),
+        "album": release_title,
     } for t in (found.get("tracks") or {}).get("items") or []]
     missing, _ = catalog.edition_missing(
-        saved, available, None, album_folder=album.get("name"))
+        _snapshot_release(album), available, None, album_folder=album.get("name") or "")
     return not missing
 
 
@@ -98,9 +111,9 @@ class _OnDisk:
     def __init__(self):
         self.by_name = {}
         self.by_normalized = {}
-        self.unreadable = set()
+        self.read_errors = {}
         for artist_dir in scanner.list_library_artists(
-                on_artist_error=lambda path, error: self.unreadable.add(path.name)):
+                on_artist_error=self.read_errors.__setitem__):
             self.by_name[artist_dir.name] = artist_dir
             self.by_normalized.setdefault(normalize(artist_dir.name),
                                           artist_dir)
@@ -115,6 +128,8 @@ class _OnDisk:
         return self.by_normalized.get(normalize(name))
 
     def album_dirs(self, artist_dir):
+        if artist_dir in self.read_errors:
+            raise self.read_errors[artist_dir]
         if artist_dir not in self._albums:
             self._albums[artist_dir] = scanner.list_artist_album_dirs(
                 artist_dir)
@@ -182,8 +197,8 @@ def _usable(album) -> bool:
     if not isinstance(album, dict) or not album.get("id"):
         return False
     tracks = (album.get("tracks") or {}).get("items") or []
-    count = album.get("tracks_count")
-    return is_lossless_album(album) and bool(tracks or count)
+    return (is_lossless_album(album) and not catalog.unstreamable(album)
+            and any(not catalog.unstreamable(track) for track in tracks))
 
 
 def _holds_saved_recordings(found, album, artist_name) -> bool:
@@ -192,8 +207,7 @@ def _holds_saved_recordings(found, album, artist_name) -> bool:
     tracks, each known by its ISRC, for a backed-up album whose folder and
     title name no edition."""
     found_artist = (found.get("artist") or {}).get("name") or ""
-    saved = [catalog._edition_title_parts(text, folder=True)
-             for text in (album.get("name"), album.get("title")) if text]
+    saved = _saved_titles(album)
     found_title, _versions = catalog._edition_title_parts(
         found.get("title"), found.get("version"))
     wanted = _album_isrcs(album)
@@ -206,6 +220,7 @@ def _holds_saved_recordings(found, album, artist_name) -> bool:
         and bool(wanted)
         and len(wanted) == len(album.get("tracks") or [])
         and set(wanted) <= have
+        and _matches_snapshot_tracks(found, album, _snapshot_album_title(album))
     )
 
 
@@ -224,36 +239,14 @@ def _backed_up(found, album, artist_name) -> int:
     return 1 if _holds_saved_recordings(found, album, artist_name) else 0
 
 
-def _stored_album(album, token):
-    """The Qobuz album the backup recorded for this folder, or None when
-    Qobuz no longer has it."""
-    album_id = album.get("qobuz_album_id")
-    if not album_id:
-        return None
-    try:
-        found = get_album(album_id, token)
-    except (AuthLost, QobuzUnavailable):
-        raise
-    except Exception:
-        return None
-    return found if _usable(found) else None
-
-
-def _by_isrc(album, artist_name, token):
+def _by_isrc(album, artist_name, token, lookup):
     """The first album the backup's ISRCs lead to that matches it, and the
     first that holds its recordings."""
     held = None
     for code in _album_isrcs(album)[:ISRC_LOOKUP_TRIES]:
         track = find_qobuz_track_by_isrc(code, token)
         album_id = ((track or {}).get("album") or {}).get("id")
-        if not album_id:
-            continue
-        try:
-            found = get_album(album_id, token)
-        except (AuthLost, QobuzUnavailable):
-            raise
-        except Exception:
-            continue
+        found = lookup(album_id)
         sure = _backed_up(found, album, artist_name)
         if sure == 2:
             return found, held
@@ -262,7 +255,7 @@ def _by_isrc(album, artist_name, token):
     return None, held
 
 
-def _by_search(album, artist_name, token):
+def _by_search(album, artist_name, token, lookup):
     """The first album a search by name finds that matches the backup, and
     the first that holds its recordings."""
     title = _snapshot_album_title(album)
@@ -270,12 +263,7 @@ def _by_search(album, artist_name, token):
         return None, None
     wanted = _title_key(title)
     wanted_artist = _name_key(artist_name)
-    try:
-        results = search_albums(f"{artist_name} {title}", token)
-    except (AuthLost, QobuzUnavailable):
-        raise
-    except Exception:
-        return None, None
+    results = search_albums(f"{artist_name} {title}", token)
     held = None
     lossless = [a for a in results if is_lossless_album(a)]
     for found in lossless:
@@ -284,12 +272,7 @@ def _by_search(album, artist_name, token):
         found_artist = (found.get("artist") or {}).get("name") or ""
         if wanted_artist and _name_key(found_artist) != wanted_artist:
             continue
-        try:
-            full = get_album(found.get("id"), token)
-        except (AuthLost, QobuzUnavailable):
-            raise
-        except Exception:
-            continue
+        full = lookup(found.get("id"))
         sure = _backed_up(full, album, artist_name)
         if sure == 2:
             return full, held
@@ -307,16 +290,38 @@ def _resolve(album, artist_name, token):
     taken for it. A recorded album that holds other recordings, as one
     recorded before the folder's edition was switched does, is passed over.
     """
-    stored = _stored_album(album, token)
+    checked = {}
+    lookup_error = None
+
+    def lookup(album_id):
+        nonlocal lookup_error
+        if not album_id:
+            return None
+        if album_id not in checked:
+            try:
+                checked[album_id] = fetch_album(album_id, token)
+            except QobuzError as exc:
+                if exc.status_code not in (404, 410):
+                    lookup_error = exc
+                checked[album_id] = None
+        return checked[album_id]
+
+    stored = lookup(album.get("qobuz_album_id"))
     if stored is not None and _backed_up(stored, album, artist_name):
         return stored, None
-    found, held = _by_isrc(album, artist_name, token)
+    try:
+        found, held = _by_isrc(album, artist_name, token, lookup)
+    except QobuzError as exc:
+        lookup_error = exc
+        found, held = None, None
     if found is None:
-        found, searched = _by_search(album, artist_name, token)
+        found, searched = _by_search(album, artist_name, token, lookup)
         found = found or held or searched
     if found is not None:
         return found, None
-    if album.get("qobuz_album_id") and stored is None:
+    if lookup_error is not None:
+        raise lookup_error
+    if album.get("qobuz_album_id") and not _usable(stored):
         return None, NO_QOBUZ_ALBUM
     return None, NO_ISRC_MATCH if _album_isrcs(album) else NO_SEARCH_MATCH
 
@@ -331,17 +336,14 @@ def scan_restore(job, snapshot, token):
     if root is not None and isinstance(job.execute_args, dict):
         job.execute_args["music_root"] = root
     disk = _OnDisk()
-    for name in sorted(disk.unreadable):
-        job.push_line(f"Unreadable artist {name}. Check folder permissions and retry.")
-    unreadable_keys = {normalize(name) for name in disk.unreadable}
-    if disk.unreadable:
-        flows._record_unchecked_artists(job, len(disk.unreadable))
+    unreadable = set()
     artists = [a for a in snapshot.get("artists") or [] if isinstance(a, dict)]
     total = len(artists)
     owned = 0
     queued = 0
     gap_fills = 0
     unlisted = 0
+    unchecked_albums = 0
     unresolved = []
     seen_album_ids = set()
 
@@ -352,19 +354,36 @@ def scan_restore(job, snapshot, token):
         artist_name = (entry.get("name") or "").strip()
         if not artist_name:
             continue
-        if normalize(artist_name) in unreadable_keys:
-            continue
         artist_dir = disk.artist_dir(artist_name)
         artist_key = artist_dir.name if artist_dir is not None else None
         albums = [a for a in entry.get("albums") or [] if isinstance(a, dict)]
+        before = queued
         for album in albums:
+            if job.cancel_requested:
+                break
             title = _snapshot_album_title(album) or "?"
-            folder = (_owned_folder(disk, artist_dir, album)
-                      if artist_dir is not None else None)
+            try:
+                folder = (_owned_folder(disk, artist_dir, album)
+                          if artist_dir is not None else None)
+            except OSError as exc:
+                unreadable.add(artist_name)
+                flows._record_unchecked_artists(job, len(unreadable))
+                job.push_line(f"Couldn't read {exc.filename or artist_dir}. "
+                              "Check folder permissions and retry.")
+                break
             if folder is not None and not _lost_tracks(disk, folder, album):
                 owned += 1
                 continue
-            found, reason = _resolve(album, artist_name, token)
+            try:
+                found, reason = _resolve(album, artist_name, token)
+            except QobuzUnavailable:
+                if job.cancel_requested:
+                    break
+                raise
+            except QobuzError as exc:
+                unchecked_albums += 1
+                job.push_line(f"{artist_name} - {title}: {exc}")
+                continue
             if found is None:
                 unresolved.append((artist_name, title, reason))
                 job.push_line(f"{artist_name} - {title}: {reason}.")
@@ -374,7 +393,9 @@ def scan_restore(job, snapshot, token):
                 continue
             missing = []
             if folder is not None:
-                missing, present = catalog.edition_missing(found, disk.tracks(folder), folder)
+                missing, present = catalog.edition_missing(
+                    found, disk.tracks(folder), folder, album_folder=album.get("name") or "")
+                missing = [t for t in missing if not catalog.unstreamable(t)]
                 if not missing:
                     unlisted += 1
                     job.push_line(f"{artist_name} - {title}: {NO_QOBUZ_TRACKS}.")
@@ -383,7 +404,7 @@ def scan_restore(job, snapshot, token):
                     folder = None
             added = flows.add_restore_candidate(
                 job, found, artist_name, artist_key=artist_key,
-                album_dir=folder, missing=missing)
+                album_dir=folder, missing=missing, restore_folder=album.get("name") or title)
             if added is None:
                 unresolved.append((artist_name, title, UNSAFE_NAME))
                 job.push_line(f"{artist_name} - {title}: {UNSAFE_NAME}.")
@@ -392,12 +413,15 @@ def scan_restore(job, snapshot, token):
             queued += 1
             if folder is not None:
                 gap_fills += 1
+        if job.cancel_requested:
+            break
+        matched = queued - before
+        hit = {"artist": artist_name, "albums": matched} if matched else None
         job.push_progress("Checking the backup", done, total, artist_name,
-                          found=queued, unit="artist")
+                          found=queued, hit=hit, unit="artist")
 
     if job.cancel_requested:
-        job.summary = (f"Stopped early. {plural(queued, 'album')} to download "
-                       "from the part of the backup that was checked.")
+        job.summary = job_persistence.RESTORE_UPLOAD_AGAIN
         log.info(job.summary)
         return
 
@@ -406,21 +430,28 @@ def scan_restore(job, snapshot, token):
         ready.append(f"{plural(queued - gap_fills, 'album')} to download")
     if gap_fills:
         ready.append(f"{plural(gap_fills, 'album')} with missing tracks")
-    parts = [f"Restore review ready: {' and '.join(ready)}."
-             if queued else "Nothing to restore."]
-    if disk.unreadable:
-        if not queued:
-            parts = ["Restore check incomplete."]
-            flows._mark_job_failed(job)
-        parts.append("Unreadable: " + ", ".join(sorted(disk.unreadable))
+    if queued:
+        parts = [f"Restore review ready: {' and '.join(ready)}."]
+    elif unreadable or unchecked_albums:
+        parts = ["Restore check incomplete."]
+        flows._mark_job_failed(job)
+    elif unresolved or unlisted:
+        parts = ["No albums available to restore."]
+    else:
+        parts = ["Nothing to restore."]
+    if unreadable:
+        parts.append("Unreadable: " + ", ".join(sorted(unreadable))
                      + ". Check folder permissions and retry.")
+    if unchecked_albums:
+        parts.append(f"{plural(unchecked_albums, 'album')} couldn't be checked "
+                     "on Qobuz. See the Activity log.")
     if owned:
         parts.append(f"{plural(owned, 'album')} already in your library.")
     if unresolved:
         parts.append(f"{plural(len(unresolved), 'album')} couldn't be matched "
                      "on Qobuz; the Activity log names them.")
     if unlisted:
-        parts.append("Qobuz no longer lists the missing tracks of "
+        parts.append("Qobuz cannot supply the missing tracks of "
                      f"{plural(unlisted, 'album')}; the Activity log names them.")
     job.summary = " ".join(parts)
     log.info(job.summary)

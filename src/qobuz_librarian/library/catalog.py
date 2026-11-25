@@ -760,8 +760,6 @@ _VERSION_LABEL_RE = re.compile(
     r"demo|take|edit|version|session|edition|deluxe|expanded|anniversary|reissue)\b",
     re.IGNORECASE,
 )
-_RECORDING_WORD_RE = re.compile(
-    r"mix|remaster|mono|stereo|live|acoustic|instrumental|demo|take|session|edit(?!ion)")
 _PACKAGING_LABEL_RE = re.compile(
     r"(?:album|anniversary|bonus|collectors|deluxe|digital|edition|expanded|legacy|limited|lp|"
     r"pa|special|split|standard|super|the|tracks?|uk|us|version|"
@@ -822,8 +820,8 @@ def _recording_labels(labels):
     return {label for label in labels if not _PACKAGING_LABEL_RE.fullmatch(label)}
 
 
-def _recording_kinds(labels):
-    return {word for label in labels for word in _RECORDING_WORD_RE.findall(label)}
+def _local_track_titles(existing, versions):
+    return [_edition_title_parts(t.get("title"), known_versions=versions) for t in existing]
 
 
 def _version_in_title(track):
@@ -856,28 +854,38 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
     unless the files lack some of the titles and the lengths say most of
     those pairs are another recording."""
     tracks = (album.get("tracks") or {}).get("items") or []
+    if album_folder is None:
+        album_folder = album.get("_restore_folder")
+    # Explicit is a folder label for editions filed separately. On restore,
+    # both the original folder and the tags can name the edition to bring back.
+    known_versions = {"explicit", "clean"} if album_folder is not None else set()
     album_key, album_version = _edition_title_parts(
-        _release_title(album), album.get("version"), folder=album_folder is not None)
-    if not album_version and album_folder:
-        _, album_version = _edition_title_parts(str(album_folder), folder=True)
-    known_versions = album_version | frozenset(
+        _release_title(album), album.get("version"), folder=album_folder is not None,
+        known_versions=known_versions)
+    if album_folder:
+        album_version |= _edition_title_parts(
+            str(album_folder), folder=True, known_versions=known_versions)[1]
+    known_versions |= album_version | frozenset(
         canonical_track_title(t["version"]) for t in tracks if t.get("version"))
     folder_key, folder_version = _edition_title_parts(
         folder.name if folder is not None else "", folder=True, known_versions=known_versions)
     local_albums = [_edition_title_parts(t.get("album"), known_versions=known_versions)
                     for t in existing]
     local_isrcs = [_norm_isrc(t.get("isrc")) for t in existing]
-    # A restore brings back the mix or master the backup's folder names; the
-    # original's recording IDs do not stand in for it.
-    restored_kinds = _recording_kinds(album_version) if album_folder is not None else None
+    if album_folder is not None:
+        local_keys = _local_track_titles(existing, known_versions)
+        local_labels = [_recording_labels(folder_version | tag | title)
+                        for (_, tag), (_, title) in zip(local_albums, local_keys)]
+        saved_labels = [_recording_labels(album_version | _edition_title_parts(
+            _release_title(t), "" if _version_in_title(t) else t.get("version"),
+            known_versions=known_versions)[1]) for t in tracks]
     used = set()
     pairs = {}
     for index, track in enumerate(tracks):
         isrc = canonical_recording_id(track.get("isrc"), "isrc")
         matches = [i for i, local_isrc in enumerate(local_isrcs)
                    if isrc and local_isrc == isrc and i not in used
-                   and (restored_kinds is None or restored_kinds
-                        == _recording_kinds(local_albums[i][1] or folder_version))]
+                   and (album_folder is None or saved_labels[index] == local_labels[i])]
         if matches:
             title = canonical_track_title(_release_title(track))
             picked = max(matches, key=lambda i: (
@@ -893,8 +901,8 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
     track_labels = [_label_parts(t["version"]) if t.get("version") else frozenset()
                     for t in tracks]
     disc_scoped = _disc_scoped_match(tracks, existing)
-    local_keys = [_edition_title_parts(t.get("title"), known_versions=known_versions)
-                  for t in existing]
+    if album_folder is None:
+        local_keys = _local_track_titles(existing, known_versions)
     for index, track in enumerate(tracks):
         if index in pairs:
             continue
@@ -915,6 +923,8 @@ def _edition_pairs(album, existing, folder, *, album_folder=None):
         matches = []
         for local_index, local in enumerate(existing):
             if local_index in used:
+                continue
+            if album_folder is not None and saved_labels[index] != local_labels[local_index]:
                 continue
             if isrc and local_isrcs[local_index] and isrc != local_isrcs[local_index]:
                 continue
@@ -1178,6 +1188,12 @@ def find_edition_tracks(album, *, track_id=None):
     """Find one edition using full track versions, album labels and ISRCs."""
     tracks = (album.get("tracks") or {}).get("items") or []
     best = ([], None, tracks, [])
+    folder = album.get("_restore_album_dir")
+    if folder is not None:
+        folder = Path(folder)
+        existing, _ = find_existing_tracks(album, album_dir=folder)
+        missing, present = edition_missing(album, existing, folder)
+        return (existing, folder, missing, present) if present else best
     for existing, folder, missing, present in _edition_matches(album):
         if track_id is not None and any(str(t.get("id")) == str(track_id) for t in present):
             return existing, folder, missing, present

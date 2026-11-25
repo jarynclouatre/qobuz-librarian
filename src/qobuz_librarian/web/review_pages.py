@@ -5,7 +5,7 @@ import urllib.parse
 from qobuz_librarian.library import hidden as hidden_mod
 from qobuz_librarian.library import missing_types
 from qobuz_librarian.ui_cli.colors import format_size
-from qobuz_librarian.web import flows
+from qobuz_librarian.web import flows, job_persistence
 from qobuz_librarian.web import jobs as job_mgr
 
 
@@ -176,9 +176,14 @@ def summary_without_old_advice(execute_kind, summary) -> str:
     if execute_kind in ("library", "new_releases"):
         summary = _NO_ARTIST_NOTE.sub("", summary).strip()
         summary = summary.removesuffix(_OLD_LIBRARY_RESUME)
-    if execute_kind == "new_releases" and summary.endswith(_OLD_CHECK_AGAIN):
-        summary = (summary[:-len(_OLD_CHECK_AGAIN)]
-                   + "Check again from the Library page.")
+    if summary.endswith(_OLD_CHECK_AGAIN):
+        if execute_kind == "new_releases":
+            summary = summary.removesuffix(_OLD_CHECK_AGAIN) + "Check again from the Library page."
+        elif execute_kind == "collection_restore":
+            summary = summary.removesuffix(_OLD_CHECK_AGAIN) + job_persistence.RESTORE_UPLOAD_AGAIN
+    if (execute_kind == "collection_restore" and summary.startswith("Stopped early. ")
+            and summary.endswith("from the part of the backup that was checked.")):
+        return job_persistence.RESTORE_UPLOAD_AGAIN
     return summary
 
 

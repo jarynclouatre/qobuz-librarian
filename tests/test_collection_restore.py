@@ -64,7 +64,7 @@ def qobuz(monkeypatch):
         state["album_calls"].append(str(album_id))
         found = state["albums"].get(str(album_id))
         if found is None:
-            raise QobuzError("no such album")
+            raise QobuzError("no such album", status_code=404)
         return found
 
     def by_isrc(isrc, _token):
@@ -74,7 +74,7 @@ def qobuz(monkeypatch):
         state["search_calls"].append(query)
         return state["search"].get(query, [])
 
-    monkeypatch.setattr(restore, "get_album", get_album)
+    monkeypatch.setattr(restore, "fetch_album", get_album)
     monkeypatch.setattr(restore, "find_qobuz_track_by_isrc", by_isrc)
     monkeypatch.setattr(restore, "search_albums", search)
     return state

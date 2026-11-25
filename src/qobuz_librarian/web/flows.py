@@ -214,7 +214,8 @@ def _refresh_after_local_album_change(
     if (result or {}).get("imported") and result.get("dir"):
         filed_into = result["dir"]
     if filed_into or any(rewritten):
-        reseal_past_album_import(filed_into, rewritten)
+        reseal_past_album_import(filed_into, rewritten,
+                                 added_paths=(result or {}).get("gap_additions"))
     saved_views.refresh_after_changes(
         [{**(result or {}), "album": album, "fallback_artist": fallback_artist}],
         token,
@@ -414,7 +415,7 @@ def _add_gap_candidate(job, gap, artist_name, selected=False, is_new=False,
 
 
 def add_restore_candidate(job, album, artist_name, *, artist_key=None,
-                          album_dir=None, missing=()):
+                          album_dir=None, missing=(), restore_folder=None):
     """Add one album a collection restore has to fetch back.
 
     Ticked on arrival: uploading a backup file is the intent, and the review is
@@ -430,6 +431,8 @@ def add_restore_candidate(job, album, artist_name, *, artist_key=None,
         selected=True,
         artist_key=artist_key,
     )
+    if restore_folder:
+        spec["payload"]["restore_folder"] = restore_folder
     if artist_key is None:
         absent = candidate_premise.capture_absent(artist_name)
         if absent is None:
@@ -708,6 +711,10 @@ class _CandidateFold:
     def run(self):
         if self.parked.status != job_mgr.JobStatus.AWAITING_REVIEW:
             return None
+        # Save a split review's count with its rows. A scan's own summary
+        # may name unreadable folders or other caveats.
+        update_count = self.parked.summary and self.parked.summary == split_review_summary(
+            self.parked.execute_kind, self.parked.candidates)
         self._read_review()
         self._carry_rows()
         self._drop_duplicates()
@@ -717,6 +724,8 @@ class _CandidateFold:
                 **(self.parked.execute_args or {}),
                 "_library_review_generation": int(self.review_generation),
             }
+        if update_count:
+            self.parked.summary = split_review_summary(self.parked.execute_kind, self.parked.candidates)
         counted = self._count_changes()
         notes = self._write_notes()
         # Saved with this change; the review's lock is already held.
@@ -1066,20 +1075,11 @@ def refold_into_living_review(picks, execute_kind="library", ticked=True,
     if parked is None:
         return None
     specs = [dict(c, selected=True) if ticked else dict(c) for c in picks]
-    # A count we wrote ourselves has to be rewritten once the review grows, or
-    # the History card keeps the number it had at the split and disagrees with
-    # the review it points at. A scan's own summary is left alone: it carries
-    # caveats a bare count would throw away.
-    ours = (parked.summary or "") == split_review_summary(
-        parked.execute_kind, parked.candidates)
     folded = fold_new_candidates(parked, specs, retire=retire)
     if folded is False:
         return False
     if folded is None:
         return None
-    if ours:
-        parked.summary = split_review_summary(
-            parked.execute_kind, parked.candidates)
     parked.notify_review_changed()
     return folded[0]
 
@@ -1357,7 +1357,7 @@ def reseal_after_own_writes(writes):
         _reseal_reviews(candidate_premise.sealer_after_writes(writes))
 
 
-def reseal_past_album_import(album_dir=None, rewritten=()):
+def reseal_past_album_import(album_dir=None, rewritten=(), *, added_paths=None):
     """Seal again the missing albums whose artist folder changed only by
     ``album_dir``, a new folder a download filed an album into, and inside
     ``rewritten``, album folders whose files the app wrote, so Start does
@@ -1379,10 +1379,17 @@ def reseal_past_album_import(album_dir=None, rewritten=()):
         own = tops(path, changed)
         if not own or candidate_premise.canonical_premise(value) is None:
             return None
-        if path not in captures:
-            captures[path] = candidate_premise.capture("missing", path)
-        return candidate_premise.resealed_after_own_imports(
-            value, captures[path], own, tops(path, rewritten))
+        key = ("missing", value["path"])
+        if key not in captures:
+            captures[key] = candidate_premise.capture(*key)
+        fresh = candidate_premise.resealed_after_own_imports(
+            value, captures[key], own, tops(path, rewritten))
+        if fresh is None and added_paths:
+            # A gap fill added files to an existing album. Every other file
+            # in the artist directory must still match the saved review.
+            fresh = candidate_premise.resealed_after_writes(
+                value, added_paths["files"], captures, created_dirs=added_paths["directories"])
+        return fresh
 
     def admits(c):
         path = Path(c["payload"]["_premise"]["path"])
@@ -1446,6 +1453,8 @@ def _partial_gap_fill_spec(full_album, artist_name, n_missing, *,
         "_premise": premise,
         "_gap_fill_receipts": candidate_premise.gap_fill_receipts(premise),
     }
+    if full_album.get("_restore_folder"):
+        extra_payload["restore_folder"] = full_album["_restore_folder"]
     # The folder names the tracks still missing; the list is shown only when
     # it agrees with the count the download left, which leaves out tracks
     # Qobuz does not stream.
@@ -3729,6 +3738,11 @@ class _AlbumsRun:
 
     def _check_and_download(self):
         _note_staging_wait(self.job, "Downloading albums", self.i - 1, len(self.chosen))
+        if self.is_restore_run or self.cand["payload"].get("restore_folder"):
+            # Use the same edition evidence that identified the missing tracks
+            # at review time, including labels only the saved folder carries.
+            self.full = {**self.full, "_restore_folder": self.cand["payload"].get(
+                "restore_folder") or catalog._release_title(self.full)}
         self.exact_edition = bool(
             self.is_restore_run or self.is_nr_run or not is_gap_candidate(self.cand)
             or self.cand["payload"].get("exact_edition"))
@@ -3747,10 +3761,19 @@ class _AlbumsRun:
                     if found is not None and present:
                         raise CandidateStale(
                             "This missing album appeared locally after the "
-                            "review was built. Refresh the review."
+                            "review was built. " + ("Upload the backup file again from Settings."
+                                                    if self.is_restore_run else "Refresh the review.")
                         )
                 else:
                     premise = candidate_premise.validate(self.cand)
+                    if self.full.get("_restore_folder") and premise["kind"] == "gap-fill":
+                        self.full["_restore_album_dir"] = premise["path"]
+                        _files, found, _missing, _present = catalog.find_edition_tracks(self.full)
+                        if found is None:
+                            raise CandidateStale(
+                                "The reviewed folder no longer matches this edition. "
+                                "Upload the backup file again from Settings."
+                            )
                 _note_written_into(self.job, self.cand)
                 self.result = process_mode.process_album(self.full, self.args, allow_force=False,
                                        already_confirmed=True, token=self.token,

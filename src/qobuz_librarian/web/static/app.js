@@ -3292,7 +3292,8 @@
     function showFound() {
       if (!foundEl) return;
       foundEl.textContent = foundAlbums
-        ? "Found " + countLabel(foundAlbums, foundSingular, foundPlural) + " across " + plural(foundArtists, "artist") + " so far…"
+        ? "Found " + countLabel(foundAlbums, foundSingular, foundPlural)
+          + (foundArtists ? " across " + plural(foundArtists, "artist") : "") + " so far…"
         : "";
     }
     function clearQueuedState() {

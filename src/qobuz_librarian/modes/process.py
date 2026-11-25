@@ -1073,6 +1073,7 @@ class _AlbumRun:
         self.quality = quality
         self.treat_as_new = treat_as_new
         self.exact_edition = exact_edition
+        self.gap_additions = {} if expected_gap_fill_receipts is not None else None
         self.expected_album_receipt = expected_album_receipt
         self.expected_gap_fill_receipts = expected_gap_fill_receipts
         self.cover_backup = cover_backup
@@ -2005,6 +2006,8 @@ class _AlbumRun:
                     album_dirs=self.staged_dirs_for_import,
                     album_dir=self.album_dir,
                     folder=self.import_folder,
+                    **({"added_paths": self.gap_additions} if self.gap_additions is not None
+                       and self.present and not self.download_result.get("download_full_album") else {}),
                     **({"repair_token": self.repair_token} if self.repair_token else {}),
                     protected_paths=(
                         [self.album_dir] if self.replaced_beets_entries is not None
@@ -2583,6 +2586,7 @@ class _AlbumRun:
             "imported": self.imported,
             **({"repair_kept": self.repair_kept} if self.repair_kept else {}),
             "dir": self.post_dir,
+            **({"gap_additions": self.gap_additions} if self.gap_additions else {}),
             "upgrade_unverified": self.upgrade_unverified,
             "catalogue_unverified": self.catalogue_unverified,
             "recovery_unverified": self.recovery_unverified,

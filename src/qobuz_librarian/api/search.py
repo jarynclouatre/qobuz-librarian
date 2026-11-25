@@ -69,22 +69,6 @@ def _expect_dict(data, endpoint):
     return data
 
 
-def _envelope(data, key):
-    """The ``data[key]`` sub-object as a dict, or {} when it's missing or a
-    non-dict."""
-    obj = data.get(key)
-    return obj if isinstance(obj, dict) else {}
-
-
-def _items(data, key):
-    """The ``data[key]['items']`` list with only its dict members, or [] when
-    that items array is missing or the wrong type."""
-    items = _envelope(data, key).get("items")
-    if not isinstance(items, list):
-        return []
-    return [x for x in items if isinstance(x, dict)]
-
-
 def _required_items(data, key, endpoint):
     """Return a structurally valid result list for a lookup whose empty result
     is durable state. Missing/wrong envelopes are incomplete responses, not a
@@ -119,7 +103,8 @@ def search_albums(query, token, limit=None):
     data = _expect_dict(
         qobuz_get("album/search", {"query": query, "limit": limit}, token),
         "album/search")
-    items = _items(data, "albums")
+    _, rows = _paged_items(data, "albums", "album/search")
+    items = [row for row in rows if isinstance(row, dict)]
     for a in items:
         _normalize_album_fields(a)
     return items
@@ -200,6 +185,11 @@ def get_album(album_id, token):
             if (cached_items and len(cached_items) >= _listed_track_total(cached)
                     and not any(t.get("streamable") is False for t in cached_items)):
                 return cached
+    return fetch_album(album_id, token)
+
+
+def fetch_album(album_id, token):
+    """Fetch the current release and all its tracks from Qobuz."""
     album, track_items = _validated_album(
         qobuz_get(
             "album/get",
@@ -265,7 +255,8 @@ def search_tracks(query, token, limit=10):
     data = _expect_dict(
         qobuz_get("track/search", {"query": query, "limit": limit}, token),
         "track/search")
-    items = _items(data, "tracks")
+    _, rows = _paged_items(data, "tracks", "track/search")
+    items = [row for row in rows if isinstance(row, dict)]
     for t in items:
         _normalize_track_fields(t)
     return items
@@ -273,7 +264,7 @@ def search_tracks(query, token, limit=10):
 
 def find_qobuz_track_by_isrc(isrc, token):
     """The first Qobuz track with this exact ISRC, or None."""
-    return next(iter(find_qobuz_tracks_by_isrc(isrc, token)), None)
+    return next(iter(_tracks_by_isrc(isrc, token)), None)
 
 
 def find_qobuz_tracks_by_isrc(isrc, token):
@@ -282,15 +273,19 @@ def find_qobuz_tracks_by_isrc(isrc, token):
     also surface tracks whose ISRC merely starts with the same characters, or
     tracks whose title coincidentally contains the string.
     """
+    try:
+        return _tracks_by_isrc(isrc, token)
+    except QobuzError:
+        return []
+
+
+def _tracks_by_isrc(isrc, token):
     if not isrc:
         return []
     isrc_n = str(isrc).replace("-", "").upper().strip()
     if not isrc_n:
         return []
-    try:
-        results = search_tracks(isrc_n, token, limit=25)
-    except QobuzError:
-        return []
+    results = search_tracks(isrc_n, token, limit=25)
     return [track for track in results
             if str(track.get("isrc") or "").replace("-", "").upper().strip() == isrc_n]
 
