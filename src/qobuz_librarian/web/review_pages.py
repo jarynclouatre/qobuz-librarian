@@ -1,6 +1,4 @@
 """Grouping and paging for review lists."""
-import hashlib
-import json
 import re
 import urllib.parse
 
@@ -9,19 +7,6 @@ from qobuz_librarian.library import missing_types
 from qobuz_librarian.ui_cli.colors import format_size
 from qobuz_librarian.web import flows
 from qobuz_librarian.web import jobs as job_mgr
-
-
-def _token_of(job, cids):
-    return hashlib.sha256(
-        json.dumps([job.id, sorted(cids)]).encode()).hexdigest()
-
-
-def _selection_token(job, tab=""):
-    in_tab = flows.review_tab_filter(tab)
-    with job._lock:
-        selected = [
-            c["cid"] for c in job.candidates if c.get("selected") and in_tab(c)]
-    return _token_of(job, selected)
 
 
 def _selection_tallies(job):
@@ -52,7 +37,7 @@ def _selection_tallies(job):
                     picked[tab].append(c["cid"])
     tallies = {
         "selection_tokens": {
-            tab: _token_of(job, cids) for tab, cids in picked.items()
+            tab: flows.review_selection_token(job, selected=cids) for tab, cids in picked.items()
             if library or not tab},
         "selected": len(picked[""]),
         "total": total,
@@ -99,7 +84,7 @@ def _review_context(job, page=1, query="", tab="", *, through=False, anchor=""):
             "review_filtered_selected": filtered_total - filtered_rest,
             "review_filtered_rest": filtered_rest,
             "review_tab": tab,
-            "review_selection_token": _selection_token(job, tab),
+            "review_selection_token": flows.review_selection_token(job, tab),
             "review_tab_counts": tab_counts,
             "review_type_switches": RELEASE_TYPE_SWITCHES,
             "review_gap_switches": GAP_SWITCHES,

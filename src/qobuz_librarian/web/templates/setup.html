@@ -54,8 +54,8 @@
         <div class="ql-field">
           <label class="ql-field-label" for="password">Password</label>
           <div class="relative">
-            <input type="password" name="password" id="password" required
-                   autocomplete="new-password" {% if error %}autofocus{% endif %} class="ql-input pr-12">
+            <input type="password" name="password" id="password" required minlength="15"
+                   autocomplete="new-password" {% if error %}autofocus{% endif %} class="ql-input">
             {{ secret_toggle("password", "password") }}
           </div>
           <p class="ql-field-help">At least 15 characters.</p>
@@ -63,9 +63,9 @@
         <div class="ql-field">
           <label class="ql-field-label" for="confirm">Confirm password</label>
           <div class="relative">
-            <input type="password" name="confirm" id="confirm" required
-                   autocomplete="new-password" class="ql-input pr-12">
-            {{ secret_toggle("confirm", "password") }}
+            <input type="password" name="confirm" id="confirm" required minlength="15" data-matches-password="password"
+                   autocomplete="new-password" class="ql-input">
+            {{ secret_toggle("confirm", "confirmation") }}
           </div>
         </div>
         <button type="submit" class="ql-btn ql-btn-primary w-full">Create login</button>

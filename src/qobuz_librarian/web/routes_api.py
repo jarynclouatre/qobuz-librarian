@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import queue
 
@@ -9,10 +10,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from qobuz_librarian import config as cfg
+from qobuz_librarian.library import generation_state
 from qobuz_librarian.web import auth as web_auth
 from qobuz_librarian.web import (
     diagnostics,
     download_admission,
+    flows,
     job_labels,
     job_persistence,
     rendering,
@@ -64,7 +67,7 @@ def _stream_session_active(request: Request) -> bool:
     return bool(token) and web_auth.verify_session(token)
 
 
-async def _job_events(request, job, event_for, idle_end):
+async def _job_events(request, job, event_for, idle_end, opening_event=None):
     """The loop both job streams share. Each line fanned out to ``job`` goes
     through ``event_for``, which returns the event to send ("" for none) and
     whether it ends the stream. With nothing queued, ``idle_end`` returns the
@@ -74,6 +77,8 @@ async def _job_events(request, job, event_for, idle_end):
     sub = job.subscribe()
     quiet_ticks = 0
     try:
+        if opening_event is not None:
+            yield await asyncio.to_thread(opening_event)
         while not runtime._STOP_SIGNALLED.is_set():
             if not _stream_session_active(request):
                 yield "event: auth\ndata: signed_out\n\n"
@@ -207,8 +212,15 @@ async def job_review_stream(request: Request, job_id: str):
                 return f"event: closed\ndata: {job.status.value}\n\n"
             return ""
 
+        def _snapshot():
+            # Subscribe first so a change during the snapshot is still delivered.
+            with job._lock:
+                token = flows.review_selection_token(job, request.query_params.get("tab", ""))
+                state = {"total": len(job.candidates), "selection_token": token}
+            return f"event: snapshot\ndata: {json.dumps(state)}\n\n"
+
         async with contextlib.aclosing(
-                _job_events(request, job, _event_for, _idle_end)) as events:
+                _job_events(request, job, _event_for, _idle_end, _snapshot)) as events:
             async for event in events:
                 yield event
 
@@ -283,6 +295,7 @@ async def queue_count():
             for j in active
         ),
         "signature": hashlib.sha256(revision.encode("utf-8")).hexdigest()[:16],
+        "library_revision": await asyncio.to_thread(generation_state.revision),
         # Status alone: the signature above moves every time a scan adds a
         # candidate, which would redraw the Queue on every poll for hours.
         "rows": job_labels._queue_rows_signature(active),

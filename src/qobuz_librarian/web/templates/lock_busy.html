@@ -22,10 +22,7 @@
   {% if action %}
   <a href="{{ action.href }}" class="ql-btn ql-btn-primary w-full sm:w-auto">{{ action.label }}</a>
   {% endif %}
-  {% if can_retry %}
-  <button type="button" data-reload class="ql-btn {{ 'ql-btn-ghost' if action else 'ql-btn-primary' }} w-full sm:w-auto">Try again</button>
-  {% endif %}
-  <a href="/" class="ql-btn ql-btn-ghost w-full sm:w-auto">Back to Search</a>
+  <a href="{{ form_page or '/' }}" class="ql-btn {{ 'ql-btn-ghost' if action else 'ql-btn-primary' }} w-full sm:w-auto">{{ 'Back to form' if form_page and form_page != '/' else 'Back to Search' }}</a>
 </div>
 </div>
 </div>

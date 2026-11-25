@@ -59,10 +59,16 @@ def _hidden_view(request, scope, *, page, restore_action, back_url,
         for a in g["albums"]:
             a["when"], a["when_exact"] = job_labels._when_label(_hidden_ts_epoch(a.get("ts")))
 
+    origin = request.query_params.get("return_to", "")
+    if not origin.startswith(back_url + "?"):
+        origin = ""
+    return_query = urllib.parse.urlencode({"return_to": origin}) if origin else ""
+    suffix = "?" + return_query if origin else ""
     return rendering._tr(request, "hidden.html", {
-        "page": page, "scope": scope, "back_url": back_url,
-        "restore_action": restore_action,
-        "restore_all_action": restore_all_action,
+        "page": page, "scope": scope, "back_url": origin or back_url,
+        "review_return": origin, "return_query": return_query,
+        "restore_action": restore_action + suffix,
+        "restore_all_action": restore_all_action + suffix if restore_all_action else None,
         "restore_all_count": total_rows,
         "notice": rendering._notice_text(request.query_params.get("notice")),
         "hidden_q": q,
@@ -102,17 +108,17 @@ async def _restore_hidden_all(request, scope, dest, what, what_plural):
                 None, lambda: hidden_mod.restore_albums(scope, fingerprints))
     except OSError as e:
         return RedirectResponse(
-            url=dest + _hidden_query(q, str(e)), status_code=303)
+            url=dest + _hidden_query(request, q, str(e)), status_code=303)
     if not changed:
         msg = "Nothing to bring back."
     elif q:
         msg = f"Brought back {changed} {what if changed == 1 else what_plural}."
     else:
         msg = f"Brought every {what} back."
-    return RedirectResponse(url=dest + _hidden_query(q, msg), status_code=303)
+    return RedirectResponse(url=dest + _hidden_query(request, q, msg), status_code=303)
 
 
-def _hidden_query(q, notice, p=None):
+def _hidden_query(request, q, notice, p=None):
     """Back to the Dismissed page with its filter and page still on, so a
     restore does not silently widen the list the next click acts on or drop
     the user back at page 1."""
@@ -121,6 +127,9 @@ def _hidden_query(q, notice, p=None):
         parts += "&q=" + urllib.parse.quote(q)
     if p:
         parts += "&p=" + urllib.parse.quote(p)
+    origin = request.query_params.get("return_to")
+    if origin:
+        parts += "&" + urllib.parse.urlencode({"return_to": origin})
     return parts
 
 
@@ -148,7 +157,7 @@ async def _restore_hidden(request, scope, redirect):
         # Store write failed; nothing was restored; say so instead of
         # rendering the rows gone until the next reload.
         return RedirectResponse(
-            url=redirect + _hidden_query(q, str(e), p), status_code=303)
+            url=redirect + _hidden_query(request, q, str(e), p), status_code=303)
     if scope == hidden_mod.SCOPE_MISSING and (artists or fingerprints):
         # Upgrade/Downsample re-derive their reviews from saved state at read
         # time, so restore takes effect there on its own.
@@ -189,12 +198,12 @@ async def _restore_hidden(request, scope, redirect):
             else:
                 msg += " " + _relisted_note(relisted)
         return RedirectResponse(
-            url=redirect + _hidden_query(q, msg, p), status_code=303)
+            url=redirect + _hidden_query(request, q, msg, p), status_code=303)
     # Upgrade and Downsample scopes: nothing to fold.
     msg = (f"Brought back {restored}." if restored != 1 else "Brought back."
            ) if restored else "Nothing to bring back."
     return RedirectResponse(
-        url=redirect + _hidden_query(q, msg, p), status_code=303)
+        url=redirect + _hidden_query(request, q, msg, p), status_code=303)
 
 
 def _held_note(held, brought_back):

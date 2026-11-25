@@ -10,7 +10,13 @@
   {% endif %}
   <p class="ql-track-line{% if t.owned %} is-owned{% endif %}">
     <span class="ql-track-n">{{ t.n }}</span>
-    <span class="ql-track-name">{{ t.title }}{% if t.version %} <span class="ql-track-version">({{ t.version }})</span>{% endif %}{% if t.unavailable and not t.owned %} <span class="ql-track-version">· not on Qobuz</span>{% elif partly_owned and t.owned %} <span class="ql-track-owned">· In library</span>{% endif %}</span>
+    <span class="ql-track-name">{{ t.title }}
+      <span class="ql-track-detail">
+        {%- if t.version %}<span class="ql-track-edition">{{ t.version }}</span>{% endif -%}
+        {% if t.unavailable and not t.owned %} <span class="ql-track-unavailable">not on Qobuz</span>
+        {%- elif partly_owned and t.owned %} <span class="ql-track-owned">In library</span>{% endif -%}
+      </span>
+    </span>
     <span class="ql-track-time">{{ t.length }}</span>
   </p>
   {% else %}

@@ -37,6 +37,7 @@
   {# Server-side filter, plain GET: works without JS and covers the whole
      set, not just the page on screen. #}
   <form method="get" class="ql-hidden-filter" role="search">
+    {% if review_return %}<input type="hidden" name="return_to" value="{{ review_return }}">{% endif %}
     <div class="ql-clear-field">
       {# An empty q means the box was just cleared, so the cursor goes back. #}
       <input type="text" role="searchbox" name="q" value="{{ hidden_q }}" autocomplete="off" data-clear-submits
@@ -126,9 +127,9 @@
 
 {% if hidden_pages > 1 %}
 <nav class="ql-hidden-pagenav" aria-label="Pages">
-  {% if hidden_page > 1 %}<a class="ql-btn ql-btn-secondary ql-btn-sm" href="?p={{ hidden_page - 1 }}{% if hidden_q %}&amp;q={{ hidden_q | urlencode }}{% endif %}">Previous</a>{% endif %}
+  {% if hidden_page > 1 %}<a class="ql-btn ql-btn-secondary ql-btn-sm" href="?p={{ hidden_page - 1 }}{% if hidden_q %}&amp;q={{ hidden_q | urlencode }}{% endif %}{% if return_query %}&amp;{{ return_query }}{% endif %}">Previous</a>{% endif %}
   <span class="ql-hidden-pagenav-label">Page {{ hidden_page }} of {{ hidden_pages }}</span>
-  {% if hidden_page < hidden_pages %}<a class="ql-btn ql-btn-secondary ql-btn-sm" href="?p={{ hidden_page + 1 }}{% if hidden_q %}&amp;q={{ hidden_q | urlencode }}{% endif %}">Next</a>{% endif %}
+  {% if hidden_page < hidden_pages %}<a class="ql-btn ql-btn-secondary ql-btn-sm" href="?p={{ hidden_page + 1 }}{% if hidden_q %}&amp;q={{ hidden_q | urlencode }}{% endif %}{% if return_query %}&amp;{{ return_query }}{% endif %}">Next</a>{% endif %}
 </nav>
 {% endif %}
 

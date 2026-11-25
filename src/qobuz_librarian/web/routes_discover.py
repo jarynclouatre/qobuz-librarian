@@ -12,7 +12,12 @@ from qobuz_librarian.api.auth import (
     QobuzError,
     QobuzUnavailable,
 )
-from qobuz_librarian.library import collection_snapshot, discover_hidden, recommendations
+from qobuz_librarian.library import (
+    collection_snapshot,
+    discover_hidden,
+    generation_state,
+    recommendations,
+)
 from qobuz_librarian.library.tags import known_year
 from qobuz_librarian.quality.tiers import format_quality
 from qobuz_librarian.web import (
@@ -86,6 +91,7 @@ async def _discover_render(request: Request, tab: str, *, tag: str = "",
         return _discover_unavailable_response()
     context = {
         "page": "discover",
+        "library_revision": await asyncio.to_thread(generation_state.revision),
         "discover_tab": tab,
         "discover_tabs": _DISCOVER_TABS,
         "creds_ok": qobuz_access._creds_ok(),
@@ -234,6 +240,7 @@ async def discover_artist_albums(request: Request, artist_id: str = "",
     albums = _discover_album_views(rows)
     return rendering._tr(request, "_discover_albums.html", {
         "albums": albums,
+        "artist_id": artist_id,
         "decades": _discover_decades(albums),
         "error": error,
         "page": "discover",
@@ -307,7 +314,7 @@ async def discover_unhide(request: Request):
 
 
 @router.get("/discover/hidden", response_class=HTMLResponse)
-async def discover_hidden_page(request: Request):
+async def discover_hidden_page(request: Request, q: str | None = None):
     if not runtime._discover_available():
         return _discover_unavailable_response()
     loop = asyncio.get_running_loop()
@@ -318,5 +325,6 @@ async def discover_hidden_page(request: Request):
     return rendering._tr(request, "discover_hidden.html", {
         "page": "discover",
         "artists": artists,
+        "search_query": q[:200] if q is not None else None,
         "notice": rendering._notice_text(request.query_params.get("notice")),
     })

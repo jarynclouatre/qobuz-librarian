@@ -733,10 +733,10 @@ async def library_hidden_restore_all(request: Request):
                     hidden_mod.SCOPE_MISSING, fingerprints))
     except OSError as e:
         return RedirectResponse(
-            url="/library/hidden" + hidden_pages._hidden_query(q, str(e)), status_code=303)
+            url="/library/hidden" + hidden_pages._hidden_query(request, q, str(e)), status_code=303)
     if not restored:
         return RedirectResponse(
-            url="/library/hidden" + hidden_pages._hidden_query(q, "Nothing to bring back."),
+            url="/library/hidden" + hidden_pages._hidden_query(request, q, "Nothing to bring back."),
             status_code=303)
     rejoined = await loop.run_in_executor(
         None, lambda: flows.refold_restored_missing(artists, fingerprints or []))
@@ -766,7 +766,7 @@ async def library_hidden_restore_all(request: Request):
     if relisted and rejoined is not False:
         msg += " " + hidden_pages._relisted_note(relisted)
     return RedirectResponse(
-        url="/library/hidden" + hidden_pages._hidden_query(q, msg), status_code=303)
+        url="/library/hidden" + hidden_pages._hidden_query(request, q, msg), status_code=303)
 
 
 @router.post("/library/bring-back-all")

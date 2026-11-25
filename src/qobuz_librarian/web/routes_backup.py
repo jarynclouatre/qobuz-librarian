@@ -47,7 +47,7 @@ _log = logging.getLogger("qobuz_librarian")
 @router.post("/collection/snapshot")
 async def collection_snapshot_now(request: Request, force: str = Form("")):
     """Write a collection snapshot now instead of waiting for the next scan."""
-    busy = refusals._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request, form_page="/settings#collection-backup")
     if busy is not None:
         return busy
     existing = scans._active_scan("collection_snapshot",
@@ -127,7 +127,7 @@ async def collection_restore_upload(request: Request,
                                     backup: UploadFile = File(...),
                                     empty_replacement: str = Form("")):
     """Read a collection backup and park one review of what it can put back."""
-    busy = refusals._lock_busy_response(request)
+    busy = refusals._lock_busy_response(request, form_page="/settings#collection-restore")
     if busy is not None:
         return busy
     existing = scans._active_scan(
@@ -253,7 +253,7 @@ async def collection_restore_upload(request: Request,
                   job_mgr.JobStatus.AWAITING_REVIEW, job_mgr.JobStatus.RUNNING),
     )
     if submitted is None:
-        busy = refusals._lock_busy_response(request)
+        busy = refusals._lock_busy_response(request, form_page="/settings#collection-restore")
         if busy is not None:
             return busy
         return refusals._job_admission_response(request)

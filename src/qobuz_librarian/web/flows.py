@@ -8,6 +8,8 @@ import argparse
 import contextlib
 import dataclasses
 import errno
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -468,6 +470,16 @@ def is_gap_candidate(c):
     if (c.get("payload") or {}).get("gap_fill"):
         return True
     return "gap-fill:" in (c.get("detail") or "")
+
+
+def review_selection_token(job, tab="", *, selected=None):
+    if selected is None:
+        in_tab = review_tab_filter(tab)
+        with job._lock:
+            selected = [
+                c["cid"] for c in job.candidates if c.get("selected") and in_tab(c)]
+    return hashlib.sha256(
+        json.dumps([job.id, sorted(selected)]).encode()).hexdigest()
 
 
 def review_tab_filter(tab, included=None):
@@ -1762,7 +1774,7 @@ def _flag_new_since_last_scan(job, mode, found=()):
 
 
 def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
-                   query=""):
+                   query="", selection_token=None):
     """Hide the albums of ``artists`` that aren't currently selected, in
     ``scope``, as one action with one save.
 
@@ -1781,7 +1793,7 @@ def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
     The hidden albums are recorded in the durable store so future bulk walks of
     that scope skip them, then dropped from this job's review list. Returns the
     number hidden, False when the matching review snapshot could not be saved,
-    or None once the review has left review.
+    or None once the review or its confirmed selection has changed.
     """
     artists = set(artists)
     in_tab = review_tab_filter(tab)
@@ -1799,6 +1811,8 @@ def dismiss_albums(job, artists, scope=hidden_mod.SCOPE_MISSING, tab="",
     # separate steps could drop a concurrently-added album.
     with job._review_action_lock, job._lock:
         if job.status not in live:
+            return None
+        if selection_token is not None and selection_token != review_selection_token(job, tab):
             return None
         # The store's key deliberately ignores parentheticals so editions of one
         # album stay dismissed together, but that also collapses genuinely
@@ -5329,8 +5343,9 @@ def _scan_repairs_impl(job, token, checkpoint):
                 # A per-artist failure (not auth/outage) is left unscanned so a
                 # resume retries it rather than baking in a transient miss.
                 log.info(f"    skipped {ad.name}: {e}")
-                n_failed_artists += 1
-                n_linked_artists += isinstance(e, _RepairLink)
+                if ad.name not in unreadable_artists:
+                    n_failed_artists += 1
+                    n_linked_artists += isinstance(e, _RepairLink)
                 with beat["lock"]:
                     beat["artists"] = done
                     albums_seen = beat["albums"]
@@ -5372,8 +5387,6 @@ def _scan_repairs_impl(job, token, checkpoint):
         save_checkpoint(force=True)
     else:
         clear_failed = checkpoint.clear() is False
-    # Honest summary: report what was actually checked, and never
-    # claim completeness the scan didn't earn.
     caveats = _repair_scan_caveats(
         n_unverified, n_failed_albums,
         n_failed_artists - len(unreadable_artists) - n_linked_artists,
@@ -5387,6 +5400,8 @@ def _scan_repairs_impl(job, token, checkpoint):
         job.summary = (f"{plural(total, 'album')} flagged with damaged files. "
                        f"{plural(n_verified, 'track')} checked and complete."
                        + unmatched + caveats)
+    elif not n_verified and (unmatched or caveats or unreadable_artists):
+        job.summary = (unmatched + caveats).strip()
     else:
         job.summary = (f"No damaged files found. "
                        f"{plural(n_verified, 'track')} checked and complete."
@@ -5404,7 +5419,7 @@ def _scan_repairs_impl(job, token, checkpoint):
         job.summary = (
             f"{plural(len(unreadable_artists), 'artist')} could not be read: "
             + ", ".join(sorted(unreadable_artists)) + ". " + job.summary
-        )
+        ).rstrip()
     if n_failed_artists and not total:
         _mark_job_failed(job)
     else:

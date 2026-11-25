@@ -5,8 +5,9 @@
 
 <div id="repair-page" class="ql-tool-page ql-tool-page--wide" data-job-surface="/repair">
   {% set review_parked = repair_job and repair_job.status.value == 'awaiting_review' %}
-  <header class="ql-page-header{% if review_parked %} ql-page-header--split{% endif %}">
+  <header class="ql-page-header ql-page-header--split">
     <h1>Repair</h1>
+    <a href="/repair/history" class="ql-inline-link ql-activity-section-action text-sm">View history</a>
     {% if review_parked %}
     <form action="/repair" method="post" data-busy-submit>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
@@ -53,14 +54,13 @@
   <span class="ql-status-chip is-neutral">{{ 'Repair' if repair_job.phase == 'execute' else 'Scan' }} stopped</span>
 </div>
 {% endif %}
-{% with job = repair_job, embedded_surface = true %}{% include "_job_body.html" %}{% endwith %}
+{% with job = repair_job, embedded_surface = true, show_finished = true %}{% include "_job_body.html" %}{% endwith %}
 {% endif %}
 <div class="ql-work-status">
   <span class="ql-status-chip {% if repair_resume %}is-warning{% else %}is-neutral{% endif %}">
     {% if repair_resume %}Resume available{% elif last_run %}Ready to scan{% else %}Not scanned yet{% endif %}
   </span>
   {% if last_run %}<span>Last repair scan {{ last_run }}{% if last_summary %}: {{ last_summary }}{% else %}.{% endif %}</span>{% endif %}
-  <a href="/repair/history">View history</a>
 </div>
 
 <section class="ql-work-card">

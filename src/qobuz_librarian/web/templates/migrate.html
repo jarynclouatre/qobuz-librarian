@@ -34,7 +34,7 @@
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <div class="ql-migrate-options">
         <label class="ql-option-row">
-          <input type="checkbox" name="acoustid" class="ql-checkbox">
+          <input type="checkbox" name="acoustid" class="ql-checkbox"{% if use_acoustid %} checked{% endif %}>
           <span>
             <span class="ql-option-title">Fingerprint unclear files</span>
             <span class="ql-option-help">
@@ -43,7 +43,7 @@
           </span>
         </label>
         <label class="ql-option-row">
-          <input type="checkbox" name="in_place" class="ql-checkbox">
+          <input type="checkbox" name="in_place" class="ql-checkbox"{% if in_place %} checked{% endif %}>
           <span>
             <span class="ql-option-title">Move instead of copy</span>
             <span class="ql-option-help ql-option-help-warning">

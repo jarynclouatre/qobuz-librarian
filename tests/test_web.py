@@ -2204,8 +2204,8 @@ def test_select_all_and_dismiss_rest_act_only_on_the_rows_in_scope(
     job.execute_kind = "library"
     keep = job.add_candidate(kind="album", title="Dummy", artist="Portishead",
                              payload={"year": "1994"}, selected=False)
-    job.add_candidate(kind="album", title="Third", artist="Portishead",
-                      payload={"year": "2008"}, selected=False)
+    third = job.add_candidate(kind="album", title="Third", artist="Portishead",
+                              payload={"year": "2008"}, selected=False)
     job.add_candidate(kind="album", title="Untrue", artist="Burial",
                       payload={"year": "2007"}, selected=False)
     job.add_candidate(kind="album", title="Mezzanine", artist="Massive Attack",
@@ -2213,6 +2213,19 @@ def test_select_all_and_dismiss_rest_act_only_on_the_rows_in_scope(
     try:
         r = client.post(f"/jobs/{job.id}/select", data={"cid": keep, "checked": "1"})
         assert r.status_code == 200
+
+        # Another tab kept Third instead. A stale page still pictures Dummy
+        # checked, even though its count of one is correct.
+        stale = {"tab": "missing", "artist": "Portishead",
+                 "selection_token": r.json()["selection_tokens"]["missing"]}
+        job.set_selected(keep, False)
+        job.set_selected(third, True)
+        for action in ("hide", "dismiss-rest"):
+            assert client.post(f"/jobs/{job.id}/{action}", data=stale).status_code == 409
+        assert not hidden.count(hidden.SCOPE_MISSING)
+        assert len(job.candidates) == 4
+        job.set_selected(third, False)
+        job.set_selected(keep, True)
 
         saves.clear()
         r = client.post(f"/jobs/{job.id}/dismiss-rest")

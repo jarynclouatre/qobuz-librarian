@@ -156,7 +156,7 @@
 {% endmacro %}
 
 {% macro section(id, title, open=False, state="", warning=False) %}
-<details class="ql-settings-section"{% if open %} open{% endif %}>
+<details class="ql-settings-section" hx-headers='{"X-Settings-Section":"{{ id }}"}'{% if open %} open{% endif %}>
   <summary class="ql-settings-summary">
     <h2 id="{{ id }}" tabindex="-1" class="ql-anchor-target">{{ title }}</h2>
     <span id="{{ id }}-state" class="ql-settings-state{% if warning %} ql-settings-state--warning{% endif %}">{{ state }}</span>
@@ -362,7 +362,7 @@
                  autocomplete="off" autocorrect="off" spellcheck="false"
                  {% if creds_from_env %}disabled aria-disabled="true"{% endif %}
                  placeholder="{% if auth_token_set %}{% else %}Paste token{% endif %}"
-                 class="ql-input ql-mono pr-12">
+                 class="ql-input ql-mono">
           {{ secret_toggle("auth_token", "token") }}
         </div>
       </div>
@@ -375,11 +375,12 @@
     {% if auth_token_set %}</details>{% endif %}
 {% endcall %}
 
+{% set quality = (saved_behaviour|default({})).get('STREAMRIP_QUALITY', behavior['STREAMRIP_QUALITY']) %}
 {% call section("behaviour", "Behaviour", settings_section == 'behaviour',
-                option_labels['STREAMRIP_QUALITY'].get(behavior['STREAMRIP_QUALITY'], behavior['STREAMRIP_QUALITY'])) %}
+                option_labels['STREAMRIP_QUALITY'].get(quality, quality)) %}
 {% if not rerendered %}{{ behaviour_notices() }}{% endif %}
     <form id="behaviour-form" action="/settings/behavior" method="post" data-busy-submit data-busy-label="Saving…"
-          {%- if settings_section == 'behaviour' and error in ("invalidsettings", "persist") %} data-unsaved{% endif %}>
+          {%- if saved_behaviour %} data-saved-values='{{ saved_behaviour | tojson }}'{% endif %}>
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
       <input type="hidden" name="form_complete" value="1">
       <input type="hidden" name="settings_generation" value="{{ behavior_generation }}">
@@ -536,7 +537,7 @@
           <input type="password" name="{{ key }}" id="f-{{ key }}"
                  value="" placeholder="{% if not behavior[key] %}{{ placeholder }}{% endif %}"
                  autocomplete="off" autocorrect="off" spellcheck="false"
-                 class="ql-input ql-mono pr-12">
+                 class="ql-input ql-mono">
           {{ secret_toggle("f-" ~ key, "key") }}
         </div>
         <p class="ql-field-help">{{ help }} <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener" class="ql-link">Keys come from last.fm</a> and need a Pro account.</p>
@@ -687,7 +688,7 @@
 
     <form hx-post="/collection/restore" hx-encoding="multipart/form-data"
           hx-target="#collection-restore-result" hx-swap="innerHTML"
-          hx-disabled-elt="find button[type=submit]"
+          hx-disabled-elt="find input[type=file], find input[type=checkbox], find button[type=submit]"
           class="ql-settings-form">
       <div class="ql-field">
         <span class="ql-field-label">Backup file</span>
@@ -739,7 +740,7 @@
         <div class="relative max-w-lg">
           <input type="password" name="current_password" id="current_password"
                  autocomplete="current-password" required
-                 class="ql-input pr-12">
+                 class="ql-input">
           {{ secret_toggle("current_password", "password") }}
         </div>
       </div>
@@ -748,7 +749,7 @@
         <div class="relative max-w-lg">
           <input type="password" name="new_password" id="new_password"
                  autocomplete="new-password" required minlength="15"
-                 class="ql-input pr-12">
+                 class="ql-input">
           {{ secret_toggle("new_password", "new password") }}
         </div>
         <p class="ql-field-help">At least 15 characters.</p>
@@ -756,9 +757,9 @@
       <div class="ql-field">
         <label class="ql-field-label" for="confirm_password">Confirm new password</label>
         <div class="relative max-w-lg">
-          <input type="password" name="confirm_password" id="confirm_password"
+          <input type="password" name="confirm_password" id="confirm_password" data-matches-password="new_password"
                  autocomplete="new-password" required minlength="15"
-                 class="ql-input pr-12">
+                 class="ql-input">
           {{ secret_toggle("confirm_password", "confirmation") }}
         </div>
       </div>

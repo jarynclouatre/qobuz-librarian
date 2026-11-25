@@ -56,7 +56,7 @@ def _repair_current_job():
 
 
 @router.get("/repair", response_class=HTMLResponse)
-async def repair_page(request: Request, page: int = 1):
+async def repair_page(request: Request, page: int = 1, q: str = ""):
     badge_generation = review_badges.ready_generation("repair")
     creds_ok = qobuz_access._creds_ok()
     # /repair is the SINGLE authoritative repair surface.
@@ -72,7 +72,7 @@ async def repair_page(request: Request, page: int = 1):
         ctx["ended_run"] = ended
     if rjob is not None:
         ctx["queue_wait"] = job_labels._queue_wait(rjob)
-        ctx.update(review_pages._review_context(rjob, page))
+        ctx.update(review_pages._review_context(rjob, page, q))
     # The launcher renders when the surface is idle AND under a run that failed
     # or was cancelled (see _repair_current_job, which keeps those on the page
     # on purpose). Both cases read these, so both have to be given them.

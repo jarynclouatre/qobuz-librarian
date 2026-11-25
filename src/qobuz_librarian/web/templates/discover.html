@@ -28,7 +28,8 @@
           <path d="M21 21l-4.35-4.35" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
         </svg>
         <input type="text" name="q" value="{{ query }}" aria-label="Artist name"
-               placeholder="Find artists like…" class="ql-search-input" autocomplete="off"
+               placeholder="Find artists like…" class="ql-search-input" autocomplete="off" data-clear-submits
+               {% if not query and 'q' in request.query_params %}autofocus{% endif %}
                enterkeyhint="search" maxlength="200">
         {{ clear_field("Clear search") }}
       </div>
@@ -45,7 +46,7 @@
 
   {# A build publishes as it goes, so the page re-asks for itself while one is
      running, and stops when the replacement arrives without the trigger. #}
-  <div id="discover-body" hx-disinherit="hx-select"{% if feed.phase in ('building', 'waiting') %} hx-get="{{ poll_url }}"
+  <div id="discover-body" data-library-revision="{{ library_revision }}" hx-disinherit="hx-select"{% if feed.phase in ('building', 'waiting') %} hx-get="{{ poll_url }}"
        hx-trigger="every 2s" hx-target="#discover-body"
        hx-select="#discover-body" hx-swap="outerHTML"{% endif %}>
 
@@ -115,7 +116,7 @@
       <span class="ql-status-chip is-neutral">Nothing yet</span>
       {% endif %}
       {% if discover_tab in ('similar', 'search') %}
-      <a href="/discover/hidden" class="ql-discover-hidden-link{% if not hidden_count %} hidden{% endif %}"
+      <a href="/discover/hidden{% if discover_tab == 'search' %}?q={{ query | urlencode }}{% endif %}" class="ql-discover-hidden-link{% if not hidden_count %} hidden{% endif %}"
          data-discover-hidden-link>Dismissed (<span data-discover-hidden-count>{{ hidden_count }}</span>)</a>
       {% endif %}
     </div>

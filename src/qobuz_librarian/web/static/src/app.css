@@ -525,6 +525,9 @@ body.ql-drawer-page-locked {
   overflow: hidden;
   overscroll-behavior: none;
 }
+.ql-drawer-page-locked .ql-tabbar {
+  z-index: 60;
+}
 details.ql-mobile-drawer[open]::before {
   content: "";
   position: fixed;
@@ -579,7 +582,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-toast-host {
   position: fixed;
   right: 1rem;
-  bottom: 1rem;
+  bottom: max(1rem, calc(var(--ql-action-bar-inset, 0px) + 0.75rem));
   z-index: 50;
   display: grid;
   width: min(24rem, calc(100vw - 2rem));
@@ -592,7 +595,6 @@ details.ql-mobile-drawer[open]::before {
 @media (max-width: 639.98px) {
   .ql-toast-host {
     right: 0.75rem;
-    bottom: 0.75rem;
     left: 0.75rem;
     width: auto;
   }
@@ -1210,8 +1212,17 @@ details.ql-mobile-drawer[open]::before {
   font-size: 0.8125rem;
   color: var(--ql-text-3);
 }
+.ql-search-results .ql-result-row--artist {
+  position: relative;
+}
 .ql-result-action-form {
   width: 100%;
+}
+.ql-result-action-form button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
 }
 .ql-result-action-form .ql-btn {
   width: 100%;
@@ -1394,15 +1405,10 @@ details.ql-mobile-drawer[open]::before {
   color: var(--ql-text-2);
   overflow-wrap: anywhere;
 }
-.ql-grid-tile .ql-track-line {
-  grid-template-columns: 1.35rem minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 0.45rem;
-}
 .ql-track-line.is-owned {
   opacity: 0.5;
 }
-.ql-track-version {
+.ql-track-detail {
   color: var(--ql-text-3);
 }
 .ql-track-owned {
@@ -1418,8 +1424,115 @@ details.ql-mobile-drawer[open]::before {
 .ql-track-disc:first-child {
   margin-top: 0;
 }
-.ql-tracklist-panel + .ql-grid-version-row {
-  border-top: 1px solid color-mix(in oklab, var(--ql-line-soft) 72%, transparent);
+.ql-tracklist-panel .ql-track-edition::before { content: "("; }
+.ql-tracklist-panel .ql-track-edition::after { content: ")"; }
+.ql-tracklist-panel :is(.ql-track-unavailable, .ql-track-owned)::before,
+.ql-track-edition + span::before {
+  content: "· ";
+}
+
+html:has(.ql-release-sheet[open]) {
+  overflow: hidden;
+}
+.ql-release-sheet {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(36rem, calc(100% - 2rem));
+  max-height: 70dvh;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--ql-line);
+  border-radius: var(--ql-radius-xl);
+  background: var(--ql-surface);
+  color: var(--ql-text);
+  box-shadow: var(--ql-shadow);
+}
+.ql-release-sheet[open] {
+  display: flex;
+  flex-direction: column;
+}
+.ql-release-sheet::backdrop {
+  background: rgb(0 0 0 / 0.55);
+}
+.ql-release-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem;
+  border-bottom: 1px solid var(--ql-line);
+  overflow-wrap: anywhere;
+}
+.ql-release-sheet-head h2 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.ql-release-sheet-head p,
+.ql-track-sheet-loading {
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
+}
+.ql-release-sheet-head p {
+  margin-top: 0.25rem;
+}
+.ql-release-sheet-head button {
+  flex: none;
+  margin-left: auto;
+  width: 2.75rem;
+  height: 2.75rem;
+}
+.ql-release-sheet-list {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ql-track-sheet-list:not(:empty) + .ql-track-sheet-loading {
+  display: none;
+}
+.ql-track-sheet-loading,
+.ql-track-sheet-list .ql-notice {
+  margin: 1rem;
+}
+.ql-track-sheet .ql-tracklist {
+  margin: 0;
+  border: 0;
+  padding: 0 1rem env(safe-area-inset-bottom);
+}
+.ql-track-sheet .ql-track-line {
+  grid-template-columns: 1.25rem minmax(0, 1fr) auto;
+  gap: 0.625rem;
+  padding: 0.55rem 0;
+  font-size: 0.9375rem;
+  line-height: 1.35;
+  border-bottom: 1px solid var(--ql-line-soft);
+}
+.ql-track-sheet .ql-track-line:last-child {
+  border-bottom: 0;
+}
+.ql-track-sheet .ql-track-name {
+  color: var(--ql-text);
+}
+.ql-track-sheet .ql-track-line.is-owned {
+  opacity: 1;
+}
+.ql-track-sheet .ql-track-detail:not(:empty) {
+  display: block;
+  margin-top: 0.125rem;
+  font-size: 0.75rem;
+}
+.ql-track-sheet .ql-track-detail,
+.ql-track-sheet .ql-track-n,
+.ql-track-sheet .ql-track-time {
+  color: var(--ql-text-2);
+}
+@media (max-width: 639.98px) {
+  .ql-release-sheet {
+    inset: auto 0 0;
+    margin: 0;
+    width: 100%;
+    max-width: 100%;
+    border-radius: var(--ql-radius-xl) var(--ql-radius-xl) 0 0;
+  }
 }
 .ql-table-row.ql-subrow {
   border-top-color: var(--ql-line-soft);
@@ -2172,10 +2285,7 @@ details.ql-mobile-drawer[open]::before {
 .ql-grid-tile:hover {
   border-color: var(--ql-line);
 }
-/* A row of tiles shares one height, with the download buttons along the
-   bottom. While a tile has its tracks or versions open the grid goes back
-   to tiles of their own height, or the rest of that row would stretch to
-   the open one. */
+/* Keep the download buttons aligned along the bottom of each tile row. */
 .ql-grid-view--even .ql-grid-tile {
   display: flex;
   flex-direction: column;
@@ -2184,35 +2294,31 @@ details.ql-mobile-drawer[open]::before {
 .ql-grid-view--even .ql-grid-footer {
   margin-top: auto;
 }
-.ql-grid-view--even:has(.ql-tracklist-panel:not(.hidden), .ql-grid-version-panel:not(.hidden)) .ql-grid-tile {
-  align-self: start;
-}
 .ql-grid-tile:has(.ql-checkbox:checked) {
   border-color: color-mix(in oklab, var(--ql-text) 40%, transparent);
   background-color: color-mix(in oklab, var(--ql-text) 5%, var(--ql-surface));
 }
-/* The drawn chip stays 1.5rem (its ::before, inset to match); the target
-   grows to 44px. Top/left are pulled in by the same amount the box grew so
-   the chip lands at its original corner position. */
+.ql-grid-art {
+  position: relative;
+  display: grid;
+}
 .ql-grid-check {
   position: absolute;
-  top: 0.025rem;
-  left: 0.025rem;
+  inset: 0;
   z-index: 1;
-  display: inline-flex;
-  min-width: 2.75rem;
-  min-height: 2.75rem;
-  align-items: center;
-  justify-content: center;
+  display: flex;
+  align-items: flex-start;
+  padding: 0.25rem;
   cursor: pointer;
 }
-.ql-grid-check::before {
-  content: "";
-  position: absolute;
-  inset: 0.625rem;
-  z-index: -1;
-  border-radius: var(--ql-radius-sm);
-  background-color: color-mix(in oklab, var(--ql-bg) 84%, transparent);
+.ql-grid-check:empty {
+  display: none;
+}
+.ql-grid-check:has(:disabled) {
+  cursor: default;
+}
+.ql-grid-check .ql-checkbox {
+  box-shadow: 0 0 0 0.25rem color-mix(in oklab, var(--ql-bg) 84%, transparent);
 }
 .ql-grid-cover {
   width: 100%;
@@ -2262,58 +2368,32 @@ details.ql-mobile-drawer[open]::before {
   font-size: 0.6875rem;
 }
 .ql-grid-version-panel {
-  display: grid;
-  gap: 0.15rem;
-  border-top: 1px solid var(--ql-line-soft);
-  padding-top: 0.45rem;
-}
-.ql-grid-version-panel.hidden {
-  display: none;
+  padding: 0 1rem env(safe-area-inset-bottom);
 }
 .ql-grid-version-row {
   display: grid;
-  min-width: 0;
-  grid-template-columns: 1.15rem minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.45rem;
-  border-radius: var(--ql-radius-sm);
-  padding: 0.45rem 0.35rem;
+  grid-template-columns: 1.5rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.65rem;
+  padding: 0.875rem 0;
 }
-.ql-grid-version-row + .ql-grid-version-row {
-  border-top: 1px solid color-mix(in oklab, var(--ql-line-soft) 72%, transparent);
-}
-.ql-grid-version-row:has(.ql-checkbox:checked) {
-  background-color: color-mix(in oklab, var(--ql-text) 5%, transparent);
+.ql-grid-version-row:not(:first-child) {
+  border-top: 1px solid var(--ql-line-soft);
 }
 .ql-grid-version-copy {
+  grid-column: 2;
   min-width: 0;
-}
-.ql-grid-version-copy p {
-  margin: 0;
   overflow-wrap: anywhere;
-  color: var(--ql-text);
-  font-size: 0.75rem;
-  font-weight: 690;
-  line-height: 1.25;
+  font-size: 0.9375rem;
+  line-height: 1.35;
 }
-.ql-grid-version-copy span {
-  display: block;
-  margin-top: 0.14rem;
-  color: var(--ql-text-3);
-  font-size: 0.75rem;
-  line-height: 1.3;
+.ql-grid-version-meta {
+  margin-top: 0.125rem;
+  color: var(--ql-text-2);
+  font-size: 0.8125rem;
 }
-.ql-grid-version-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.3rem;
-}
-.ql-grid-version-action .ql-owned-label,
-.ql-grid-version-action .ql-partial-label,
-.ql-grid-version-action .ql-other-version-label {
-  padding: 0.24rem 0.34rem;
-  font-size: 0.625rem;
+.ql-grid-version-row .ql-vchip {
+  margin-left: -0.375rem;
 }
 .ql-grid-tile.is-owned .ql-grid-cover,
 .ql-grid-tile.is-owned .ql-grid-title {
@@ -2660,6 +2740,7 @@ details.ql-mobile-drawer[open]::before {
   display: grid;
 }
 .ql-activity-row {
+  position: relative;
   display: grid;
   min-width: 0;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -3452,6 +3533,15 @@ details.ql-mobile-drawer[open]::before {
     top: var(--ql-mobilebar-h, 4rem);
     z-index: 5;
     background-color: var(--ql-bg);
+  }
+  .ql-review-group[open] .ql-review-title {
+    flex-wrap: wrap;
+    row-gap: 0;
+  }
+  .ql-review-group[open] .ql-review-title-main,
+  .ql-hidden-group[open] .ql-hidden-artist {
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   .ql-group-dismiss {
     z-index: 6;
@@ -4394,17 +4484,14 @@ a.ql-activity-section-action::before {
 .ql-activity-row--waiting .ql-job-tile svg {
   stroke: var(--ql-text-3);
 }
-/* The whole queue card opens its job's surface, a thumb target, not just the
-   title text. Buttons sit above the stretched link so they still win the tap. */
-.ql-activity-row--queue {
-  position: relative;
-}
-.ql-activity-row--queue .ql-row-link::after {
+.ql-activity-row .ql-row-link::after {
   content: "";
   position: absolute;
   inset: 0;
 }
-.ql-activity-row--queue .ql-activity-actions {
+.ql-activity-row .ql-activity-actions,
+.ql-history-row .ql-row-reason,
+.ql-history-row .ql-activity-side [title] {
   position: relative;
   z-index: 1;
 }
@@ -5827,6 +5914,9 @@ details[open] > summary .ql-review-chevron {
 
 /* Password/token reveal controls live inside the input so they don't squeeze
    long secret fields on narrow screens. */
+.ql-input:has(+ .ql-secret-toggle) {
+  padding-right: 3rem;
+}
 .ql-secret-toggle {
   position: absolute;
   inset-block: 0;
@@ -6122,7 +6212,7 @@ details[data-artist].htmx-swapping {
 .ql-discover-album + .ql-discover-album {
   border-top: 1px solid var(--ql-line-soft);
 }
-.ql-discover-album img {
+.ql-discover-album > img {
   width: 2.25rem;
   height: 2.25rem;
   flex: none;
@@ -6214,17 +6304,13 @@ details[data-artist].htmx-swapping {
   }
 }
 
-/* Phone: the fixed bottom nav owns the bottom edge, so the sticky review
-   footer and toasts sit above it. This lives at the END of the file on
-   purpose. The base rules (`.ql-review-footer { bottom: 0 }`,
-   `.ql-toast-host { bottom: 1rem }`) have equal specificity, and anywhere
-   earlier they win the cascade and the nav covers the review actions. */
+/* Leave room for the tabs and for any actions docked above them. */
 @media (max-width: 1023.98px) {
   .ql-review-footer {
     bottom: var(--ql-tabbar-h, calc(3.6rem + env(safe-area-inset-bottom)));
   }
   .ql-toast-host {
-    bottom: calc(var(--ql-tabbar-h, calc(3.6rem + env(safe-area-inset-bottom))) + 0.8rem);
+    bottom: calc(max(var(--ql-tabbar-h, calc(3.6rem + env(safe-area-inset-bottom))), var(--ql-action-bar-inset, 0px)) + 0.8rem);
   }
 }
 /* A short landscape viewport cannot hold both sticky review bands and still

@@ -1,4 +1,4 @@
-{% from "_search_results.html" import download_form, pending_chip, quality_badge with context %}
+{% from "_search_results.html" import download_form, pending_chip, quality_badge, track_sheet, tracks_toggle with context %}
 {% if error %}
 <div class="ql-notice ql-notice-warning" data-flash><span>{{ error | link_settings }}</span></div>
 {% else %}
@@ -15,6 +15,7 @@
   </div>
   {% endif %}
   {% for al in albums %}
+  {% set tracks_id = 'discover-tracks-' ~ artist_id ~ '-' ~ al.id %}
   <div class="ql-discover-album" data-album-year="{{ al.year }}"
        data-search-item data-search-key="album-{{ al.id }}"
        data-queued="{{ 1 if al.queued else 0 }}" data-scanning="{{ 1 if al.scanning else 0 }}">
@@ -22,7 +23,11 @@
     <div class="ql-discover-album-copy">
       <p class="ql-discover-album-title">{{ release_title(al.title, al.version) }}</p>
       <p class="ql-discover-album-meta">{{ al.year or '?' }} · {{ al.tracks or '?' }} track{{ 's' if al.tracks != 1 }}{{ quality_badge(al, inline=True) }}</p>
+      <div class="ql-row-chips ql-sub-chips">
+        {{ tracks_toggle(al.id, release_title(al.title, al.version), tracks_id, sheet=True) }}
+      </div>
     </div>
+    {{ track_sheet(al, tracks_id) }}
     <div class="ql-discover-album-side">
       {{ quality_badge(al) }}
       {{ pending_chip(al) }}

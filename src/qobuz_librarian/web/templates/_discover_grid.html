@@ -1,7 +1,8 @@
-{% from "_search_results.html" import download_form, pending_chip, quality_badge with context %}
+{% from "_search_results.html" import download_form, pending_chip, quality_badge, track_sheet, tracks_toggle with context %}
 {% if albums %}
 <div class="ql-grid-view ql-grid-view--even">
   {% for g in albums %}
+  {% set tracks_id = 'discover-tracks-' ~ g.id %}
   <div class="ql-grid-tile" data-search-item data-search-key="album-{{ g.id }}"
        data-queued="{{ 1 if g.queued else 0 }}" data-scanning="{{ 1 if g.scanning else 0 }}">
     {% if g.cover %}<img src="{{ g.cover }}" alt="" width="320" height="320" class="ql-grid-cover" loading="lazy">{% endif %}
@@ -9,7 +10,11 @@
       <p class="ql-grid-title">{{ release_title(g.title, g.version) }}</p>
       <p class="ql-grid-artist">{{ g.artist }}</p>
       <p class="ql-grid-meta">{{ g.year or '?' }} · {{ g.tracks or '?' }} track{{ 's' if g.tracks != 1 }}</p>
+      <div class="ql-row-chips ql-sub-chips">
+        {{ tracks_toggle(g.id, release_title(g.title, g.version), tracks_id, sheet=True) }}
+      </div>
     </div>
+    {{ track_sheet(g, tracks_id) }}
     <div class="ql-grid-footer">
       {{ quality_badge(g) }}
       {{ pending_chip(g) }}

@@ -76,6 +76,7 @@ async def migrate_scan(request: Request):
         return rendering._tr(request, "migrate.html", {
             "page": "settings",
             "configured": bool(src and dest), "error": err,
+            "use_acoustid": use_acoustid, "in_place": in_place,
             "migrate_checks": _migrate_checks(src, dest)})
     job = job_mgr.Job(title="Library migration")
     job.review_verb = "Move" if in_place else "Copy"

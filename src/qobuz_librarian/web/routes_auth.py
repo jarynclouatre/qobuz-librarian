@@ -49,6 +49,8 @@ def _login_again(request, error, username, next_path):
     """Send a refused sign-in back to the form by redirect, so Back from
     the page that follows never lands on a form post."""
     params = {"error": rendering._notice_key(error)}
+    if request.query_params.get("interrupted") == "1":
+        params["interrupted"] = "1"
     if next_path:
         params["next"] = next_path
     resp = RedirectResponse(url="/login?" + urllib.parse.urlencode(params),

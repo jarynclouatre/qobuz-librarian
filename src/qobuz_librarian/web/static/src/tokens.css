@@ -104,6 +104,7 @@
 }
 
 .ql-btn:disabled,
+.ql-file-choose:has(input:disabled),
 .ql-btn[aria-disabled="true"],
 .ql-btn.is-disabled {
   cursor: not-allowed;

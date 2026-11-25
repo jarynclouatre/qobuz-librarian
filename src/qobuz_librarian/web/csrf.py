@@ -128,22 +128,22 @@ def _stale_page_response(request, token):
     Reloading would send the same stale form again, so the page links to a
     fresh copy of the one it came from."""
     from starlette.responses import HTMLResponse
-    if request.headers.get("HX-Request"):
+
+    from qobuz_librarian.web import auth, rendering
+
+    signed_out = auth.signed_out_target(request)
+    if signed_out and request.scope["path"] not in (auth.LOGIN_PATH, auth.SETUP_PATH):
+        resp = auth.refuse_signed_out(request, signed_out)
+    elif request.headers.get("HX-Request"):
         # htmx swallows a non-2xx body, and the app's toast host reads this
         # verbatim; HX-Refresh reloads the page with the new cookie in place.
         resp = HTMLResponse("", status_code=200,
                             headers={"HX-Refresh": "true"})
     else:
-        from qobuz_librarian.web import auth, rendering
-        signed_out = auth.signed_out_target(request)
-        if signed_out and request.scope["path"] not in (auth.LOGIN_PATH,
-                                                        auth.SETUP_PATH):
-            resp = auth.refuse_signed_out(request, signed_out)
-        else:
-            back = _referring_page(request)
-            resp = rendering.render_error_page(
-                request, 403, "That page went stale", _STALE_MESSAGE,
-                action={"href": back, "label": "Open the page again"} if back else None)
+        back = _referring_page(request)
+        resp = rendering.render_error_page(
+            request, 403, "That page went stale", _STALE_MESSAGE,
+            action={"href": back, "label": "Open the page again"} if back else None)
     _set_csrf_cookie(request, resp, token)
     return resp
 

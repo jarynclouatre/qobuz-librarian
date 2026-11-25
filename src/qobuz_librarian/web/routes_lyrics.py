@@ -44,6 +44,8 @@ async def lyrics_page(request: Request):
         "sidecar": ".lrc sidecar files",
         "both": "Embedded tags and .lrc files",
     }.get(lyrics_format, lyrics_format)
+    running = scans._active_scan(
+        "lyrics", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING))
     latest_lyrics = scans._last_finished("lyrics")
     lyrics_failed = (
         latest_lyrics
@@ -57,8 +59,6 @@ async def lyrics_page(request: Request):
         and latest_lyrics.status == job_mgr.JobStatus.CANCELED
         else None
     )
-    running = scans._active_scan(
-        "lyrics", statuses=(job_mgr.JobStatus.PENDING, job_mgr.JobStatus.RUNNING))
     return rendering._tr(request, "lyrics.html", {
         "page": "lyrics",
         "have_lyrics": lyric_fetch.AVAILABLE,

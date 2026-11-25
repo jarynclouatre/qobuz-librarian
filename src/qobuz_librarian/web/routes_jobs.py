@@ -87,7 +87,7 @@ _REVIEW_DISK_FEATURES = {
 async def job_page(request: Request, job_id: str,
                    stale: bool = False, noselection: bool = False, page: int = 1,
                    error: str = "", q: str = "", tab: str = "",
-                   waiting: bool = False):
+                   waiting: bool = False, history_page: int = 1):
     job = job_mgr.registry.get(job_id)
     if not job:
         job = job_mgr.load_historical_job(job_id)
@@ -119,7 +119,9 @@ async def job_page(request: Request, job_id: str,
             query = f"?{request.url.query}" if request.url.query else ""
             return RedirectResponse(url=shown_at + query, status_code=303)
     review_badge_ack = _review_badge_ack_for(job)
-    nav_page, _return_href, _return_label = job_labels._job_nav_destination(job)
+    nav_page, return_href, _return_label = job_labels._job_nav_destination(job)
+    if return_href == "/queue/history" and history_page > 1:
+        return_href = f"/queue/history?p={history_page}"
     shown_attention = job.attention
     if job.attention and job.attention not in ("recovery", "catalog"):
         # Opening the page is the acknowledgement: the History chip and the
@@ -153,7 +155,8 @@ async def job_page(request: Request, job_id: str,
             "stale": not current,
             "reason": str(output.get("reason") or ""),
         }
-    ctx = {"job": job, "page": nav_page, "shown_attention": shown_attention,
+    ctx = {"job": job, "page": nav_page, "job_return_href": return_href,
+           "shown_attention": shown_attention,
            "stale": stale, "noselection": noselection,
            "waiting": waiting,
            "error": rendering._notice_text(error),
@@ -374,7 +377,7 @@ def _recheck_selection(job, tab, selection_token, selected_ids, stale_premise,
 
     current_selected = _selected_candidates(job, tab)
     if (selection_token is not None
-            and selection_token != review_pages._selection_token(job, tab)):
+            and selection_token != flows.review_selection_token(job, tab)):
         return "review_changed", stale_premise
     if {c.get("cid") for c in current_selected} != selected_ids:
         return "review_changed", stale_premise
@@ -1215,7 +1218,8 @@ async def job_hide(request: Request, job_id: str):
         def _dismiss():
             with saved_reviews._SAVED_REVIEW_LOCK:
                 n = flows.dismiss_albums(
-                    job, [artist], scope=scope, tab=tab, query=q)
+                    job, [artist], scope=scope, tab=tab, query=q,
+                    selection_token=form.get("selection_token"))
             if n is None or n is False:
                 return n, None, [], {}
             # Dismissing the last album completes the review, so drop
@@ -1315,7 +1319,8 @@ async def job_dismiss_rest(request: Request, job_id: str):
                        and (not q or flows.candidate_matches_query(c, q))}
         with saved_reviews._SAVED_REVIEW_LOCK:
             hidden = flows.dismiss_albums(
-                job, artists, scope=scope, tab=tab, query=q)
+                job, artists, scope=scope, tab=tab, query=q,
+                selection_token=form.get("selection_token"))
         if hidden is None or hidden is False:
             return hidden, {}
         payload = _selection_payload(job)

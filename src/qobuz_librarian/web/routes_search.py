@@ -258,7 +258,8 @@ def _maybe_resume_library_scan():
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, q: str = "", kind: str = "artist",
                     artist_id: str = "", artist_name: str = "", album_id: str = "",
-                    back_kind: str = "", back_q: str = ""):
+                    back_kind: str = "", back_q: str = "",
+                    back_album_id: str = "", back_track_q: str = ""):
     active_jobs = [j for j in job_mgr.registry.pending_and_running()
                    if j.status in (job_mgr.JobStatus.RUNNING, job_mgr.JobStatus.SCANNING)]
 
@@ -272,6 +273,7 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
         scan_state = scans._library_scan_state()
         library_generation = generation_state.load()
         return {
+            "library_revision": library_generation["revision"],
             "new_release_review": _new_release_review(),
             # First run offers the baseline scan as a Run/Skip choice rather than
             # auto-starting it; suppress the offer once the user skips it (the
@@ -315,7 +317,8 @@ async def dashboard(request: Request, q: str = "", kind: str = "artist",
     search_artist_id = str(artist_id or "").strip()[:64]
     search_artist_name = str(artist_name or "").strip()[:200]
     search_album_id = str(album_id or "").strip()[:64] if search_kind == "album" else ""
-    search_back = _search_origin(back_kind, back_q[:500]) if search_artist_id else None
+    search_back = (_search_origin(back_kind, back_q, back_album_id, back_track_q)
+                   if search_artist_id or search_album_id else None)
     pending = job_mgr.registry.pending_and_running()
     return rendering._tr(request, "index.html", {
         "pending": pending,
@@ -976,14 +979,17 @@ def _search_error(exc, query):
     return "The search did not finish. Try again."
 
 
-def _search_origin(kind, q):
-    """The album or track search an artist page was opened from, which its
-    Search results link goes back to, or the Discover list, searched for
-    ``q`` when it is set."""
+def _search_origin(kind, q, album_id="", track_q=""):
+    """The results that opened this album or artist."""
     kind = str(kind or "").strip().lower()
-    q = str(q or "").strip()
+    q = str(q or "").strip()[:500]
     if kind in ("album", "track") and q:
-        return {"kind": kind, "q": q}
+        origin = {"kind": kind, "q": q}
+        if kind == "album" and album_id.strip():
+            origin["album_id"] = album_id.strip()[:64]
+            if track_q.strip():
+                origin["track_q"] = track_q.strip()[:500]
+        return origin
     if kind == "discover":
         return {"kind": kind, "q": q}
     return None
@@ -996,7 +1002,9 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                     artist_name: str = Form(""),
                     album_id: str = Form(""),
                     back_kind: str = Form(""),
-                    back_q: str = Form("", max_length=500)):
+                    back_q: str = Form("", max_length=500),
+                    back_album_id: str = Form("", max_length=64),
+                    back_track_q: str = Form("", max_length=500)):
     results = []
     album_groups = []
     artist_results = []
@@ -1013,9 +1021,10 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
     artist_id = str(artist_id or "").strip()
     artist_name = str(artist_name or "").strip()
     album_id = str(album_id or "").strip()
-    back = _search_origin(back_kind, back_q)
+    back = _search_origin(back_kind, back_q, back_album_id, back_track_q)
     if not rendering._is_htmx(request):
         return RedirectResponse(url="/", status_code=303)
+    library_revision = await asyncio.to_thread(generation_state.revision)
     if query or (kind == "album" and album_id):
         try:
             token = qobuz_access._get_token()
@@ -1104,10 +1113,13 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
         search_count_label += " on Qobuz"
     search_cacheable = search_result_count <= _SEARCH_SNAPSHOT_RESULT_LIMIT
     ctx = {"q": query, "results": results, "album_groups": album_groups,
+           "library_revision": library_revision,
            "album_total": album_total, "album_more": album_more,
            "artist_results": artist_results, "selected_artist": selected_artist,
            "error": error, "kind": kind, "list_kind": kind,
-           "back": back or {"kind": "artist", "q": "" if is_qobuz_url else query},
+           "album_id": album_id,
+           "back": back or ({"kind": "artist", "q": "" if is_qobuz_url else query}
+                            if selected_artist else None),
            "search_count_label": search_count_label,
            "artist_only_count": artist_only_count,
            "artist_only_label": plural(artist_only_count, "album"),
@@ -1128,11 +1140,10 @@ async def do_search(request: Request, q: str = Form("", max_length=500),
                 params["artist_id"] = artist_id
                 if artist_name:
                     params["artist_name"] = artist_name
-                if back:
-                    params["back_kind"] = back["kind"]
-                    params["back_q"] = back["q"]
             if kind == "album" and album_id:
                 params["album_id"] = album_id
+            if back and (artist_id or album_id):
+                params.update({"back_" + key: value for key, value in back.items()})
             resp.headers["HX-Push-Url"] = "/?" + urllib.parse.urlencode(params)
         return resp
     return RedirectResponse(url="/", status_code=303)

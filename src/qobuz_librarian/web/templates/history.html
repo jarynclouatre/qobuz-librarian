@@ -43,7 +43,7 @@
 <section class="ql-activity-section" aria-label="Finished jobs">
   <div class="ql-activity-list">
     {% for job in jobs %}
-    {{ rows.row(job, _return_to) }}
+    {{ rows.row(job, _return_to, cur_page) }}
     {% endfor %}
   </div>
 </section>

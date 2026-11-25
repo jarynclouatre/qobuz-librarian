@@ -26,7 +26,7 @@
   {% if lazy | default(false) %}
   <div class="ql-review-items" data-lazy-items
        data-items-url="/jobs/{{ job.id }}/review-group-items?artist={{ artist | urlencode }}&tab={{ review_tab | default('') | urlencode }}&q={{ review_query | default('') | urlencode }}">
-    <span class="ql-review-candidate-detail ql-review-items-loading">Loading…</span>
+    <span class="ql-review-candidate-detail ql-review-items-loading" role="status">Loading…</span>
   </div>
   {% else %}
   <div class="ql-review-items">

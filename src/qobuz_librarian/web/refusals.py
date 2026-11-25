@@ -4,10 +4,15 @@ import logging
 
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from qobuz_librarian.web import auth, rendering, write_gate
 from qobuz_librarian.web import jobs as job_mgr
-from qobuz_librarian.web import queue_recovery, rendering, runtime, storage, write_gate
 
 _log = logging.getLogger("qobuz_librarian")
+
+
+def _form_page(request):
+    return auth.safe_current_path(request.headers.get("referer"),
+                                  request.headers.get("host", ""))
 
 
 def _durable_recovery_response(request, message: str):
@@ -16,10 +21,8 @@ def _durable_recovery_response(request, message: str):
             rendering._ql_notice_html("error", html.escape(message)),
             status_code=200,
         )
-    # can_retry: these messages end in "restart Qobuz Librarian", and after a
-    # restart a reload is exactly the next step.
-    return rendering._tr(request, "lock_busy.html", {"msg": message, "can_retry": True},
-               status_code=503)
+    return rendering._tr(request, "lock_busy.html", {
+        "msg": message, "form_page": _form_page(request)}, status_code=503)
 
 
 def _job_admission_response(request):
@@ -36,7 +39,7 @@ def _job_admission_response(request):
     )
 
 
-def _lock_busy_response(request, *, downloads: bool = False):
+def _lock_busy_response(request, *, downloads: bool = False, form_page=""):
     """Return a 503 response if web writes are paused, else None."""
     notice = write_gate._writes_paused_notice(
         log_details=True,
@@ -44,7 +47,6 @@ def _lock_busy_response(request, *, downloads: bool = False):
     )
     if notice is None:
         return None
-    unwritable_now = storage._unwritable_volumes()
     if rendering._is_htmx(request):
         if request.headers.get("HX-Target") == "diagnostics-list":
             # The list is the whole Diagnostics panel and stays as it is; the
@@ -59,10 +61,5 @@ def _lock_busy_response(request, *, downloads: bool = False):
     return rendering._tr(request, "lock_busy.html",
                {"msg": notice["msg"], "reason": notice["reason"],
                 "action": notice["action"],
-                # "Try again" only helps where retrying can succeed; the rest
-                # need something fixed first.
-                "can_retry": (runtime._LOCK_BUSY_PID is not None
-                              or bool(unwritable_now)
-                              or not storage._data_dir_available()
-                              or queue_recovery._STARTUP_RECOVERY_REFRESHING)},
+                "form_page": form_page or _form_page(request)},
                status_code=503)

@@ -21,12 +21,15 @@
       {% if changed %}
       <div class="ql-notice ql-notice-success"><span>Password changed. Sign in again.</span></div>
       {% endif %}
+      {% if request.query_params.get("interrupted") == "1" %}
+      <div class="ql-notice ql-notice-warning"><span>Your last action didn't go through. Sign in and try again.</span></div>
+      {% endif %}
       {% if error %}
       <div class="ql-notice ql-notice-error"><span>{{ error }}</span></div>
       {% endif %}
 
       {% from "_secret_toggle.html" import secret_toggle %}
-      <form action="/login" method="post" class="ql-auth-form">
+      <form method="post" class="ql-auth-form">
         <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
         {% if next_path %}<input type="hidden" name="next" value="{{ next_path }}">{% endif %}
         <div class="ql-field">
@@ -40,7 +43,7 @@
           <label class="ql-field-label" for="password">Password</label>
           <div class="relative">
             <input type="password" name="password" id="password" required
-                   autocomplete="current-password" {% if error %}autofocus{% endif %} class="ql-input pr-12">
+                   autocomplete="current-password" {% if error %}autofocus{% endif %} class="ql-input">
             {{ secret_toggle("password", "password") }}
           </div>
         </div>

@@ -245,10 +245,11 @@
         {% if search_artist_id %}
         <input type="hidden" name="artist_id" value="{{ search_artist_id }}" data-deep-link>
         <input type="hidden" name="artist_name" value="{{ search_artist_name }}" data-deep-link>
-        {% if search_back %}
-        <input type="hidden" name="back_kind" value="{{ search_back.kind }}" data-deep-link>
-        <input type="hidden" name="back_q" value="{{ search_back.q }}" data-deep-link>
         {% endif %}
+        {% if search_back %}
+        {% for key, value in search_back.items() %}
+        <input type="hidden" name="back_{{ key }}" value="{{ value }}" data-deep-link>
+        {% endfor %}
         {% endif %}
         {% if search_album_id %}
         <input type="hidden" name="album_id" value="{{ search_album_id }}" data-deep-link>

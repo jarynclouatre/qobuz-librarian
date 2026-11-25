@@ -2,6 +2,9 @@
 {# Opening the job page clears a warning marker before this renders; the route
    hands over the one the visit found so the page can still explain it. #}
 {% set _attention = shown_attention | default(job.attention) %}
+{# A run can finish between opening the tool and rendering its progress.
+   Its stream still delivers the finished page with the launcher. #}
+{% set s = job.status.value %}
 
 <div id="job-content" class="ql-job-shell" data-job-id="{{ job.id }}"
   data-job-kind="{{ job.execute_kind }}"
@@ -10,10 +13,10 @@
   {%- if embedded_surface|default(false) %} data-embedded="1"{% endif %}
   data-progress-item-singular="{{ labels.progress_item_singular(job) }}"
   data-progress-item-plural="{{ labels.progress_item_plural(job) }}"
-  {%- if job.status.value in ('scanning', 'running') %} data-job-status="{{ job.status.value }}"{% endif %}
+  {%- if s in ('scanning', 'running') %} data-job-status="{{ s }}"{% endif %}
   {%- if job.title %} data-job-title="{{ job_own_title(job) }}"{% endif %}
-  {%- if job.status.value == 'awaiting_review' %} data-job-view="review"
-  {%- elif job.status.value in ('pending', 'scanning', 'running') %} data-job-view="progress"{% endif %}>
+  {%- if s == 'awaiting_review' %} data-job-view="review"
+  {%- elif s in ('pending', 'scanning', 'running') or (embedded_surface and not show_finished) %} data-job-view="progress"{% endif %}>
   {# The Library surface renders this body under its own "Library" heading, so
      it skips the job header. Everywhere else the header is de-jargoned: plain
      names, no job ids or scan-mode strings. #}
@@ -43,7 +46,6 @@
   </div>
   {% endif %}
 
-  {% set s = job.status.value %}
   {% if s != 'awaiting_review' and (not embedded_surface|default(false) or job.finished_at) %}
   <p class="ql-job-when">
     {% if not embedded_surface|default(false) %}
@@ -181,7 +183,7 @@
     {% if _review_log %}
     <details class="ql-job-log-details">
       <summary class="ql-disclosure-summary">Activity log</summary>
-      <div class="log-console">
+      <div class="log-console" tabindex="0">
         {%- for line in _review_log %}{{ line }}
 {% endfor -%}
       </div>
@@ -254,7 +256,7 @@
 
     <details class="ql-job-log">
       <summary class="ql-disclosure-summary">Activity log</summary>
-      <div class="log-console log-console--job" id="log"></div>
+      <div class="log-console log-console--job" id="log" tabindex="0" data-replay-limit="{{ job.REPLAY_TAIL }}"></div>
     </details>
   {% else %}
     {# A partial run sets both: the summary is what it managed, the error is
@@ -363,7 +365,7 @@
        are here for whoever wants them, not the first thing on the page. #}
     <details class="ql-job-log">
       <summary class="ql-disclosure-summary">Activity log</summary>
-      <div class="log-console">
+      <div class="log-console" tabindex="0">
         {%- for line in job.log_lines %}{{ line }}
 {% endfor -%}
       </div>

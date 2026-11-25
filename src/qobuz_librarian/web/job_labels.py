@@ -92,8 +92,8 @@ _JOB_NAV_SURFACES = {
     "repair": ("repair", "/repair", "Repair"),
     "lyrics": ("lyrics", "/lyrics", "Lyrics"),
     "migration": ("settings", "/migrate", "Migration"),
-    "collection_snapshot": ("settings", "/settings", "Settings"),
-    "collection_restore": ("settings", "/settings", "Settings"),
+    "collection_snapshot": ("settings", "/settings#collection-backup", "Settings"),
+    "collection_restore": ("settings", "/settings#collection-restore", "Settings"),
 }
 
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="night" data-asset-version="{{ asset_version }}">
+<html lang="en" data-theme="night" data-asset-version="{{ asset_version }}"{% if library_revision is defined %} data-library-revision="{{ library_revision }}"{% endif %}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -210,9 +210,9 @@
         <span>More</span>
         <span class="ql-tab-dot{% if not (nav_review_badges.get('upgrade') or nav_review_badges.get('downsample') or nav_review_badges.get('repair')) %} hidden{% endif %}" data-review-badge="upgrade downsample repair" aria-hidden="true"></span>
       </summary>
-      <div id="mobile-menu" class="ql-sheet">
+      <div id="mobile-menu" class="ql-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-menu-title">
         <div class="ql-sheet-head">
-          <span>More</span>
+          <span id="mobile-menu-title">More</span>
           <button type="button" class="ql-icon-button" data-close-mobile-menu aria-label="Close">
             <svg class="ql-nav-icon-stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>
           </button>

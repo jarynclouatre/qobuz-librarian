@@ -961,23 +961,14 @@ def _record_login_failure(key: str, uname: str, now: float) -> tuple[int, bool]:
 def refuse_signed_out(request, location):
     """Send a request without a session to `location`, the sign-in or setup
     page, in the form its caller can follow."""
-    if request.headers.get("HX-Request") == "true":
-        target = safe_current_path(
-            request.headers.get("HX-Current-URL"),
-            request.headers.get("host", ""),
-        )
-        if location == LOGIN_PATH and target:
-            location += "?next=" + urllib.parse.quote(target)
-        return Response(status_code=401, headers={"HX-Redirect": location})
-    # API/SSE callers get a machine-readable 401.
-    if request.scope["path"].startswith("/api/"):
-        return JSONResponse({"detail": "authentication required"},
-                            status_code=401)
-    # Remember where a page GET was headed, or the page a form was sent from,
-    # so login can land there instead of dumping every deep link on the
-    # dashboard.
+    htmx = request.headers.get("HX-Request") == "true"
+    if not htmx and request.scope["path"].startswith("/api/"):
+        return JSONResponse({"detail": "authentication required"}, status_code=401)
     if location == LOGIN_PATH:
-        if request.method == "GET":
+        if htmx:
+            target = safe_current_path(request.headers.get("HX-Current-URL"),
+                                       request.headers.get("host", ""))
+        elif request.method == "GET":
             target = request.scope["path"]
             qs = request.scope.get("query_string", b"").decode("utf-8", "ignore")
             if qs:
@@ -986,8 +977,22 @@ def refuse_signed_out(request, location):
         else:
             target = safe_current_path(request.headers.get("referer"),
                                        request.headers.get("host", ""))
-        if target not in ("", "/"):
-            location = LOGIN_PATH + "?next=" + urllib.parse.quote(target)
+        interrupted = request.method == "POST"
+        if interrupted and target.partition("?")[0] == "/settings":
+            section = request.query_params.get("section") or request.headers.get("X-Settings-Section")
+            if section in ("qobuz", "behaviour", "discover", "library-maintenance",
+                           "collection-backup", "collection-restore", "web-login",
+                           "diagnostics", "mode"):
+                target += "#" + section
+        params = {}
+        if target and (htmx or target != "/"):
+            params["next"] = target
+        if interrupted:
+            params["interrupted"] = "1"
+        if params:
+            location += "?" + urllib.parse.urlencode(params, safe="/")
+    if htmx:
+        return Response(status_code=401, headers={"HX-Redirect": location})
     return RedirectResponse(url=location, status_code=303)
 
 

@@ -3,10 +3,11 @@
 {% block title %}Dismissed from Discover - Qobuz Librarian{% endblock %}
 {% block content_max %}max-w-4xl{% endblock %}
 {% block content %}
+{% set search_suffix = '?q=' ~ (search_query | urlencode) if search_query is not none else '' %}
 
 <div class="ql-list-page">
 <div>
-  <a href="/discover" class="ql-search-back">&larr; Discover</a>
+  <a href="/discover{% if search_suffix %}/search{{ search_suffix }}{% endif %}" class="ql-search-back">&larr; Discover</a>
   <header class="ql-page-header">
     <h1>Dismissed from Discover</h1>
   </header>
@@ -27,6 +28,7 @@
       <span class="ql-hidden-when"{% if a.when_exact %} title="{{ a.when_exact }}"{% endif %}>Dismissed {{ a.when }}</span>{% endif %}</span>
     <form action="/discover/unhide" method="post" class="ql-hidden-restore">
       <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+      {% if search_suffix %}<input type="hidden" name="back" value="/discover/hidden{{ search_suffix }}">{% endif %}
       <input type="hidden" name="artist_id" value="{{ a.id }}">
       <input type="hidden" name="name" value="{{ a.name }}">
       <button type="submit" class="ql-btn ql-btn-secondary ql-btn-sm"

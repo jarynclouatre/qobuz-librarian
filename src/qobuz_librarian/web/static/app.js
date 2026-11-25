@@ -24,6 +24,8 @@
   // Each tab's results for the query in the box, so switching back to a tab
   // shows them again without asking Qobuz.
   var keptSearchViews = {};
+  var libraryRevision = document.documentElement.dataset.libraryRevision;
+  var failedLibraryReads = new WeakMap();
 
   function searchStateId(kind, query, artistId, albumId) {
     kind = ["artist", "album", "track"].indexOf(kind) >= 0 ? kind : "artist";
@@ -63,8 +65,15 @@
     return SEARCH_STATE_PREFIX + state;
   }
 
+  function searchSnapshotKey(state) {
+    var params = new URLSearchParams(location.search);
+    if (!params.has("back_kind")) return state;
+    return JSON.stringify([state, params.get("back_kind"), params.get("back_q"),
+      params.get("back_album_id"), params.get("back_track_q")]);
+  }
+
   function searchSnapshotStorageKey(state) {
-    return SEARCH_SNAPSHOT_PREFIX + state;
+    return SEARCH_SNAPSHOT_PREFIX + searchSnapshotKey(state);
   }
 
   function validSearchRecord(record) {
@@ -92,7 +101,8 @@
     var key = searchSnapshotStorageKey(state);
     try {
       var record = JSON.parse(sessionStorage.getItem(key) || "null");
-      if (!validSearchRecord(record) || typeof record.html !== "string") {
+      if (!validSearchRecord(record) || typeof record.html !== "string"
+          || record.libraryRevision !== libraryRevision) {
         sessionStorage.removeItem(key);
         return "";
       }
@@ -119,7 +129,7 @@
     try { sessionStorage.removeItem(searchSnapshotStorageKey(state)); } catch (e) {}
   }
 
-  function writeSearchSnapshot(state, html) {
+  function writeSearchSnapshot(state, html, revision) {
     if (!state || !html || html.length > SEARCH_SNAPSHOT_MAX_CHARS) {
       removeSearchSnapshot(state);
       return false;
@@ -128,6 +138,7 @@
     try {
       sessionStorage.setItem(searchSnapshotStorageKey(state), JSON.stringify({
         html: html,
+        libraryRevision: revision,
         assetVersion: SEARCH_ASSET_VERSION,
         savedAt: Date.now(),
       }));
@@ -255,6 +266,7 @@
             sessionStorage.setItem(queueSignatureKey, signature);
           } catch (e) {}
           apply(data.count, data.attention || 0, data.reviews || {});
+          if (data.library_revision !== undefined) refreshLibraryResults(String(data.library_revision));
           // Redraw when the rendered rows no longer match the live queue.
           var body = document.getElementById("queue-body");
           var rows = data.rows || String(data.count);
@@ -284,6 +296,7 @@
         controller = null;
         inFlight = null;
       } else {
+        failedLibraryReads = new WeakMap();
         refresh();
       }
     });
@@ -336,7 +349,7 @@
     if (tab === "search") return path === "/";
     if (tab === "library") return /^\/library(?:\/hidden)?\/?$/.test(path);
     if (tab === "discover") {
-      return /^\/discover(?:\/(?:genres|search|favourites))?\/?$/.test(path);
+      return /^\/discover(?:\/(?:genres|search|favourites|hidden))?\/?$/.test(path);
     }
     if (tab === "repair") return /^\/repair(?:\/history)?\/?$/.test(path);
     if (tab === "lyrics") return path === "/lyrics" || path === "/lyrics/";
@@ -608,6 +621,10 @@
     var key = item && item.dataset.searchKey;
     var peers = item ? [item] : [];
     if (key) {
+      if (queuedDuringAvailabilityCheck) {
+        queuedDuringAvailabilityCheck.add(key);
+        refreshSearchAvailabilityAgain = true;
+      }
       peers = searchAvailabilityItems().filter(function (peer) {
         return peer.dataset.searchKey === key;
       });
@@ -619,20 +636,19 @@
     if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
 
-  var searchAvailabilityRequest = null;
+  var queuedDuringAvailabilityCheck = null;
   var refreshSearchAvailabilityAgain = false;
 
   function refreshSearchAvailability() {
     if (!searchAvailabilityItems().length) return;
-    if (searchAvailabilityRequest) {
+    if (queuedDuringAvailabilityCheck) {
       refreshSearchAvailabilityAgain = true;
       return;
     }
-    var request = sessionFetch("/api/search/availability", {
+    queuedDuringAvailabilityCheck = new Set();
+    sessionFetch("/api/search/availability", {
       headers: { "Accept": "application/json" },
-    });
-    searchAvailabilityRequest = request;
-    request
+    })
       .then(function (response) { return response.ok ? response.json() : Promise.reject(); })
       .then(function (data) {
         var queued = new Set(data.queued || []);
@@ -644,6 +660,7 @@
         var owned = new Set(data.owned || []);
         searchAvailabilityItems().forEach(function (item) {
           var key = item.dataset.searchKey || "";
+          if (queuedDuringAvailabilityCheck.has(key)) return;
           if (owned.has(key) && item.dataset.queued === "1") {
             markSearchItemOwned(item);
             return;
@@ -660,7 +677,7 @@
       })
       .catch(function () {})
       .then(function () {
-        if (searchAvailabilityRequest === request) searchAvailabilityRequest = null;
+        queuedDuringAvailabilityCheck = null;
         if (refreshSearchAvailabilityAgain) {
           refreshSearchAvailabilityAgain = false;
           refreshSearchAvailability();
@@ -715,9 +732,9 @@
       var id = toggle.getAttribute("aria-controls");
       if (!own(toggle) || refetched[id]) return;
       refetched[id] = true;
-      var panel = document.getElementById(id);
+      var panel = document.querySelector(toggle.getAttribute("hx-target"));
       if (!panel || !panel.firstElementChild) return;
-      if (panel.classList.contains("hidden")) panel.replaceChildren();
+      if (panel.classList.contains("hidden") || panel.closest("dialog:not([open])")) panel.replaceChildren();
       else window.htmx.ajax("GET", toggle.getAttribute("hx-get"), { target: panel, swap: "innerHTML" });
     });
   }
@@ -744,6 +761,13 @@
     if (root) root.dispatchEvent(new CustomEvent("qlSearchAvailabilityChanged"));
   }
 
+  document.addEventListener("htmx:beforeSend", function (evt) {
+    var form = evt.detail.elt;
+    if (form.matches("[data-search-download-form]") && form.closest(".ql-version-sheet[open]")) {
+      dismissSheet();
+    }
+  });
+
   // Disable a search-result button only once the album is queued, by this
   // press or an earlier one. A press refused because the album is on disk
   // already draws the row owned: a download that finished while the tab was
@@ -767,20 +791,37 @@
     return !!trigger && /(^|[\s,])every\s/.test(trigger);
   }
 
+  function showRequestError(event, message) {
+    if (fromBackgroundPoll(event)) return;
+    if (libraryRefreshRevision(event.detail)) return;
+    if (event.detail.target && event.detail.target.matches(".ql-track-sheet-list")) return;
+    var form = searchRequestForm(event);
+    if (form && form.matches(".ql-search-form")) {
+      if (event.detail.xhr.qlSearchSubmission !== latestSearchSubmission) return;
+      clearSearchMoreError();
+      var error = document.createElement("p");
+      error.className = "ql-notice ql-notice-warning ql-search-error";
+      error.setAttribute("role", "alert");
+      error.textContent = message;
+      event.detail.target.replaceChildren(error);
+      searchExitSave = saveSearchSnapshot;
+      return;
+    }
+    showToast(message, "error");
+  }
+
   // Surface failed htmx requests instead of failing silently. A short
   // plain-text body is the route speaking (e.g. "couldn't save that
   // dismissal"); anything longer or HTML-shaped gets the generic line.
   document.addEventListener("htmx:responseError", function (evt) {
-    if (fromBackgroundPoll(evt)) return;
     var xhr = evt.detail && evt.detail.xhr;
     var body = (xhr && xhr.responseText || "").trim();
     var msg = (body && body.length <= 200 && body.indexOf("<") === -1)
       ? body : "That didn't go through. Try again in a moment.";
-    showToast(msg, "error");
+    showRequestError(evt, msg);
   });
   document.addEventListener("htmx:sendError", function (evt) {
-    if (fromBackgroundPoll(evt)) return;
-    showToast("Couldn't reach the server. Check your connection and try again.", "error");
+    showRequestError(evt, "Couldn't reach the server. Check your connection and try again.");
   });
 
   // A control htmx disables while its request runs drops keyboard focus to
@@ -842,7 +883,7 @@
     input.value = "";
     input.focus();
     input.dispatchEvent(new Event("input", { bubbles: true }));
-    if (filtered) input.form.requestSubmit();
+    if (filtered || isSearchRequestForm(input.form)) input.form.requestSubmit();
   }
   document.addEventListener("mousedown", function (evt) {
     if (evt.target.closest && evt.target.closest("[data-clear-field]")) evt.preventDefault();
@@ -857,12 +898,20 @@
   var gTimer = null;
   document.addEventListener("keydown", function (evt) {
     if (evt.ctrlKey || evt.metaKey || evt.altKey) return;
+    var overlay = document.querySelector("dialog[open], .ql-mobile-drawer[open]");
+    if (overlay) {
+      gPending = false;
+      if (evt.key === "Escape" && overlay.matches(".ql-mobile-drawer")) {
+        evt.preventDefault();
+        dismissSheet();
+      }
+      return;
+    }
     var t = evt.target;
     var inField = !!(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" ||
                            t.tagName === "SELECT" || t.isContentEditable));
     if (evt.key === "Escape") {
       if (window.qlDismissAllFlashes) window.qlDismissAllFlashes();
-      if (window.qlCloseDropdowns) window.qlCloseDropdowns();
       if (inField && t.value && clearButtonFor(t)) {
         evt.preventDefault();
         clearField(t);
@@ -877,9 +926,10 @@
     if (inField) return;
     if (evt.key === "/") {
       evt.preventDefault();
-      var box = document.querySelector('input[name="q"]');
+      var box = Array.from(document.querySelectorAll('#review-filter, input[name="q"]:not([type="hidden"])'))
+        .find(function (input) { return !input.disabled && input.getClientRects().length; });
       if (!box) {
-        navigateToTab("search", { restorePosition: false, hash: "search" });
+        if (activeNavTab() !== "search") navigateToTab("search", { restorePosition: false, hash: "search" });
         return;
       }
       box.focus();
@@ -918,6 +968,17 @@
     if (opened) target.scrollIntoView();
   }
   window.addEventListener("hashchange", openSettingsSectionFromHash);
+
+  // A form's Referer omits the fragment. If its session ends, sign-in can
+  // still return to the Settings section that held the form.
+  document.addEventListener("submit", function (evt) {
+    var form = evt.target;
+    var section = form.closest(".ql-settings-section");
+    if (!section || form.method !== "post" || !form.hasAttribute("action")) return;
+    var action = new URL(form.action);
+    action.searchParams.set("section", section.querySelector("h2").id);
+    form.action = action.href;
+  });
 
   function focusSearchFromHash() {
     if (window.location.hash !== "#search") return;
@@ -1050,12 +1111,28 @@
     var bar = document.querySelector("[data-unsaved-bar]");
     if (!bar) return;
     var form = document.getElementById(bar.dataset.unsavedBar);
-    bar.classList.toggle("hidden", !form.hasAttribute("data-unsaved")
-      && !Array.prototype.some.call(form.elements, fieldChanged));
+    var saved = JSON.parse(form.dataset.savedValues || "{}");
+    var changed = Array.prototype.some.call(form.elements, function (field) {
+      if (field.name in saved) {
+        return (field.type === "checkbox" ? field.checked : field.value) !== saved[field.name];
+      }
+      return fieldChanged(field);
+    });
+    bar.classList.toggle("hidden", !changed);
   }
   document.addEventListener("input", syncUnsavedBar);
   document.addEventListener("change", syncUnsavedBar);
   window.addEventListener("pageshow", syncUnsavedBar);
+
+  document.addEventListener("input", function (evt) {
+    var field = evt.target;
+    if (field.getAttribute("aria-invalid") !== "true") return;
+    var note = document.getElementById("refusal-" + field.name);
+    if (!note) return;
+    field.removeAttribute("aria-invalid");
+    field.removeAttribute("aria-describedby");
+    note.remove();
+  });
 
   // An htmx form the response left in place (a refusal, an error, no
   // answer) gets its button back.
@@ -1093,6 +1170,7 @@
     if (!d || typeof d.showModal !== "function") {
       return Promise.resolve(window.confirm(msg));
     }
+    if (d.open) return Promise.resolve(false);
     return new Promise(function (resolve) {
       d.querySelector("[data-confirm-text]").textContent = msg;
       var okButton = d.querySelector("[data-confirm-ok]");
@@ -1100,21 +1178,27 @@
       okButton.toggleAttribute("data-irreversible", !!opts.irreversible);
       okButton.classList.toggle("ql-btn-primary", !opts.irreversible);
       var choice = false;
-      okButton.onclick = function () { choice = true; d.close(); };
+      okButton.onclick = function () { dismissSheet(function () { choice = true; }); };
       var cancelButton = d.querySelector("[data-confirm-cancel]");
       // Asked whether to cancel a job, a button labelled "Cancel" reads as yes.
       cancelButton.textContent = opts.dismiss || "Cancel";
-      cancelButton.onclick = function () { choice = false; d.close(); };
+      cancelButton.onclick = function () { dismissSheet(); };
       // An action in the review's menu closes the menu as the dialog opens,
       // so the dialog has no visible button to hand focus back to.
       var menu = document.activeElement.closest("[data-review-more]");
+      function leavePage() {
+        d.close();
+      }
+      window.addEventListener("pagehide", leavePage);
       d.addEventListener("close", function h() {
         d.removeEventListener("close", h);
+        window.removeEventListener("pagehide", leavePage);
         if (menu && !document.activeElement.getClientRects().length) {
           menu.querySelector(".ql-review-more-toggle").focus();
         }
         resolve(choice);
       });
+      pushSheet(d.id);
       d.showModal();
     });
   };
@@ -1138,6 +1222,7 @@
     evt.preventDefault();
     evt.stopPropagation();
     var msg = el.getAttribute("data-confirm");
+    var dismissalKey = el.matches("[data-hide]") ? confirmControlKey(el) : null;
     // A box that changes what the control does gives it another question.
     var box = document.getElementById(el.getAttribute("data-confirm-checked") || "");
     if (box && box.checked) msg = el.getAttribute("data-confirm-checked-text");
@@ -1159,7 +1244,7 @@
       // redrawn copy, or say nothing happened rather than click a button
       // that is no longer on the page.
       var target = el.isConnected ? el : redrawnConfirmControl(el);
-      if (!target) {
+      if (!target || (dismissalKey && confirmControlKey(target) !== dismissalKey)) {
         var main = document.getElementById("main-content");
         if (main) main.focus({ preventScroll: true });
         showToast("The page changed before you confirmed, so nothing was done.", "warning");
@@ -1250,14 +1335,6 @@
     });
   });
 
-  // Lock-busy retry button.
-  document.addEventListener("click", function (evt) {
-    if (evt.target.closest && evt.target.closest("[data-reload]")) {
-      evt.preventDefault();
-      location.reload();
-    }
-  });
-
   // Show/hide password and token fields.
   document.addEventListener("click", function (evt) {
     var btn = evt.target.closest && evt.target.closest("[data-toggle-password]");
@@ -1280,10 +1357,23 @@
     if (hideIcon) hideIcon.classList.toggle("hidden", !isVisible);
   });
 
+  document.addEventListener("input", function (evt) {
+    var field = evt.target;
+    if (field.autocomplete !== "new-password" || !field.form) return;
+    var confirm = field.form.querySelector("[data-matches-password]");
+    if (!confirm) return;
+    var password = field.form.elements.namedItem(confirm.dataset.matchesPassword);
+    confirm.setCustomValidity(confirm.value && confirm.value !== password.value
+      ? "The two passwords don't match." : "");
+  });
+
   // A hidden file input says nothing about what was picked, so write the name
   // beside the button that opened it.
   document.addEventListener("change", function (evt) {
     var input = evt.target;
+    if (input.form && input.form.getAttribute("hx-target") === "#collection-restore-result") {
+      document.getElementById("collection-restore-result").textContent = "";
+    }
     if (!input.matches || !input.matches("input[type=file][data-file-name]")) return;
     var out = document.getElementById(input.getAttribute("data-file-name"));
     if (!out) return;
@@ -1329,15 +1419,15 @@
     var results = document.getElementById("search-results");
     var shown = searchResponseState(results);
     (searchExitSave || saveSearchSnapshot)();
-    if (shown && !searchSnapshotsInvalidated
-        && results.querySelector('[data-search-cacheable="1"]')) {
-      keptSearchViews[shown] = searchSnapshotHtml(results);
+    var marker = results.querySelector('[data-search-cacheable="1"]');
+    if (shown && !searchSnapshotsInvalidated && marker && marker.dataset.libraryRevision === libraryRevision) {
+      keptSearchViews[searchSnapshotKey(shown)] = searchSnapshotHtml(results);
     }
     cancelSearchRequests();
     form.querySelectorAll("[data-deep-link]").forEach(function (node) { node.remove(); });
     var query = q.value.trim();
     if (!query) {
-      if (shown) results.replaceChildren();
+      if (shown || results.querySelector(".ql-search-error")) results.replaceChildren();
       var empty = "/?kind=" + encodeURIComponent(radio.value);
       if (location.pathname + location.search !== empty) {
         // Back still returns to a search the box was cleared from.
@@ -1365,6 +1455,11 @@
   document.addEventListener("input", function (evt) {
     if (evt.target.matches && evt.target.matches('.ql-search-form input[name="q"]')) {
       keptSearchViews = {};
+      if (activeSearchRequests.some(function (xhr) { return xhr.qlSearchResultLink; })) {
+        pendingSearchFocus = null;
+        pendingSearchRestoreY = null;
+        cancelSearchRequests();
+      }
     }
   });
 
@@ -1392,23 +1487,56 @@
   document.addEventListener("htmx:beforeRequest", function (evt) {
     var btn = evt.detail && evt.detail.elt;
     if (!btn || !btn.matches("[data-tracks-toggle],[data-discover-toggle]")) return;
-    var panel = document.getElementById(btn.getAttribute("aria-controls"));
+    var panel = evt.detail.target;
     if (panel && panel.firstElementChild && !panelHoldsNotice(panel)) evt.preventDefault();
   });
-  // A fetch that failed leaves an empty panel: close it, so the next press
-  // opens it and asks again.
   document.addEventListener("htmx:afterRequest", function (evt) {
     var btn = evt.detail && evt.detail.elt;
     if (!btn || !btn.matches || !btn.matches("[data-tracks-toggle],[data-discover-toggle]")) return;
-    if (evt.detail.successful) return;
-    var panel = document.getElementById(btn.getAttribute("aria-controls"));
-    if (!panel || panel.firstElementChild) return;
-    setPanelOpen(panel, false);
+    var panel = evt.detail.target;
+    if (!panel) return;
+    if (!panel.classList.contains("ql-track-sheet-list")) {
+      if (!evt.detail.successful && !panel.firstElementChild) setPanelOpen(panel, false);
+      return;
+    }
+    var notice = panel.firstElementChild;
+    if (!notice) {
+      notice = document.createElement("div");
+      notice.className = "ql-notice ql-notice-warning";
+      notice.setAttribute("data-flash", "");
+      notice.setAttribute("role", "alert");
+      notice.textContent = "Couldn't load the track list.";
+      panel.appendChild(notice);
+    }
+    if (!panelHoldsNotice(panel) || notice.querySelector("button")) return;
+    var retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "ql-inline-link ql-inline-link-hit";
+    retry.textContent = "Retry";
+    retry.onclick = function () {
+      panel.focus({ preventScroll: true });
+      panel.replaceChildren();
+      window.htmx.trigger(btn, "retry-tracks");
+    };
+    notice.appendChild(retry);
   });
   var discoverFocus = null;
+  var discoverWrites = 0;
+  var lastDiscoverWrite = Promise.resolve();
+  document.addEventListener("htmx:beforeRequest", function (evt) {
+    if (evt.detail.target && evt.detail.target.id === "discover-body") {
+      evt.detail.xhr.qlDiscoverWrite = discoverWrites ? null : lastDiscoverWrite;
+    }
+  });
   document.addEventListener("htmx:beforeSwap", function (evt) {
     var target = evt.detail.target;
     if (!target || target.id !== "discover-body") return;
+    if (target.querySelector(".ql-release-sheet[open]")
+        || evt.detail.xhr.qlDiscoverWrite !== lastDiscoverWrite
+        || document.querySelector("[data-discover-undo]")) {
+      evt.detail.shouldSwap = false;
+      return;
+    }
     var active = document.activeElement;
     discoverFocus = target.contains(active) ? active : null;
   });
@@ -1424,12 +1552,171 @@
     var target = previous.isConnected ? previous : previous.id && document.getElementById(previous.id);
     if (target) target.focus({ preventScroll: true });
   });
+  var sheetUrl = "";
+  var closingSheet = false;
+  var afterSheetClose = null;
+  var sheetOnLoad = history.state && history.state.qlSheet;
+  var loadingSheetArtist = false;
+
+  function pushSheet(id, artistPanel) {
+    sheetUrl = location.href;
+    if (!history.state || history.state.qlSheet !== id) {
+      if (!history.state && document.querySelector(".ql-search-form")) {
+        history.replaceState({ htmx: true }, "", sheetUrl);
+      }
+      history.pushState(Object.assign({}, history.state, {
+        qlSheet: id, qlSheetArtist: artistPanel ? artistPanel.id : ""
+      }), "", sheetUrl);
+    }
+  }
+
+  function sheetToggle(id) {
+    return document.querySelector('[aria-controls="' + CSS.escape(id) + '"]');
+  }
+
+  function showReleaseSheet(panel, button) {
+    button.focus({ preventScroll: true });
+    panel.showModal();
+    panel.querySelector(".ql-release-sheet-list").scrollTop = 0;
+  }
+
+  function reopenSheetControl(button) {
+    // A feed can deliver this button before htmx wires its request.
+    if (window.htmx) window.htmx.process(button);
+    button.click();
+  }
+
+  function restorePageSheet() {
+    if (!sheetOnLoad || !history.state || history.state.qlSheet !== sheetOnLoad) return;
+    sheetUrl = location.href;
+    var panel = document.getElementById(sheetOnLoad);
+    if (panel && panel.matches(".ql-release-sheet, .ql-mobile-drawer .ql-sheet")) {
+      var parent = panel.parentElement.closest(".ql-version-sheet");
+      if (parent && !parent.open) showReleaseSheet(parent, sheetToggle(parent.id));
+      var toggle = sheetToggle(panel.id);
+      if (toggle && toggle.getClientRects().length) {
+        sheetOnLoad = null;
+        reopenSheetControl(toggle);
+        return;
+      }
+    }
+    var artist = history.state.qlSheetArtist && sheetToggle(history.state.qlSheetArtist);
+    if (!panel && artist && artist.matches("[data-discover-toggle]")) {
+      if (artist.classList.contains("htmx-request")) return;
+      if (!loadingSheetArtist) {
+        loadingSheetArtist = true;
+        reopenSheetControl(artist);
+        return;
+      }
+    }
+    if (!panel && !artist && document.querySelector("#discover-body[hx-get]")) return;
+    sheetOnLoad = null;
+    dismissSheet();
+  }
+
+  window.addEventListener("pageshow", function (event) {
+    if (event.persisted) {
+      if (history.state && history.state.qlSheet === "ql-confirm") dismissSheet();
+      return;
+    }
+    if (!sheetOnLoad) return;
+    Promise.resolve(bootSearchRequest).then(function () {
+      var root = document.querySelector("[data-search-results-root]");
+      return root && root.qlSearchRestored;
+    }).then(restorePageSheet);
+  });
+  document.addEventListener("htmx:afterRequest", function (event) {
+    if (!sheetOnLoad || !history.state) return;
+    var target = event.detail.target;
+    if (target && ((history.state.qlSheetArtist && target.id === history.state.qlSheetArtist)
+        || (target.id === "discover-body" && !loadingSheetArtist))) restorePageSheet();
+  });
+
+  function closeSheetsOutside(target) {
+    var sheets = document.querySelectorAll(".ql-release-sheet[open], .ql-mobile-drawer[open], #ql-confirm[open]");
+    var closed = false;
+    for (var i = sheets.length - 1; i >= 0; i--) {
+      if (target && sheets[i].contains(target)) continue;
+      if (sheets[i].matches("dialog")) sheets[i].close();
+      else closeDrawer(sheets[i]);
+      closed = true;
+    }
+    return closed;
+  }
+
+  function dismissSheet(then) {
+    if (!history.state || !history.state.qlSheet) {
+      closeSheetsOutside(null);
+      if (then) then();
+      return;
+    }
+    if (closingSheet) return;
+    closingSheet = true;
+    afterSheetClose = then;
+    history.back();
+  }
+
+  document.addEventListener("click", function (evt) {
+    if (evt.target.matches(".ql-release-sheet[open]") || evt.target.closest("[data-close-sheet]")) {
+      dismissSheet();
+    }
+  });
+  document.addEventListener("cancel", function (evt) {
+    if (evt.target.matches(".ql-release-sheet, #ql-confirm")) {
+      evt.preventDefault();
+      dismissSheet();
+    }
+  }, true);
+
+  // A step within the same page belongs to the sheet before it belongs to
+  // htmx or a review tab.
+  window.addEventListener("popstate", function (evt) {
+    sheetOnLoad = null;
+    var target = evt.state && evt.state.qlSheet && document.getElementById(evt.state.qlSheet);
+    if (evt.state && evt.state.qlSheet && location.href === sheetUrl
+        && (!target || (target.id === "ql-confirm" && !target.open))) {
+      // A missing release or an old confirmation has nothing to reopen.
+      evt.stopImmediatePropagation();
+      closingSheet = false;
+      dismissSheet();
+      return;
+    }
+    var handled = closeSheetsOutside(target) || closingSheet;
+    if (target && !target.matches("dialog[open], .ql-mobile-drawer[open] .ql-sheet")) {
+      var toggle = sheetToggle(target.id);
+      if (toggle && toggle.getClientRects().length) {
+        toggle.click();
+        handled = true;
+      }
+    }
+    closingSheet = false;
+    var then = afterSheetClose;
+    afterSheetClose = null;
+    if (handled && location.href === sheetUrl) {
+      evt.stopImmediatePropagation();
+      // A bookmarked section would otherwise take focus and scroll after popstate.
+      if (location.hash && history.scrollRestoration === "auto") {
+        var entry = history.state;
+        history.scrollRestoration = "manual";
+        requestAnimationFrame(function () {
+          if (history.state === entry) history.scrollRestoration = "auto";
+        });
+      }
+      if (then) then();
+    }
+  }, true);
+
   document.addEventListener("click", function (evt) {
     var btn = evt.target.closest
       && evt.target.closest("[data-version-toggle],[data-tracks-toggle]");
     if (!btn) return;
     var panel = document.getElementById(btn.getAttribute("aria-controls"));
     if (!panel) return;
+    if (panel.matches(".ql-release-sheet")) {
+      pushSheet(panel.id, btn.closest("[hx-preserve][id]"));
+      showReleaseSheet(panel, btn);
+      return;
+    }
     var open = btn.getAttribute("aria-expanded") === "true";
     // A press on an open panel that holds a notice asks again in place.
     if (open && panelHoldsNotice(panel)) return;
@@ -1552,16 +1839,23 @@
   }
   function discoverHiddenPost(url, form) {
     var body = new FormData(form);
-    return sessionFetch(url, {
-      method: "POST",
-      headers: { "X-CSRF-Token": body.get("_csrf_token") || "", "Accept": "application/json" },
-      body: body,
+    discoverWrites++;
+    var write = lastDiscoverWrite.then(function () {
+      return sessionFetch(url, {
+        method: "POST",
+        headers: { "X-CSRF-Token": body.get("_csrf_token") || "", "Accept": "application/json" },
+        body: body,
+      });
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (data) {
         if (!r.ok) throw new Error(data.error || "That didn't go through. Try again in a moment.");
         return data;
       });
+    }).finally(function () {
+      discoverWrites--;
     });
+    lastDiscoverWrite = write.catch(function () {});
+    return write;
   }
   document.addEventListener("submit", function (evt) {
     var form = evt.target;
@@ -1596,6 +1890,7 @@
       var undo = document.createElement("button");
       undo.type = "button";
       undo.className = "ql-inline-link";
+      undo.setAttribute("data-discover-undo", "");
       undo.textContent = "Undo";
       undo.setAttribute("aria-label", "Bring back " + name);
       note.appendChild(undo);
@@ -1654,37 +1949,37 @@
 
   // Tap-driven drawer support for mobile browsers.
   var drawerScrollY = null;
+  function setDrawerBackground(inert) {
+    document.querySelectorAll('.ql-app-shell, .ql-tabbar > a, .ql-tab-more > summary, a[href="#main-content"], .ql-toast-host')
+      .forEach(function (el) { el.inert = inert; });
+  }
   function lockDrawerPage() {
     if (drawerScrollY !== null || !document.body) return;
     drawerScrollY = Math.max(0, Math.round(window.scrollY || 0));
     document.body.style.setProperty("--ql-drawer-page-top", -drawerScrollY + "px");
     document.body.classList.add("ql-drawer-page-locked");
+    setDrawerBackground(true);
   }
   function unlockDrawerPage() {
     if (drawerScrollY === null || !document.body) return;
     var y = drawerScrollY;
     drawerScrollY = null;
     document.body.classList.remove("ql-drawer-page-locked");
+    setDrawerBackground(false);
     document.body.style.removeProperty("--ql-drawer-page-top");
     window.scrollTo(0, y);
   }
   function closeDrawer(dd) {
-    var hadFocus = dd.contains(document.activeElement);
     dd.classList.remove("ql-mobile-drawer-open");
     dd.removeAttribute("open");
     var b = dd.querySelector("[aria-expanded]");
     if (b) b.setAttribute("aria-expanded", "false");
-    // Hand focus back to the control that opened it. Blurring instead would
-    // leave it on <body>, which costs a dead Tab and then restarts at "Skip to
-    // content".
-    if (hadFocus) {
-      var summary = dd.querySelector("summary");
-      var target = summary && summary.getClientRects().length ? summary : document.getElementById("main-content");
-      if (target) target.focus({ preventScroll: true });
-    }
     if (!document.querySelector(".ql-mobile-drawer.ql-mobile-drawer-open")) {
       unlockDrawerPage();
     }
+    var summary = dd.querySelector("summary");
+    var target = summary.getClientRects().length ? summary : document.getElementById("main-content");
+    if (target) target.focus({ preventScroll: true });
   }
 
   // A sheet that covers the viewport keeps Tab inside itself; without this,
@@ -1698,8 +1993,6 @@
     var focusable = Array.prototype.filter.call(
       sheet.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'),
       function (el) { return el.offsetParent !== null; });
-    var summary = dd.querySelector("summary");
-    if (summary) focusable.unshift(summary);
     if (!focusable.length) return;
     var first = focusable[0];
     var last = focusable[focusable.length - 1];
@@ -1711,48 +2004,58 @@
       first.focus();
     }
   });
-  window.qlCloseDropdowns = function (root) {
-    var scope = root || document;
-    var nodes = [];
-    if (scope.matches && scope.matches(".ql-mobile-drawer")) nodes.push(scope);
-    scope.querySelectorAll(".ql-mobile-drawer.ql-mobile-drawer-open, details.ql-mobile-drawer[open]")
-      .forEach(function (dd) {
-        if (nodes.indexOf(dd) === -1) nodes.push(dd);
-      });
-    nodes.forEach(closeDrawer);
+  window.qlCloseDropdowns = function () {
+    if (document.querySelector(".ql-mobile-drawer[open]")) dismissSheet();
   };
-  document.addEventListener("click", function (evt) {
-    // The drawer trigger is its <summary> (a disclosure button, not a menu).
-    var btn = evt.target.closest && evt.target.closest(".ql-mobile-drawer > summary");
-    var trigger = (btn && btn.closest(".ql-mobile-drawer")) ? btn : null;
-    var triggerDd = trigger ? trigger.closest(".ql-mobile-drawer") : null;
-    // Close outside taps and other open drawers.
-    document.querySelectorAll(".ql-mobile-drawer.ql-mobile-drawer-open").forEach(function (o) {
-      if (o !== triggerDd) closeDrawer(o);
-    });
-    if (!triggerDd) return;
-    evt.preventDefault();
-    if (drawerIsOpen(triggerDd)) {
-      closeDrawer(triggerDd);
-    } else {
-      lockDrawerPage();
-      triggerDd.classList.add("ql-mobile-drawer-open");
-      triggerDd.setAttribute("open", "");
-      trigger.setAttribute("aria-expanded", "true");
+
+  // A search can finish while More is open. Save the closed page and
+  // give its pending navigation the entry More was using.
+  document.addEventListener("htmx:beforeSwap", function (evt) {
+    if (history.state && history.state.qlSheet && evt.detail.shouldSwap &&
+        evt.detail.xhr.getResponseHeader("HX-Push-Url")) {
+      evt.detail.xhr.qlReplaceSheet = closeSheetsOutside(null);
     }
   });
+  document.addEventListener("htmx:beforeHistoryUpdate", function (evt) {
+    if (evt.detail.xhr.qlReplaceSheet) evt.detail.history.type = "replace";
+  });
   document.addEventListener("click", function (evt) {
-    var btn = evt.target.closest && evt.target.closest("[data-close-mobile-menu]");
-    if (!btn) return;
-    var dd = btn.closest(".ql-mobile-drawer");
-    if (dd) closeDrawer(dd);
+    var trigger = evt.target.closest(".ql-mobile-drawer > summary");
+    var drawer = document.querySelector(".ql-mobile-drawer[open]");
+    if (drawer) {
+      var link = evt.target.closest("a[href]");
+      if (link) {
+        if (evt.defaultPrevented || evt.button !== 0 || evt.ctrlKey || evt.metaKey ||
+            evt.altKey || evt.shiftKey || link.target || link.origin !== location.origin) return;
+        // Follow the link from the page under More, so Back lands there.
+        evt.preventDefault();
+        dismissSheet(function () { link.click(); });
+      } else if (evt.target.closest('button[type="submit"][form]')) {
+        var submitter = evt.target.closest("button");
+        evt.preventDefault();
+        dismissSheet(function () { submitter.form.requestSubmit(submitter); });
+      } else if (trigger || !drawer.contains(evt.target) ||
+                 evt.target.closest("[data-close-mobile-menu], [data-theme-toggle]")) {
+        evt.preventDefault();
+        dismissSheet();
+      }
+    } else if (trigger) {
+      evt.preventDefault();
+      drawer = trigger.closest(".ql-mobile-drawer");
+      pushSheet(trigger.getAttribute("aria-controls"));
+      lockDrawerPage();
+      drawer.classList.add("ql-mobile-drawer-open");
+      drawer.setAttribute("open", "");
+      trigger.setAttribute("aria-expanded", "true");
+      drawer.querySelector("[data-close-mobile-menu]").focus({ preventScroll: true });
+    }
   });
   // The dimmed backdrop is the drawer's own ::before. On iOS Safari a tap
   // there fires no click unless the drawer itself listens for one.
   function listenOnDrawerBackdrops() {
     document.querySelectorAll(".ql-mobile-drawer").forEach(function (dd) {
       dd.addEventListener("click", function (evt) {
-        if (evt.target === dd && drawerIsOpen(dd)) closeDrawer(dd);
+        if (evt.target === dd && drawerIsOpen(dd)) dismissSheet();
       });
     });
   }
@@ -2005,6 +2308,9 @@
 
   function searchSnapshotHtml(results) {
     var copy = results.cloneNode(true);
+    copy.querySelectorAll(".ql-release-sheet[open]").forEach(function (sheet) {
+      sheet.removeAttribute("open");
+    });
     copy.querySelectorAll("[data-search-wired]").forEach(function (node) {
       node.removeAttribute("data-search-wired");
     });
@@ -2027,7 +2333,7 @@
       removeSearchSnapshot(state);
       return;
     }
-    writeSearchSnapshot(state, searchSnapshotHtml(results));
+    writeSearchSnapshot(state, searchSnapshotHtml(results), marker.dataset.libraryRevision);
   }
 
   function finishSearchRestore(record) {
@@ -2056,6 +2362,7 @@
     if (searchExitSave) searchExitSave();
   });
 
+  var bootSearchRequest = null;
   function initSearchPage() {
     var form = document.querySelector(".ql-search-form");
     var results = document.getElementById("search-results");
@@ -2081,7 +2388,7 @@
     }
     document.documentElement.classList.remove("ql-search-restoring");
     if (form.dataset.searchAuto === "1" && window.htmx) {
-      window.htmx.ajax("POST", "/search", {
+      bootSearchRequest = window.htmx.ajax("POST", "/search", {
         source: form, target: "#search-results", swap: "innerHTML",
         headers: { "HX-History-Restore-Request": "true" }
       }).catch(function () {});
@@ -2095,6 +2402,15 @@
     document.addEventListener("DOMContentLoaded", initSearchPage);
   } else {
     initSearchPage();
+  }
+
+  function showSearchMoreError(message) {
+    var notice = showToast(message, "error");
+    if (notice) notice.id = "search-more-error";
+  }
+  function clearSearchMoreError() {
+    var notice = document.getElementById("search-more-error");
+    if (notice) notice.remove();
   }
 
   function initSearchResults() {
@@ -2165,6 +2481,7 @@
       var selectedCount = root.querySelector("[data-search-selected-count]");
       var selectAll = root.querySelector("[data-search-select-all]");
       var bulkButton = root.querySelector("[data-search-bulk-download]");
+      var queueingSelection = false;
       var clearButton = root.querySelector("[data-search-clear-selection]");
       var hideOwnedButton = root.querySelector("[data-search-hide-owned]");
       if (hideOwnedButton && restored.hideOwned) {
@@ -2199,8 +2516,15 @@
       // A pick kept from before a reload can sit in a batch not loaded yet.
       function inUnloadedBatch(key) {
         return !!root.querySelector("[data-search-more]")
-          && !Array.prototype.some.call(root.querySelectorAll("[data-search-item]"),
-            function (item) { return item.dataset.searchKey === key; });
+          && !root.querySelector('[data-search-item][data-search-key="' + CSS.escape(key) + '"]');
+      }
+      function updateBulkButton() {
+        if (!bulkButton) return;
+        var missing = selectedKeys().some(inUnloadedBatch);
+        bulkButton.disabled = queueingSelection || (missing && !!moreRequest);
+        bulkButton.textContent = queueingSelection ? "Queueing…"
+          : missing ? (moreRequest ? "Loading selection…" : "Retry selection")
+          : "Download selected";
       }
       function syncBoxes() {
         reconcileSelection();
@@ -2209,6 +2533,7 @@
         });
         var keys = selectedKeys();
         if (bulkBar) bulkBar.classList.toggle("hidden", keys.length === 0);
+        updateBulkButton();
         if (selectedCount) {
           selectedCount.textContent = keys.length + " selected";
         }
@@ -2327,28 +2652,32 @@
         });
       }
       var moreRequest = null;
-      function loadMoreAlbums(through) {
+      function loadMoreAlbums(through, keyboard) {
         var more = root.querySelector("[data-search-more]");
         var button = more && more.querySelector("[data-search-more-url]");
         if (!button) return Promise.resolve(false);
         if (moreRequest) return moreRequest;
+        clearSearchMoreError();
         var url = button.dataset.searchMoreUrl;
-        (through || []).forEach(function (id) {
-          url += "&through=" + encodeURIComponent(id);
+        var missingPicks = selectedKeys().filter(inUnloadedBatch);
+        new Set(missingPicks.concat(through || [])).forEach(function (key) {
+          url += "&through=" + encodeURIComponent(key.replace(/^album-/, ""));
         });
         button.disabled = true;
         moreRequest = sessionFetch(url)
           .then(function (r) { return r.ok ? r.text() : ""; })
           .then(function (text) {
+            if (!root.isConnected) return false;
             var reply = document.createElement("template");
             reply.innerHTML = text;
             var batches = reply.content.querySelectorAll("template[data-search-batch]");
             if (!batches.length) {
               button.disabled = false;
-              showToast(reply.content.textContent.trim()
-                || "Couldn't load more results. Try again.", "error");
+              showSearchMoreError(reply.content.textContent.trim()
+                || "Couldn't load more results. Try again.");
               return false;
             }
+            var firstNew = null;
             batches.forEach(function (batch) {
               var panel = root.querySelector(
                 '[data-search-view-panel="' + batch.dataset.searchBatch + '"]');
@@ -2357,6 +2686,9 @@
               var host = parked && parked.content.childNodes.length ? parked.content : panel;
               var target = batch.dataset.searchBatch === "table"
                 ? host.querySelector(".ql-table-body") : host;
+              if (keyboard && !panel.classList.contains("hidden")) {
+                firstNew = batch.content.querySelector("[data-search-item]");
+              }
               if (target) insertInOrder(target, batch.content);
             });
             var next = reply.content.querySelector("[data-search-more]");
@@ -2366,21 +2698,36 @@
               if (!panel.classList.contains("hidden") && window.htmx) window.htmx.process(panel);
             });
             initCoverFallbacks();
+            missingPicks.forEach(function (key) {
+              if (!actionableFormForKey(key)) delete selected[key];
+            });
             syncBoxes();
             applyOwnedFilterCount();
+            if (firstNew && document.activeElement === document.body) {
+              var control = Array.prototype.find.call(
+                firstNew.querySelectorAll("input[data-search-select]:enabled, button:enabled"),
+                function (el) { return el.getClientRects().length > 0; });
+              if (!control) firstNew.tabIndex = -1;
+              (control || firstNew).focus();
+            }
             return true;
           })
           .catch(function (why) {
             button.disabled = false;
-            if (why !== "navigation") {
-              showToast("Couldn't load more results. Check your connection.", "error");
+            if (root.isConnected && why !== "navigation") {
+              showSearchMoreError("Couldn't load more results. Check your connection.");
             }
             return false;
           })
           .then(function (loaded) {
             moreRequest = null;
+            updateBulkButton();
+            if (!loaded && keyboard && button.isConnected && document.activeElement === document.body) {
+              button.focus({ preventScroll: true });
+            }
             return loaded;
           });
+        updateBulkButton();
         return moreRequest;
       }
       function savedSearchView() {
@@ -2427,7 +2774,7 @@
         }
         if (evt.target.closest("[data-search-more-url]")) {
           evt.preventDefault();
-          loadMoreAlbums();
+          loadMoreAlbums(null, evt.detail === 0);
           return;
         }
         if (clearButton && evt.target.closest("[data-search-clear-selection]")) {
@@ -2446,14 +2793,12 @@
         return m ? m.content : "";
       }
       function actionableFormForKey(key) {
-        var items = Array.prototype.filter.call(root.querySelectorAll("[data-search-item]"),
-          function (item) { return item.dataset.searchKey === key; });
-        for (var i = 0; i < items.length; i++) {
-          var form = items[i].querySelector("[data-search-download-form]");
-          var button = form && form.querySelector("button[type=submit]");
-          if (form && button && !button.disabled) return form;
-        }
-        return null;
+        var forms = root.querySelectorAll(
+          '[data-search-item][data-search-key="' + CSS.escape(key) + '"] [data-search-download-form]');
+        return Array.prototype.find.call(forms, function (form) {
+          return form.closest("[data-search-item]").dataset.searchKey === key
+            && !form.querySelector("button[type=submit]").disabled;
+        });
       }
       function postForm(form) {
         return sessionFetch(form.action || "/download", {
@@ -2480,6 +2825,10 @@
       function bulkDownload() {
         var keys = selectedKeys();
         if (!keys.length || bulkButton.disabled) return;
+        if (keys.some(inUnloadedBatch)) {
+          loadMoreAlbums();
+          return;
+        }
         var forms = keys.map(actionableFormForKey).filter(Boolean);
         if (!forms.length) return;
         // The key prefix supplies the correct track or album noun.
@@ -2520,9 +2869,8 @@
         return "“" + title + "”" + (artist ? " by " + artist : "");
       }
       function runBulkDownload(forms) {
-        var original = bulkButton.textContent;
-        bulkButton.disabled = true;
-        bulkButton.textContent = "Queueing…";
+        queueingSelection = true;
+        updateBulkButton();
         var queued = 0;
         var queuedTracks = 0;
         var duplicates = 0;
@@ -2558,11 +2906,10 @@
           });
         });
         chain.then(function () {
-          bulkButton.disabled = false;
-          bulkButton.textContent = original;
+          queueingSelection = false;
+          updateBulkButton();
           if (navigating) return;
           if (stale) { pageWentStale(); return; }
-          selected = {};
           syncBoxes();
           // The same receipt the single-row path gives: name what was queued
           // and link where it went, instead of a bare count.
@@ -2600,25 +2947,16 @@
       setView(savedSearchView());
       syncBoxes();
       applyOwnedFilterCount();
-      var unloadedPicks = Object.keys(selected).filter(inUnloadedBatch);
-      var reach = unloadedPicks.slice();
-      if (restored.loadedThrough && inUnloadedBatch(restored.loadedThrough)) {
-        reach.push(restored.loadedThrough);
-      }
-      if (reach.length) {
+      var lastUnloaded = restored.loadedThrough && inUnloadedBatch(restored.loadedThrough);
+      if (lastUnloaded || selectedKeys().some(inUnloadedBatch)) {
         // The page could only scroll as far as the first batch reached.
         var moved = false;
         var noteMove = function () { moved = true; };
         ["wheel", "touchmove", "keydown"].forEach(function (name) {
           window.addEventListener(name, noteMove, { once: true, passive: true });
         });
-        loadMoreAlbums(reach.map(function (key) {
-          return key.replace(/^album-/, "");
-        })).then(function (loaded) {
+        root.qlSearchRestored = loadMoreAlbums(lastUnloaded ? [restored.loadedThrough] : []).then(function (loaded) {
           if (!loaded) return;
-          unloadedPicks.forEach(function (key) {
-            if (!actionableFormForKey(key)) delete selected[key];
-          });
           if (!moved) {
             root.querySelectorAll("[data-search-view-panel]").forEach(function (panel) {
               var y = (restored.viewScroll || {})[panel.dataset.searchViewPanel];
@@ -2861,6 +3199,12 @@
 
   function wireProgress(id) {
     var logEl = document.getElementById("log");
+    var logDetails = logEl && logEl.closest("details");
+    var replayLines = 0;
+    var replayGap = 0;
+    if (logDetails) logDetails.addEventListener("toggle", function () {
+      if (logDetails.open) logEl.scrollTop = logEl.scrollHeight;
+    }, { once: true });
     var card = document.getElementById("progress-card");
     var count = document.getElementById("prog-count");
     var unit = document.getElementById("prog-unit");
@@ -2874,6 +3218,35 @@
     var foundSingular = (jc && jc.dataset.progressItemSingular) || "album";
     var foundPlural = (jc && jc.dataset.progressItemPlural) || foundSingular + "s";
     var ownTitle = (jc && jc.dataset.jobTitle) || "";
+    function distanceFromEnd(log) {
+      return Math.max(0, log.scrollHeight - log.clientHeight - log.scrollTop);
+    }
+    function swapJob(target, html, select) {
+      var options = { select: select };
+      if (logDetails && (logDetails.open || logDetails.contains(document.activeElement))) {
+        var open = logDetails.open;
+        var gap = distanceFromEnd(logEl);
+        var focus = logDetails.contains(document.activeElement);
+        var reading = document.activeElement === logEl;
+        options.afterSwapCallback = function () {
+          var job = document.getElementById("job-content");
+          var log = job && job.dataset.jobId === id && job.querySelector(".log-console");
+          if (!log) {
+            var link = document.querySelector("main a[href='/jobs/" + id + "']");
+            if (focus && link) link.focus({ preventScroll: true });
+            return;
+          }
+          var details = log.closest("details");
+          details.open = open;
+          if (focus) {
+            var control = reading ? log : details.querySelector("summary");
+            control.focus({ preventScroll: true });
+          }
+          if (open) log.scrollTop = log.scrollHeight - log.clientHeight - gap;
+        };
+      }
+      window.htmx.swap(target, html, { swapStyle: "outerHTML" }, options);
+    }
     // The line names a scan by its kind, and a tool page names its repair.
     var fixedVerb = !!jc && (jc.dataset.embedded ? jc.dataset.jobKind === "repair"
       : jc.dataset.jobStatus === "scanning");
@@ -2945,7 +3318,7 @@
           if (src) { try { src.close(); } catch (e) {} }
           stopWatching();
           stopElapsed();
-          window.htmx.swap(target, html, { swapStyle: "outerHTML" });
+          swapJob(target, html);
         })
         .catch(function () { leavingQueued = false; });
     }
@@ -2991,14 +3364,31 @@
       src.onmessage = function (e) {
         streamAlive();
         if (!titleSet) { document.title = "\u25b6 " + baseTitle; titleSet = true; }
-        if (logEl) { logEl.appendChild(document.createTextNode(e.data + "\n")); logEl.scrollTop = logEl.scrollHeight; }
+        if (logEl) {
+          var following = distanceFromEnd(logEl) <= 1;
+          logEl.appendChild(document.createTextNode(e.data + "\n"));
+          if (replayLines > 0) {
+            replayLines--;
+            logEl.scrollTop = logEl.scrollHeight - logEl.clientHeight - replayGap;
+          } else if (following) {
+            logEl.scrollTop = logEl.scrollHeight;
+          }
+        }
       };
-      src.addEventListener("ping", streamAlive);
+      src.addEventListener("ping", function () {
+        replayLines = 0;
+        streamAlive();
+      });
       src.onopen = function () {
         streamAlive();
         // Reconnect replays recent lines, so reset before appending them again.
         if (opened) {
-          if (logEl) logEl.textContent = "";
+          if (logEl) {
+            replayGap = logDetails.open ? distanceFromEnd(logEl) : 0;
+            replayLines = replayGap > 1
+              ? Math.min(logEl.childNodes.length, Number(logEl.dataset.replayLimit)) : 0;
+            logEl.textContent = "";
+          }
           foundAlbums = 0;
           foundArtists = 0;
         }
@@ -3020,6 +3410,7 @@
       };
       src.addEventListener("progress", function (e) {
         streamAlive();
+        replayLines = 0;
         var p; try { p = JSON.parse(e.data); } catch (_) { return; }
         if (renderedQueued) { leaveQueued(); return; }
         clearQueuedState();
@@ -3111,8 +3502,7 @@
           if (!target) return;
           stopWatching();
           hideGap();
-          window.htmx.swap(target, html, { swapStyle: "outerHTML" },
-            surface ? { select: "#" + targetId } : {});
+          swapJob(target, html, surface ? "#" + targetId : undefined);
         })
         .catch(function (why) {
           if (why === "navigation") return;
@@ -3279,6 +3669,9 @@
     function syncActions() {
       var blocked = actionsBlocked();
       if (submit) submit.disabled = submitBlocked();
+      cont.querySelectorAll("[data-select-master], [data-select-page]").forEach(function (button) {
+        button.disabled = !!pageLoading;
+      });
       form.querySelectorAll("[data-hide], #review-dismiss-rest, [formaction$='/cancel']").forEach(function (button) {
         if (blocked && !button.disabled) {
           button.disabled = true;
@@ -3459,6 +3852,7 @@
       btn.textContent = allOpen ? "Collapse all" : "Expand all";
     }
     cont.addEventListener("toggle", syncExpandAll, true);
+    syncExpandAll();
 
     // The rows the list can show: the tab's, or under a filter the ones it
     // matches.
@@ -3815,6 +4209,8 @@
       var choicesAtStart = choiceVersion;
       boxEl._loadGeneration = generation;
       boxEl.dataset.loading = "1";
+      var status = boxEl.querySelector(".ql-review-items-loading");
+      if (status) status.textContent = "Loading…";
       var p = sessionFetch(boxEl.dataset.itemsUrl)
         .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
         .then(function (txt) {
@@ -3837,7 +4233,17 @@
           if (boxEl._loadGeneration !== generation) return false;
           delete boxEl.dataset.loading;
           if (why === "navigation") return false;
-          showToast("Couldn't load this artist's albums. Try opening it again.", "error");
+          if (status) {
+            var retry = document.createElement("button");
+            retry.type = "button";
+            retry.className = "ql-inline-link ql-inline-link-hit";
+            retry.textContent = "Retry";
+            retry.onclick = function () {
+              det.querySelector("summary").focus({ preventScroll: true });
+              loadGroupItems(det, false);
+            };
+            status.replaceChildren("Couldn't load this artist's results. ", retry);
+          }
           return false;
         });
       boxEl._loadPromise = p.then(function (ok) {
@@ -3850,6 +4256,7 @@
     var loading = false;
     var loadingPromise = null;
     var pageLoading = false;
+    var loadError = null;
     var pendingTab = null;
     var loadGen = 0;
 
@@ -3859,6 +4266,7 @@
       if (choicesUnknown || dismissPending) return Promise.resolve(false);
       if (loading) return loadingPromise || Promise.resolve(false);
       if (pageLoading) return Promise.resolve(false);
+      if (loadError) loadError.remove();
       loading = true;
       var gen = ++loadGen;
       var choicesAtStart = choiceVersion;
@@ -3875,18 +4283,20 @@
             return loadMore(page);
           }
           if (txt == null) {
-            showToast("Couldn't load those results. Try again.", "error");
+            loadError = showToast("Couldn't load those results. Try again.", "error");
             return false;
           }
           var tmp = document.createElement("div");
           tmp.innerHTML = txt;
           var liveGroups = document.getElementById("review-groups");
           var newGroups = tmp.querySelector("#review-groups");
+          var oldMore = document.getElementById("review-loadmore");
+          var nextFocus = oldMore && oldMore.querySelector("[data-load-more]:focus-visible") && newGroups
+            ? newGroups.querySelector("details[data-artist] > summary") : null;
           if (liveGroups && newGroups) {
             while (newGroups.firstElementChild) liveGroups.appendChild(newGroups.firstElementChild);
             liveGroups.dataset.page = newGroups.dataset.page || liveGroups.dataset.page;
           }
-          var oldMore = document.getElementById("review-loadmore");
           if (oldMore) oldMore.remove();
           var newMore = tmp.querySelector("#review-loadmore");
           if (newMore && liveGroups) liveGroups.parentNode.appendChild(newMore);
@@ -3894,11 +4304,12 @@
           updateHideLabels();
           updateArtistChecks();
           syncExpandAll();
+          if (nextFocus && nextFocus.isConnected) nextFocus.focus();
           return true;
         })
         .catch(function (why) {
           if (why !== "navigation" && gen === loadGen) {
-            showToast("Couldn't load those results. Check your connection.", "error");
+            loadError = showToast("Couldn't load those results. Check your connection.", "error");
           }
           return false;
         });
@@ -3932,7 +4343,17 @@
       var st = window.history.state && window.history.state.ql;
       return st && st.review === id ? st.from || "" : "";
     }
+    function setHiddenReturn(tab, query) {
+      var link = cont.querySelector(".ql-review-dismissed-link");
+      if (!link || link.pathname !== location.pathname + "/hidden") return;
+      var params = new URLSearchParams();
+      if (tab) params.set("tab", tab);
+      if (query) params.set("q", query);
+      link.search = tab || query
+        ? new URLSearchParams({ return_to: location.pathname + "?" + params }).toString() : "";
+    }
     function syncUrl(tab, query, mode) {
+      setHiddenReturn(tab, query);
       if (mode === "none") return;
       if (typeof URL !== "function" || !window.history.replaceState) return;
       var url;
@@ -3949,6 +4370,10 @@
       var from = !filterStep ? ""
         : onFilter ? filterFrom()
         : (st && st.review === id ? st.q || "" : "");
+      if (history.state && history.state.qlSheet) {
+        if (url.href === location.href) return;
+        if (closeSheetsOutside(null)) push = false;
+      }
       if (push && window.history.pushState) {
         window.history.pushState(reviewEntry(tab, query, filterStep, from), "", url);
       } else {
@@ -3994,7 +4419,12 @@
         // The group's rows arrive after the redraw; wait for the box.
         if (spot.cid && i === 0 && group.open
             && group.querySelector("[data-lazy-items]:not([data-loaded])")) {
-          loadGroupItems(group, false).then(function () { restoreReviewFocus(spot); });
+          loadGroupItems(group, false).then(function (loaded) {
+            if (loaded) restoreReviewFocus(spot);
+            else if (document.activeElement === document.body) {
+              group.querySelector("summary").focus({ preventScroll: true });
+            }
+          });
           return;
         }
         target = shown(shell.querySelector(spot.kind)) || group.querySelector("summary");
@@ -4027,6 +4457,7 @@
       }
       loading = false;   // a page swap supersedes any in-flight append
       loadingPromise = null;
+      if (loadError) loadError.remove();
       pageLoading = true;
       pendingTab = requestedTab;
       syncActions();
@@ -4138,7 +4569,7 @@
             pendingTab = null;
             if (staleMoreButton) staleMoreButton.disabled = false;
             if (filterInput) filterInput.value = loadedQuery;
-            showToast("Couldn't load those results. Check your connection.", "error");
+            loadError = showToast("Couldn't load those results. Check your connection.", "error");
           }
           return false;
         }).then(function (loaded) {
@@ -4165,6 +4596,7 @@
     }, true);
     cont.addEventListener("click", function (e) {
       var t = e.target;
+      if (t.closest(".ql-review-dismissed-link")) recordPlace();
       if (t.closest("[data-hide]")) return;
       // The artist checkbox sits inside a <summary>: its own activation runs
       // instead of the summary's, but stop the bubble so nothing else fires.
@@ -4175,13 +4607,17 @@
       var pageBtn = t.closest("[data-select-page]");
       if (pageBtn) { bulkSelect(pageBtn.getAttribute("data-select-page") === "1", "page"); return; }
       var more = t.closest("[data-load-more]");
-      if (more) { loadMore(parseInt(more.getAttribute("data-next-page") || "2", 10)); return; }
+      if (more) {
+        loadMore(parseInt(more.getAttribute("data-next-page") || "2", 10));
+        return;
+      }
       var switchBtn = t.closest("[data-review-switch]");
       if (switchBtn) { switchReleaseType(switchBtn); return; }
       var tabBtn = t.closest("[data-review-tab]");
       if (tabBtn && (
         !tabBtn.classList.contains("is-active") || pageLoading
       )) {
+        cancelFilter();
         loadPage(
           1,
           inputQuery(),
@@ -4210,6 +4646,7 @@
         if (actionsBlocked()) return;
         var requestTab = curTab();
         var requestQuery = curQuery();
+        var selectionToken = form.elements.namedItem("selection_token").value;
         var rest = restCount();
         if (rest <= 0) return;
         // The number is the filtered one when a filter is on, so the question
@@ -4229,9 +4666,11 @@
           dismissRest.textContent = dismissBusyLabel();
           post("/jobs/" + id + "/dismiss-rest",
                "tab=" + encodeURIComponent(requestTab) +
+               "&selection_token=" + encodeURIComponent(selectionToken) +
                "&q=" + encodeURIComponent(requestQuery))
             .then(function (r) {
               if (r.status === 403) return Promise.reject("stale");
+              if (r.status === 409) return Promise.reject("changed");
               return r.ok ? r.json() : Promise.reject();
             })
             .then(function (c) {
@@ -4253,6 +4692,7 @@
               syncActions();
               if (why === "navigation") return;
               if (why === "stale") { pageWentStale(); return; }
+              if (why === "changed") showToast("The review changed. Check your selection and try again.", "warning");
               recoverChoices();
             });
         });
@@ -4277,6 +4717,8 @@
       filterInput.addEventListener("input", function () {
         cancelFilter();
         loadGen += 1;
+        pageLoading = true;
+        syncActions();
         filterTimer = setTimeout(function () {
           filterTimer = null;
           applyFilter();
@@ -4314,6 +4756,7 @@
     window.addEventListener("popstate", onPopState);
     // Tag the entry the user arrived on, without touching the address they
     // arrived with, so a Back press onto it can be restored like any other.
+    setHiddenReturn(curTab(), loadedQuery);
     if (window.history.replaceState) {
       window.history.replaceState(
         reviewEntry(curTab(), loadedQuery, false), "", window.location.href
@@ -4336,6 +4779,7 @@
         refreshReview();
       } else {
         updateHideLabels();
+        syncExpandAll();
         restoreReviewFocus(spot);
       }
     }
@@ -4457,7 +4901,10 @@
     updateDismissRest();
 
     // Keep review pages in sync across tabs.
-    var rsrc = new EventSource("/api/jobs/" + id + "/review-stream");
+    var streamTab = curTab();
+    var rsrc = new EventSource("/api/jobs/" + id + "/review-stream" +
+                               (streamTab ? "?tab=" + encodeURIComponent(streamTab) : ""));
+    var streamInterrupted = false;
     var reviewNavigating = false;
     function beginReviewNavigation(e) {
       if (actionsBlocked()) {
@@ -4523,7 +4970,16 @@
       shutReview();
       returnToLogin();
     });
+    rsrc.addEventListener("snapshot", function (e) {
+      var snapshot = JSON.parse(e.data);
+      var changed = streamInterrupted || streamTab !== curTab() ||
+        snapshot.total !== lastCounts.total ||
+        snapshot.selection_token !== form.elements.namedItem("selection_token").value;
+      streamInterrupted = false;
+      if (changed) refreshReview();
+    });
     rsrc.onerror = function () {
+      streamInterrupted = true;
       if (rsrc.readyState === EventSource.CLOSED) shutReview();
     };
   }
@@ -4554,6 +5010,7 @@
   }
 
   function cancelSearchRequests() {
+    clearSearchMoreError();
     latestSearchSubmission += 1;
     cancelHistoryRequest();
     activeSearchRequests.slice().forEach(function (xhr) { xhr.abort(); });
@@ -4590,17 +5047,25 @@
   }, true);
 
   document.addEventListener("htmx:beforeRequest", function (event) {
+    if (libraryRefreshRevision(event.detail) && event.detail.target.id === "search-results") {
+      event.detail.xhr.qlSearchSubmission = latestSearchSubmission;
+      return;
+    }
     var form = searchRequestForm(event);
     if (!form || !event.detail.xhr) return;
     cancelHistoryRequest();
     // The same save as leaving the page: on desktop the list scrolls in its
     // own panel, and Back should find it where it was.
     (searchExitSave || saveSearchSnapshot)();
+    var row = form.closest("[data-search-item]");
+    if (row && form.matches(".ql-result-link-form")) {
+      updateSearchRecord(searchStateFromUrl(), { opener: row.dataset.searchKey });
+    }
     // "Search results" returns to where the list was left, as Back does.
     if (form.matches(".ql-search-back-form")) {
+      var fields = form.elements;
       var left = readSearchRecord(searchStateId(
-        form.querySelector('input[name="kind"]').value,
-        form.querySelector('input[name="q"]').value));
+        fields.kind.value, fields.q.value, "", fields.album_id && fields.album_id.value));
       pendingSearchRestoreY = left && typeof left.scrollY === "number" ? left.scrollY : null;
     }
     var generation = parseInt(form.dataset.searchSubmission || "0", 10);
@@ -4612,6 +5077,7 @@
       form.dataset.searchSubmission = generation;
     }
     event.detail.xhr.qlSearchSubmission = generation;
+    event.detail.xhr.qlSearchResultLink = !form.matches(".ql-search-form");
     var previousRequests = activeSearchRequests.slice();
     if (activeSearchRequests.indexOf(event.detail.xhr) === -1) {
       activeSearchRequests.push(event.detail.xhr);
@@ -4659,7 +5125,6 @@
 
   document.addEventListener("htmx:afterRequest", function (event) {
     if (!event.detail.xhr) return;
-    var failed = event.detail.successful !== true;
     var index = activeSearchRequests.indexOf(event.detail.xhr);
     if (index === -1) return;
     activeSearchRequests.splice(index, 1);
@@ -4668,9 +5133,7 @@
     var status = document.getElementById("search-status");
     if (results) results.setAttribute("aria-busy", "false");
     if (status) status.textContent = "";
-    if (failed && event.detail.xhr.qlSearchSubmission === latestSearchSubmission) {
-      restoreSearchFormFromUrl();
-    }
+    if (!event.detail.successful) pendingSearchRestoreY = null;
   });
 
   document.addEventListener("keydown", function (event) {
@@ -4688,11 +5151,11 @@
     var source = event.detail && event.detail.elt;
     var form = source && (source.matches("form") ? source : source.closest("form"));
     if (!form || form !== keyboardSearchForm) return;
-    var artist = form.querySelector('input[name="artist_id"]');
     pendingSearchFocus = {
       form: form,
       returning: form.classList.contains("ql-search-back-form"),
-      artistId: artist ? artist.value : form.dataset.searchArtistId
+      albumId: form.dataset.searchAlbumId,
+      artistId: form.dataset.searchArtistId
     };
     keyboardSearchForm = null;
   });
@@ -4702,18 +5165,31 @@
     if (!pendingSearchFocus || !target || target.id !== "search-results") return;
     var pending = pendingSearchFocus;
     pendingSearchFocus = null;
-    requestAnimationFrame(function () {
+    var root = target.querySelector("[data-search-results-root]");
+    function focusResult() {
+      var active = document.activeElement;
+      if (!target.isConnected || (active !== document.body && active !== target)) return;
       var control = null;
-      if (pending.returning && pending.artistId) {
-        Array.prototype.some.call(target.querySelectorAll('input[name="artist_id"]'), function (input) {
-          if (input.value !== pending.artistId) return false;
-          control = input.form && input.form.querySelector("button[type=submit]");
-          return !!control;
+      if (pending.returning) {
+        var saved = readSearchRecord(searchResponseState(target)) || {};
+        var field = pending.albumId ? "album_id" : "artist_id";
+        var id = pending.albumId || pending.artistId;
+        var buttons = target.querySelectorAll(".ql-result-link-form button, .ql-result-action-form button");
+        var matches = Array.prototype.filter.call(buttons, function (button) {
+          var input = button.form.elements[field];
+          return input && input.value === id && button.getClientRects().length;
         });
+        control = matches.find(function (button) {
+          var row = button.closest("[data-search-item]");
+          return row && row.dataset.searchKey === saved.opener;
+        }) || matches[0];
       } else {
         control = target.querySelector(".ql-search-back");
       }
       (control || target).focus();
+    }
+    Promise.resolve(root && root.qlSearchRestored).then(function () {
+      requestAnimationFrame(focusResult);
     });
   }
 
@@ -4744,9 +5220,45 @@
     });
   }
 
+  var diagnosticActionRows = ".ql-diagnostic-row:has(button[data-confirm]:enabled)";
+  document.addEventListener("htmx:beforeRequest", function (evt) {
+    var target = evt.detail.target;
+    var button = document.activeElement;
+    if (!target || target.id !== "diagnostics-list" || !target.contains(button)
+        || !button.matches("button[data-confirm]:focus-visible")) return;
+    var rows = Array.from(target.querySelectorAll(diagnosticActionRows));
+    evt.detail.xhr.qlDiagnosticFocus = {
+      button: button, row: rows.indexOf(button.closest(".ql-diagnostic-row"))
+    };
+  });
+
+  document.addEventListener("htmx:beforeSwap", function (evt) {
+    var target = evt.detail.target;
+    if (target && target.id === "diagnostics-list") {
+      evt.detail.xhr.qlChecksOpen = !!target.querySelector("details[open]");
+      var spot = evt.detail.xhr.qlDiagnosticFocus;
+      if (spot && document.activeElement !== document.body && document.activeElement !== spot.button) {
+        evt.detail.xhr.qlDiagnosticFocus = null;
+      }
+    }
+  });
+
   function announceDiagnosticsSwap(event) {
     var target = event.detail && event.detail.target;
     if (!target || target.id !== "diagnostics-list") return;
+    if (event.detail.xhr.qlChecksOpen) {
+      var checks = target.querySelector("details");
+      if (checks) checks.open = true;
+    }
+    var spot = event.detail.xhr.qlDiagnosticFocus;
+    if (spot && document.activeElement === document.body) {
+      var rows = target.querySelectorAll(diagnosticActionRows);
+      var row = rows[Math.min(spot.row, rows.length - 1)];
+      var button = redrawnConfirmControl(spot.button)
+        || (row && row.querySelector("button[data-confirm]:enabled"))
+        || document.querySelector('[hx-get="/api/diagnostics"]');
+      if (button) button.focus();
+    }
     // Recheck alone. Restore, Remove and Delete swap the same list, and each
     // already says what it did; a second, generic notice beside a refusal
     // reads like the action went through.
@@ -4761,6 +5273,7 @@
   function rememberSearchSwap(event) {
     var target = event.detail && event.detail.target;
     if (!target || target.id !== "search-results") return;
+    clearSearchMoreError();
     // An artist link or "Search results" runs a search of its own; the box
     // and tab say which one, so Search repeats what is listed.
     var source = event.detail.requestConfig && event.detail.requestConfig.elt;
@@ -4780,33 +5293,160 @@
     }
   }
 
+  function requestSearchAtAddress(results, headers) {
+    var params = new URLSearchParams(location.search);
+    var form = document.querySelector(".ql-search-form");
+    var values = { _csrf_token: form.elements._csrf_token.value };
+    ["q", "kind", "artist_id", "artist_name", "album_id", "back_kind",
+      "back_q", "back_album_id", "back_track_q"].forEach(function (key) {
+      values[key] = params.get(key) || "";
+    });
+    return window.htmx.ajax("POST", "/search", {
+      source: headers ? results : form, target: results,
+      swap: "innerHTML", values: values,
+      headers: Object.assign({ "HX-History-Restore-Request": "true" }, headers)
+    }).catch(function () {});
+  }
+
+  function refreshLibraryResults(revision) {
+    if (libraryRevision !== revision) {
+      libraryRevision = revision;
+      keptSearchViews = {};
+      failedLibraryReads = new WeakMap();
+    }
+    var view = document.querySelector("[data-search-response-state], #discover-body");
+    if (!view || view.dataset.libraryRevision === revision || !window.htmx
+        || activeSearchRequests.length || document.querySelector(
+          "#ql-confirm[open], .ql-mobile-drawer[open], [data-search-more-url]:disabled, [data-search-bulk-download]:disabled")) return;
+    var headers = { "X-QL-Refresh-Library": revision };
+    var tracks = document.querySelector(".ql-track-sheet[open]");
+    var list = tracks && tracks.querySelector(".ql-track-sheet-list");
+    var target = list || (view.id === "discover-body" ? view : view.parentElement);
+    // Retry a failed catalogue read once, then wait until the tab is
+    // revisited or the library changes again.
+    if (failedLibraryReads.get(target) >= 2 || target.classList.contains("htmx-request")) return;
+    if (tracks) {
+      var toggle = sheetToggle(tracks.id);
+      if (tracks.dataset.libraryRevision === revision || toggle.classList.contains("htmx-request")) return;
+      window.htmx.ajax("GET", toggle.getAttribute("hx-get"), {
+        source: list, target: list, swap: "innerHTML", headers: headers
+      }).catch(function () {});
+    } else if (view.id === "discover-body") {
+      if (discoverWrites || document.querySelector("[data-discover-undo]")) return;
+      view.querySelectorAll("[hx-preserve]").forEach(function (panel) {
+        if (!panel.firstElementChild) return;
+        if (panel.classList.contains("hidden")) { panel.replaceChildren(); return; }
+        var decade = panel.querySelector('[data-decade][aria-pressed="true"]');
+        window.htmx.ajax("GET", sheetToggle(panel.id).getAttribute("hx-get"), {
+          source: panel, target: panel, swap: "innerHTML", headers: headers
+        }).then(function () {
+          var chip = decade && panel.querySelector('[data-decade="' + CSS.escape(decade.dataset.decade) + '"]');
+          if (chip) chip.click();
+        }).catch(function () {});
+      });
+      window.htmx.ajax("GET", location.pathname + location.search, {
+        source: view, target: view, select: "#discover-body", swap: "outerHTML", headers: headers
+      }).catch(function () {});
+    } else if (searchResponseState(view.parentElement) === searchStateFromUrl()) {
+      requestSearchAtAddress(view.parentElement, headers);
+    }
+  }
+
+  document.addEventListener("close", function (event) {
+    if (event.target.matches(".ql-release-sheet, #ql-confirm") && libraryRevision !== undefined) {
+      refreshLibraryResults(libraryRevision);
+    }
+  }, true);
+
+  function libraryRefreshRevision(detail) {
+    var headers = detail.requestConfig && detail.requestConfig.headers;
+    return headers && headers["X-QL-Refresh-Library"];
+  }
+
+  document.addEventListener("htmx:afterRequest", function (event) {
+    var detail = event.detail;
+    var revision = libraryRefreshRevision(detail);
+    if (!revision || revision !== libraryRevision) return;
+    if (detail.failed || detail.xhr.qlLibraryReadFailed) {
+      failedLibraryReads.set(detail.target, (failedLibraryReads.get(detail.target) || 0) + 1);
+    }
+  });
+
+  document.addEventListener("htmx:beforeSwap", function (event) {
+    var detail = event.detail;
+    var revision = libraryRefreshRevision(detail);
+    if (!revision || !detail.shouldSwap) return;
+    var trackList = detail.target.matches(".ql-track-sheet-list");
+    if ((trackList && detail.xhr.responseText.indexOf("data-flash") >= 0)
+        || (detail.target.id === "search-results" && detail.xhr.responseText.indexOf("ql-search-error") >= 0)) {
+      detail.xhr.qlLibraryReadFailed = true;
+      detail.shouldSwap = false;
+      return;
+    }
+    if (trackList) {
+      detail.target.closest("dialog").dataset.libraryRevision = revision;
+      return;
+    }
+    if (detail.target.id !== "search-results") return;
+    if (detail.xhr.qlSearchSubmission !== latestSearchSubmission
+        || document.querySelector("#ql-confirm[open], .ql-track-sheet[open], .ql-mobile-drawer[open]")) {
+      detail.shouldSwap = false;
+      return;
+    }
+    (searchExitSave || saveSearchSnapshot)();
+    pendingSearchRestoreY = window.scrollY;
+    var versions = detail.target.querySelector(".ql-version-sheet[open]");
+    if (versions) detail.xhr.qlOpenVersions = {
+      id: versions.id, y: versions.querySelector(".ql-release-sheet-list").scrollTop,
+      focus: document.activeElement.getAttribute("aria-label")
+    };
+    detail.xhr.qlExpanded = Array.from(detail.target.querySelectorAll(
+      '[aria-expanded="true"][data-version-toggle], [aria-expanded="true"][data-tracks-toggle]'
+    ), function (button) { return button.getAttribute("aria-controls"); });
+  });
+  document.addEventListener("htmx:afterSettle", function (event) {
+    var saved = event.detail.xhr && event.detail.xhr.qlOpenVersions;
+    var expanded = event.detail.xhr && event.detail.xhr.qlExpanded;
+    if (!saved && !expanded) return;
+    var root = event.detail.target.querySelector("[data-search-results-root]");
+    Promise.resolve(root && root.qlSearchRestored).then(function () {
+      (expanded || []).forEach(function (id) {
+        var toggle = sheetToggle(id);
+        if (toggle && toggle.getAttribute("aria-expanded") === "false") toggle.click();
+      });
+      if (saved && history.state && history.state.qlSheet === saved.id) {
+        sheetOnLoad = saved.id;
+        restorePageSheet();
+        var panel = document.getElementById(saved.id);
+        if (panel) {
+          var control = saved.focus && panel.querySelector('[aria-label="' + CSS.escape(saved.focus) + '"]');
+          if (control && !control.disabled) control.focus({ preventScroll: true });
+          panel.querySelector(".ql-release-sheet-list").scrollTop = saved.y;
+        }
+      }
+    });
+  });
+
   function restoreSearchHistory() {
+    clearSearchMoreError();
     restoreSearchFormFromUrl();
     var results = document.getElementById("search-results");
     if (!results) return;
     var state = searchStateFromUrl();
-    if (state && searchResponseState(results) !== state) {
+    var marker = results.querySelector("[data-search-response-state]");
+    if (state && (searchResponseState(results) !== state
+        || (marker && marker.dataset.libraryRevision !== libraryRevision))) {
       var record = readSearchRecord(state);
       pendingSearchRestoreY = record && typeof record.scrollY === "number"
         ? record.scrollY : 0;
-      var snapshot = keptSearchViews[state] || readSearchSnapshot(state);
+      var snapshot = keptSearchViews[searchSnapshotKey(state)] || readSearchSnapshot(state);
       if (snapshot) {
         results.innerHTML = snapshot;
         window.htmx.process(results);
         finishSearchRestore(record);
       } else {
         results.innerHTML = "";
-        var form = document.querySelector(".ql-search-form");
-        var params = new URL(location.href).searchParams;
-        var values = {};
-        ["q", "kind", "artist_id", "artist_name", "album_id", "back_kind",
-          "back_q"].forEach(function (key) {
-          values[key] = params.get(key) || "";
-        });
-        window.htmx.ajax("POST", "/search", {
-          source: form, target: results, swap: "innerHTML", values: values,
-          headers: { "HX-History-Restore-Request": "true" }
-        }).catch(function () {});
+        requestSearchAtAddress(results);
         return;
       }
     }
@@ -4853,12 +5493,21 @@
     if (window.qlRefreshQueueBadge) window.qlRefreshQueueBadge();
   });
   cleanFlashUrl();
+  function actionBarInset(actions) {
+    if (!actions || !actions.offsetHeight) return 0;
+    var style = getComputedStyle(actions);
+    return style.position === "fixed" || style.position === "sticky"
+      ? actions.offsetHeight + parseFloat(style.bottom) : 0;
+  }
+
   // The sticky chrome (review summary row, review footer, toasts, search bar)
   // offsets itself by the header and tab-bar heights. Those vary with the
   // safe-area insets and the font, so measure the real elements and let the
   // CSS read the result; the stylesheet's rem values are fallbacks for the
   // moment before this runs.
   (function () {
+    var actionBar = null;
+    var observer = new ResizeObserver(apply);
     function apply() {
       var root = document.documentElement;
       var bar = document.querySelector(".ql-mobilebar");
@@ -4871,9 +5520,18 @@
       } else if (drawerScrollY !== null) {
         window.qlCloseDropdowns();
       }
+      var actions = document.querySelector(".ql-bulk-bar, .ql-review-footer");
+      if (actions !== actionBar) {
+        observer.disconnect();
+        actionBar = actions;
+        if (actions) observer.observe(actions);
+      }
+      root.style.setProperty("--ql-action-bar-inset", actionBarInset(actions) + "px");
     }
     window.addEventListener("resize", apply);
     window.addEventListener("load", apply);
+    document.addEventListener("htmx:afterSwap", apply);
+    document.addEventListener("htmx:historyRestore", apply);
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", apply);
     } else {
@@ -4886,6 +5544,7 @@
     var el = e.target;
     if (!el.matches || !el.matches(":focus-visible")) return;
     requestAnimationFrame(function () {
+      if (document.activeElement !== el) return;
       var r = el.getBoundingClientRect();
       var hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
       if (!hit || el.contains(hit) || hit.contains(el)) return;
@@ -4895,8 +5554,12 @@
       }
       if (!bar || bar.contains(el)) return;
       var b = bar.getBoundingClientRect();
-      if (b.top > window.innerHeight / 2) window.scrollBy(0, r.bottom - b.top + 8);
-      else window.scrollBy(0, r.top - b.bottom - 8);
+      if (b.top > window.innerHeight / 2) {
+        var inset = actionBarInset(document.querySelector(".ql-bulk-bar, .ql-review-footer"));
+        window.scrollBy(0, r.bottom - Math.min(b.top, window.innerHeight - inset) + 8);
+      } else {
+        window.scrollBy(0, r.top - b.bottom - 8);
+      }
     });
   });
   // "Load more artists" clicks itself as it approaches the viewport, so a

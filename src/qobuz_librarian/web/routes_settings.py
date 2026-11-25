@@ -63,13 +63,14 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
         name: settings_store.form_generation(name, values)
         for name in settings_store.FORM_KEYS
     }
+    saved_behaviour = {}
     if submitted_values is not None:
-        values = {
-            **values,
-            **{key: value for key, value in submitted_values.items()
-               if key in settings_store.FORM_KEYS[section]
-               and key not in settings_store.SECRET_KEYS},
-        }
+        entered = {key: value for key, value in submitted_values.items()
+                   if key in settings_store.FORM_KEYS[section]
+                   and key not in settings_store.SECRET_KEYS}
+        if section == "behaviour":
+            saved_behaviour = {key: values[key] for key in entered if entered[key] != values[key]}
+        values.update(entered)
         generations[section] = submitted_generation
     # If credentials come from environment or a secret-file declaration,
     # anything saved via the form lacks authority, so let the user know.
@@ -154,6 +155,7 @@ def _settings_response(request, *, saved=False, queued=False, connected=False,
             have_lyrics=lyric_fetch.AVAILABLE),
         "text_fields": settings_store.TEXT_FIELDS,
         "behavior_generation": generations["behaviour"],
+        "saved_behaviour": saved_behaviour,
         "lastfm_generation": generations["discover"],
         "lastfm_from_env": settings_store.supplied_by_environment(
             "LASTFM_API_KEY", values),
