@@ -26,11 +26,11 @@ from pathlib import Path
 
 from qobuz_librarian import config as cfg
 from qobuz_librarian.api.auth import AuthLost, QobuzUnavailable
-from qobuz_librarian.api.search import find_qobuz_track_by_isrc
+from qobuz_librarian.api.search import find_qobuz_tracks_by_isrc, get_track
 from qobuz_librarian.integrations.rip import flac_audio_offset, flac_audio_ok
 from qobuz_librarian.library import catalog, repair_cache, scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks, parse_track_num
-from qobuz_librarian.library.tags import similarity, strip_edition_suffix
+from qobuz_librarian.library.tags import canonical_track_title
 from qobuz_librarian.ui_cli.colors import C, fmt
 from qobuz_librarian.ui_cli.logging import log
 
@@ -53,18 +53,16 @@ def _throttle_lookup():
         _last_lookup = time.time()
 
 
-def _qobuz_track_by_isrc(isrc, token):
-    """ISRC→Qobuz track, served from the on-disk cache when present so a re-scan
-    (and any album that shares the ISRC) skips the lookup. Only a positive
-    result is cached; a miss is left uncached so an outage doesn't stick."""
-    cached = repair_cache.get_track(isrc)
+def _qobuz_tracks_by_isrc(isrc, token):
+    """Cache the search hits. Albums sharing an ISRC can need different cuts."""
+    cached = repair_cache.get_tracks(isrc)
     if cached is not None:
         return cached
     _throttle_lookup()
-    qt = find_qobuz_track_by_isrc(isrc, token)
-    if qt:
-        repair_cache.put_track(isrc, qt)
-    return qt
+    tracks = find_qobuz_tracks_by_isrc(isrc, token)
+    if tracks:
+        repair_cache.put_tracks(isrc, tracks)
+    return tracks
 
 
 def truncated_tracks_after_download(album_dir, token, tracks=None):
@@ -142,79 +140,86 @@ def _flac_decode_ok(path, *, descriptor=None):
     return True if ok is None else ok
 
 
-# How alike two titles must read before an ISRC match is trusted to be the same
-# recording. Deliberately low: the job is to reject a tag pointing at an
-# unrelated song, not to referee edition wording. An unrelated song scores
-# around 0.2 and a genuine pair 0.87 or better; "Ace of Spades" against its
-# live version scores 0.56 and stays trusted.
-_SAME_RECORDING_SIM = 0.50
-
 _MISMATCHED_DAMAGE_DIAGNOSTIC = (
     "damaged, but the recording or edition could not be confirmed for a "
     "single-track refill")
 
 
-def _same_recording(local_title, qobuz_title):
-    """True when the matched Qobuz track reads like the same song as the file.
-
-    An ISRC tag anchors identity for the whole repair path, but nothing
-    guarantees the tag itself is right. A mis-tagged file resolves to a
-    stranger, and a stranger's duration is not evidence about this file.
-    Edition suffixes are stripped first so a remaster still counts as itself.
-    Either title missing returns True, which leaves files that carry nothing to
-    compare exactly where they were.
-    """
-    if not local_title or not qobuz_title:
-        return True
-    return similarity(strip_edition_suffix(local_title),
-                      strip_edition_suffix(qobuz_title)) >= _SAME_RECORDING_SIM
-
-
-_TITLE_LABEL_RE = re.compile(r"\(([^()]*)\)|\[([^\[\]]*)\]|\s[-\u2013]\s+(.+)$")
 _BRACKET_LABEL_RE = re.compile(r"\(([^()]*)\)|\[([^\[\]]*)\]")
-_CUT_WORD_RE = re.compile(
-    r"\b(?:(re)?(mix|master)(?:e[ds]|s)?|(mono|stereo|live|acoustic|instrumental|demo|"
-    r"extended|edit|session|take)s?)\b", re.IGNORECASE)
-_YEAR_RE = re.compile(r"\b(?:19|20)[0-9]{2}\b")
 
 
-def _cut(versions, titles, folders=()):
-    """The mix, master and performance words in version fields, title labels
-    and bracketed folder labels, with any year given beside a mix or master.
-    A folder's " - " part is its name, as in "1994 - Live Through This"."""
-    labels = list(versions)
-    for names, pattern in ((titles, _TITLE_LABEL_RE), (folders, _BRACKET_LABEL_RE)):
-        for name in names:
-            labels += [next(part for part in match.groups() if part is not None)
-                       for match in pattern.finditer(name or "")]
-    words, years = set(), set()
-    for label in filter(None, labels):
-        for match in _CUT_WORD_RE.finditer(label):
-            prefix, kind, performance = match.groups()
-            if performance:
-                words.add(performance.lower())
-                continue
-            kind = kind.lower()
-            words.add("remix" if prefix and kind == "mix" else kind)
-            years.update(_YEAR_RE.findall(label))
-    return words, years
+def _repair_title_parts(title, version=""):
+    labels = {canonical_track_title(a or b) for a, b in _BRACKET_LABEL_RE.findall(title or "")}
+    packaging = {label for label in labels if catalog._PACKAGING_LABEL_RE.fullmatch(label)}
+    return catalog._edition_title_parts(title, version, known_versions=packaging)
 
 
-def _same_cut(local, qobuz_track, album_dir):
-    """Whether a file and the Qobuz track that shares its ISRC name the same
-    mix, master and performance. A remaster, a live take or an extended mix
-    can carry the original's ISRC."""
-    album = qobuz_track.get("album") or {}
-    version = "" if catalog._version_in_title(qobuz_track) else qobuz_track.get("version")
-    track_cut, track_years = _cut([version], [qobuz_track.get("title")])
-    album_cut, album_years = _cut([album.get("version")], [album.get("title")])
-    held, held_years = _cut([], [local.get("title"), local.get("album")],
-                            [album_dir.name])
-    wanted, wanted_years = track_cut | album_cut, track_years | album_years
-    if wanted == held:
-        return not (wanted_years and held_years and not wanted_years & held_years)
-    # An album's own "Remastered" never reaches files filed as Album (Year).
-    return not held and not track_cut and album_cut == {"master"}
+def _same_recording(local, track, album_dir):
+    """A shared ISRC can name two cuts, or even two different songs."""
+    version = "" if catalog._version_in_title(track) else track.get("version")
+    title, track_labels = _repair_title_parts(track.get("title"), version)
+    held_title, held = _repair_title_parts(local.get("title"))
+    if not title or title != held_title:
+        return False
+    album = track.get("album") or {}
+    _, album_labels = catalog._edition_title_parts(album.get("title"), album.get("version"))
+    _, local_labels = catalog._edition_title_parts(local.get("album"))
+    held |= local_labels
+    for match in _BRACKET_LABEL_RE.finditer(album_dir.name):
+        label = match.group(1) or match.group(2)
+        if catalog._VERSION_LABEL_RE.search(label):
+            held |= catalog._label_parts(label)
+    held = catalog._recording_labels(held)
+    track_cut = catalog._recording_labels(track_labels)
+    album_cut = catalog._recording_labels(album_labels)
+    if held == track_cut | album_cut:
+        return True
+    # Qobuz also uses a bare album-level "Remastered" on otherwise unlabelled files.
+    return not held and not track_cut and album_cut in ({"remaster"}, {"remastered"})
+
+
+def _matching_repair_track(local, tracks, album_dir):
+    artists = {canonical_track_title(name) for name in local.get("artists") or ()} - {""}
+    matches = []
+    for track in tracks:
+        album = track.get("album") or {}
+        performer = track.get("performer") or album.get("artist") or {}
+        name = canonical_track_title(performer.get("name"))
+        if artists and name not in artists:
+            continue
+        if _same_recording(local, track, album_dir):
+            matches.append(track)
+    if len(matches) > 1:
+        title, _ = catalog._edition_title_parts(local.get("album"))
+        matches = [t for t in matches if title and
+                   catalog._edition_title_parts((t.get("album") or {}).get("title"))[0] == title]
+    if len(matches) > 1:
+        matches = [t for t in matches if
+                   parse_track_num(t.get("track_number")) == local.get("tracknumber")
+                   and parse_track_num(t.get("media_number") or 1) == local.get("discnumber")]
+    return matches[0] if len(matches) == 1 else None
+
+
+def refill_recording(entry, album_dir, album, token):
+    """Check the selected release and the current track before moving the original."""
+    with _HeldRepairSource(album_dir, entry["path"]) as source:
+        local = _read_held_audio_meta(source)
+        isrc = local.get("isrc")
+        if not isrc or isrc != catalog._norm_isrc(entry.get("isrc")):
+            return None
+        release = {key: album.get(key) for key in ("id", "title", "version", "artist")}
+        tracks = [{**t, "album": release} for t in (album.get("tracks") or {}).get("items") or []
+                  if catalog._norm_isrc(t.get("isrc")) == isrc]
+        choice = _matching_repair_track(local, tracks or [entry["qobuz_track"]], album_dir)
+        if not choice or not choice.get("id"):
+            return None
+        track = get_track(choice["id"], token)
+        if (not track
+                or catalog._norm_isrc(track.get("isrc")) != isrc
+                or tracks and str((track.get("album") or {}).get("id")) != str(album.get("id"))
+                or not source.intact()):
+            return None
+        return _matching_repair_track(local, [track], album_dir)
 
 
 def _stat_identity(value):
@@ -408,6 +413,7 @@ def _read_held_audio_meta(source):
     return {
         "title": title,
         "album": first("album"),
+        "artists": tags.get("artist") or tags.get("albumartist") or [],
         "isrc": first("isrc").strip().replace("-", "").upper(),
         "tracknumber": parse_track_num(first("tracknumber")),
         "discnumber": parse_track_num(first("discnumber")) or 1,
@@ -487,18 +493,15 @@ def _scan_held_repair_source(
 
     if not isrc:
         entry = {"path": path, "title": title, "size_bytes": source.size}
-        if source.size < 50_000:
-            entry["diagnostic"] = (
-                f"likely-corrupted ({source.size:,} B); hand-verify "
-                "before refilling")
-        elif not decodes():
+        ok = flac_audio_ok(source.path, descriptor=source.descriptor) if decode else True
+        if ok is None or not source.intact():
+            report["unverified"] += 1
+            return
+        if not ok:
             entry["diagnostic"] = (
                 "won't decode (frame-CRC or mid-file damage); "
                 "re-download or replace from another source")
-        if source.intact():
-            report["no_isrc_tag"].append(entry)
-        else:
-            report["unverified"] += 1
+        report["no_isrc_tag"].append(entry)
         return
 
     sample_rate = int(et.get("sample_rate") or 0)
@@ -527,11 +530,11 @@ def _scan_held_repair_source(
         _append_verified_ok(report, source, isrc, record_isrc=False)
         return
 
-    qt = _qobuz_track_by_isrc(isrc, token)
+    hits = _qobuz_tracks_by_isrc(isrc, token)
     if not source.intact():
         report["unverified"] += 1
         return
-    if qt is None:
+    if not hits:
         # These files have an ISRC, it just matched nothing at Qobuz. A broken
         # one belongs in the same bucket carrying a diagnostic, not under
         # "no ISRC tag", which is where the report files them by name.
@@ -546,6 +549,8 @@ def _scan_held_repair_source(
             report["unverified"] += 1
         return
 
+    matched = _matching_repair_track(et, hits, source.album_dir)
+    qt = matched or hits[0]
     try:
         qdur = float(qt.get("duration") or 0)
     except (TypeError, ValueError):
@@ -566,8 +571,7 @@ def _scan_held_repair_source(
         "local_title": title,
         "local_track_number": parse_track_num(et.get("tracknumber")),
     }
-    same_recording = (_same_recording(title, qt.get("title"))
-                      and _same_cut(et, qt, source.album_dir))
+    same_recording = matched is not None
 
     def damaged(reason, **extra):
         """Offer a track refill only when its recording and edition match."""

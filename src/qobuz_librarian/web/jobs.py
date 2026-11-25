@@ -928,7 +928,7 @@ def prepare_recovery_resolution(location, receipt):
     return job_persistence.prepare_recovery_resolution(location, receipt)
 
 
-def resolve_recovery_resolution(plan) -> bool:
+def resolve_recovery_resolution(plan, *, removed=False) -> bool:
     """Durably retire a restored carrier, then refresh any live history row."""
     job_ids = (
         {job_id for job_id, _raw in plan.rows}
@@ -943,7 +943,7 @@ def resolve_recovery_resolution(plan) -> bool:
         job._lock.acquire()
     try:
         # A full persist takes the same job lock before the database lock.
-        updates = job_persistence.resolve_recovery_resolution(plan)
+        updates = job_persistence.resolve_recovery_resolution(plan, removed=removed)
         if updates is None:
             return False
         live_by_id = {job.id: job for job in live_jobs}
@@ -953,6 +953,8 @@ def resolve_recovery_resolution(plan) -> bool:
                 continue
             job.recoveries = state["recoveries"]
             job.attention = state["attention"]
+            if "error" in state:
+                job.error = state["error"]
         return True
     finally:
         for job in reversed(live_jobs):
@@ -2479,8 +2481,7 @@ def _fail_interrupted_run(job, *, unsettled, finished_upgrades, returns_picks):
     else:
         job.error = restart + "Run it again to retry."
     if job.recoveries:
-        job.error = (restart + "The original files were kept; check "
-                     "them before retrying.")
+        job.error = restart + job_persistence.REPAIR_CHECK_ORIGINALS
     job.finished_at = job.finished_at or time.time()
     job._cut_short_this_start = True
 

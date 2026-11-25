@@ -71,8 +71,8 @@ def test_shallow_scan_catches_frame_crc_corruption(tmp_path, _need_tools):
     _make_flac(untagged, isrc=None)
     _frame_corrupt(untagged)
 
-    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
-               return_value=_QT):
+    with patch("qobuz_librarian.repair_log.find_qobuz_tracks_by_isrc",
+               return_value=[{**_QT, "title": "01"}]):
         r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=False)
 
     assert "01.flac" in _names(r["verified_truncated"]), (
@@ -89,13 +89,18 @@ def test_shallow_scan_does_not_false_flag_healthy(tmp_path, _need_tools):
     _make_flac(album / "01.flac")              # normal noise
     _make_flac(album / "02.flac", amp=0.01)    # quiet but valid
     assert _decodes(album / "01.flac") and _decodes(album / "02.flac")
+    short = album / "03.flac"
+    _make_flac(short, seconds=0.1, isrc=None)
+    assert short.stat().st_size < 50_000 and _decodes(short)
 
-    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
-               return_value=_QT):
+    with patch("qobuz_librarian.repair_log.find_qobuz_tracks_by_isrc",
+               return_value=[_QT]):
         r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=False)
 
     assert r["verified_truncated"] == [], f"healthy files must not be flagged (got {r})"
     assert r["verified_ok"] == 2
+    assert _names(r["no_isrc_tag"]) == {short.name}
+    assert "diagnostic" not in r["no_isrc_tag"][0]
 
 
 def _qt(title, duration, isrc):
@@ -113,9 +118,9 @@ def test_repair_leaves_wrong_recordings_and_editions_alone(
     _make_flac(p, isrc="GBBTF1800330")
     assert _decodes(p)
 
-    with patch("qobuz_librarian.repair_log.find_qobuz_track_by_isrc",
-               return_value=_qt("A Rock 'n' Roll Swindler", 407.0,
-                                "GBBTF1800330")):
+    with patch("qobuz_librarian.repair_log.find_qobuz_tracks_by_isrc",
+               return_value=[_qt("A Rock 'n' Roll Swindler", 407.0,
+                                 "GBBTF1800330")]):
         r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
 
     assert r["verified_truncated"] == [], (
@@ -125,7 +130,7 @@ def test_repair_leaves_wrong_recordings_and_editions_alone(
     assert r["isrc_mismatch"][0]["local_title"] == "The Five Knuckle Shuffle"
 
     live = {**_qt(p.stem, 407.0, "GBBTF1800330"), "version": "Live"}
-    with patch.object(repair_log, "find_qobuz_track_by_isrc", return_value=live):
+    with patch.object(repair_log, "find_qobuz_tracks_by_isrc", return_value=[live]):
         r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
     assert r["verified_truncated"] == []
 
@@ -136,13 +141,13 @@ def test_repair_leaves_wrong_recordings_and_editions_alone(
     replacement = {
         **_qt(p.stem, 4.0, "GBBTF1800330"), "version": "2009 Remaster",
     }
-    with patch.object(repair_log, "find_qobuz_track_by_isrc", return_value=replacement):
+    with patch.object(repair_log, "find_qobuz_tracks_by_isrc", return_value=[replacement]):
         r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
     assert not r["verified_truncated"]
     assert r["isrc_mismatch"][0].get("diagnostic")
 
     replacement["version"] = "2026 Mix"
-    with patch.object(repair_log, "find_qobuz_track_by_isrc", return_value=replacement):
+    with patch.object(repair_log, "find_qobuz_tracks_by_isrc", return_value=[replacement]):
         r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
     assert _names(r["verified_truncated"]) == {p.name}
 
@@ -152,6 +157,6 @@ def test_repair_leaves_wrong_recordings_and_editions_alone(
     tags.save()
     remastered = {**_qt(p.stem, 4.0, "GBBTF1800330"),
                   "album": {"title": "Yes Sir, I Will", "version": "Remastered"}}
-    with patch.object(repair_log, "find_qobuz_track_by_isrc", return_value=remastered):
+    with patch.object(repair_log, "find_qobuz_tracks_by_isrc", return_value=[remastered]):
         r = repair_log.scan_dir_for_isrc_repairs(album, "token", deep=True)
     assert _names(r["verified_truncated"]) == {p.name}

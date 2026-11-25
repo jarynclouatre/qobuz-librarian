@@ -1814,8 +1814,8 @@ def prepare_recovery_resolution(
 
 
 def resolve_recovery_resolution(
-        plan: RecoveryResolutionPlan) -> dict[str, dict] | None:
-    """CAS-remove the exact retained records after Restore succeeds."""
+        plan: RecoveryResolutionPlan, *, removed=False) -> dict[str, dict] | None:
+    """Clear the exact retained records after a backup is restored or removed."""
     if type(plan) is not RecoveryResolutionPlan:
         return None
     resolved = {}
@@ -1827,7 +1827,7 @@ def resolve_recovery_resolution(
             conn.execute("BEGIN IMMEDIATE")
             for job_id, expected_raw in plan.rows:
                 row = conn.execute(
-                    "SELECT recoveries, attention FROM jobs WHERE id=?",
+                    "SELECT recoveries, attention, execute_kind, error FROM jobs WHERE id=?",
                     (job_id,),
                 ).fetchone()
                 if row is None or row[0] != expected_raw:
@@ -1856,10 +1856,17 @@ def resolve_recovery_resolution(
                 attention = row[1] or ""
                 if not remaining and attention == "recovery":
                     attention = ""
+                error = row[3]
+                if (not remaining and row[2] == "repair" and error
+                        and error.startswith(RESTART_INTERRUPTED)
+                        and error.endswith(REPAIR_CHECK_ORIGINALS)):
+                    outcome = "Backup removed." if removed else "Backup restored."
+                    error = (error.removesuffix(REPAIR_CHECK_ORIGINALS)
+                             + outcome + " Scan again from Repair to retry.")
                 encoded = _canonical_json(remaining)
                 changed = conn.execute(
-                    "UPDATE jobs SET recoveries=?, attention=? WHERE id=?",
-                    (encoded, attention, job_id),
+                    "UPDATE jobs SET recoveries=?, attention=?, error=? WHERE id=?",
+                    (encoded, attention, error, job_id),
                 )
                 if changed.rowcount != 1:
                     conn.rollback()
@@ -1868,6 +1875,8 @@ def resolve_recovery_resolution(
                     "recoveries": remaining,
                     "attention": attention,
                 }
+                if error != row[3]:
+                    resolved[job_id]["error"] = error
             conn.commit()
             return resolved
         except (sqlite3.Error, TypeError, ValueError) as exc:
@@ -2023,6 +2032,7 @@ _HISTORY_SQL = (
 # keeps a Retry, and only the opening of its summary or error tells it apart
 # from a stop or failure of its own.
 RESTART_INTERRUPTED = "Interrupted by a restart."
+REPAIR_CHECK_ORIGINALS = "The original files were kept; check them before retrying."
 
 # Saved with a Search download while it holds a saved queue entry, which the
 # terminal can settle without the web app seeing it.

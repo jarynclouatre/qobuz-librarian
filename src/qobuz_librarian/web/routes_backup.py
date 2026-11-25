@@ -655,7 +655,7 @@ def _discard_backup_sync(request: Request, backup: str) -> str:
                 f" The lyrics of {html.escape(backup_mod.some_names(lyrics))} were "
                 f"copied onto the album's {'track' if len(lyrics) == 1 else 'tracks'} first."
                 if lyrics else "")
-            if job_mgr.resolve_recovery_resolution(resolution_plan):
+            if job_mgr.resolve_recovery_resolution(resolution_plan, removed=True):
                 note = _diagnostics_result_notice(
                     "success", "Removed the backup. Every file it held is "
                     f"verified present at {dest}." if identical else
@@ -725,7 +725,7 @@ def _release_undo_copy_sync(request: Request, backup: str) -> str:
                 f" The lyrics of {html.escape(backup_mod.some_names(lyrics))} were "
                 f"copied onto the album's {'track' if len(lyrics) == 1 else 'tracks'} first."
                 if lyrics else "")
-            if job_mgr.resolve_recovery_resolution(resolution_plan):
+            if job_mgr.resolve_recovery_resolution(resolution_plan, removed=True):
                 note = _diagnostics_result_notice(
                     "success", f"Deleted the hi-res originals of {album}. "
                     f"That downsample can no longer be undone.{kept}")

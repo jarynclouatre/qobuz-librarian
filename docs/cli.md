@@ -122,7 +122,7 @@ docker compose run --rm qobuz-librarian cli --help
 | `--artist NAME` | One artist: fill gaps, then offer albums you're missing |
 | `--library-walk` | Every artist in turn, queueing as you go (menu: Library walk) |
 | `--gap-fill`, `--album-gaps` | Fill missing tracks in every incomplete album you own (menu: Gap Fill) |
-| `--repair` | Re-download damaged (truncated or corrupt) tracks you own |
+| `--repair` | Re-download truncated or corrupt tracks. Whole-album repair requires interactive confirmation. `--yes` covers matched tracks only. |
 | `--upgrade-walk` | Review quality upgrades, artist by artist |
 | `--downsample-walk` | Bring files above 48 kHz down to 44.1 / 48 kHz in place |
 | `--lyrics-walk` | Fetch missing lyrics, and synced lyrics for tracks with plain ones |

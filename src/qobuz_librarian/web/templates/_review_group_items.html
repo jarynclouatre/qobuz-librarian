@@ -60,6 +60,15 @@
       <span class="ql-review-truncated-more">+{{ (c.payload.verified_truncated | length) - 12 }} more</span>
       {% endif %}
     </span>
+    {% elif c.kind == 'redownload' and c.payload.damaged %}
+    <span class="ql-review-truncated">
+      {% for t in c.payload.damaged[:12] %}
+      <span class="ql-review-truncated-line">{{ t.file or t.title }}</span>
+      {% endfor %}
+      {% if c.payload.damaged | length > 12 %}
+      <span class="ql-review-truncated-more">+{{ c.payload.damaged | length - 12 }} more</span>
+      {% endif %}
+    </span>
     {% endif %}
   </span>
 </label>

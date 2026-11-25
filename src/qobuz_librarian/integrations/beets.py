@@ -4147,6 +4147,7 @@ def _build_import_override_yaml(
     flat=False,
     places=None,
     disc_folders=None,
+    repair_token=None,
 ):
     """The beets config override the import runs with, as a YAML string. Forces
     the keys the import contract depends on: library/directory, non-
@@ -4185,8 +4186,12 @@ def _build_import_override_yaml(
     )
     # Beets takes an as-is album whose tracks share one album artist, as
     # Qobuz's Various Artists releases do, for a single-artist album.
-    if compilation:
-        override_yaml += "  set_fields:\n    comp: 'True'\n"
+    if compilation or repair_token:
+        override_yaml += "  set_fields:\n"
+        if compilation:
+            override_yaml += "    comp: 'True'\n"
+        if repair_token:
+            override_yaml += f"    {_repair_import_key(repair_token)}: '1'\n"
     # Another program reading the library, such as `beet web`, can hold it
     # longer than Beets' default five seconds.
     override_yaml += f"timeout: {beets_db.timeout():g}\n"
@@ -4313,6 +4318,7 @@ def _prepare_for_beets_run(
     roots, ownership_out=None, source_files_out=None, album_dir=None,
     places=None,
     folder=None,
+    repair_token=None,
 ):
     """Common setup shared by the path and per-album entry points:
     resolve Beets' own runtime, prep tags on the staged FLACs, and write the
@@ -4415,6 +4421,7 @@ def _prepare_for_beets_run(
                 _build_import_override_yaml(
                     plugin_config,
                     ownership_enabled=ownership_enabled,
+                    repair_token=repair_token,
                     album_folder=album_folder,
                     flat=(album_folder is not None and album_dir is not None
                           and tracks_sit_flat(album_dir)),
@@ -4903,7 +4910,7 @@ def relocate_disc_album_artwork(album_dir) -> bool:
 
 def beets_import_paths(
     consolidate=True, *, album_dirs, source_files_out=None, album_dir=None,
-    protected_paths=None, folder=None,
+    protected_paths=None, folder=None, repair_token=None,
 ):
     """Run beets on explicit staged albums and return a success bool, or
     raise MusicDiskFull when beets stopped on a full disk.
@@ -4919,7 +4926,7 @@ def beets_import_paths(
     prepared_sources = source_files_out if source_files_out is not None else []
     override_path, cleanup, runtime = _prepare_for_beets_run(
         roots=roots, source_files_out=prepared_sources, album_dir=album_dir,
-        folder=folder,
+        folder=folder, **({"repair_token": repair_token} if repair_token else {}),
     )
     if cleanup is None:
         return False
@@ -6700,7 +6707,7 @@ def _beets_snapshot_from_record(record):
         return None
 
 
-def _captured_beets_item_ids(connection, snapshot):
+def _captured_beets_item_ids(connection, snapshot, *, kept_ids=frozenset()):
     columns = _replacement_catalogue_columns(connection)
     expected = (snapshot.album_columns, snapshot.item_columns,
                 snapshot.album_attribute_columns, snapshot.item_attribute_columns)
@@ -6721,15 +6728,21 @@ def _captured_beets_item_ids(connection, snapshot):
         connection, "item_attributes", snapshot.item_attribute_columns,
         "entity_id", snapshot.item_ids,
     )
-    if items:
+    present = frozenset(row[snapshot.item_columns.index("id")] for row in items)
+    if not kept_ids.issubset(present):
+        raise sqlite3.IntegrityError("a kept Beets item is missing")
+    if present != kept_ids:
         unchanged("items", items, snapshot.item_rows)
         unchanged("item metadata", attributes, snapshot.item_attribute_rows)
         album_ids = snapshot.album_ids
     else:
-        if attributes:
-            raise sqlite3.IntegrityError("captured Beets item metadata remains")
+        item_id = snapshot.item_columns.index("id")
+        owner = snapshot.item_attribute_columns.index("entity_id")
+        unchanged("items", items, [r for r in snapshot.item_rows if r[item_id] in kept_ids])
+        unchanged("item metadata", attributes,
+                  [r for r in snapshot.item_attribute_rows if r[owner] in kept_ids])
         attribute_ids = tuple(row[snapshot.item_attribute_columns.index("id")]
-                              for row in snapshot.item_attribute_rows)
+                              for row in snapshot.item_attribute_rows if row[owner] not in kept_ids)
         if _consolidation_rows_for_ids(
                 connection, "item_attributes", snapshot.item_attribute_columns,
                 "id", attribute_ids):
@@ -6745,7 +6758,7 @@ def _captured_beets_item_ids(connection, snapshot):
     albums = _consolidation_rows_for_ids(
         connection, "albums", snapshot.album_columns, "id", snapshot.album_ids,
     )
-    if not items and "artpath" in snapshot.album_columns:
+    if present == kept_ids and "artpath" in snapshot.album_columns:
         # An album that took in its replacement's tracks took its cover
         # when it had none.
         art = snapshot.album_columns.index("artpath")
@@ -6758,7 +6771,7 @@ def _captured_beets_item_ids(connection, snapshot):
         connection, "album_attributes", snapshot.album_attribute_columns,
         "entity_id", snapshot.album_ids,
     ), wanted_attributes)
-    return frozenset(snapshot.item_ids) if items else frozenset()
+    return present
 
 
 def _replacement_catalogue_columns(connection):
@@ -6966,9 +6979,111 @@ def _adopt_replacement_album(connection, album_id, snapshot, item_ids, album_col
     return True
 
 
+def _repair_import_key(token):
+    if not is_hex64(token):
+        raise ValueError("invalid Repair receipt token")
+    return "ql_repair_" + token
+
+
+def _repair_stamp_owners(connection, key, table):
+    rows = connection.execute(
+        f"SELECT entity_id, value FROM {table} WHERE key = ?", (key,)).fetchall()
+    owners = {row[0] for row in rows}
+    if len(owners) != len(rows) or any(row[1] != "1" for row in rows):
+        raise sqlite3.IntegrityError("the Repair import field changed")
+    return owners
+
+
+def _repair_import_rows(connection, token, snapshot):
+    key = _repair_import_key(token)
+    items = _repair_stamp_owners(connection, key, "item_attributes")
+    albums = _repair_stamp_owners(connection, key, "album_attributes")
+    if not items and not albums:
+        return {}, set()
+    if not albums or not items or albums.intersection(snapshot.album_ids) or items.intersection(snapshot.item_ids):
+        raise sqlite3.IntegrityError("the Repair import overlaps another Beets entry")
+    album_rows = _consolidation_rows_for_ids(connection, "albums", ("id",), "id", albums)
+    members = _consolidation_rows_for_ids(connection, "items", ("id", "path", "album_id"), "album_id", albums)
+    if {row[0] for row in album_rows} != albums or {row[2] for row in members} != albums or (
+            {row[0] for row in members} != items):
+        raise sqlite3.IntegrityError("the Repair import's album membership changed")
+    return {row[0]: _catalogue_item_path(row[1], allow_external=True) for row in members}, albums
+
+
+def prepare_repair_import(backup, staged_dirs):
+    """Seal the original entries before beets marks this Repair's new items and albums."""
+    from qobuz_librarian.library import backup as backup_mod
+
+    try:
+        token = backup.receipt["token"]
+        key = _repair_import_key(token)
+        snapshot = capture_beets_album_entries(backup.receipt["origin"])
+        staged = [os.fspath(Path(d).relative_to(cfg.STAGING_DIR)) for d in staged_dirs]
+        if snapshot is None or not staged or any(d == "." or ".." in Path(d).parts for d in staged):
+            return None
+        database = beets_db.path()
+        if database is None or database.exists() and beets_db.read(database, lambda conn: any(
+                conn.execute(f"SELECT 1 FROM {table} WHERE key=? LIMIT 1", (key,)).fetchone()
+                for table in ("item_attributes", "album_attributes"))):
+            return None
+        record = json.dumps({"beets": _beets_snapshot_record(snapshot), "staged": staged},
+                            sort_keys=True, separators=(",", ":"))
+        return token if backup_mod.mark_repair_import(backup, record) else None
+    except (OSError, sqlite3.Error, KeyError, TypeError, ValueError):
+        return None
+
+
+def undo_repair_import(receipt, record, *, check_only=False):
+    """Remove only the marked Beets import of a restored, unfinished Repair."""
+    try:
+        snapshot = _beets_snapshot_from_record(record["beets"])
+        staged = record["staged"]
+        if snapshot is None or not isinstance(staged, list) or not staged:
+            return False
+        roots = [Path(receipt["origin"])]
+        for name in staged:
+            relative = Path(name)
+            if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                return False
+            roots.append(Path(cfg.STAGING_DIR) / relative)
+        database = beets_db.path()
+        if database is None or not database.exists():
+            return database is not None and not snapshot.item_ids
+        with beets_db.transaction(database) as connection:
+            _replacement_catalogue_columns(connection)
+            items, albums = _repair_import_rows(connection, receipt["token"], snapshot)
+            if not items:
+                # Beets adds the staged entries before it stamps the import.
+                # A stop between those transactions leaves no proof to remove them.
+                old_ids = set(snapshot.item_ids)
+                for item_id, raw in connection.execute("SELECT id, path FROM items"):
+                    if item_id not in old_ids:
+                        path = _catalogue_item_path(raw, allow_external=True)
+                        if any(stage in path.parents for stage in roots[1:]):
+                            return False
+                return True
+            if (_captured_beets_item_ids(connection, snapshot) != set(snapshot.item_ids)
+                    or any(not any(root in path.parents for root in roots) for path in items.values())):
+                return False
+            if check_only:
+                return True
+            for table, ids in (("item", items), ("album", albums)):
+                placeholders = ",".join("?" for _ in ids)
+                connection.execute(f"DELETE FROM {table}_attributes WHERE entity_id IN ({placeholders})",
+                                   tuple(ids))
+                if connection.execute(f"DELETE FROM {table}s WHERE id IN ({placeholders})",
+                                      tuple(ids)).rowcount != len(ids):
+                    raise sqlite3.IntegrityError("the Repair import changed")
+        clear_scan_caches()
+        return True
+    except (OSError, sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+        log.warning(f"  Couldn't settle the restored Repair's Beets entries: {exc}")
+        return False
+
+
 def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
-                                  *, before_commit=None):
-    """Retire only captured rows after proving the replacement catalogue."""
+                                  *, before_commit=None, kept_paths=(), repair_token=None):
+    """Retire captured rows for replacements. Files kept in place keep their entries."""
     if not isinstance(snapshot, BeetsAlbumSnapshot):
         return False
     try:
@@ -6976,8 +7091,10 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
         expected_paths = tuple(
             sorted({_catalogue_item_path(path) for path in replacement_paths})
         )
+        kept_paths = {_catalogue_item_path(path) for path in kept_paths}
         if (
             not expected_paths
+            or not kept_paths.issubset(expected_paths)
             or len(expected_paths) > 4096
             or any(path.parent != replacement_root and replacement_root not in path.parents
                    for path in expected_paths)
@@ -6997,12 +7114,23 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
                 album_attribute_columns,
                 item_attribute_columns,
             ) = _replacement_catalogue_columns(connection)
-            item_ids = tuple(sorted(_captured_beets_item_ids(connection, snapshot)))
-
             item_id_index = item_columns.index("id")
             item_path_index = item_columns.index("path")
-            captured_ids = set(item_ids)
-            replacement_rows = {path: [] for path in expected_paths}
+            kept_ids = set()
+            kept_albums = set()
+            indexed = set()
+            if kept_paths:
+                for row in snapshot.item_rows:
+                    path = _catalogue_item_path(row[item_path_index], allow_external=True)
+                    if path in kept_paths:
+                        if path in indexed:
+                            raise sqlite3.IntegrityError("a kept file has multiple Beets entries")
+                        indexed.add(path)
+                        kept_ids.add(row[item_id_index])
+                        kept_albums.add(row[item_columns.index("album_id")])
+            captured_ids = _captured_beets_item_ids(connection, snapshot, kept_ids=kept_ids)
+            retiring_ids = tuple(sorted(captured_ids - kept_ids))
+            replacement_rows = {path: [] for path in expected_paths if path not in kept_paths}
             for row in connection.execute(
                 f"SELECT {','.join(_sql_identifier(column) for column in item_columns)} "
                 "FROM items ORDER BY id"
@@ -7018,40 +7146,62 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
             if any(len(ids) != 1 for ids in replacement_rows.values()):
                 raise sqlite3.IntegrityError("replacement catalogue is incomplete")
 
+            if repair_token is not None:
+                stamped, _ = _repair_import_rows(connection, repair_token, snapshot)
+                if not stamped and not retiring_ids and captured_ids != set(snapshot.item_ids):
+                    return before_commit is None or before_commit()
+                if stamped != {ids[0]: path for path, ids in replacement_rows.items()}:
+                    raise sqlite3.IntegrityError("the Repair import did not file the expected tracks")
+                key = _repair_import_key(repair_token)
+                for table in ("item_attributes", "album_attributes"):
+                    connection.execute(f"DELETE FROM {table} WHERE key=?", (key,))
+
             retiring_album_ids = []
-            if item_ids:
-                placeholders = ",".join("?" for _ in item_ids)
+            if captured_ids:
+                placeholders = ",".join("?" for _ in captured_ids)
+                adopt_album_id = None
                 for album_id in snapshot.album_ids:
                     remaining = connection.execute(
                         f"SELECT 1 FROM items WHERE album_id = ? "
                         f"AND id NOT IN ({placeholders}) LIMIT 1",
-                        (album_id, *item_ids),
+                        (album_id, *captured_ids),
                     ).fetchone()
                     if remaining is None:
-                        retiring_album_ids.append(album_id)
-                if len(retiring_album_ids) == 1 and _adopt_replacement_album(
-                        connection, retiring_album_ids[0], snapshot,
+                        if album_id not in kept_albums:
+                            retiring_album_ids.append(album_id)
+                        elif len(snapshot.album_ids) == 1:
+                            adopt_album_id = album_id
+                if len(retiring_album_ids) == 1:
+                    adopt_album_id = retiring_album_ids[0]
+                if adopt_album_id and replacement_rows and _adopt_replacement_album(
+                        connection, adopt_album_id, snapshot,
                         [ids[0] for ids in replacement_rows.values()],
                         album_columns):
                     retiring_album_ids = []
+                elif adopt_album_id is not None and adopt_album_id in kept_albums:
+                    raise sqlite3.IntegrityError("the kept Beets album could not take the replacements")
+            if retiring_ids:
+                placeholders = ",".join("?" for _ in retiring_ids)
                 _carry_item_fields(
                     connection,
                     {item_id: _catalogue_item_path(raw, allow_external=True)
                      for item_id, raw in connection.execute(
-                         f"SELECT id, path FROM items WHERE id IN ({placeholders})", item_ids)},
+                         f"SELECT id, path FROM items WHERE id IN ({placeholders})", retiring_ids)},
                     {path: ids[0] for path, ids in replacement_rows.items()},
                     item_columns)
 
                 deleted_attributes = connection.execute(
                     f"DELETE FROM item_attributes WHERE entity_id IN ({placeholders})",
-                    item_ids,
+                    retiring_ids,
                 )
-                if deleted_attributes.rowcount != len(snapshot.item_attribute_rows):
+                expected_attributes = sum(row[item_attribute_columns.index("entity_id")] not in kept_ids
+                                          for row in snapshot.item_attribute_rows)
+                if deleted_attributes.rowcount != expected_attributes:
                     raise sqlite3.IntegrityError("captured beets item metadata changed")
                 deleted_items = connection.execute(
-                    f"DELETE FROM items WHERE id IN ({placeholders})", item_ids
+                    f"DELETE FROM items WHERE id IN ({placeholders})", retiring_ids
                 )
-                if deleted_items.rowcount != len(item_ids):
+                if deleted_items.rowcount != len(retiring_ids):
                     raise sqlite3.IntegrityError("captured beets items changed")
 
             if retiring_album_ids:
@@ -7074,7 +7224,7 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
                 if deleted_albums.rowcount != len(retiring_album_ids):
                     raise sqlite3.IntegrityError("captured beets albums changed")
 
-            if not item_ids:
+            if not captured_ids and repair_token is None:
                 connection.rollback()
                 return before_commit is None or before_commit()
 
@@ -7082,17 +7232,17 @@ def retire_replaced_beets_entries(snapshot, replacement_dir, replacement_paths,
                 if current.execute("PRAGMA quick_check").fetchone() != ("ok",):
                     return False
                 if _consolidation_rows_for_ids(
-                    current, "items", item_columns, "id", item_ids
+                    current, "items", item_columns, "id", retiring_ids
                 ):
                     return False
                 counts = {path: 0 for path in expected_paths}
-                for item_id, raw_path in current.execute("SELECT id, path FROM items"):
-                    if item_id in captured_ids:
-                        return False
+                for (raw_path,) in current.execute("SELECT path FROM items"):
                     path = _catalogue_item_path(raw_path, allow_external=True)
                     if path in counts:
                         counts[path] += 1
-                return all(count == 1 for count in counts.values())
+                unindexed = kept_paths - indexed
+                return all(count == (0 if path in unindexed else 1)
+                           for path, count in counts.items())
             if not validate(connection):
                 raise sqlite3.IntegrityError("the replacement catalogue was not exact")
             if before_commit is not None and not before_commit():

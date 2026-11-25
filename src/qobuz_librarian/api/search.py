@@ -272,25 +272,27 @@ def search_tracks(query, token, limit=10):
 
 
 def find_qobuz_track_by_isrc(isrc, token):
-    """Look up a Qobuz track by exact ISRC. Returns the track dict or None. Qobuz
+    """The first Qobuz track with this exact ISRC, or None."""
+    return next(iter(find_qobuz_tracks_by_isrc(isrc, token)), None)
+
+
+def find_qobuz_tracks_by_isrc(isrc, token):
+    """Look up Qobuz tracks by exact ISRC. Qobuz
     indexes ISRCs in track/search, but a text query for an ISRC string can
     also surface tracks whose ISRC merely starts with the same characters, or
     tracks whose title coincidentally contains the string.
     """
     if not isrc:
-        return None
+        return []
     isrc_n = str(isrc).replace("-", "").upper().strip()
     if not isrc_n:
-        return None
+        return []
     try:
         results = search_tracks(isrc_n, token, limit=25)
     except QobuzError:
-        return None
-    for t in results:
-        t_isrc = str(t.get("isrc") or "").replace("-", "").upper().strip()
-        if t_isrc and t_isrc == isrc_n:
-            return t
-    return None
+        return []
+    return [track for track in results
+            if str(track.get("isrc") or "").replace("-", "").upper().strip() == isrc_n]
 
 
 def get_artist(artist_id, token):

@@ -24,7 +24,8 @@ from qobuz_librarian.library import collection_snapshot, scanner
 from qobuz_librarian.queue import startup_recovery
 from qobuz_librarian.ui_cli.colors import clock_zone, format_size
 from qobuz_librarian.ui_cli.errors import plural
-from qobuz_librarian.web import job_labels, storage, write_gate
+from qobuz_librarian.web import job_labels, job_persistence, storage, write_gate
+from qobuz_librarian.web import jobs as job_mgr
 
 _log = logging.getLogger("qobuz_librarian")
 
@@ -118,9 +119,8 @@ _KEPT_RUN_KINDS = {
         "library, so these files were kept here.",
     ),
     "incomplete-replacement": (
-        "Files from an upgrade that came up short",
-        "The new download was missing tracks, so your original album was put "
-        "back and these files were kept here.",
+        "Incomplete album replacement",
+        "The tracks that downloaded were kept in staging.",
     ),
 }
 
@@ -571,7 +571,7 @@ def _tool_checks(checks):
     })
 
 
-def _unfinished_backup_check(checks):
+def _unfinished_backup_check(checks, in_use):
     copies = []
     left_in_backups = []
     restores = []
@@ -582,7 +582,8 @@ def _unfinished_backup_check(checks):
                 if entry.is_dir() and entry.name.startswith(
                         backup_mod._PARTIAL_COPY_PREFIX):
                     copies.append(entry)
-            left_in_backups = backup_mod.albums_left_in_backups()
+            left_in_backups = [item for item in backup_mod.albums_left_in_backups()
+                               if item[0] not in in_use]
             restores = backup_mod.unfinished_restores()
         except OSError as exc:
             stranded_error = True
@@ -643,12 +644,30 @@ def _backup_folder_check(checks):
         })
 
 
-def _backup_review_checks(checks, inventory, retained, waiting):
+def _repair_backup_paths(retained):
+    """A running Repair holds its current backup until the refill is checked."""
+    locations = {item[0] for item in retained or ()}
+    recorded, in_use = set(), set()
+    if locations:
+        for job in job_persistence.recovery_history():
+            if job["execute_kind"] != "repair" or not job["recoveries"]:
+                continue
+            records = job["recoveries"]
+            recorded.update(Path(r["location"]) for r in records)
+            current = records[-1]
+            path = Path(current["location"])
+            live = job_mgr.registry.get(job["id"])
+            if (path in locations and live and live.status == job_mgr.JobStatus.RUNNING
+                    and current["stage"] == "backup"
+                    and not backup_mod.backup_keep_markers_present(path)):
+                in_use.add(path)
+    return recorded, in_use
+
+
+def _backup_review_checks(checks, inventory, retained, excluded):
     if retained is not None:
-        # An upgrade's backup inside its retention window is expected, not a
-        # fault; the age sweep settles it.
         inventory["orphans"] = [
-            item for item in retained if item[0] not in waiting]
+            item for item in retained if item[0] not in excluded]
     else:
         checks.append({
             "label": "Backups needing review",
@@ -744,18 +763,19 @@ def _diagnostics():
         retained = None
         _log.warning(
             "couldn't inspect kept recovery backups: %s", exc)
+    repair_paths, in_use = _repair_backup_paths(retained)
     waiting = {item[0] for item in retained or ()
-               if backup_mod.awaiting_retention(item[0])}
+               if item[0] not in repair_paths and backup_mod.awaiting_retention(item[0])}
     _upgrade_backups_check(checks, retained, waiting)
     for label, ok, detail in disk_support.report(
             lambda path: storage._resolve_host_path(str(path))[0]):
         checks.append({"label": label, "ok": ok, "detail": detail})
     _beets_database_check(checks)
     _tool_checks(checks)
-    _unfinished_backup_check(checks)
+    _unfinished_backup_check(checks, in_use)
     _backup_folder_check(checks)
     inventory = {"orphans": [], "undo": [], "leftovers": []}
-    _backup_review_checks(checks, inventory, retained, waiting)
+    _backup_review_checks(checks, inventory, retained, waiting | in_use)
     _undo_copy_check(checks, inventory)
     _staging_leftover_check(checks, inventory)
     return {"checks": checks, **inventory}
@@ -1007,7 +1027,7 @@ def _backup_row(rows, tok, shared, path, origin, classification,
             f"Delete this backup? {checked} is no longer in your library, "
             "so this may be the only copy of its files. It cannot be "
             "undone.")
-    what = "Damaged tracks Repair replaced" if repaired else "Backup"
+    what = "Repair backup" if repaired else "Backup"
     size = _size_note(path)
     if classification.removable:
         if not by_file and not consolidated:

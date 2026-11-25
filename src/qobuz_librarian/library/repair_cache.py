@@ -1,10 +1,10 @@
-"""On-disk cache of Qobuz ISRC→track lookups - the one network cost of a repair scan.
+"""On-disk cache of the Qobuz tracks returned for an exact ISRC.
 
 A repair scan resolves every track to its exact Qobuz recording by ISRC to
 compare durations, and that lookup (one search per track) is both the slow part
-and the only part that touches the network. An ISRC names a recording for good,
-so the result is safe to remember: a re-scan, and any album that shares the same
-ISRC, skips the lookup. The file itself is still decode-tested fresh on every
+and the only part that touches the network. A re-scan, and any album that shares
+the same ISRC, can reuse the search without assuming it needs the same cut.
+The file itself is still decode-tested fresh on every
 scan, so corruption that turns up on disk later is always caught - only the
 network round trip is cached, never a verdict about a file.
 
@@ -35,8 +35,8 @@ _db = CacheDB(
 )
 
 
-def get_track(isrc) -> dict | None:
-    """The cached Qobuz track for ``isrc`` if one was stored within
+def get_tracks(isrc) -> list | None:
+    """The cached Qobuz tracks for ``isrc`` if stored within
     REPAIR_CACHE_TTL_DAYS, else None so the caller does a live lookup."""
     if not isrc or not _db.ensure():
         return None
@@ -60,10 +60,13 @@ def get_track(isrc) -> dict | None:
     if ttl > 0 and (time.time() - stored_at) > ttl:
         return None
     try:
-        track = json.loads(row[1])
+        tracks = json.loads(row[1])
     except (ValueError, TypeError):
         return None
-    return track if _track_matches_isrc(isrc, track) else None
+    # Older entries kept only the first search hit.
+    if isinstance(tracks, list) and tracks and all(_track_matches_isrc(isrc, t) for t in tracks):
+        return tracks
+    return None
 
 
 def _normalise_isrc(value) -> str:
@@ -84,13 +87,13 @@ def _track_matches_isrc(isrc, track) -> bool:
     return bool(expected and _normalise_isrc(track.get("isrc")) == expected)
 
 
-def put_track(isrc, track) -> None:
-    """Remember a positive ISRC→track lookup. A None/empty result is never stored
+def put_tracks(isrc, tracks) -> None:
+    """Remember a positive ISRC lookup. An empty result is never stored
     so a transient miss can't later be served as a stable 'no match'."""
-    if not _track_matches_isrc(isrc, track) or not _db.ensure():
+    if not tracks or not all(_track_matches_isrc(isrc, t) for t in tracks) or not _db.ensure():
         return
     try:
-        data = json.dumps(track)
+        data = json.dumps(tracks)
     except (TypeError, ValueError):
         return
     try:

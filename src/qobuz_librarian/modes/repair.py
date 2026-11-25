@@ -39,7 +39,12 @@ from qobuz_librarian.library.backup import (
     retire_verified_repair_backup,
     warn_pin_failed,
 )
-from qobuz_librarian.library.catalog import _norm_isrc, find_qobuz_album_for_dir
+from qobuz_librarian.library.catalog import (
+    _norm_isrc,
+    album_year,
+    edition_album_title,
+    find_qobuz_album_for_dir,
+)
 from qobuz_librarian.library.discovery import resolve_artist_dir
 from qobuz_librarian.library.scanner import (
     clear_scan_caches,
@@ -53,7 +58,11 @@ from qobuz_librarian.queue.executor import (
     _execute_download_queue,
     _refresh_review_state_after_downloads,
 )
-from qobuz_librarian.repair_log import append_repair_log, scan_dir_for_isrc_repairs
+from qobuz_librarian.repair_log import (
+    append_repair_log,
+    refill_recording,
+    scan_dir_for_isrc_repairs,
+)
 from qobuz_librarian.ui_cli.ask import ask
 from qobuz_librarian.ui_cli.colors import C, fmt, section, truncate, wrap
 from qobuz_librarian.ui_cli.errors import (
@@ -63,6 +72,7 @@ from qobuz_librarian.ui_cli.errors import (
     unreadable_artist,
 )
 from qobuz_librarian.ui_cli.logging import log, vlog
+from qobuz_librarian.ui_cli.prompts import confirm
 from qobuz_librarian.ui_cli.sentinels import NO_ANSWER
 
 
@@ -610,7 +620,26 @@ class _AlbumRepair:
                                       self.token)
 
         qobuz_tracks_full = (album.get("tracks") or {}).get("items") or []
-        missing_tracks = [b["qobuz_track"] for b in verified_truncated]
+        try:
+            missing_tracks = [refill_recording(b, album_dir, album, self.token)
+                              for b in verified_truncated]
+        except (AuthLost, QobuzUnavailable):
+            raise
+        except (OSError, QobuzError) as exc:
+            log.warning(f"  Couldn't check the repair tracks: {exc}")
+            return self._failed()
+        if not all(missing_tracks):
+            log.warning("  The recording or edition could not be confirmed. Kept the original files.")
+            return self._failed()
+        # The import pairs each refill with its original's tags by ISRC.
+        # Two different Qobuz tracks with that ID could trade places.
+        recordings = {(_norm_isrc(b["isrc"]), str(t["id"]))
+                      for b, t in zip(verified_truncated, missing_tracks)}
+        if len(recordings) > len(wanted_isrcs):
+            reason = ("Different damaged tracks share the same recording ID. "
+                      "Repair left the original files in place.")
+            log.warning(f"  {reason}")
+            return {**self._failed(), "refusal": reason}
 
         present_synth = [{} for _ in range(max(
             0, len(qobuz_tracks_full) - len(missing_tracks)))]
@@ -1214,6 +1243,110 @@ def _report_repair_recovery(backup, *, reason=""):
     return True
 
 
+def _offer_album_repair(album_dir, artist_name, damaged_files, args, token):
+    from qobuz_librarian.modes.repair_album import redownload_damaged_album
+
+    matched = find_qobuz_album_for_dir(album_dir, artist_name, token)
+    if not matched or not matched.get("id"):
+        log.info(fmt(C.YELLOW, "  Couldn't match this album to a Qobuz release for repair."))
+        return None
+    title = edition_album_title(matched) or matched.get("title") or album_dir.name
+    if year := album_year(matched):
+        title = f"{title} ({year})"
+    artist = (matched.get("artist") or {}).get("name") or artist_name
+    log.info(fmt(C.GRAY, f"  Whole-album repair available from {artist} · {title}."))
+    directions = f"  Run qobuz-librarian --repair and choose {artist_name} · {album_dir.name}."
+    if args.yes or getattr(args, "dry_run", False) or not sys.stdin.isatty():
+        log.info(fmt(C.GRAY, directions))
+        return None
+
+    premise = candidate_premise.capture("repair-redownload", album_dir)
+    if premise is None:
+        log.warning("  Couldn't verify the album folder. Scan it again before repairing.")
+        return None
+    log.info(fmt(C.GRAY, "  Healthy originals at the same lossless quality are kept. "
+                 "Verified replacements are permanent."))
+    answer = confirm("\n  Download the whole album for repair?", default_yes=False, on_eof=None)
+    if answer is None:
+        log.info(fmt(C.GRAY, directions))
+        return None
+    if not answer:
+        log.info(fmt(C.GRAY, "  Skipped."))
+        return {"result": "skipped"}
+    if not candidate_premise.same_files(
+            premise, candidate_premise.capture("repair-redownload", album_dir)):
+        log.warning("  The album changed. Scan it again before repairing.")
+        return None
+
+    payload = {"album_dir": str(album_dir), "artist_name": artist_name, "album_id": matched["id"],
+               "damaged": [{"file": Path(e["path"]).relative_to(album_dir).as_posix(),
+                            "title": e.get("local_title") or e.get("title")} for e in damaged_files]}
+    retained = None
+
+    def remember(recovery):
+        nonlocal retained
+        retained = recovery.backup if recovery.retained else None
+        return True
+
+    result = redownload_damaged_album(
+        payload, token, args, expected_album_receipt=premise["receipt"], recovery_checkpoint=remember)
+    if retained:
+        result["backup"] = retained
+    return result
+
+
+def _confirm_track_repair(verified_truncated, args, unverified):
+    log.info(fmt(C.YELLOW + C.BOLD,
+        f"\n  ⚠  {plural(len(verified_truncated), 'damaged track')}, "
+        "matched on Qobuz by recording ID (ISRC):"))
+    log.info(fmt(C.GRAY,
+        "    track  title                                              "
+        "  on-disk / Qobuz   ISRC"))
+    for b in verified_truncated:
+        qt = b["qobuz_track"]
+        # Name the row after the file on disk. The matched recording's own
+        # title is the right thing to re-download and the wrong thing to label
+        # a file with, because a mis-tagged ISRC makes them different songs.
+        title = b.get("local_title") or b["title"]
+        ver = qt.get("version") or ""
+        if ver and ver.lower() not in title.lower():
+            title = f"{title} ({ver})"
+        tnum = b.get("local_track_number") or b["track_number"]
+        tnum_str = f"#{tnum:>2}" if tnum else "   "
+        log.info(
+            fmt(C.WHITE, f"    {tnum_str}  {truncate(title, 50):<50}")
+            + fmt(C.GRAY,
+                f"   {_format_mmss(b['file_length']):>5}"
+                f" / {_format_mmss(b['qobuz_duration']):>5}"
+                f"  {b['isrc']}"
+                + ("  won't decode" if b.get("reason") else "")))
+
+    # Repair moves the truncated originals aside before re-ripping, so it has to
+    # stop here under --dry-run, reaching repair_album_dir would mutate the
+    # filesystem (and an interrupt mid-repair could strand the originals).
+    if getattr(args, "dry_run", False):
+        log.info(fmt(C.YELLOW,
+            f"\n  --dry-run: would re-download "
+            f"{plural(len(verified_truncated), 'track')}."))
+        return "attention" if unverified else "would_repair"
+
+    read_only = unwritable_track_folder(verified_truncated)
+    if read_only is not None:
+        log.info(fmt(C.RED,
+            f"\n  ✗  Can't repair this album: the app can't write to "
+            f"{read_only}. Every track was left in place."))
+        return "failed"
+
+    if not args.yes:
+        r = ask(f"\n  Re-download {plural(len(verified_truncated), 'track')}? "
+                "[y/N]: ")
+        if r is None:
+            return "attention"
+        if r not in ("y", "yes"):
+            log.info(fmt(C.GRAY, "  Skipped."))
+            return "attention" if unverified else "skipped"
+
+
 def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
                         quiet=False, cd_quality=None, tally=None):
     """Scan one album dir by ISRC, report, confirm, and repair. Returns
@@ -1300,10 +1433,8 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
     # dealing with and just can't be refilled a track at a time.
     mismatch_damaged = [x for x in isrc_mismatch if x.get("diagnostic")]
     mismatch_short = [x for x in isrc_mismatch if not x.get("diagnostic")]
-    unresolved_damage = bool(
-        mismatch_damaged
-        or any(x.get("diagnostic") for x in (*isrc_no_match, *no_isrc_tag))
-    )
+    unresolved_damage = [x for x in (*isrc_no_match, *no_isrc_tag, *mismatch_damaged)
+                         if x.get("diagnostic")]
 
     def _mismatch_row(x, colour):
         log.info(
@@ -1335,78 +1466,24 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
             log.info(fmt(C.GRAY,
                 f"    ... and {len(mismatch_short) - 10} more"))
 
-    if not verified_truncated:
-        if unresolved_damage:
-            log.info(fmt(
-                C.YELLOW,
-                "\n  ⚠  Damage was found, but no affected track was safe "
-                "to refill automatically. Follow the guidance above.",
-            ))
-            matched = find_qobuz_album_for_dir(album_dir, artist_name, token)
-            if matched and matched.get("id"):
-                log.info(fmt(C.GRAY,
-                    "     To download the whole album again as "
-                    f"\"{matched.get('title') or album_dir.name}\", run:\n"
-                    "     qobuz-librarian --force "
-                    f"https://open.qobuz.com/album/{matched['id']}"))
-        elif not quiet and not unverified:
-            log.info(fmt(C.GREEN,
-                "\n  ✓  No damaged tracks. Nothing to repair."))
-        return "attention" if unresolved_damage or unverified else "clean"
-
-    log.info(fmt(C.YELLOW + C.BOLD,
-        f"\n  ⚠  {plural(len(verified_truncated), 'damaged track')}, "
-        "matched on Qobuz by recording ID (ISRC):"))
-    log.info(fmt(C.GRAY,
-        "    track  title                                              "
-        "  on-disk / Qobuz   ISRC"))
-    for b in verified_truncated:
-        qt = b["qobuz_track"]
-        # Name the row after the file on disk. The matched recording's own
-        # title is the right thing to re-download and the wrong thing to label
-        # a file with, because a mis-tagged ISRC makes them different songs.
-        title = b.get("local_title") or b["title"]
-        ver = qt.get("version") or ""
-        if ver and ver.lower() not in title.lower():
-            title = f"{title} ({ver})"
-        tnum = b.get("local_track_number") or b["track_number"]
-        tnum_str = f"#{tnum:>2}" if tnum else "   "
-        log.info(
-            fmt(C.WHITE, f"    {tnum_str}  {truncate(title, 50):<50}")
-            + fmt(C.GRAY,
-                f"   {_format_mmss(b['file_length']):>5}"
-                f" / {_format_mmss(b['qobuz_duration']):>5}"
-                f"  {b['isrc']}"
-                + ("  won't decode" if b.get("reason") else "")))
-
-    # Repair moves the truncated originals aside before re-ripping, so it has to
-    # stop here under --dry-run, reaching repair_album_dir would mutate the
-    # filesystem (and an interrupt mid-repair could strand the originals).
-    if getattr(args, "dry_run", False):
-        log.info(fmt(C.YELLOW,
-            f"\n  --dry-run: would re-download "
-            f"{plural(len(verified_truncated), 'track')}."))
-        return "attention" if unverified else "would_repair"
-
-    read_only = unwritable_track_folder(verified_truncated)
-    if read_only is not None:
-        log.info(fmt(C.RED,
-            f"\n  ✗  Can't repair this album: the app can't write to "
-            f"{read_only}. Every track was left in place."))
-        return "failed"
-
-    if not args.yes:
-        r = ask(f"\n  Re-download {plural(len(verified_truncated), 'track')}? "
-                "[y/N]: ")
-        if r is None:
-            return "attention"
-        if r not in ("y", "yes"):
-            log.info(fmt(C.GRAY, "  Skipped."))
-            return "attention" if unverified else "skipped"
+    if not verified_truncated and not unresolved_damage:
+        if not quiet and not unverified:
+            log.info(fmt(C.GREEN, "\n  ✓  No damaged tracks. Nothing to repair."))
+        return "attention" if unverified else "clean"
 
     try:
-        result = repair_album_dir(
-            album_dir, verified_truncated, artist_name, args, token)
+        if verified_truncated:
+            status = _confirm_track_repair(verified_truncated, args, unverified)
+            if status:
+                return status
+            result = repair_album_dir(
+                album_dir, verified_truncated, artist_name, args, token)
+        else:
+            result = _offer_album_repair(album_dir, artist_name, unresolved_damage, args, token)
+            if result is None:
+                return "attention"
+            if result.get("result") == "skipped":
+                return "attention" if unverified else "skipped"
     except RepairRecoveryRequired as exc:
         _report_repair_recovery(
             exc.recovery.backup,
@@ -1432,6 +1509,8 @@ def _scan_report_repair(album_dir, artist_name, args, token, deep=True,
         return "attention" if unverified else "repaired"
     if result and _report_repair_recovery(result.get("backup")):
         return "recovery"
+    if result and result.get("refusal") and tally is not None:
+        tally["refusal"] = result["refusal"]
     return "failed"
 
 
@@ -1473,6 +1552,8 @@ def _report_repair_run(tally, started, *, interrupted=False, clause=None,
     failed = tally.get("failed", 0)
     error = (f"Finished with {plural(failed, 'error')}." if failed
              else f"Needs attention: {clause}." if clause else None)
+    if album and tally.get("refusal"):
+        error = tally["refusal"]
     post_job_hook.report_terminal_run(
         kind="repair", title="Repair",
         status=("canceled" if interrupted

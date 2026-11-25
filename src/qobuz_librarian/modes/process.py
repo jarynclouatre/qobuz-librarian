@@ -3,6 +3,7 @@ import json
 import math
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
@@ -28,7 +29,7 @@ from qobuz_librarian.download_result import (
     track_shortfall,
     tracks_missing,
 )
-from qobuz_librarian.integrations import lyric_fetch, track_annotations
+from qobuz_librarian.integrations import beets, lyric_fetch, track_annotations
 from qobuz_librarian.integrations.beets import (
     _ART_EXTS,
     MusicDiskFull,
@@ -46,6 +47,7 @@ from qobuz_librarian.integrations.beets import (
 )
 from qobuz_librarian.integrations.lyrics import write_post_import_sidecars
 from qobuz_librarian.integrations.rip import (
+    flac_audio_ok,
     is_cancel_requested,
     snapshot_staging,
 )
@@ -60,6 +62,7 @@ from qobuz_librarian.library.backup import (
     interrupted_upgrades,
     mark_upgrade_pending,
     pin_unverified_upgrade_backup,
+    put_back_healthy_tracks,
     restore_gap_fill_backup,
     restore_incomplete_upgrade_backup,
     restore_upgrade_backup,
@@ -438,7 +441,8 @@ def _upgrade_same_quality(backup_path, staged_dirs):
     return _upgrade_comparison(backup_path, staged_dirs, quiet=True) == "equal"
 
 
-def _upgrade_comparison(backup_path, replacement_dirs, damaged=(), *, quiet=False):
+def _upgrade_comparison(backup_path, replacement_dirs, damaged=(), *, quiet=False,
+                        matched_pairs=None):
     """Compare complete sets of paired recordings, including their channels and playtime."""
     def refused(reason):
         if not quiet:
@@ -516,7 +520,43 @@ def _upgrade_comparison(backup_path, replacement_dirs, damaged=(), *, quiet=Fals
         if new_duration < old_duration * _UPGRADE_VERIFY_DURATION_RATIO:
             return refused(
                 f"  ⚠  Upgrade for {title} is shorter than the original.")
+    if matched_pairs is not None:
+        matched_pairs.extend(pairs)
     return "higher" if improved else "equal"
+
+
+def _repair_keep_originals(backup, staged_dirs, damaged):
+    """Leave only repairs, higher-quality recordings and new tracks for import."""
+    pairs = []
+    if not damaged or not _upgrade_comparison(
+            backup, staged_dirs, damaged, matched_pairs=pairs):
+        return None
+    held = _held_paths(backup, damaged)
+    if not held.issubset(old["path"] for old, _ in pairs):
+        return None
+    keep = {}
+    for old, new in pairs:
+        if old["path"] in held or old.get("lossy") or _track_quality(old) != _track_quality(new):
+            continue
+        if abs(_known_track_duration(old) - _known_track_duration(new)) > 2:
+            return None
+        path = Path(old["path"])
+        if path.suffix.lower() == ".flac":
+            decodes = flac_audio_ok(path)
+        else:
+            decodes = subprocess.run(
+                ["ffmpeg", "-v", "error", "-xerror", "-i", str(path),
+                 "-map", "0:a:0", "-f", "null", "-"], timeout=300,
+                stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=cfg.child_env()).returncode == 0
+        if not decodes:
+            return None
+        staged = Path(new["path"])
+        keep[path.relative_to(backup).as_posix()] = (staged, safefile.stat_identity(staged.lstat()))
+    for staged, identity in keep.values():
+        if not safefile.delete_verified(staged, identity):
+            return None
+    return list(keep)
 
 
 def _intentional_replacement_verified(replacement_path, _backup_path):
@@ -625,7 +665,7 @@ def _tags_present(tags, target):
 
 
 def _carry_track_annotations(backup_path, replacement_path, *, edition=None,
-                             damaged=()):
+                             damaged=(), kept=()):
     """Give each replacement track the user's own tags and pictures.
 
     Original tags take precedence unless the new download owns that kind
@@ -637,10 +677,10 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None,
         return False
     if edition is not None:
         new_tracks = catalog.edition_files(edition, new_tracks, replacement_path)
-    return _copy_track_annotations(backup_path, new_tracks, damaged=damaged)
+    return _copy_track_annotations(backup_path, new_tracks, damaged=damaged, kept=kept)
 
 
-def _carry_staged_upgrade_tags(backup_path, album_dirs):
+def _carry_staged_upgrade_tags(backup_path, album_dirs, *, damaged=()):
     """Give beets the tags it will index when it imports these tracks."""
     tracks = []
     for folder in album_dirs:
@@ -648,10 +688,10 @@ def _carry_staged_upgrade_tags(backup_path, album_dirs):
         if degraded:
             return
         tracks.extend(found)
-    _copy_track_annotations(backup_path, tracks, tags_only=True)
+    _copy_track_annotations(backup_path, tracks, tags_only=True, damaged=damaged)
 
 
-def _copy_track_annotations(backup_path, new_tracks, *, damaged=(), tags_only=False):
+def _copy_track_annotations(backup_path, new_tracks, *, damaged=(), tags_only=False, kept=()):
     from mutagen.flac import FLAC
 
     old_tracks, old_degraded = _folder_tracks_checked(backup_path)
@@ -661,7 +701,10 @@ def _copy_track_annotations(backup_path, new_tracks, *, damaged=(), tags_only=Fa
     if pairs is None:
         return False
     carried_to = 0
+    preserved = _held_paths(backup_path, kept)
     for old, new in pairs:
+        if old["path"] in preserved:
+            continue
         target_path = Path(new["path"])
         try:
             target = FLAC(str(target_path))
@@ -699,7 +742,7 @@ def _copy_track_annotations(backup_path, new_tracks, *, damaged=(), tags_only=Fa
 
 
 def _carry_non_audio_from_backup(album, album_dir, backup_path,
-                                 replacement_dir=None, damaged=()):
+                                 replacement_dir=None, damaged=(), kept=()):
     """Carry companions and the user's own track tags between exact trees.
 
     Returns the exact replacement path, its updated receipt, and the names
@@ -716,7 +759,7 @@ def _carry_non_audio_from_backup(album, album_dir, backup_path,
             dest = album_dir
     if not dest or not dest.exists():
         return None
-    if not _carry_track_annotations(backup_path, dest, damaged=damaged):
+    if not _carry_track_annotations(backup_path, dest, damaged=damaged, kept=kept):
         return None
     receipt = capture_album_source_receipt(dest)
     if receipt is None:
@@ -1027,7 +1070,7 @@ class _AlbumRun:
     def __init__(self, album, args, *, allow_force, label, already_confirmed,
                  upgrade_only, token, quality, treat_as_new, exact_edition,
                  expected_album_receipt, expected_gap_fill_receipts,
-                 cover_backup, rebuild_dir):
+                 cover_backup, rebuild_dir, repair_damaged):
         self.album = album
         self.args = args
         self.allow_force = allow_force
@@ -1042,6 +1085,9 @@ class _AlbumRun:
         self.expected_gap_fill_receipts = expected_gap_fill_receipts
         self.cover_backup = cover_backup
         self.rebuild_dir = rebuild_dir
+        self.repair_damaged = repair_damaged
+        self.repair_kept = []
+        self.repair_token = None
 
     def run(self):
         for step in (self._locate, self._plan_upgrade, self._check_premise,
@@ -1727,8 +1773,10 @@ class _AlbumRun:
         # that came back partial gets rolled back to the original by the
         # finally below, so importing the partial first would only strand its
         # rows in beets once the backup is restored over it.
-        if ((self.auto_upgrade_active or self.use_force or self.force_tracks) and self.n_ok > 0
-                and (self.n_fail > 0 or self.n_lossy > 0) and not self.args.no_import):
+        replacement = (self.auto_upgrade_active or self.use_force or self.force_tracks
+                       or self.rebuild_dir is not None)
+        if (replacement and self.n_ok > 0 and (self.n_fail > 0 or self.n_lossy > 0)
+                and not self.args.no_import):
             return self._keep_original_over_incomplete("Re-download")
 
     def _keep_original_over_incomplete(self, attempt):
@@ -1879,8 +1927,34 @@ class _AlbumRun:
                     self.early_result = {"result": "upgrade_same_quality", "imported": False, "n_ok": 0}
                     return self.early_result
                 _carry_staged_upgrade_tags(self.upgrade_backup_path, self.staged_dirs_for_import)
+            elif self.rebuild_dir is not None and self.cover_backup is not None:
+                _carry_staged_upgrade_tags(self.cover_backup, self.staged_dirs_for_import,
+                                           damaged=self.repair_damaged)
+                refusal = self._prepare_repair_import()
+                if refusal:
+                    log.warning(f"  {refusal}")
+                    retain_download_staging(self.download_result, label="unverified-repair")
+                    return {"result": "unverified", "imported": False, "n_ok": 0,
+                            "refusal": refusal}
             self.post_import_signatures = track_signatures_for_album_dirs(
                 self.staged_dirs_for_import)
+
+    def _prepare_repair_import(self):
+        try:
+            kept = _repair_keep_originals(
+                self.cover_backup, self.staged_dirs_for_import, self.repair_damaged)
+        except (OSError, subprocess.TimeoutExpired):
+            kept = None
+        if kept is None:
+            return "The download could not be matched to the original album."
+        if kept:
+            self.repair_token = beets.prepare_repair_import(
+                self.cover_backup, self.staged_dirs_for_import)
+            if not self.repair_token:
+                return "The beets entries for this repair could not be recorded."
+            if not put_back_healthy_tracks(self.cover_backup, self.rebuild_dir, kept):
+                return "The healthy originals could not be returned to their original paths."
+        self.repair_kept = kept
 
     def _import(self):
         self.imported = False
@@ -1939,6 +2013,7 @@ class _AlbumRun:
                     album_dirs=self.staged_dirs_for_import,
                     album_dir=self.album_dir,
                     folder=self.import_folder,
+                    **({"repair_token": self.repair_token} if self.repair_token else {}),
                     protected_paths=(
                         [self.album_dir] if self.replaced_beets_entries is not None
                         else None),
@@ -2514,6 +2589,7 @@ class _AlbumRun:
             "lossy_tracks": self.truly_lossy,
             "broken_tracks": self.broken_tracks,
             "imported": self.imported,
+            **({"repair_kept": self.repair_kept} if self.repair_kept else {}),
             "dir": self.post_dir,
             "upgrade_unverified": self.upgrade_unverified,
             "catalogue_unverified": self.catalogue_unverified,
@@ -2555,7 +2631,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                   exact_edition=False,
                   expected_album_receipt=None,
                   expected_gap_fill_receipts=None,
-                  cover_backup=None, rebuild_dir=None):
+                  cover_backup=None, rebuild_dir=None, repair_damaged=()):
     """End-to-end processing for one Qobuz album: detect → prompt → download →
     cleanup → import → consolidate.
 
@@ -2570,6 +2646,7 @@ def process_album(album, args, *, allow_force=True, label=None,
                     art the download keeps
       rebuild_dir   the folder ``cover_backup`` was taken from; the whole
                     album is downloaded into it under the backup's album name
+      repair_damaged  damaged filenames relative to the whole-album backup
 
     Track-by-track downloading is a queue-only contract: this path always
     downloads the whole album in one rip invocation and delegates per-track
@@ -2588,5 +2665,5 @@ def process_album(album, args, *, allow_force=True, label=None,
         exact_edition=exact_edition,
         expected_album_receipt=expected_album_receipt,
         expected_gap_fill_receipts=expected_gap_fill_receipts,
-        cover_backup=cover_backup, rebuild_dir=rebuild_dir,
+        cover_backup=cover_backup, rebuild_dir=rebuild_dir, repair_damaged=repair_damaged,
     ).run()

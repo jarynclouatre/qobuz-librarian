@@ -23,7 +23,7 @@ from qobuz_librarian import disk_support
 from qobuz_librarian.integrations.rip import flac_audio_ok
 from qobuz_librarian.library import scanner
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
-from qobuz_librarian.library.tags import beets_sanitize
+from qobuz_librarian.library.tags import beets_sanitize, canonical_track_title
 from qobuz_librarian.recovery import (
     decode_recovery_json,
     normalise_recovery_owner,
@@ -1221,6 +1221,7 @@ _UPGRADE_RECOVERY_STATE_SENTINEL = ".ql_upgrade_recovery_state"
 # the album's beets entries and the download's staged folders, so a start-up
 # after a hard stop can finish the upgrade or undo it.
 _UPGRADE_PENDING_SENTINEL = ".ql_upgrade_pending"
+_REPAIR_IMPORT = ".ql_repair_import"
 
 # Earlier versions wrote these receipt-bound records into an upgrade's backup
 # while carrying its other files into the new album. A backup holding them
@@ -1271,6 +1272,7 @@ def _hidden_name(name: str, prefix=_LEFTOVER_PREFIX) -> str:
 
 # Files a backup carries that aren't backed-up tracks.
 _SIDECARS = (
+    _REPAIR_IMPORT,
     _ORIGIN_SIDECAR,
     _PARTIAL_RESTORE_SENTINEL,
     _UNVERIFIED_UPGRADE_SENTINEL,
@@ -1299,6 +1301,7 @@ _OPTIONAL_RECEIPT_MARKERS = (
     _UPGRADE_RETIREMENT_COMPLETE_SENTINEL,
     _UPGRADE_RECOVERY_STATE_SENTINEL,
     _UPGRADE_PENDING_SENTINEL,
+    _REPAIR_IMPORT,
     _COMPANION_CARRY_INTENT_SENTINEL,
     _COMPANION_CARRY_READY_SENTINEL,
     _COMPANION_CARRY_COMMITTED_SENTINEL,
@@ -2389,7 +2392,13 @@ def _backup_owner_authorized(backup, expected_owner) -> bool:
         backup.receipt.get("owner"), expected_owner)
 
 
-def _read_exact_text_at(directory_fd, name, *, max_bytes=1024 * 1024):
+def _marker_limit(name):
+    return _RECORD_READ_BYTES if name == _REPAIR_IMPORT else 1024 * 1024
+
+
+def _read_exact_text_at(directory_fd, name, *, max_bytes=None):
+    if max_bytes is None:
+        max_bytes = _marker_limit(name)
     descriptor = _open_regular_file_at(directory_fd, name)
     try:
         value = os.fstat(descriptor)
@@ -2421,6 +2430,8 @@ def _write_receipt_marker(backup, name, note) -> bool:
     directory_fd = descriptors[-1]
     try:
         expected = _marker_text(backup.receipt, note)
+        if len(expected.encode("utf-8")) > _marker_limit(name):
+            return False
         try:
             existing = _read_exact_text_at(directory_fd, name)
         except FileNotFoundError:
@@ -2453,7 +2464,7 @@ def _receipt_owned_marker(directory_fd, name, receipt) -> bool:
     if raw is None:
         return False
     try:
-        value = decode_recovery_json(raw)
+        value = decode_recovery_json(raw, max_bytes=_marker_limit(name))
     except (TypeError, ValueError):
         return False
     return (
@@ -2468,7 +2479,7 @@ def _receipt_marker_note(directory_fd, name, receipt):
     """Return one receipt-bound marker note, or None for absent/invalid."""
     try:
         raw = _read_exact_text_at(directory_fd, name)
-        value = decode_recovery_json(raw)
+        value = decode_recovery_json(raw, max_bytes=_marker_limit(name))
     except (FileNotFoundError, TypeError, ValueError):
         return None
     if (
@@ -3315,7 +3326,7 @@ def awaiting_retention(path: Path) -> bool:
     it later; this reads metadata only.
     """
     m = re.match(r"^(\d{8}_\d{6})_", path.name)
-    if m is None or backup_keep_markers_present(path):
+    if m is None or is_repair_backup(path) or backup_keep_markers_present(path):
         return False
     try:
         made = datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").timestamp()
@@ -3557,6 +3568,8 @@ def _drop_put_back_note(name) -> None:
 def _remove_put_back_sidecars(album: Path) -> bool:
     """Remove the backup's own files from an album renamed back home, and
     say whether none is left."""
+    if not _settle_repair_import(album, album):
+        return False
     for sidecar in _SIDECARS:
         try:
             value = os.lstat(album / sidecar)
@@ -5039,6 +5052,84 @@ def _restorable(backup, original_path, *, expected_owner, complete=None,
     return opened[0]
 
 
+def put_back_healthy_tracks(backup, album_dir, kept):
+    """Return the verified originals to an empty album path before beets imports."""
+    source = _restorable(backup, album_dir, expected_owner=None, complete=True)
+    origin = _library_path(album_dir)
+    if source is None or origin is None or not _album_parents_unchanged(backup.receipt):
+        return False
+    files = backup_payload(backup.receipt)
+    selected = {}
+    for relative in kept:
+        if relative not in files or Path(relative).suffix.lower() not in cfg.AUDIO_EXTS:
+            return False
+        selected[relative] = files[relative]
+        lyrics = Path(relative).with_suffix(".lrc").as_posix()
+        if lyrics in files:
+            selected[lyrics] = files[lyrics]
+    stage, _ = _restore_folders(source, origin)
+    if os.path.lexists(origin) or os.path.lexists(stage):
+        return False
+    try:
+        _copy_backup_into(source, stage, selected, backup.receipt["tree"]["directories"])
+        _rename_noreplace_at(AT_FDCWD, stage, AT_FDCWD, origin)
+        fsync_dir(origin.parent, strict=True)
+        return True
+    except OSError:
+        _clear_restore_folder(stage, selected)
+        return False
+
+
+def restore_failed_album_repair(backup, album_dir):
+    """An automatic rollback may replace only files returned from this backup."""
+    return restore_upgrade_backup(
+        backup, album_dir, replace_partial=_album_untouched(album_dir, backup.receipt))
+
+
+def pending_repair_import(backup):
+    if backup is None:
+        return False
+    try:
+        (Path(backup) / _REPAIR_IMPORT).lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def mark_repair_import(backup, record):
+    if not _write_receipt_marker(backup, _REPAIR_IMPORT, record):
+        return False
+    try:
+        fd = _open_backup_directory(backup)
+        try:
+            return _receipt_marker_note(fd, _REPAIR_IMPORT, backup.receipt) == record
+        finally:
+            os.close(fd)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _settle_repair_import(folder, origin, *, check_only=False):
+    if not pending_repair_import(folder):
+        return True
+    from qobuz_librarian.integrations.beets import undo_repair_import
+
+    try:
+        fd = _open_backup_directory(folder)
+        try:
+            receipt = _read_backup_receipt(fd)
+            if not receipt or receipt["origin"] != os.fspath(origin):
+                return False
+            note = _receipt_marker_note(fd, _REPAIR_IMPORT, receipt)
+        finally:
+            os.close(fd)
+        return undo_repair_import(receipt, json.loads(note), check_only=check_only)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def _restore_upgrade_backup(
         backup, original_path: Path, *, expected_owner=None,
         replace_partial=True) -> bool:
@@ -5068,6 +5159,10 @@ def _restore_upgrade_backup(
         return False
     origin = _library_path(original_path, create_parents=True)
     if origin is None:
+        return False
+    repair_import = pending_repair_import(source)
+    if repair_import and not _settle_repair_import(source, origin, check_only=True):
+        log.warning("  The Repair import's Beets entries changed. The backup was left in place.")
         return False
     payload = backup_payload(backup.receipt)
     backup_snapshot = snapshot_tree(source)
@@ -5121,6 +5216,8 @@ def _restore_upgrade_backup(
 
         if _same_filesystem(source, origin):
             note = _write_put_back_note(source, origin)
+            if note is None and repair_import:
+                raise OSError("the Repair restore could not be recorded")
             try:
                 _rename_noreplace_at(AT_FDCWD, source, AT_FDCWD, origin)
                 renamed = published = True
@@ -5157,6 +5254,11 @@ def _restore_upgrade_backup(
         if note is not None and not renamed:
             _drop_put_back_note(note)
 
+    if repair_import and not (_remove_put_back_sidecars(origin) if renamed else
+                              _settle_repair_import(source, origin)):
+        log.warning("  The files were restored. The Repair import's Beets entries still need attention.")
+        return False
+
     # The old partial goes before the backup or its put-back note: what a
     # stop leaves of it is then still found from them, at the next start or
     # in Diagnostics.
@@ -5166,7 +5268,7 @@ def _restore_upgrade_backup(
             "  ⚠  The album was restored, but the old partial is retained "
             f"in {aside}."))
     if renamed:
-        if _remove_put_back_sidecars(origin) and note is not None:
+        if (repair_import or _remove_put_back_sidecars(origin)) and note is not None:
             _drop_put_back_note(note)
     elif not _delete_backup_folder(
             source, backup_snapshot, _hidden_name(source.name)):
@@ -5177,7 +5279,7 @@ def _restore_upgrade_backup(
     # Beets is deliberately not mutated by restored public paths: those
     # paths may already name replacement rows and external remove hooks are
     # not transaction-safe.
-    if partial is not None:
+    if partial is not None and not repair_import:
         log.info(fmt(C.GRAY,
             "     · If beets still lists the replaced partial import, "
             "run `beet update`; no path-based database removal was "
@@ -5234,6 +5336,10 @@ def settle_interrupted_restores() -> None:
     for path, origin in _backups_and_origins():
         if _library_path(origin) is not None:
             _remove_partial_copies(origin)
+            if pending_repair_import(path):
+                backup = load_backup_result(path)
+                if backup and _album_untouched(origin, backup.receipt.get("source_receipt"), whole=True):
+                    _settle_repair_import(path, origin)
         stage, aside = _restore_folders(path, origin)
         if (
             os.path.lexists(aside)
@@ -5917,6 +6023,15 @@ def _audio_isrc(path: Path):
     return value or None
 
 
+def _recording_tags(path):
+    try:
+        tags = _read_tags(path, easy=True).tags or {}
+        return {key: frozenset(canonical_track_title(v) for v in tags[key])
+                for key in ("isrc", "title", "artist") if tags.get(key)}
+    except Exception:
+        return None
+
+
 def _decoded_audio_digest(path: Path):
     """(rate, bits, channels, sha256 of the decoded samples) of a FLAC, or
     None when it does not decode."""
@@ -6098,6 +6213,7 @@ class BackupClassification:
             "missing": f"Not removable: {name} is missing from the album.",
             "unrecorded": f"Not removable: {name} is not one of the files this backup was made with.",
             "different": f"Not removable: {name} differs from the album copy.",
+            "recording": f"Not removable: the album's {name} could not be matched to the recording in this backup.",
             "audio": f"Not removable: the album's {name} does not decode cleanly.",
             "length": f"Not removable: the length of {name} can't be read in the backup or the album.",
             "shorter": f"Not removable: the album's {name} is shorter than this backup's.",
@@ -6139,6 +6255,7 @@ def _classify_backup_contents(
         same_audio=False,
         carry_lyrics=False,
         pairs=None,
+        repaired_isrcs=(),
 ):
     """Compare payloads; retention permits verified replacement audio.
 
@@ -6204,6 +6321,13 @@ def _classify_backup_contents(
                     # The album holds this very file, damaged or not, so the
                     # backup's copy adds nothing.
                     continue
+                if match_recordings and not same_audio:
+                    held, filed = _recording_tags(source), _recording_tags(destination)
+                    if held is not None and relative.as_posix() in repaired_isrcs:
+                        held.pop("isrc", None)
+                    if held is None or filed is None or any(
+                            filed.get(key) != value for key, value in held.items()):
+                        return BackupClassification("retained", "recording", str(relative))
                 source_duration = _audio_duration_seconds(source)
                 destination_duration = _audio_duration_seconds(destination)
                 if source_duration is None or destination_duration is None:
@@ -6497,6 +6621,16 @@ def retire_verified_repair_backup(backup) -> bool:
         return False
     return _dispose_retention_candidate(
         backup, allow_smaller_audio=True, match_recordings=True)
+
+
+def retire_rebuilt_album(backup, replacement, receipt, damaged) -> bool:
+    """A whole-album Repair can correct the ISRC of a named damaged file."""
+    return dispose_backup(
+        backup, replacement_path=replacement, expected_replacement_receipt=receipt,
+        replacement_validator=lambda filed, held: _classify_backup_contents(
+            filed, held, audio_replacement=True, allow_smaller_audio=True,
+            match_recordings=True, repaired_isrcs=damaged).removable,
+    )
 
 
 def backup_files_preserved(replacement_view: Path, backup_view: Path) -> bool:
@@ -6875,7 +7009,7 @@ def _leftover_origin(top):
 def is_repair_backup(path) -> bool:
     """Whether the backup at ``path`` holds the damaged tracks a Repair
     replaced."""
-    return bool(re.match(r"^\d{8}_\d{6}_\d{6}_repair_", backup_name(path)))
+    return bool(re.match(r"^\d{8}_\d{6}_(?:\d{6}_)?repair_", backup_name(path)))
 
 
 def backup_name(path) -> str:

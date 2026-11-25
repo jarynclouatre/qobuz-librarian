@@ -16,7 +16,7 @@ def test_no_isrc_redownload_failure_restores_original_folder(tmp_path, monkeypat
     album_dir.mkdir()
     backup_dir = tmp_path / "backup"
     restored, called = {}, {}
-    monkeypatch.setattr(flows, "get_album", lambda *a: {"id": "x"})
+    monkeypatch.setattr("qobuz_librarian.modes.repair_album.get_album", lambda *a: {"id": "x"})
     backup = BackupResult(
         backup_dir,
         complete=True,
@@ -32,7 +32,7 @@ def test_no_isrc_redownload_failure_restores_original_folder(tmp_path, monkeypat
     )
     monkeypatch.setattr("qobuz_librarian.modes.process.process_album",
                         lambda *a, **k: called.update(k) or {"imported": False, "n_ok": 0})
-    monkeypatch.setattr("qobuz_librarian.library.backup.restore_upgrade_backup",
+    monkeypatch.setattr("qobuz_librarian.library.backup.restore_failed_album_repair",
                         lambda bp, d: restored.update(bp=bp, dir=d) or True)
     res = flows._redownload_damaged_album(
         {"album_dir": str(album_dir), "album_id": "x"}, "token")
@@ -85,6 +85,7 @@ def _call_repair_album_dir(tmp_path, monkeypatch, *, n_ok, n_fail, imported,
     monkeypatch.setattr("qobuz_librarian.config.REPAIR_LOG_PATH", tmp_path / "repair.log")
     monkeypatch.setattr(repair_mod, "get_album",
                         lambda aid, tok: {"id": aid, "title": "Album", "tracks": {"items": []}})
+    monkeypatch.setattr(repair_mod, "refill_recording", lambda entry, *_: entry["qobuz_track"])
     # Parent-album resolution prefers the folder match; with none, it falls
     # back to the most-common ISRC album (get_album above).
     monkeypatch.setattr(repair_mod, "find_qobuz_album_for_dir",
@@ -264,6 +265,7 @@ def test_repair_pins_the_backup_when_the_tag_carry_fails(tmp_path, monkeypatch):
     monkeypatch.setattr("qobuz_librarian.config.REPAIR_LOG_PATH", tmp_path / "repair.log")
     monkeypatch.setattr(repair_mod, "get_album",
                         lambda aid, tok: {"id": aid, "title": "Album", "tracks": {"items": []}})
+    monkeypatch.setattr(repair_mod, "refill_recording", lambda entry, *_: entry["qobuz_track"])
     monkeypatch.setattr(repair_mod, "find_qobuz_album_for_dir", lambda *a, **k: None)
 
     def fake_execute(queue, args, token):
