@@ -28,7 +28,7 @@ It has a web UI and a CLI.
 - **Gap Fill.** Finds albums you own that are missing tracks and downloads just those tracks, from the same edition you have.
 - **Editions.** Search marks the editions you own as **In library** by matching recording IDs; a remaster or mix with its own recording IDs counts as a separate release. [How matching works](docs/existing-libraries.md#how-editions-are-matched).
 - **Single tracks.** Switch Search to **Track** to download one song into its album's folder.
-- **Upgrades.** Finds albums Qobuz now has in higher quality, or in FLAC where you have MP3 or AAC, and replaces them, keeping a backup until the new files check out.
+- **Upgrades.** Finds albums Qobuz now has in higher quality, or in FLAC where you have MP3 or AAC, and replaces them, keeping a backup until the new files check out. If the same tracks come back at the same quality, Upgrade keeps your original files.
 - **Downsample.** Converts FLACs above 48 kHz to 44.1 or 48 kHz, on demand or for every new download.
 - **New releases.** Checks regularly for new albums by artists in your library.
 - **Discover.** With a Last.fm API key, which needs Last.fm Pro, suggests artists like yours, browses your library by genre and lists albums you saved on Qobuz that aren't on disk yet.

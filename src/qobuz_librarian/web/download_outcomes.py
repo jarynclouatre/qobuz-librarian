@@ -48,6 +48,7 @@ _DOWNLOAD_SUMMARY_LABELS = {
     "skipped_already_higher_quality": "Skipped: the library already has higher quality.",
     "skipped_has_extras": "Skipped: the library copy includes extra tracks.",
     "upgrade_only_no_op": "Already at or above the target quality.",
+    "upgrade_same_quality": "The download matched the original quality. Kept the original album.",
     "upgrade_no_local_tracks": "This album isn't in your library any more.",
     "dry_run": "Dry run. Nothing downloaded.",
     "user_skipped": "Skipped at confirmation.",

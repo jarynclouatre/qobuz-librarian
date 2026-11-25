@@ -89,6 +89,14 @@ def forget_upgraded_album(album, album_dir):
         vlog(f"review dot update failed: {exc}")
 
 
+def note_same_quality_upgrade(album_dir, album, verdict, *, resampled):
+    if resampled:
+        quality_decision.mark_local_album_capped(album_dir, qobuz_album=album, origin="auto")
+    elif verdict and verdict.get("under") and not verdict.get("recovered"):
+        quality_decision.mark_album_capped(album.get("id"), album, verdict)
+    forget_upgraded_album(None, album_dir)
+
+
 def reseal_saved_reviews(fresh_seal):
     """Give each saved Upgrade and Downsample row the seal ``fresh_seal``
     returns for it, if any. A view whose saved results can't be rewritten

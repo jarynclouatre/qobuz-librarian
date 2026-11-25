@@ -71,6 +71,7 @@ _SETTLED_ONE_SHOT_RESULTS = {
     "downloaded",
     "dry_run",
     "skipped_already_higher_quality",
+    "upgrade_same_quality",
     "user_skipped",
 }
 
@@ -86,7 +87,8 @@ def _one_shot_exit_code(result):
         or result.get("recovery_unverified")
         or result.get("consolidation_interrupted")
         or result.get("consolidation_failed")
-        or (verdict.get("under") and not verdict.get("recovered"))
+        or (verdict.get("under") and not verdict.get("recovered")
+            and result.get("result") != "upgrade_same_quality")
     ):
         return EXIT_GENERAL
     settled = result.get("result") in _SETTLED_ONE_SHOT_RESULTS or (

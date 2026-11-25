@@ -6,7 +6,7 @@ import stat
 from pathlib import Path
 
 from qobuz_librarian import config as cfg
-from qobuz_librarian import run_lock, safefile
+from qobuz_librarian import run_lock, safefile, saved_views
 from qobuz_librarian.api import client as api_client
 from qobuz_librarian.download import (
     clear_attempts_after_import,
@@ -23,11 +23,12 @@ from qobuz_librarian.download import (
     validated_staged_album_dirs,
 )
 from qobuz_librarian.download_result import (
+    processing_attention,
     shortfall_fields,
     track_shortfall,
     tracks_missing,
 )
-from qobuz_librarian.integrations import lyric_fetch
+from qobuz_librarian.integrations import lyric_fetch, track_annotations
 from qobuz_librarian.integrations.beets import (
     _ART_EXTS,
     MusicDiskFull,
@@ -425,55 +426,65 @@ def _upgrade_replacement_verified(album, album_dir, backup_path, damaged=()):
 
 
 def _upgrade_trees_verified(post_dir, backup_path, damaged=()):
-    """Compare exact replacement/original tree views at the disposal gate.
-    ``damaged`` names files, relative to the album, that Repair found
-    damaged."""
+    """Repair and Gap Fill can keep a replacement at the original quality."""
+    return bool(_upgrade_comparison(backup_path, [post_dir], damaged))
+
+
+def _upgrade_improves_original(post_dir, backup_path):
+    return _upgrade_comparison(backup_path, [post_dir]) == "higher"
+
+
+def _upgrade_same_quality(backup_path, staged_dirs):
+    return _upgrade_comparison(backup_path, staged_dirs, quiet=True) == "equal"
+
+
+def _upgrade_comparison(backup_path, replacement_dirs, damaged=(), *, quiet=False):
+    """Compare complete sets of paired recordings, including their channels and playtime."""
+    def refused(reason):
+        if not quiet:
+            log.info(fmt(C.YELLOW, reason))
+        return None
+
     damaged = _held_paths(backup_path, damaged)
-    new_tracks, new_degraded = _folder_tracks_checked(post_dir)
-    old_tracks, old_degraded = _folder_tracks_checked(backup_path)
-    # A degraded walk returns only the READABLE tracks: a transient error on
-    # the backup side lowers the baseline enough for an incomplete replacement
-    # to pass every gate below and delete the only full copy.
-    if old_degraded or new_degraded:
-        log.info(fmt(C.YELLOW,
-            "  ⚠  Couldn't fully read the "
-            f"{'backup' if old_degraded else 'imported album'} while verifying "
-            "the upgrade."))
-        return False
+    old_tracks, degraded = _folder_tracks_checked(backup_path)
+    if degraded:
+        return refused("  ⚠  Couldn't fully read the backup while verifying the upgrade.")
+    new_tracks = []
+    for folder in replacement_dirs:
+        tracks, degraded = _folder_tracks_checked(folder)
+        if degraded:
+            return refused("  ⚠  Couldn't fully read the imported album while verifying the upgrade.")
+        new_tracks.extend(tracks)
     new_n, new_secs = len(new_tracks), _tracks_seconds(new_tracks)
     old_n, old_secs = len(old_tracks), _tracks_seconds(old_tracks)
     # An empty or unreadable backup reads as (0, 0.0), which makes both gates
     # below pass vacuously (new_n < 0 is never true), deleting the only full
     # copy. Treat an unreadable/empty backup as unverifiable and keep it.
     if old_n == 0:
-        log.info(fmt(C.YELLOW,
-            "  ⚠  Couldn't read the upgrade backup (empty or unreadable)."))
-        return False
+        return refused(
+            "  ⚠  Couldn't read the upgrade backup (empty or unreadable).")
     if new_n < old_n:
-        log.info(fmt(C.YELLOW,
+        return refused(
             f"  ⚠  Upgrade landed {plural(new_n, 'track')} but the original held "
-            f"{old_n}."))
-        return False
+            f"{old_n}.")
     if old_secs > 0 and new_secs < old_secs * _UPGRADE_VERIFY_DURATION_RATIO:
-        log.info(fmt(C.YELLOW,
+        return refused(
             f"  ⚠  Upgrade playtime {int(new_secs)}s falls short of the "
-            f"original {int(old_secs)}s (a track may be truncated)."))
-        return False
+            f"original {int(old_secs)}s (a track may be truncated).")
     # Every original must have one identity-paired replacement.
     pairs = _pair_upgrade_tracks_for_disposal(old_tracks, new_tracks, damaged)
     if pairs is None:
-        log.info(fmt(C.YELLOW,
+        return refused(
             "  ⚠  Couldn't prove one unique replacement for every original "
-            "track."))
-        return False
+            "track.")
+    improved = new_n > old_n
     for ot, nt in pairs:
         oq, nq = _track_quality(ot), _track_quality(nt)
         title = truncate(str(ot.get("title") or ""), 40)
         if ot.get("path") not in damaged and _track_identity_conflicts(ot, nt):
-            log.info(fmt(C.YELLOW,
+            return refused(
                 f"  ⚠  Upgrade matched {title} to a different recording "
-                "identity."))
-            return False
+                "identity.")
         if ot.get("lossy") and not nt.get("lossy"):
             relation = "higher" if track_relation(ot, nq) == "lower" else "unknown"
         else:
@@ -484,31 +495,28 @@ def _upgrade_trees_verified(post_dir, backup_path, damaged=()):
                 if relation == "incomparable"
                 else f"returned at {_fmt_quality(nq)} instead of {_fmt_quality(oq)}"
             )
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  Upgrade for {title} {detail}."))
-            return False
+            return refused(
+                f"  ⚠  Upgrade for {title} {detail}.")
+        if relation == "higher":
+            improved = True
         old_channels = _known_track_channels(ot)
         new_channels = _known_track_channels(nt)
         if old_channels is None or new_channels is None:
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  Couldn't verify the channel layout for {title}."))
-            return False
+            return refused(
+                f"  ⚠  Couldn't verify the channel layout for {title}.")
         if new_channels != old_channels:
-            log.info(fmt(C.YELLOW,
+            return refused(
                 f"  ⚠  Upgrade for {title} changed from {old_channels} to "
-                f"{new_channels} channels."))
-            return False
+                f"{new_channels} channels.")
         old_duration = _known_track_duration(ot)
         new_duration = _known_track_duration(nt)
         if old_duration is None or new_duration is None:
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  Couldn't verify the playtime for {title}."))
-            return False
+            return refused(
+                f"  ⚠  Couldn't verify the playtime for {title}.")
         if new_duration < old_duration * _UPGRADE_VERIFY_DURATION_RATIO:
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  Upgrade for {title} is shorter than the original."))
-            return False
-    return True
+            return refused(
+                f"  ⚠  Upgrade for {title} is shorter than the original.")
+    return "higher" if improved else "equal"
 
 
 def _intentional_replacement_verified(replacement_path, _backup_path):
@@ -544,70 +552,42 @@ _REPLACEMENT_OWNED_PREFIXES = (
 _LYRIC_TAGS = frozenset({"lyrics", "unsyncedlyrics"})
 
 
-def _original_track_tags(source):
-    return [
-        (key, value) for key, value in (source.tags or [])
+def _carried_track_tags(entries, target):
+    """Keep the original track's own tags, preferring synced lyrics."""
+    tags = [
+        (key, value) for key, value in entries
         if key.lower() not in _REPLACEMENT_OWNED_TAGS
         and not key.lower().startswith(_REPLACEMENT_OWNED_PREFIXES)
         and (key.lower() not in _LYRIC_TAGS or value.strip())
     ]
-
-
-def _carried_track_tags(source, target):
-    """The original track's own tags to carry, without its lyrics when the
-    replacement's rank higher: synced lyrics stay over plain ones."""
-    tags = _original_track_tags(source)
     rank = ("none", "plain", "synced").index
-    if (rank(lyric_fetch.classify(lyric_fetch.get_existing_lyrics(target)))
-            > rank(lyric_fetch.classify(lyric_fetch.get_existing_lyrics(source)))):
-        tags = [(key, value) for key, value in tags
-                if key.lower() not in _LYRIC_TAGS]
+    lyric_rank = max((rank(lyric_fetch.classify(value)) for key, value in tags
+                      if key.lower() in _LYRIC_TAGS), default=0)
+    if rank(lyric_fetch.classify(lyric_fetch.get_existing_lyrics(target))) > lyric_rank:
+        tags = [(key, value) for key, value in tags if key.lower() not in _LYRIC_TAGS]
     return tags
 
 
-def _missing_track_pictures(source, target):
+def _missing_track_pictures(original, target):
     embedded = {picture.data for picture in target.pictures}
-    has_front = any(picture.type == 3 for picture in target.pictures)
-    return [
-        picture for picture in source.pictures
-        if picture.data not in embedded
-        and not (picture.type == 3 and has_front)
-    ]
+    missing = []
+    for picture in original:
+        if picture.data not in embedded:
+            missing.append(picture)
+            embedded.add(picture.data)
+    return missing
 
 
 def _annotations_to_carry(old, target):
-    """The original track's own tags and pictures that ``target`` lacks. A
-    lossy original gives the tags mutagen's easy interface reads and its
-    lyrics; its pictures are not carried."""
-    import mutagen
+    """The original track's own tags and pictures to keep on the replacement."""
     from mutagen.flac import FLAC
 
-    if not old.get("lossy"):
+    if Path(old["path"]).suffix.lower() == ".flac":
         source = FLAC(old["path"])
-        return (_carried_track_tags(source, target),
-                _missing_track_pictures(source, target))
-    easy = mutagen.File(old["path"], easy=True)
-    tags = [
-        (key, value) for key, values in (easy.tags or {}).items()
-        for value in values
-        if isinstance(value, str)
-        and key.lower() not in _REPLACEMENT_OWNED_TAGS
-        and not key.lower().startswith(_REPLACEMENT_OWNED_PREFIXES)
-    ]
-    rank = ("none", "plain", "synced").index
-    lyrics = max(lyric_fetch.tag_lyric_values(mutagen.File(old["path"])),
-                 key=lambda value: rank(lyric_fetch.classify(value)), default=None)
-    kind = lyric_fetch.classify(lyrics)
-    if kind != "none" and rank(kind) >= rank(lyric_fetch.classify(
-            lyric_fetch.get_existing_lyrics(target))):
-        tags.append(("lyrics", lyrics))
-    return tags, []
-
-
-def _carries_annotations(old, new):
-    return (Path(new["path"]).suffix.lower() == ".flac"
-            and (bool(old.get("lossy"))
-                 or Path(old["path"]).suffix.lower() == ".flac"))
+        entries, pictures = source.tags or [], source.pictures
+    else:
+        entries, pictures = track_annotations.read(old["path"])
+    return _carried_track_tags(entries, target), _missing_track_pictures(pictures, target)
 
 
 def _track_annotations_preserved(backup_path, replacement_path):
@@ -620,8 +600,6 @@ def _track_annotations_preserved(backup_path, replacement_path):
     if pairs is None:
         return False
     for old, new in pairs:
-        if not _carries_annotations(old, new):
-            return False
         try:
             target = FLAC(new["path"])
             tags, pictures = _annotations_to_carry(old, target)
@@ -651,16 +629,33 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None,
     """Give each replacement track the user's own tags and pictures.
 
     Original tags take precedence unless the new download owns that kind
-    of tag. Embedded pictures other than an existing front cover are added.
+    of tag. Distinct original pictures follow the download's embedded art.
     Returns False when a track could not be paired or written.
     """
-    from mutagen.flac import FLAC
-
     new_tracks, new_degraded = _folder_tracks_checked(replacement_path)
-    old_tracks, old_degraded = _folder_tracks_checked(backup_path)
+    if new_degraded:
+        return False
     if edition is not None:
         new_tracks = catalog.edition_files(edition, new_tracks, replacement_path)
-    pairs = (None if new_degraded or old_degraded
+    return _copy_track_annotations(backup_path, new_tracks, damaged=damaged)
+
+
+def _carry_staged_upgrade_tags(backup_path, album_dirs):
+    """Give beets the tags it will index when it imports these tracks."""
+    tracks = []
+    for folder in album_dirs:
+        found, degraded = _folder_tracks_checked(folder)
+        if degraded:
+            return
+        tracks.extend(found)
+    _copy_track_annotations(backup_path, tracks, tags_only=True)
+
+
+def _copy_track_annotations(backup_path, new_tracks, *, damaged=(), tags_only=False):
+    from mutagen.flac import FLAC
+
+    old_tracks, old_degraded = _folder_tracks_checked(backup_path)
+    pairs = (None if old_degraded
              else _pair_upgrade_tracks_for_disposal(
                  old_tracks, new_tracks, _held_paths(backup_path, damaged)))
     if pairs is None:
@@ -668,14 +663,14 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None,
     carried_to = 0
     for old, new in pairs:
         target_path = Path(new["path"])
-        if not _carries_annotations(old, new):
-            continue
         try:
             target = FLAC(str(target_path))
             if target.tags is None:
                 target.add_tags()
             lyric_keys = _LYRIC_TAGS
             tags, pictures = _annotations_to_carry(old, target)
+            if tags_only:
+                pictures = []
             if not pictures and _tags_present(tags, target):
                 continue
             if any(key.lower() in lyric_keys for key, _value in tags):
@@ -690,16 +685,16 @@ def _carry_track_annotations(backup_path, replacement_path, *, edition=None,
                 target.add_picture(picture)
             lyric_fetch.save_flac_tags(target, target_path)
         except Exception as e:
-            log.info(fmt(C.YELLOW,
-                f"  ⚠  Couldn't carry your own tags onto "
-                f"{truncate(target_path.name, 40)} ({e}); keeping the "
-                "backup."))
+            if not tags_only:
+                log.info(fmt(C.YELLOW,
+                    f"  ⚠  Couldn't carry your own tags onto "
+                    f"{truncate(target_path.name, 40)} ({e}); keeping the "
+                    "backup."))
             return False
         carried_to += 1
-    if carried_to:
+    if carried_to and not tags_only:
         log.info(fmt(C.GRAY,
-            f"  ⤷  Carried your own tags and pictures onto "
-            f"{plural(carried_to, 'track')}."))
+            f"  ⤷  Copied metadata from the originals to {plural(carried_to, 'track')}."))
     return True
 
 
@@ -874,7 +869,7 @@ def _finish_upgrade(backup, album_dir, entries):
     """Finish an upgrade whose download is in ``album_dir`` as the run
     would have. False, with nothing removed, when the download doesn't
     check out against the original or its beets entries can't take it."""
-    if not _upgrade_trees_verified(album_dir, backup.path):
+    if not _upgrade_improves_original(album_dir, backup.path):
         return False
     carried = _carry_non_audio_from_backup(
         None, album_dir, backup, replacement_dir=album_dir)
@@ -892,7 +887,7 @@ def _finish_upgrade(backup, album_dir, entries):
             replacement_path=replacement_path,
             expected_replacement_receipt=replacement_receipt,
             replacement_validator=without_unread_audio(
-                _upgrade_trees_verified, backup, replacement_receipt)):
+                _upgrade_improves_original, backup, replacement_receipt)):
         if not pin_unverified_upgrade_backup(
                 backup,
                 "upgrade kept; final exact replacement proof did not hold"):
@@ -901,16 +896,12 @@ def _finish_upgrade(backup, album_dir, entries):
 
 
 def finish_interrupted_upgrades():
-    """Settle each upgrade a hard stop cut short once its download began to
-    import. A download that checks out against the original is kept, with
-    the user's tags and companions carried onto it and its tracks in the
-    album's beets entry, and leaves the saved Upgrade list; anything else
-    gives way to the original, and the entries the import added are
-    dropped. An album still in its backup is left to the start-up put-back,
-    and one whose parent folder is gone, as an unmounted library reads, is
-    left alone. Returns the album folders upgraded and those put back."""
-    from qobuz_librarian import saved_views
+    """Finish verified upgrades and put back originals after a failed import.
 
+    An older import at equal quality keeps its original in Backups for
+    review. An album still in its backup is left to the start-up put-back.
+    Returns the album folders upgraded and those put back.
+    """
     finished, put_back = [], []
     for backup, note in interrupted_upgrades():
         try:
@@ -932,6 +923,13 @@ def finish_interrupted_upgrades():
                 "run left unfinished."))
             saved_views.forget_upgraded_album(None, album_dir)
             finished.append(album_dir)
+            continue
+        if _upgrade_same_quality(backup.path, [album_dir]):
+            # An older run may already have retired the original beets rows.
+            _pin_or_warn(backup, "interrupted upgrade imported the same quality")
+            log.info(fmt(C.YELLOW,
+                f"  An interrupted upgrade of {album_dir} imported the same "
+                f"quality. The original is at {backup} for review in Settings."))
             continue
         try:
             album_dir.rmdir()
@@ -1875,6 +1873,12 @@ class _AlbumRun:
             prepared = _pre_import_staging_hooks(self.args, self.staged_dirs_for_import)
             self.resampled_n = prepared.resampled
             self.downsample_outcome = _pre_import_outcome_fields(prepared)
+            if self.auto_upgrade_active and self.upgrade_backup_path is not None:
+                if (not processing_attention(self.downsample_outcome)
+                        and _upgrade_same_quality(self.upgrade_backup_path, self.staged_dirs_for_import)):
+                    self.early_result = {"result": "upgrade_same_quality", "imported": False, "n_ok": 0}
+                    return self.early_result
+                _carry_staged_upgrade_tags(self.upgrade_backup_path, self.staged_dirs_for_import)
             self.post_import_signatures = track_signatures_for_album_dirs(
                 self.staged_dirs_for_import)
 
@@ -1987,7 +1991,7 @@ class _AlbumRun:
                 upgrade_verified = upgrade_succeeded and (
                     self.import_folder is None or replacement_dir is not None)
             if upgrade_verified and self.auto_upgrade_active:
-                upgrade_verified = _upgrade_trees_verified(replacement_dir, self.upgrade_backup_path)
+                upgrade_verified = _upgrade_improves_original(replacement_dir, self.upgrade_backup_path)
             if upgrade_verified:
                 # Carry non-audio companions (booklets, art, .cue/.log) from
                 # the backup into the rebuilt album before deleting it. The
@@ -1998,7 +2002,7 @@ class _AlbumRun:
                 if carried is not None:
                     replacement_path, replacement_receipt, left = carried
                     tree_validator = (
-                        _upgrade_trees_verified
+                        _upgrade_improves_original
                         if self.auto_upgrade_active
                         else _intentional_replacement_verified
                     )
@@ -2118,14 +2122,27 @@ class _AlbumRun:
                 if upgrade_succeeded:
                     self.imported = False
                     self.upgrade_unverified = True
-                op_label = "Forced re-download" if self.use_force else "Upgrade"
-                log.info(fmt(C.YELLOW,
-                    f"\n  ⚠  {op_label} did not succeed (no successful import); "
-                    "restoring backup …"))
-                if restore_upgrade_backup(self.upgrade_backup_path, self.album_dir):
-                    log.info(fmt(C.GREEN,
-                        f"  ✓  Restored original folder to {self.album_dir}."))
+                same_quality = (self.early_result or {}).get("result") == "upgrade_same_quality"
+                if same_quality:
+                    if not discard_download_staging(self.download_result):
+                        log.warning("  The same-quality download could not be cleared from staging.")
                 else:
+                    op_label = "Forced re-download" if self.use_force else "Upgrade"
+                    log.info(fmt(C.YELLOW,
+                        f"\n  ⚠  {op_label} did not succeed (no successful import); "
+                        "restoring backup …"))
+                if restore_upgrade_backup(self.upgrade_backup_path, self.album_dir,
+                                          replace_partial=not same_quality):
+                    if same_quality:
+                        log.info("  The download matched the original quality. Kept the original album.")
+                        saved_views.note_same_quality_upgrade(
+                            self.album_dir, self.album, self.quality_verdict, resampled=self.resampled_n)
+                    else:
+                        log.info(fmt(C.GREEN,
+                            f"  ✓  Restored original folder to {self.album_dir}."))
+                else:
+                    if same_quality:
+                        self.early_result["result"] = "not_imported"
                     self.upgrade_unverified = True
                     _pin_or_warn(
                         self.upgrade_backup_path,
@@ -2381,8 +2398,11 @@ class _AlbumRun:
             and not self.consolidation_interrupted
         ):
             if self.auto_upgrade_active and not self.upgrade_unverified:
+                verdict = self.quality_verdict or {}
+                label = ("replaced" if verdict.get("under") and not verdict.get("recovered")
+                         else "↑ upgraded")
                 log.info(fmt(C.MAGENTA + C.BOLD,
-                    f"  ↑ upgraded · {plural(self.n_ok, 'track')} · {int(self.elapsed)}s · imported"))
+                    f"  {label} · {plural(self.n_ok, 'track')} · {int(self.elapsed)}s · imported"))
             elif not self.auto_upgrade_active and not self.upgrade_unverified:
                 log.info(fmt(C.GREEN,
                     f"  ✓ {self.n_ok} downloaded · {int(self.elapsed)}s · imported"))

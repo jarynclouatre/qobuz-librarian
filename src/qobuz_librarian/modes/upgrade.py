@@ -35,6 +35,7 @@ from qobuz_librarian.ui_cli.prompts import _flush_stdin, confirm
 # process_album outcomes that mean "nothing to upgrade here", not a failure.
 BENIGN_UPGRADE_RESULTS = frozenset({
     "upgrade_only_no_op",
+    "upgrade_same_quality",
     "skipped_already_higher_quality",
     "skipped_has_extras",
     "lossy_only",
@@ -227,6 +228,7 @@ class _UpgradeWalk:
         self.n = len(self.by_artist)
         self.n_reviewed = 0
         self.n_upgraded_albums = 0
+        self.n_same_quality = 0
         self.n_unverified_albums = 0
         self.n_catalogue_failed = 0
         self.n_failed_albums = 0
@@ -251,8 +253,8 @@ class _UpgradeWalk:
         log.info(fmt(C.GRAY, "  Ctrl-C to stop at any point."))
         if not self.dry_run:
             log.info(fmt(C.YELLOW, wrap(
-                "Your current copy is removed once the replacement verifies. "
-                "This cannot be undone.")))
+                "If the same tracks come back at the same quality, your original "
+                "files are kept. A verified upgrade replaces them permanently.")))
 
     def _ask_unattended(self):
         if (not self.args.yes and not getattr(self.args, "auto_safe", False)
@@ -427,7 +429,9 @@ class _UpgradeWalk:
             time.sleep(cfg.ARTIST_API_DELAY)
             return
         if _pr_result in BENIGN_UPGRADE_RESULTS:
-            if _pr_result not in {"cancelled", "dry_run"}:
+            if _pr_result == "upgrade_same_quality":
+                self.n_same_quality += 1
+            elif _pr_result not in {"cancelled", "dry_run"}:
                 saved_views.forget_upgraded_album(
                     None, payload.get("album_dir"))
             time.sleep(cfg.ARTIST_API_DELAY)
@@ -490,6 +494,9 @@ class _UpgradeWalk:
             log.info(fmt(C.GRAY,
                 f"     Reviewed {plural(self.n_reviewed, 'artist')}; upgraded tracks in "
                 f"{plural(self.n_upgraded_albums, 'album')}."))
+        if self.n_same_quality:
+            log.info(fmt(C.GRAY,
+                f"     Skipped {plural(self.n_same_quality, 'album')} at the same quality."))
         if self.stopped_during_removal:
             log.info(fmt(C.YELLOW,
                 f"     ⚠  {truncate(self.stopped_during_removal, 48)} was upgraded; the "
@@ -554,7 +561,7 @@ class _UpgradeWalk:
             log.warning(fmt(C.RED, f"  ✗  Finished with {plural(self.n_failed_attempts, 'error')}."))
         elif clause:
             log.warning(fmt(C.YELLOW, f"  ⚠  Needs attention: {clause}."))
-        elif not (self.n_upgraded_albums or self.n_would_upgrade):
+        elif not (self.n_upgraded_albums or self.n_would_upgrade or self.n_same_quality):
             log.info(fmt(C.GRAY, "  Nothing to do."))
         else:
             log.info(fmt(C.GREEN, "  ✓  Done."))
@@ -564,6 +571,7 @@ class _UpgradeWalk:
             stopped = self.interrupted or self.no_answer
             parts = [f"{plural(self.n_upgraded_albums, 'album')} upgraded"]
             for count, what in (
+                    (self.n_same_quality, "skipped at the same quality"),
                     (self.n_failed_albums, "couldn't be upgraded"),
                     (self.n_refused_albums, "put back after a download that couldn't "
                                             "be verified"),

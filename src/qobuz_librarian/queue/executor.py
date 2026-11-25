@@ -28,6 +28,7 @@ from qobuz_librarian.completion import (
 )
 from qobuz_librarian.download import (
     clear_attempts_after_import,
+    discard_download_staging,
     discard_retry_staging,
     keep_unimported_download,
     note_superseded_attempts,
@@ -1367,12 +1368,17 @@ class _ItemResolution:
                 log.info(fmt(C.YELLOW,
                     f"  ⚠  {truncate(self.album_dir.name, 40)}: backup kept at {self.bp}"))
             else:
-                log.info(fmt(C.YELLOW,
-                    f"  ⚠  {truncate(self.album_dir.name, 40)}: upgrade did not succeed; restoring..."))
-                if restore_upgrade_backup(self.bp, self.album_dir):
+                same_quality = self.item.get("result") == "upgrade_same_quality"
+                if not same_quality:
+                    log.info(fmt(C.YELLOW,
+                        f"  ⚠  {truncate(self.album_dir.name, 40)}: upgrade did not succeed; restoring..."))
+                restore_opts = {"replace_partial": False} if same_quality else {}
+                if restore_upgrade_backup(self.bp, self.album_dir, **restore_opts):
                     log.info(fmt(C.GREEN, f"  ✓  Restored {truncate(self.album_dir.name, 50)}"))
                 else:
                     self.item["upgrade_unverified"] = True
+                    if same_quality:
+                        self.item["result"] = "import_failed"
                     _pin_or_warn(
                         self.bp,
                         "upgrade backup kept; automatic restore did not "
@@ -1395,11 +1401,10 @@ class _ItemResolution:
             _keep_backup_for_companions,
             _put_original_back,
             _replacement_audio_paths,
-            _upgrade_replacement_verified,
-            _upgrade_trees_verified,
+            _upgrade_improves_original,
         )
         replaced_entries = self.item.get("_replaced_beets_entries")
-        if _upgrade_replacement_verified(self.item["album"], self.album_dir, self.bp):
+        if _upgrade_improves_original(self.post_dir, self.bp):
             # Carry non-audio companions (booklets, scans, .cue/.log,
             # hand-placed cover art) from the backup into the rebuilt album
             # before deleting it. The audio-only completeness gate ignores
@@ -1445,7 +1450,7 @@ class _ItemResolution:
                     replacement_path=replacement_path,
                     expected_replacement_receipt=replacement_receipt,
                     replacement_validator=without_unread_audio(
-                        _upgrade_trees_verified, self.bp,
+                        _upgrade_improves_original, self.bp,
                         replacement_receipt),
                 ):
                     self.item["upgrade_unverified"] = True
@@ -1677,7 +1682,7 @@ class _ItemResolution:
         if _stop in (
                 "cancelled", "incomplete", "interrupted", "disk_full", "io_error",
                 "auth_lost", "import_failed", "upgrade_aborted_backup_failed",
-                "stale_candidate", "disk_refused", "folder_read_only"):
+                "stale_candidate", "disk_refused", "folder_read_only", "upgrade_same_quality"):
             status = _stop
         elif n_ok and (n_retryable or n_unretryable or outcome_attention):
             status = "partial"
@@ -1828,7 +1833,7 @@ def _record_terminal_results(changes, args):
     were stopped or had duplicate folders consolidated."""
     _record_terminal_downloads([
         change for change in changes
-        if _landed(change) or change.get("result") == "interrupted"
+        if _landed(change) or change.get("result") in {"interrupted", "upgrade_same_quality"}
         or download_job_outcome(change)[0] == "failed"
         or change.get("consolidated_tracks_removed")
         or change.get("consolidation_failed")
@@ -2195,11 +2200,12 @@ def _queue_done_line(results, n_items, *, stopped=False):
     """
     n_success = sum(1 for r in results if r.get("result") == "downloaded")
     n_cancelled = sum(1 for r in results if r.get("result") == "cancelled")
+    n_equal = sum(1 for r in results if r.get("result") == "upgrade_same_quality")
     n_left = sum(1 for r in results if _left_as_it_is(r))
     n_own_left = sum(1 for r in results if r.get("companions_unsettled"))
     n_total_ok = n_total_missing = 0
     for r in results:
-        if r.get("result") == "cancelled" or _left_as_it_is(r):
+        if r.get("result") in {"cancelled", "upgrade_same_quality"} or _left_as_it_is(r):
             continue
         missing = sum(incomplete_track_counts(r))
         if r.get("result") == "incomplete":
@@ -2208,11 +2214,11 @@ def _queue_done_line(results, n_items, *, stopped=False):
             n_total_ok += r.get("n_ok", 0)
         n_total_missing += missing
     n_unfinished = max(
-        0, n_items - n_success - n_cancelled - n_left - n_own_left)
+        0, n_items - n_success - n_cancelled - n_equal - n_left - n_own_left)
     clear = (n_total_missing == 0 and n_unfinished == 0 and n_cancelled == 0
              and n_left == 0 and n_own_left == 0)
     text = (f"  {'✓' if clear else '⚠'} Queue {'stopped' if stopped else 'done'}: "
-            f"{n_success}/{n_items} album{'s' if n_items != 1 else ''} OK")
+            f"{n_success + n_equal}/{n_items} album{'s' if n_items != 1 else ''} OK")
     # A stop tallies finished albums only, so its zero says nothing about
     # the album it cut short.
     if n_total_ok or not stopped:
@@ -2222,6 +2228,8 @@ def _queue_done_line(results, n_items, *, stopped=False):
     if n_cancelled:
         text += (f" · {n_cancelled} album"
                  f"{'s' if n_cancelled != 1 else ''} stopped")
+    if n_equal:
+        text += f" · {plural(n_equal, 'album')} skipped at the same quality"
     if n_left:
         text += (f" · {plural(n_left, 'album')} left as "
                  f"{'it is' if n_left == 1 else 'they are'}")
@@ -2877,6 +2885,20 @@ class _QueueFlush:
                 return _STOP_QUEUE
             return self._settle_durable_outcome(outcome)
 
+    def _keep_same_quality(self):
+        self.item["n_ok"] = 0
+        self.item["result"] = "upgrade_same_quality"
+        result = _resolve_queue_item(self.item, self.args, False, authority=self.authority)
+        self.results.append(result)
+        if result["result"] == "upgrade_same_quality":
+            saved_views.note_same_quality_upgrade(
+                self.album_dir, self.album, self.item.get("quality_verdict"),
+                resampled=self.item.get("resampled_n", 0))
+            self._drop(self.item)
+            log.info(fmt(C.GRAY,
+                "    The download matched the original quality. Kept the original album."))
+        return _NEXT_ALBUM
+
     def _settle_durable_outcome(self, outcome):
         removed = all(queued is not self.item for queued in self.queue)
         if removed:
@@ -2900,6 +2922,8 @@ class _QueueFlush:
             and not self.item.get("rate_limited")
         )
         if outcome.status is DurableAlbumStatus.INCOMPLETE and not refetch:
+            if outcome.reason == "upgrade-same-quality":
+                return self._keep_same_quality()
             # Qobuz could not serve the whole album, or the download did
             # not hold up against the tracks it would replace. The
             # download is gone and nothing is left waiting on recovery, so
@@ -3189,10 +3213,6 @@ class _QueueFlush:
         else:
             log.info(fmt(C.YELLOW,
                 f"    {quality_below_line(self.item['quality_verdict'])}"))
-            # Still under target: the import proceeds, but the owning
-            # job must not look like a clean finish.
-            if on_quality_shortfall is not None:
-                on_quality_shortfall(self.item["quality_verdict"])
 
     def _prepare_staged_album(self):
         # Repair carries a callback that re-tags the staged refills
@@ -3221,15 +3241,24 @@ class _QueueFlush:
                     and edition_album_title(self.album)):
                 _prepare_staging_tags(self.album_dirs, album_title=edition_album_title(self.album))
             prepared = _run_pre_import_hooks_for_dirs(self.album_dirs, self.args)
-            if self.item.get("backup_path") is not None:
-                from qobuz_librarian.modes.process import (
-                    _keep_own_cover,
-                )
-
-                _keep_own_cover(self.item["backup_path"], self.album_dirs)
-            note_superseded_attempts(self.item)
             self.item["resampled_n"] = prepared.resampled
             self.item.update(_pre_import_outcome_fields(prepared))
+            if self.item.get("backup_path") is not None:
+                from qobuz_librarian.modes.process import (
+                    _carry_staged_upgrade_tags,
+                    _keep_own_cover,
+                    _upgrade_same_quality,
+                )
+
+                if (not any(incomplete_track_counts(self.item))
+                        and not _downsample_outcome_needs_attention(self.item)
+                        and _upgrade_same_quality(self.item["backup_path"], self.album_dirs)):
+                    if not discard_download_staging(self.item):
+                        raise OSError("could not remove the equal-quality download")
+                    return self._keep_same_quality()
+                _carry_staged_upgrade_tags(self.item["backup_path"], self.album_dirs)
+                _keep_own_cover(self.item["backup_path"], self.album_dirs)
+            note_superseded_attempts(self.item)
             self.item["post_import_signatures"] = (
                 track_signatures_for_album_dirs(self.album_dirs))
         except KeyboardInterrupt:
@@ -3249,6 +3278,8 @@ class _QueueFlush:
             return _NEXT_ALBUM
 
     def _import_with_beets(self):
+        if self.item["quality_verdict"]["under"] and on_quality_shortfall is not None:
+            on_quality_shortfall(self.item["quality_verdict"])
         self.parking_receipts = tuple(
             capture_tree(directory) for directory in self.album_dirs)
         if any(receipt is None for receipt in self.parking_receipts):

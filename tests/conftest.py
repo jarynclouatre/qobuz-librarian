@@ -19,10 +19,10 @@ import pytest
 def tagged_flac():
     from mutagen.flac import FLAC
 
-    def write(path, seconds=0, **tags):
+    def write(path, seconds=0, *, sample_rate=44100, **tags):
         streaminfo = bytearray(34)
-        samples = max(1, int(seconds * 44100))
-        streaminfo[10:18] = ((44100 << 44) | (1 << 41) | (15 << 36) | samples).to_bytes(8, "big")
+        samples = max(1, int(seconds * sample_rate))
+        streaminfo[10:18] = ((sample_rate << 44) | (1 << 41) | (15 << 36) | samples).to_bytes(8, "big")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fLaC\x80\x00\x00\x22" + streaminfo)
         audio = FLAC(path)

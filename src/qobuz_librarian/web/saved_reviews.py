@@ -476,7 +476,7 @@ def open_saved_review(job):
     """The review to show for ``job`` opened by its own link, such as from
     History: a parked Upgrade or Downsample review brought in line with the
     saved results as the Review button on its page does, or the review that
-    already is."""
+    already is. Returns None when the saved review has no albums left."""
     surface = job.execute_kind
     if (surface not in _SAVED_REVIEW_TITLES
             or job.status != job_mgr.JobStatus.AWAITING_REVIEW
@@ -484,10 +484,12 @@ def open_saved_review(job):
         return job
     with _SAVED_REVIEW_LOCK:
         state = _saved_state_summary(surface)
-        if (not state["complete"] or not state["candidates"]
+        if (not state["complete"]
                 or state.get("stale") and surface == "upgrade"
                 or _active_saved_review_claim(surface, state) is not None):
             return job
+        if not state["candidates"]:
+            return None
         signature = _saved_review_signature(surface, state)
         existing = _existing_saved_review_job(surface, signature)
         if existing is not None:
@@ -592,4 +594,6 @@ def review_location(job):
         if shown is not None and (shown is job or _is_saved_review(job)):
             return f"/{job.execute_kind}"
         shown = open_saved_review(job)
+        if shown is None:
+            return f"/{job.execute_kind}"
     return None if shown is job else f"/jobs/{shown.id}"

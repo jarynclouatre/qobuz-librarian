@@ -996,18 +996,24 @@ class _DurableAlbumRun:
             )
             # Beets files a copy over the user's tracks only when it holds up
             # against them, track by track; otherwise they go back.
-            if (
-                backup is not None
-                and len(self.album_dirs) == 1
-                and not process._upgrade_trees_verified(self.album_dirs[0], backup.path)
-            ):
+            reason = None
+            if backup is not None and len(self.album_dirs) == 1:
+                if self.plan.library_backup_kind == "upgrade":
+                    verified = process._upgrade_comparison(backup.path, self.album_dirs)
+                    if verified == "equal":
+                        reason = "upgrade-same-quality"
+                else:
+                    verified = process._upgrade_trees_verified(self.album_dirs[0], backup.path)
+                if not verified:
+                    reason = "upgrade-unverified"
+            if reason:
                 outcome = _retry_or_attention_after_download(
                     operation_id=self.operation_id,
                     item_id=self.item_id,
                     result=self.item,
                     owner=self.owner,
                     checkpoint_group=self._checkpoint_group,
-                    reason="upgrade-unverified",
+                    reason=reason,
                     authority=self.authority,
                 )
                 if outcome.status is not DurableAlbumStatus.ATTENTION:
@@ -1016,7 +1022,7 @@ class _DurableAlbumRun:
                     operation_id=self.operation_id,
                     item_id=self.item_id,
                     result=self.item,
-                    reason="upgrade-unverified",
+                    reason=reason,
                     fallback=outcome,
                     authority=self.authority,
                 )

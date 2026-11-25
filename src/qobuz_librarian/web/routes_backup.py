@@ -18,6 +18,7 @@ from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import (
     candidate_premise,
     collection_snapshot,
+    flac_cache,
     generation_state,
     scanner,
 )
@@ -445,6 +446,11 @@ def _read_only_note(names):
 def _refresh_tool_lists(origin, reason):
     # The album on disk is now the older version, so the saved Upgrade and
     # Downsample candidates for its artist no longer describe it.
+    try:
+        flac_cache.forget_missing_in_album(origin)
+        scanner.cache_album_tags([origin])
+    except OSError:
+        _log.exception("album tag cache refresh failed after restore")
     try:
         saved_views.refresh_downsample_artist(Path(origin).parent)
     except Exception:

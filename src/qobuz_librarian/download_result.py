@@ -144,7 +144,7 @@ def download_job_outcome(result):
         return "done", kind
     if kind == "backup" or (result.get("result") == "partial" and result.get("imported")):
         return "failed", kind
-    benign = {"already_complete", "skipped_already_higher_quality",
+    benign = {"already_complete", "skipped_already_higher_quality", "upgrade_same_quality",
               "skipped_has_extras", "dry_run", "user_skipped",
               "lossy_only", "no_tracks", "cancelled"}
     if result.get("result") not in benign and not result.get("imported"):

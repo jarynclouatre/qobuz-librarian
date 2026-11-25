@@ -10,6 +10,7 @@ BOTH mtime and size (e.g. an mtime restored with ``touch -r``), which keeps the
 cached tags until the file next changes. Delete the db to force a re-parse.
 """
 import atexit
+import glob
 import json
 import os
 import sqlite3
@@ -201,6 +202,27 @@ def forget_missing(path: Path) -> None:
             return
         if buffered or deleted.rowcount:
             _writes += 1
+
+
+def forget_missing_in_album(folder: Path) -> None:
+    """Drop cached paths a restored album no longer has."""
+    global removal_generation
+    if (cfg.MUSIC_ROOT not in folder.parents or not folder.is_dir()
+            or not _db.ensure()):
+        return
+    with _PENDING_LOCK:
+        removal_generation += 1
+    flush_pending()
+    try:
+        rows = _db.conn().execute(
+            "SELECT path FROM files WHERE path GLOB ?",
+            (glob.escape(str(folder)) + "/*",)).fetchall()
+    except sqlite3.Error as e:
+        vlog(f"flac cache album lookup failed: {e}")
+        _db.handle_db_error(e)
+        return
+    for path, in rows:
+        forget_missing(Path(path))
 
 
 def _gone_from(listing, path) -> bool:

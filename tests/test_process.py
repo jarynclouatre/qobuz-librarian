@@ -1024,7 +1024,7 @@ def test_restart_finishes_an_upgrade_killed_after_its_import(
     connection.close()
     entries = beets.capture_beets_album_entries(album)
     backup = backup_mod.backup_album_dir(album)
-    new = tracks()
+    new = tracks(sample_rate=96000)
     (album / "cover.jpg").write_bytes(b"cover")
     (album / f".ql-copy-{'0' * 32}").write_bytes(b"boo")
     with sqlite3.connect(database) as connection:

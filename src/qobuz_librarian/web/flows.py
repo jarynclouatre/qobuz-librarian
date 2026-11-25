@@ -3574,7 +3574,7 @@ class _AlbumsRun:
     def _start(self):
         self.args = build_args()
         self._benign = {"already_complete", "skipped_already_higher_quality", "dry_run",
-                        "user_skipped", "lossy_only", "no_tracks", "skipped_has_extras",
+                        "user_skipped", "lossy_only", "no_tracks", "skipped_has_extras", "upgrade_same_quality",
                         "cancelled"}
         self.ok = 0
         self.partial = 0
@@ -4106,6 +4106,7 @@ class _UpgradesRun:
         self._skip = BENIGN_UPGRADE_RESULTS
         self.ok = 0
         self.upgraded = []
+        self.same_quality = []
         self.kept = 0
         self.companion_notes = []
         self.cd_quality_tracks = []
@@ -4122,13 +4123,16 @@ class _UpgradesRun:
         self.current_interrupted = False
         self.put_back = None
 
+    def _replacement_verb(self):
+        return "replaced" if self.quality_attention else "upgraded"
+
     def _return_unfinished(self, current_index, *, disk_full=False):
         if not self.job._imported_any:
             return True
         leftovers = self.failed_cands + self.chosen[current_index:]
         saved = _return_upgrade_picks(
             leftovers, self.refused_cands, self.job.execute_args)
-        done = f"{plural(self.ok, 'album')} upgraded"
+        done = f"{plural(self.ok, 'album')} {self._replacement_verb()}"
         if disk_full:
             lead = "Stopped: the music disk is full." + (
                 f" {done}." if self.ok else "")
@@ -4216,8 +4220,11 @@ class _UpgradesRun:
                 self._skip | {"upgrade_aborted_backup_failed"}):
             self._tally_upgraded()
         elif self.result and _res in (self._skip - {"cancelled", "dry_run"}):
-            saved_views.forget_upgraded_album(
-                None, self.cand["payload"].get("album_dir"))
+            if _res == "upgrade_same_quality":
+                self.same_quality.append(self.cand)
+            else:
+                saved_views.forget_upgraded_album(
+                    None, self.cand["payload"].get("album_dir"))
         elif _res not in self._skip:
             self.failed += 1
             if self.result and self.result.get("folder_denied"):
@@ -4276,13 +4283,15 @@ class _UpgradesRun:
             leftovers, self.refused_cands, self.job.execute_args)
         parts = []
         if self.upgraded:
-            parts.append(f"{named_albums(self.upgraded)} upgraded")
+            parts.append(f"{named_albums(self.upgraded)} {self._replacement_verb()}")
         if self.failed:
             parts.append(f"{plural(self.failed, 'album')} failed")
         if self.changed:
             parts.append(f"{plural(self.changed, 'album')} changed since the review")
         self.job.summary = "Stopped early." + (
             " " + ", ".join(parts) + "." if parts else "")
+        if self.same_quality:
+            self.job.summary += " " + self._same_quality_note()
         if self.put_back:
             self.job.summary += f" {named_albums([self.put_back])} was put back as it was"
             self.job.summary += ("; it is ticked in Upgrade to try again."
@@ -4351,9 +4360,17 @@ class _UpgradesRun:
             _mark_job_failed(self.job)
         log.info(self.job.summary)
 
+    def _same_quality_note(self):
+        return f"Kept {named_albums(self.same_quality)} at the same quality."
+
     def _write_summary(self):
-        msg = (f"Upgraded {named_albums(self.upgraded)}." if self.upgraded
-               else "No albums were upgraded.")
+        verb = self._replacement_verb().capitalize()
+        parts = []
+        if self.upgraded:
+            parts.append(f"{verb} {named_albums(self.upgraded)}.")
+        if self.same_quality:
+            parts.append(self._same_quality_note())
+        msg = " ".join(parts) or "No albums were upgraded."
         if self.kept:
             msg += (f" {plural(self.kept, 'replacement')} kept a backup because "
                     "the replacement or recovery couldn't be verified; review it "

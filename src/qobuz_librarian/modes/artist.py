@@ -797,7 +797,8 @@ def _gap_fill_result_bucket(result):
 
     if status in {"already_complete", "skipped_already_higher_quality"}:
         return "already_complete"
-    if status == "incomplete" and result.get("upgrade_put_back"):
+    if status == "upgrade_same_quality" or (
+            status == "incomplete" and result.get("upgrade_put_back")):
         return "kept"
     if status in {"user_skipped", "user_stopped", "dismissed"}:
         return "skipped"

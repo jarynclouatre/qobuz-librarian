@@ -139,7 +139,7 @@ def _replacement_validator(kind, album):
         from qobuz_librarian.modes import process
 
         return lambda replacement, backup: (
-            process._upgrade_trees_verified(replacement, backup)
+            process._upgrade_improves_original(replacement, backup)
             and process._track_annotations_preserved(backup, replacement)
         )
     if kind == "gap-fill":
