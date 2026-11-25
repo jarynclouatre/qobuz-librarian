@@ -1,8 +1,8 @@
 # Dev-only files that shouldn't bloat the image or invalidate cache layers.
 .venv
-__pycache__
-*.pyc
-*.pyo
+**/__pycache__
+**/*.pyc
+**/*.pyo
 .pytest_cache
 .ruff_cache
 .mypy_cache
