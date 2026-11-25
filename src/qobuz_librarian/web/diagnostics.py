@@ -765,8 +765,8 @@ def _diagnostics():
         _log.warning(
             "couldn't inspect kept recovery backups: %s", exc)
     repair_paths, in_use = _repair_backup_paths(retained)
-    waiting = {item[0] for item in retained or ()
-               if item[0] not in repair_paths and backup_mod.awaiting_retention(item[0])}
+    waiting = {path for path, _, classification in retained or ()
+               if path not in repair_paths and backup_mod.awaiting_retention(path, classification)}
     _upgrade_backups_check(checks, retained, waiting)
     for label, ok, detail in disk_support.report(
             lambda path: storage._resolve_host_path(str(path))[0]):
@@ -1276,6 +1276,7 @@ def _diagnostics_fragment(request: Request, diagnostics=None) -> str:
 def _diagnostics_swap(request: Request) -> str:
     """The list run again, with the count on the Diagnostics heading, which is
     outside the part of the page that is swapped."""
+    backup_mod.clear_retained_backup_cache()
     report = _fragment_report(None)
     return (
         f'{_diagnostics_fragment(request, report)}'

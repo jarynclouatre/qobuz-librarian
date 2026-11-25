@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -21,8 +22,8 @@ from pathlib import Path, PurePosixPath
 from qobuz_librarian import config as cfg
 from qobuz_librarian import disk_support
 from qobuz_librarian.integrations import downsample_index
-from qobuz_librarian.integrations.rip import flac_audio_ok
-from qobuz_librarian.library import scanner
+from qobuz_librarian.integrations.rip import audio_decodes, flac_audio_ok
+from qobuz_librarian.library import scanner, sibling_tracks
 from qobuz_librarian.library.scanner import iter_tree_no_symlinks
 from qobuz_librarian.library.tags import beets_sanitize, canonical_track_title
 from qobuz_librarian.recovery import (
@@ -1223,6 +1224,7 @@ _UPGRADE_RECOVERY_STATE_SENTINEL = ".ql_upgrade_recovery_state"
 # after a hard stop can finish the upgrade or undo it.
 _UPGRADE_PENDING_SENTINEL = ".ql_upgrade_pending"
 _REPAIR_IMPORT = ".ql_repair_import"
+_CONSOLIDATION_INDEX = ".ql_consolidation_index"
 
 # Earlier versions wrote these receipt-bound records into an upgrade's backup
 # while carrying its other files into the new album. A backup holding them
@@ -1273,6 +1275,7 @@ def _hidden_name(name: str, prefix=_LEFTOVER_PREFIX) -> str:
 
 # Files a backup carries that aren't backed-up tracks.
 _SIDECARS = (
+    _CONSOLIDATION_INDEX,
     _REPAIR_IMPORT,
     _ORIGIN_SIDECAR,
     _PARTIAL_RESTORE_SENTINEL,
@@ -3317,7 +3320,12 @@ def _files_signature(*roots):
     return signature
 
 
-def awaiting_retention(path: Path) -> bool:
+def _removal_signature(path, origin):
+    merged = consolidated_into(path)
+    return _files_signature(path, merged[0] if merged else origin)
+
+
+def awaiting_retention(path: Path, classification) -> bool:
     """Whether the age sweep will settle this backup on schedule.
 
     Inside the retention window, unpinned, and every file it holds back at its
@@ -3336,6 +3344,8 @@ def awaiting_retention(path: Path) -> bool:
     if made < time.time() - cfg.UPGRADE_BACKUP_RETENTION_DAYS * 86400:
         return False
     if (path / _CONSOLIDATED_SENTINEL).is_file():
+        if classification.status == "retained":
+            return False
         named = consolidated_into(path)
         return named is not None and all(
             (named[0] / track).is_file() for track in named[1].values())
@@ -3355,6 +3365,12 @@ def awaiting_retention(path: Path) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def clear_retained_backup_cache():
+    global _only_copy_cache
+    with _only_copy_lock:
+        _only_copy_cache = None
 
 
 def list_retained_backups():
@@ -3407,7 +3423,7 @@ def list_retained_backups():
                     result.status == "unverified"
                     and remembered is not None
                     and remembered[0] is not None
-                    and remembered[0] == _files_signature(entry, origin)
+                    and remembered[0] == _removal_signature(entry, origin)
                 ):
                     result = remembered[1]
                 out.append((entry, origin, result))
@@ -3981,7 +3997,7 @@ def _copy_album_to_backup(public, bp, snapshot, source_receipt, why, *,
 
 def backup_gap_fill_files(file_paths, album_dir: Path, *,
                           expected_receipts=None, owner=None,
-                          on_intent=None, kind="gapfill"):
+                          on_intent=None, kind="gapfill", consolidation_index=None):
     """Set the album's files ``file_paths`` aside in a backup sealed by its
     receipt, before a refill replaces them.
 
@@ -4150,6 +4166,11 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
             copy_file(path, target, sha256=receipt["sha256"])
         folder_fd = _open_backup_directory(partial)
         try:
+            if consolidation_index is not None:
+                data = json.dumps(consolidation_index, separators=(",", ":"))
+                if (len(data) > _RECORD_READ_BYTES or not _write_text_noreplace_at(
+                        folder_fd, _CONSOLIDATION_INDEX, data)):
+                    raise OSError("the beets entries could not be backed up")
             result = _seal_backup_result(
                 bp, folder_fd, public, kind="gap-fill", complete=True,
                 requested=len(sources), backed_up=len(sources), owner=owner,
@@ -4206,7 +4227,7 @@ def backup_gap_fill_files(file_paths, album_dir: Path, *,
         f"{what}tracks already removed."))
     restore_gap_fill_backup(
         result, public, keep_larger_dst=False, replace_dst=False,
-        expected_owner=owner)
+        expected_owner=owner, restore_index=False)
     return None
 
 
@@ -4516,11 +4537,49 @@ def stash_downsample_originals(files, album_dir):
     return result, copied, receipts
 
 
+class ConsolidationIndexError(Exception):
+    def __init__(self, files_restored):
+        self.files_restored = files_restored
+
+
+def has_consolidation_index(backup):
+    return _CONSOLIDATION_INDEX in backup.receipt["tree"]["files"]
+
+
+def _consolidation_index_record(backup):
+    directory = _open_backup_directory(backup.path)
+    try:
+        text = _read_exact_text_at(directory, _CONSOLIDATION_INDEX,
+                                   max_bytes=_RECORD_READ_BYTES)
+    finally:
+        os.close(directory)
+    digest = backup.receipt["tree"]["files"][_CONSOLIDATION_INDEX]["sha256"]
+    if not text or hashlib.sha256(text.encode()).hexdigest() != digest:
+        raise ValueError("the saved catalogue entries changed")
+    return decode_recovery_json(text, max_bytes=_RECORD_READ_BYTES)
+
+
+def _restore_consolidation_entries(backup, record, album, files_match=None):
+    from qobuz_librarian.integrations.beets import restore_consolidation_index
+
+    try:
+        if record is None:
+            record = _consolidation_index_record(backup)
+        files = {album / p for p in backup_payload(backup.receipt)}
+        restore_consolidation_index(record, files, files_match)
+        return record
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+        _write_receipt_marker(backup, _PARTIAL_RESTORE_SENTINEL,
+                              "beets entries still need restoration")
+        log.warning("  Couldn't restore the consolidation's beets entries: %s", exc)
+        raise ConsolidationIndexError(files_match is not None) from exc
+
+
 def restore_gap_fill_backup(backup, album_dir: Path,
                             *, keep_larger_dst: bool = True,
                             replace_dst: bool = True,
                             keep=frozenset(),
-                            expected_owner=None) -> int:
+                            expected_owner=None, restore_index=True) -> int:
     """Put every file of a gap-fill, repair or downsample backup back under
     album_dir at its own relative path, and return how many are there.
 
@@ -4563,6 +4622,10 @@ def restore_gap_fill_backup(backup, album_dir: Path,
             f"     Backed-up tracks remain at: {source}"))
         return 0
     payload = backup_payload(backup.receipt)
+    index_record = None
+    if restore_index and has_consolidation_index(backup):
+        index_record = _restore_consolidation_entries(backup, None, album)
+        keep_larger_dst = False
     found = {}
     index_note = None
     if backup.receipt["kind"] == "downsample":
@@ -4594,12 +4657,14 @@ def restore_gap_fill_backup(backup, album_dir: Path,
                 f"  ⚠  Couldn't restore {PurePosixPath(relative).name}: "
                 f"{exc.strerror or exc}."))
     downsample_index.finish(index_note)
-    try:
-        intact = all(stat_identity(os.lstat(album / relative)) == identity
-                     for relative, identity in found.items())
-    except OSError:
-        intact = False
-    if len(found) + len(keep & payload.keys()) != len(payload) or not intact:
+    def files_match():
+        try:
+            return all(stat_identity(os.lstat(album / relative)) == identity
+                       for relative, identity in found.items())
+        except OSError:
+            return False
+
+    if len(found) + len(keep & payload.keys()) != len(payload) or not files_match():
         _write_receipt_marker(
             backup,
             _PARTIAL_RESTORE_SENTINEL,
@@ -4611,6 +4676,8 @@ def restore_gap_fill_backup(backup, album_dir: Path,
         return len(found)
     if keep & payload.keys():
         return len(found)
+    if index_record is not None:
+        _restore_consolidation_entries(backup, index_record, album, files_match)
     if not _delete_backup_folder(
             source, backup_snapshot, _hidden_name(source.name)):
         log.info(fmt(
@@ -6296,6 +6363,7 @@ def _classify_backup_contents(
                 f.with_suffix(ext).is_file() for ext in cfg.AUDIO_EXTS)]
         files.sort(key=lambda f: (f.suffix.lower() in cfg.AUDIO_EXTS, str(f)))
         taken = {f.relative_to(backup_view) for f in files}
+        sibling = _read_backup_origin(backup_view) if renamed is not None else None
         skipped = False
         lyrics = []
         for source in files:
@@ -6332,6 +6400,16 @@ def _classify_backup_contents(
                     # The album holds this very file, damaged or not, so the
                     # backup's copy adds nothing.
                     continue
+                if renamed is not None:
+                    if sibling is None:
+                        return BackupClassification("retained", "record")
+                    with source.open("rb") as old, destination.open("rb") as new:
+                        held = sibling_tracks.read_held_track(old.fileno(), sibling / relative)
+                        filed = sibling_tracks.read_held_track(new.fileno(), destination)
+                    if sibling_tracks.match_sibling_track(
+                            held, [filed], sibling_folder=sibling,
+                            primary_folder=replacement_view) is None:
+                        return BackupClassification("retained", "recording", str(relative))
                 if match_recordings and not same_audio:
                     held, filed = _recording_tags(source), _recording_tags(destination)
                     if held is not None and relative.as_posix() in repaired_isrcs:
@@ -6346,8 +6424,7 @@ def _classify_backup_contents(
                 if (destination_duration + max(2.0, source_duration * 0.01)
                         < source_duration):
                     return BackupClassification("retained", "shorter", str(relative))
-                if (destination.suffix.lower() == ".flac"
-                        and flac_audio_ok(destination) is not True):
+                if not audio_decodes(destination):
                     return BackupClassification("retained", "audio", str(relative))
                 if (not allow_smaller_audio
                         and destination.stat().st_size < source.stat().st_size):
@@ -6752,7 +6829,7 @@ def removal_refusal(path):
         path, origin, _BackupReadBudget(sys.maxsize), compare_audio=True)
     with _only_copy_lock:
         _only_copy_cache = None
-        _removal_refusals[path] = (_files_signature(path, origin), result)
+        _removal_refusals[path] = (_removal_signature(path, origin), result)
     return result
 
 

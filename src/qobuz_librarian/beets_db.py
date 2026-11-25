@@ -33,6 +33,11 @@ def path():
     return Path(os.path.abspath(os.fspath(configured))) if configured else None
 
 
+def identity(database):
+    info = database.stat()
+    return [str(database), info.st_dev, info.st_ino]
+
+
 def timeout():
     """Seconds to wait on a database another program has locked: half the
     import's idle timeout, at most a minute."""

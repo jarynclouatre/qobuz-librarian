@@ -26,7 +26,7 @@ from pathlib import Path
 
 from qobuz_librarian import config, disk_support
 from qobuz_librarian.library import flac_cache
-from qobuz_librarian.library.tags import normalize
+from qobuz_librarian.library.tags import disc_folder_number, normalize
 from qobuz_librarian.ui_cli.errors import plural
 from qobuz_librarian.ui_cli.logging import vlog
 
@@ -119,6 +119,10 @@ def read_audio_meta(path: Path, *, sig=None, read_generation=None):
     if sig is None:
         sig = flac_cache.signature(path)
     cached = flac_cache.get(path, sig)
+    if (cached and not cached.get("__neg__") and "disc_tagged" not in cached
+            and any(disc_folder_number(p.name) for p in path.parents)):
+        # Old entries do not say whether disc one came from the tags or the default.
+        cached = None
     # Files other than FLAC cached before the "lossy" key existed are read
     # again once, so an MP3 or AAC album is not taken for a lossless one.
     if cached is not None and ("lossy" in cached or cached.get("__neg__")

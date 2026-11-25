@@ -4,7 +4,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-from qobuz_librarian.library import catalog, scanner
+from qobuz_librarian.library import catalog, scanner, sibling_tracks
 from qobuz_librarian.library.catalog import (
     album_quality_label,
     album_year,
@@ -420,8 +420,11 @@ def print_per_track_consolidation(summary):
     log.info(fmt(C.BOLD + C.WHITE, f"  Per-track detail: {truncate(sib_dir.name, 50)}"))
     print()
 
-    for st, pt in summary["overlap"]:
-        trk = str(st.get("tracknumber") or "?").rjust(2)
+    rows = [(st, pt, sibling_tracks.track_slot(st, sib_dir)) for st, pt in summary["overlap"]]
+    multidisc = any(slot and slot[0] > 1 for _, _, slot in rows)
+    for st, pt, slot in rows:
+        trk = (f"{slot[0]}-{slot[1]:02d}" if multidisc and slot
+               else str(st.get("tracknumber") or "?").rjust(2))
         title = truncate(st.get("title") or "?", 50)
         sib_q = format_quality(st.get("bits", 0), st.get("sample_rate", 0))
         pri_q = format_quality(pt.get("bits", 0), pt.get("sample_rate", 0))

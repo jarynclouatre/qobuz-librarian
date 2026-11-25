@@ -6520,17 +6520,6 @@ def _consolidation_item_dir(value):
     return str(directory)
 
 
-def _disc_folder_number(name):
-    """The disc a folder named like 'Disc 1', 'Disc 01', 'CD1' or 'CD 1' holds."""
-    name = name.casefold()
-    for prefix in ("disc", "cd"):
-        if name.startswith(prefix):
-            number = name[len(prefix) :].strip()
-            if number.isascii() and number.isdigit() and int(number) > 0:
-                return int(number)
-    return None
-
-
 def _album_disc_folders(album_dir):
     """The album's own folder for each disc, by number. A number two folders
     claim is left out."""
@@ -6541,7 +6530,7 @@ def _album_disc_folders(album_dir):
     except OSError:
         return {}
     for name in names:
-        number = _disc_folder_number(name)
+        number = tags_mod.disc_folder_number(name)
         if number is not None:
             found.setdefault(number, []).append(name)
     return {number: names[0] for number, names in found.items() if len(names) == 1}
@@ -6549,7 +6538,7 @@ def _album_disc_folders(album_dir):
 
 def _consolidation_disc_parent(directory):
     path = Path(directory)
-    return str(path.parent) if _disc_folder_number(path.name) else None
+    return str(path.parent) if tags_mod.disc_folder_number(path.name) else None
 
 
 def _consolidation_rows_for_ids(connection, table, columns, identity_column, identities):
@@ -6599,6 +6588,10 @@ class BeetsAlbumSnapshot:
     album_attribute_columns: tuple
     album_attribute_rows: tuple
 
+    def consolidation_record(self, database_identity, retired_albums):
+        return {"database": database_identity, "albums": list(retired_albums),
+                "entries": _beets_snapshot_record(self, lossless=True)}
+
     @property
     def item_ids(self):
         if not self.item_columns:
@@ -6635,9 +6628,9 @@ def _beets_snapshot_row_key(row):
     )
 
 
-def _beets_snapshot_record(snapshot):
+def _beets_snapshot_record(snapshot, *, lossless=False):
     def scalar(value):
-        if type(value) in (str, bytes) and len(value) > 128:
+        if not lossless and type(value) in (str, bytes) and len(value) > 128:
             digest = _beets_value_digest(value)
             return {"kind": digest.kind, "sha256": digest.digest}
         return {"bytes": value.hex()} if type(value) is bytes else value
@@ -6820,6 +6813,55 @@ def _replacement_catalogue_columns(connection):
         album_attribute_columns,
         item_attribute_columns,
     )
+
+
+def restore_consolidation_index(record, files, files_match):
+    """Put the retired rows back together, or leave the catalogue untouched."""
+    database = beets_db.path()
+    snapshot = _beets_snapshot_from_record(record["entries"])
+    if database is None or snapshot is None or not snapshot.item_rows:
+        raise ValueError("missing consolidation catalogue")
+    retired = set(record["albums"])
+    paths = {_catalogue_item_path(row[snapshot.item_columns.index("path")])
+             for row in snapshot.item_rows}
+    if not paths.issubset(files) or not retired.issubset(snapshot.album_ids):
+        raise ValueError("the catalogue does not match the backed-up tracks")
+
+    with beets_db.transaction(database) as connection:
+        if beets_db.identity(database) != record["database"]:
+            raise ValueError("the beets database changed")
+        present = _captured_beets_item_ids(connection, snapshot)
+        for path in paths:
+            relative = path.relative_to(cfg.MUSIC_ROOT)
+            variants = (str(path), os.fsencode(path), str(relative), os.fsencode(relative))
+            if any(row[0] not in present for row in connection.execute(
+                    "SELECT id FROM items WHERE path IN (?,?,?,?)", variants)):
+                raise ValueError("a restored path has another beets entry")
+        if not present:
+            for album_id in snapshot.album_ids:
+                exists = connection.execute("SELECT 1 FROM albums WHERE id = ?",
+                                            (album_id,)).fetchone()
+                if bool(exists) == (album_id in retired):
+                    raise ValueError("a consolidated album changed")
+            if files_match is None:
+                return
+            for table, columns, rows in (
+                ("albums", snapshot.album_columns, [
+                    row for row in snapshot.album_rows
+                    if row[snapshot.album_columns.index("id")] in retired]),
+                ("album_attributes", snapshot.album_attribute_columns, [
+                    row for row in snapshot.album_attribute_rows
+                    if row[snapshot.album_attribute_columns.index("entity_id")] in retired]),
+                ("items", snapshot.item_columns, snapshot.item_rows),
+                ("item_attributes", snapshot.item_attribute_columns, snapshot.item_attribute_rows),
+            ):
+                fields = ",".join(_sql_identifier(column) for column in columns)
+                placeholders = ",".join("?" for _ in columns)
+                connection.executemany(f"INSERT INTO {table} ({fields}) VALUES ({placeholders})", rows)
+            _captured_beets_item_ids(connection, snapshot)
+        if (beets_db.identity(database) != record["database"]
+                or files_match is not None and not files_match()):
+            raise ValueError("the restored files or their database changed")
 
 
 def capture_beets_album_entries(album_dir):

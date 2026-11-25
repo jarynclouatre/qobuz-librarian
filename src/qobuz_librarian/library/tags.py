@@ -512,6 +512,17 @@ def folder_title_key(name):
         _strip_decorations(name, folder=True, discs=True)))
 
 
+def disc_folder_number(name):
+    """The disc a folder named like 'Disc 1', 'Disc 01', 'CD1' or 'CD 1' holds."""
+    name = name.casefold()
+    for prefix in ("disc", "cd"):
+        if name.startswith(prefix):
+            number = name[len(prefix) :].strip()
+            if number.isascii() and number.isdigit() and int(number) > 0:
+                return int(number)
+    return None
+
+
 def disc_folders(name, other):
     """Whether two folder names are discs of one album kept one disc per
     folder: filed under the same title, and one of them named for its disc."""

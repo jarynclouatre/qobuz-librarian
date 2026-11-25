@@ -68,6 +68,7 @@ from qobuz_librarian.integrations.lyrics import (
     write_post_import_sidecars,
 )
 from qobuz_librarian.integrations.rip import (
+    audio_decodes,
     is_cancel_requested,
     snapshot_staging,
 )
@@ -114,7 +115,7 @@ from qobuz_librarian.library.catalog import (
     track_signatures_for_album_dirs,
 )
 from qobuz_librarian.library.scanner import cache_album_tags, clear_scan_caches, read_album_dir
-from qobuz_librarian.modes.consolidate import match_sibling_track
+from qobuz_librarian.library.sibling_tracks import match_sibling_track
 from qobuz_librarian.quality.decision import mark_album_capped, mark_local_album_capped
 from qobuz_librarian.quality.verify import (
     quality_below_line,
@@ -161,7 +162,7 @@ class PreImportHooksResult:
     cancelled: bool = False
 
 
-def _sibling_tracks_all_kept(sibling, kept):
+def _sibling_tracks_all_kept(sibling, kept, *, check_audio=False, sibling_origin=None):
     """True when every audio file in ``sibling`` is a recording ``kept`` also
     holds, so retiring the sibling loses no track. False when a file in the
     sibling matches no track there, as in another edition or an untagged rip,
@@ -173,9 +174,15 @@ def _sibling_tracks_all_kept(sibling, kept):
         return None
     claimed = set()
     for track in sibling_tracks:
-        match = match_sibling_track(track, kept_tracks)
+        if sibling_origin is not None:
+            track = {**track, "path": sibling_origin / Path(track["path"]).relative_to(sibling)}
+        match = match_sibling_track(
+            track, kept_tracks, sibling_folder=sibling_origin or Path(sibling),
+            primary_folder=Path(kept))
         if match is None or id(match) in claimed:
             return False
+        if check_audio and not audio_decodes(match["path"]):
+            return None
         claimed.add(id(match))
     return True
 
@@ -1179,7 +1186,7 @@ class _ItemResolution:
                         "before the download.",
                     ))
                     continue
-                covered = _sibling_tracks_all_kept(sibling_path, self.post_dir)
+                covered = _sibling_tracks_all_kept(sibling_path, self.post_dir, check_audio=True)
                 if covered is False:
                     self.item["_siblings_preserved"].remove(
                         os.fspath(sibling_path))
@@ -1303,7 +1310,7 @@ class _ItemResolution:
                             replacement, self._album_tracks,
                             destructive=True)
                         and _sibling_tracks_all_kept(
-                            held, replacement) is True
+                            held, replacement, sibling_origin=sibling_path) is True
                     ),
                 )
                 if not retired:

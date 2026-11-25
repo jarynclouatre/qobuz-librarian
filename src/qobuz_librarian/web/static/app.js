@@ -1171,7 +1171,11 @@
       return Promise.resolve(window.confirm(msg));
     }
     if (d.open) return Promise.resolve(false);
-    return new Promise(function (resolve) {
+    // The previous close event can still be queued when the button is pressed again.
+    if (d.qlConfirmResult) {
+      return d.qlConfirmResult.then(function () { return window.qlConfirm(msg, opts); });
+    }
+    d.qlConfirmResult = new Promise(function (resolve) {
       d.querySelector("[data-confirm-text]").textContent = msg;
       var okButton = d.querySelector("[data-confirm-ok]");
       okButton.textContent = opts.action || "Continue";
@@ -1192,6 +1196,7 @@
       window.addEventListener("pagehide", leavePage);
       d.addEventListener("close", function h() {
         d.removeEventListener("close", h);
+        delete d.qlConfirmResult;
         window.removeEventListener("pagehide", leavePage);
         if (menu && !document.activeElement.getClientRects().length) {
           menu.querySelector(".ql-review-more-toggle").focus();
@@ -1201,6 +1206,7 @@
       pushSheet(d.id);
       d.showModal();
     });
+    return d.qlConfirmResult;
   };
 
   // Shared confirm for destructive submits and links. A {count} placeholder

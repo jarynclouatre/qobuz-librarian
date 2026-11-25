@@ -342,6 +342,7 @@ def test_a_gap_fill_that_keeps_another_edition_is_done(
 
     monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path / "music")
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(executor, "audio_decodes", lambda path: Path(path).is_file())
     copy, remaster, explicit = (tmp_path / "music" / "Big Thief" / name for name in (
         "Masterpiece (2016)", "Masterpiece (Remaster) (2016)",
         "Masterpiece (Explicit) (2016)"))

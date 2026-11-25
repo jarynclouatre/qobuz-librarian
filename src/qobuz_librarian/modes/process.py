@@ -47,7 +47,7 @@ from qobuz_librarian.integrations.beets import (
 )
 from qobuz_librarian.integrations.lyrics import write_post_import_sidecars
 from qobuz_librarian.integrations.rip import (
-    flac_audio_ok,
+    audio_decodes,
     is_cancel_requested,
     snapshot_staging,
 )
@@ -541,15 +541,7 @@ def _repair_keep_originals(backup, staged_dirs, damaged):
         if abs(_known_track_duration(old) - _known_track_duration(new)) > 2:
             return None
         path = Path(old["path"])
-        if path.suffix.lower() == ".flac":
-            decodes = flac_audio_ok(path)
-        else:
-            decodes = subprocess.run(
-                ["ffmpeg", "-v", "error", "-xerror", "-i", str(path),
-                 "-map", "0:a:0", "-f", "null", "-"], timeout=300,
-                stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                env=cfg.child_env()).returncode == 0
-        if not decodes:
+        if not audio_decodes(path):
             return None
         staged = Path(new["path"])
         keep[path.relative_to(backup).as_posix()] = (staged, safefile.stat_identity(staged.lstat()))

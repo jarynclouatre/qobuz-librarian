@@ -1,5 +1,4 @@
 """Album consolidation - find and remove duplicate sibling folders."""
-import math
 import os
 import re
 import sqlite3
@@ -8,18 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from qobuz_librarian import beets_db, config
+from qobuz_librarian.integrations import beets
+from qobuz_librarian.integrations.rip import audio_decodes
 from qobuz_librarian.interrupts import run_sigint_deferred
 from qobuz_librarian.library import backup as backup_mod
 from qobuz_librarian.library import catalog, scanner
-from qobuz_librarian.library.scanner import parse_track_num
-from qobuz_librarian.library.tags import (
-    canonical_recording_id,
-    canonical_track_slot,
-    canonical_track_title,
-    normalize,
-    similarity,
-    strip_album_decorations,
-)
+from qobuz_librarian.library.sibling_tracks import match_sibling_track, read_held_track
+from qobuz_librarian.library.tags import similarity, strip_album_decorations
 from qobuz_librarian.quality.decision import quality_change_summary
 from qobuz_librarian.safefile import snapshot_tree, stat_identity
 from qobuz_librarian.ui_cli.ask import ask
@@ -47,66 +41,6 @@ _CHANGED_SINCE_REVIEW = (
     "consolidation again to review them as they are now")
 _LEFT_IN_PLACE = "its tracks were left in place"
 _YEAR_RE = re.compile(r"(?<!\d)(19\d\d|20\d\d)(?!\d)")
-
-
-def _metadata_from_held_file(descriptor, path):
-    parsed = None
-    if scanner.HAVE_MUTAGEN:
-        try:
-            with os.fdopen(os.dup(descriptor), "rb") as source:
-                parsed = scanner.mutagen.File(source, easy=True)
-        except OSError:
-            raise
-        except Exception:
-            parsed = None
-
-    if parsed is not None and parsed.tags:
-        tags = parsed.tags
-
-        def first(key):
-            value = tags.get(key)
-            return value[0] if value and isinstance(value, list) else ""
-
-        title = first("title")
-        if title:
-            info = parsed.info
-            result = {
-                "title": title,
-                "isrc": first("isrc").strip().replace("-", "").upper(),
-                "mb_trackid": first("musicbrainz_trackid").strip().lower(),
-                "album": first("album"),
-                "albumartist": first("albumartist") or first("artist"),
-                "tracknumber": parse_track_num(first("tracknumber")),
-                "discnumber": parse_track_num(first("discnumber")) or 1,
-                "bits": getattr(info, "bits_per_sample", 0) if info else 0,
-                "sample_rate": getattr(info, "sample_rate", 0) if info else 0,
-                "channels": getattr(info, "channels", 0) if info else 0,
-                "length": getattr(info, "length", 0.0) if info else 0.0,
-                "path": str(path),
-            }
-            result["size"] = int(os.fstat(descriptor).st_size)
-            result["normalized"] = normalize(title)
-            return result
-
-    match = re.match(r"^(\d+)[\s.\-]+(.+)$", path.stem)
-    disc = re.match(r"(?:disc|cd)\s*0*(\d+)", path.parent.name, re.IGNORECASE)
-    title = match.group(2) if match else path.stem
-    return {
-        "title": title,
-        "tracknumber": int(match.group(1)) if match else 0,
-        "isrc": "",
-        "mb_trackid": "",
-        "album": "",
-        "albumartist": "",
-        "discnumber": int(disc.group(1)) if disc else 1,
-        "bits": 0,
-        "sample_rate": 0,
-        "channels": 0,
-        "length": 0.0,
-        "path": str(path),
-        "size": int(os.fstat(descriptor).st_size),
-        "normalized": normalize(title),
-    }
 
 
 @dataclass
@@ -175,7 +109,7 @@ def _review_album(path):
             if stat_identity(os.fstat(descriptor)) != identity:
                 raise OSError(
                     f"audio file changed while it was opened: {track_path}")
-            metadata = _metadata_from_held_file(descriptor, track_path)
+            metadata = read_held_track(descriptor, track_path)
             if stat_identity(os.fstat(descriptor)) != identity:
                 raise OSError(
                     f"audio file changed while metadata was read: {track_path}")
@@ -443,6 +377,7 @@ class _BeetsItemSeal:
             album_item_rows=(), album_attribute_rows=(),
             empty_album_ids=()):
         self.database = database
+        self.database_identity = beets_db.identity(database) if database else None
         self.schema_receipt = schema_receipt
         self.item_rows = item_rows
         self.attribute_rows = attribute_rows
@@ -456,10 +391,20 @@ class _BeetsItemSeal:
     def tracked(self):
         return len(self.item_rows)
 
+    def index_backup(self):
+        if not self.tracked:
+            return None
+        schema = self.schema_receipt
+        snapshot = beets.BeetsAlbumSnapshot(
+            schema[3], self.item_rows, schema[4], self.attribute_rows,
+            schema[7], self.album_rows, schema[8], self.album_attribute_rows)
+        return snapshot.consolidation_record(self.database_identity, self.empty_album_ids)
+
     def _matches(self, connection, anchors_match):
         if (
             self._closed
             or not anchors_match()
+            or beets_db.identity(self.database) != self.database_identity
             or _database_schema(connection) != self.schema_receipt
         ):
             return False
@@ -557,6 +502,7 @@ class _BeetsItemSeal:
         if (
             self._closed
             or not anchors_match()
+            or beets_db.identity(self.database) != self.database_identity
             or _database_schema(connection) != self.schema_receipt
         ):
             return False
@@ -788,107 +734,12 @@ def _years_in(name: str) -> set:
     return set(_YEAR_RE.findall(name or ""))
 
 
-def _same_recording_signal(a, b):
-    """Positive 'same recording' evidence for two tracks that share a title but
-    have no ISRC/MBID to confirm identity: their durations must agree within ~2s.
-
-    When either side has no readable duration there is NO real evidence, so this
-    returns False and the caller keeps both copies. A title (and even a track
-    slot) can coincide between two genuinely different recordings - file size is
-    too weak a tiebreak to risk an irreversible delete on, so it is not used."""
-    la, lb = a.get("length"), b.get("length")
-    if isinstance(la, bool) or isinstance(lb, bool):
-        return False
-    try:
-        la, lb = float(la or 0), float(lb or 0)
-    except (TypeError, ValueError, OverflowError):
-        return False
-    return (
-        la > 0 and lb > 0
-        and math.isfinite(la) and math.isfinite(lb)
-        and abs(la - lb) <= 2.0
-    )
-
-
-def match_sibling_track(sibling_track, primary_tracks):
-    """Match sibling → primary by ISRC > MBID > (disc, title + same recording)."""
-    s_isrc = canonical_recording_id(sibling_track.get("isrc"), "isrc")
-    s_mbid = canonical_recording_id(
-        sibling_track.get("mb_trackid"), "mb_trackid")
-    if s_isrc is None or s_mbid is None:
-        return None
-    s_title_norm = canonical_track_title(sibling_track.get("title"))
-    s_slot = canonical_track_slot(
-        sibling_track, "discnumber", "tracknumber")
-
-    if s_isrc:
-        matches = []
-        for pt in primary_tracks:
-            primary_isrc = canonical_recording_id(pt.get("isrc"), "isrc")
-            primary_mbid = canonical_recording_id(
-                pt.get("mb_trackid"), "mb_trackid")
-            if (
-                primary_isrc is None
-                or primary_mbid is None
-                or primary_isrc != s_isrc
-            ):
-                continue
-            if s_mbid and primary_mbid and s_mbid != primary_mbid:
-                continue
-            matches.append(pt)
-        # A one-sided recording ID is uncertainty, not permission to fall back
-        # to a title before deleting the sibling's file.
-        return matches[0] if len(matches) == 1 else None
-    if s_mbid:
-        matches = []
-        for pt in primary_tracks:
-            primary_isrc = canonical_recording_id(pt.get("isrc"), "isrc")
-            primary_mbid = canonical_recording_id(
-                pt.get("mb_trackid"), "mb_trackid")
-            if (
-                primary_isrc is None
-                or primary_mbid is None
-                or primary_isrc
-                or primary_mbid != s_mbid
-            ):
-                continue
-            matches.append(pt)
-        return matches[0] if len(matches) == 1 else None
-    if s_title_norm and s_slot is not None:
-        if sum(
-            canonical_track_slot(pt, "discnumber", "tracknumber") == s_slot
-            for pt in primary_tracks
-        ) != 1:
-            return None
-        # Title + disc + position is NOT recording identity without an
-        # ISRC/MBID: a live setlist replayed on another date (or any two
-        # distinct same-titled recordings sharing a slot) matches all three.
-        matches = []
-        for pt in primary_tracks:
-            primary_isrc = canonical_recording_id(pt.get("isrc"), "isrc")
-            primary_mbid = canonical_recording_id(
-                pt.get("mb_trackid"), "mb_trackid")
-            if (
-                primary_isrc is None
-                or primary_mbid is None
-                or primary_isrc
-                or primary_mbid
-                or canonical_track_title(pt.get("title")) != s_title_norm
-                or canonical_track_slot(
-                    pt, "discnumber", "tracknumber") != s_slot
-            ):
-                continue
-            if _same_recording_signal(sibling_track, pt):
-                matches.append(pt)
-        return matches[0] if len(matches) == 1 else None
-    return None
-
-
-def _summary_from_tracks(sibling, score, sibling_tracks, primary_tracks):
+def _summary_from_tracks(sibling, score, sibling_tracks, primary_tracks, primary_folder):
     overlap, unique = [], []
     claimed = set()
     for track in sibling_tracks:
-        match = match_sibling_track(track, primary_tracks)
+        match = match_sibling_track(track, primary_tracks,
+                                    sibling_folder=sibling, primary_folder=primary_folder)
         if match is not None and id(match) not in claimed:
             claimed.add(id(match))
             overlap.append((track, match))
@@ -1067,6 +918,19 @@ def execute_consolidation(summary):
         ))
         return [], attempted
     binding.used = True
+    if not binding.before_matches():
+        log.info(fmt(C.YELLOW, f"      ⚠  Nothing was moved: {_CHANGED_SINCE_REVIEW}."))
+        return [], attempted
+    if binding.kept is None:
+        log.info(fmt(C.YELLOW, f"      ⚠  Kept {binding.sibling.path.name}; "
+                     "couldn't identify every track in the primary album."))
+        return [], attempted
+    for key in dict.fromkeys(binding.kept.values()):
+        path = binding.primary.path / key
+        if not audio_decodes(path):
+            log.info(fmt(C.YELLOW, f"      ⚠  Kept {binding.sibling.path.name}; "
+                         f"couldn't verify the audio in {shown_path(path)}."))
+            return [], attempted
     paths = binding.paths
 
     def move_to_backup():
@@ -1075,6 +939,7 @@ def execute_consolidation(summary):
             binding.sibling.path,
             expected_receipts=binding.expected_receipts,
             kind="consolidate",
+            consolidation_index=binding.database.index_backup(),
         )
 
     success, backup_result, reason = binding.database.run(
@@ -1199,6 +1064,7 @@ def consolidate_albums(album, args):
                 score,
                 sibling.tracks,
                 primary.tracks,
+                primary.path,
             )
             # A folder with tracks the album lacks stays whole, so a
             # single never takes its song out of the album it came from.

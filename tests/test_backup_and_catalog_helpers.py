@@ -337,7 +337,7 @@ def test_age_sweep_removes_only_backups_it_can_prove_redundant(tmp_path, monkeyp
         return bp
 
     with monkeypatch.context() as patch:
-        patch.setattr(bk, "flac_audio_ok", lambda _path: True)
+        patch.setattr(bk, "audio_decodes", lambda _path: True)
         patch.setattr(bk, "_audio_duration_seconds", lambda _path: 60.0)
         old = _make_completed("20200101_120000_old_album")
         legacy = backup_root / "my_hand_restored_album"
@@ -745,7 +745,7 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
 
     _need_audio_tools()
 
-    def stage(name, origin_booklet, kind="gap-fill"):
+    def stage(name, origin_booklet, kind="gap-fill", **track_tags):
         root = tmp_path / name / "backups"
         backup = root / "kept"
         backup.mkdir(parents=True)
@@ -756,6 +756,7 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
         monkeypatch.setattr(bk, "_only_copy_cache", None)
         _real_flac(backup / "01.flac")
         tagged = FLAC(backup / "01.flac")
+        tagged.update(track_tags)
         tagged["lyrics"] = "[00:01.00] only here"
         tagged.save()
         shutil.copyfile(backup / "01.flac", origin / "01.flac")
@@ -841,7 +842,8 @@ def test_diagnostics_backup_rows_are_rechecked_before_deletion(tmp_path, monkeyp
 
     # A consolidation's backup is proved in the album it kept, under the
     # names it recorded, once the folder its tracks came from is gone.
-    backup, origin, candidate = stage("consolidation", b"original booklet")
+    backup, origin, candidate = stage(
+        "consolidation", b"original booklet", title="Song", tracknumber="1")
     primary = origin.parent / "Primary"
     primary.mkdir()
     shutil.copyfile(origin / "booklet.pdf", primary / "booklet.pdf")
@@ -1130,6 +1132,12 @@ def _bind_consolidation_summary(summary, tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "BEETS_DB_PATH", tmp_path / "beets.db")
     primary = tmp_path / "Primary"
     primary.mkdir(exist_ok=True)
+    for sibling_track, kept in summary["overlap"]:
+        if "path" not in kept:
+            path = primary / Path(sibling_track["path"]).name
+            path.write_bytes(b"kept audio")
+            kept["path"] = str(path)
+    monkeypatch.setattr(consolidation, "audio_decodes", lambda path: path.is_file())
     consolidation._bind_summary(
         summary,
         consolidation._review_album(primary),
@@ -1199,6 +1207,7 @@ def test_consolidating_after_a_single_leaves_its_album_whole(
     monkeypatch.setattr(cfg, "MUSIC_ROOT", tmp_path)
     monkeypatch.setattr(cfg, "BEETS_DB_PATH", tmp_path / "beets.db")
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(c, "audio_decodes", lambda path: path.is_file())
     single = tmp_path / "Exodus" / "Goliath (feat. Katie Jacoby) (2026)"
     album = tmp_path / "Exodus" / "Goliath (2026)"
     tagged_flac(single / "01 Goliath.flac", seconds=300, TITLE="Goliath",
@@ -1408,10 +1417,11 @@ def test_consolidation_backup_expires_only_while_the_primary_keeps_its_tracks(
     monkeypatch.setattr(cfg, "UPGRADE_BACKUP_DIR", tmp_path / "backups")
     primary = tmp_path / "Primary"
     sibling = tmp_path / "Album Deluxe"
+    sibling.mkdir()
     overlap = []
     for name in ("01 - One.flac", "02 - Two.flac"):
         _real_flac(primary / name)
-        _real_flac(sibling / f"A{name}")
+        shutil.copyfile(primary / name, sibling / f"A{name}")
         overlap.append(({"path": str(sibling / f"A{name}")},
                         {"path": str(primary / name)}))
     summary = {"dir": sibling, "overlap": overlap, "unique": []}

@@ -143,6 +143,19 @@ def flac_audio_ok(path, *, descriptor=None):
     return proc.returncode == 0
 
 
+def audio_decodes(path):
+    if Path(path).suffix.lower() == ".flac":
+        return flac_audio_ok(path) is True
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-xerror", "-i", str(path),
+             "-map", "0:a:0", "-f", "null", "-"], timeout=300,
+            stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, env=cfg.child_env())
+        return result.returncode == 0 and not result.stderr
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def flac_audio_offset(path, *, descriptor=None):
     """Byte offset of the first audio frame - the ``fLaC`` marker plus every
     metadata block. Lets a caller weigh the audio stream apart from metadata and

@@ -524,8 +524,17 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
             # back.
             if kind != "downsample":
                 lyrics = {}
-            n = backup_mod.restore_gap_fill_backup(
-                carried, origin, keep_larger_dst=False)
+            old_consolidation = (kind == "gap-fill" and backup_mod.consolidated_into(target)
+                                 and not backup_mod.has_consolidation_index(carried))
+            try:
+                n = backup_mod.restore_gap_fill_backup(
+                    carried, origin, keep_larger_dst=False)
+            except backup_mod.ConsolidationIndexError as exc:
+                if exc.files_restored:
+                    _refresh_tool_lists(origin, "Upgrade needs refresh after a backup was restored.")
+                return _diagnostics_result_notice(
+                    "warning", "The saved beets entries couldn't be restored. "
+                    "The backup was kept. Check the log before retrying.")
             unwritten = backup_mod.put_lyrics_back(origin, lyrics) if n else []
             if n and kind == "downsample":
                 # Undoing a downsample has to undo everything it recorded, not
@@ -547,14 +556,15 @@ def _restore_backup_sync(request: Request, backup: str) -> str:
                     if kind == "downsample":
                         flows.note_downsample_put_back(origin, carried.name)
                     note = _diagnostics_result_notice(
-                        "warning" if unwritten else "success",
+                        "warning" if unwritten or old_consolidation else "success",
                         f"Restored {plural(n, 'file')} to "
                         f"{html.escape(storage._resolve_host_path(str(origin))[0])}."
                         + (" The lyrics of "
                            f"{html.escape(backup_mod.some_names(unwritten))} "
                            "couldn't be written back onto them; the log says "
                            "why."
-                           if unwritten else ""))
+                           if unwritten else "")
+                        + (" This backup has no saved beets entries." if old_consolidation else ""))
                 else:
                     note = _diagnostics_result_notice(
                         "error", "The files were restored, but their saved "
