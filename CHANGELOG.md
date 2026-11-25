@@ -2,6 +2,18 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.6.2] - 2026-11-25
+
+In the Search grid, tap an album cover to select it. Tracks and other versions open over the results. Press Back or tap outside to return to the album.
+
+- **Library** keeps your checked albums when you refresh. If you add part of a checked album to your music folder, it moves to **Gap Fill** with the remaining tracks still selected.
+- **Undo** for a single-track download survives a restart. Removing the track updates the count in Library and marks the download **Removed** in History.
+- **Upgrade** keeps the original album when Qobuz delivers the same recordings at the quality you already have. A whole-album **Repair** also keeps healthy tracks at equal quality, including their filenames, lyrics and beets entries.
+- **Downsample** updates the sample rate and bit depth in beets when you convert a FLAC or restore its hi-res original. FLACs with a leading ID3 tag or an application metadata block stay at their original rate.
+- When the tracks have no recording IDs, **Consolidate** checks the disc and track numbers as well as the title before removing a duplicate. Its backups include the album's beets entries and custom fields.
+- Restoring a **collection backup** matches missing tracks to the saved edition. If only part of an album downloads, Retry picks up the tracks still missing.
+- **Migration** files a shared cover or booklet once for a multi-disc album and keeps each disc's lyrics with its tracks. If a different cover is already at the destination, Move leaves the source track in place and lists the conflict in the results.
+
 ## [1.6.1] - 2026-11-23
 
 Tool pages that show their own runs, one-press downloads from Search, upgrades from MP3 and AAC to FLAC, and plain words for what a stopped scan or download left.
