@@ -4972,7 +4972,7 @@ class MusicDiskFull(OSError):
 
 
 def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
-                        places=None, folder=None, failure_out=None):
+                        places=None, folder=None, failure_out=None, on_import=None):
     """Run beets import scoped to ``album_dirs`` and return one of:
 
     - ``"ok"``: import succeeded.
@@ -5030,6 +5030,8 @@ def beets_import_albums(album_dirs, *, ownership_out=None, album_dir=None,
             settle_tracks_added_to_album(album_dir, last_old_id)
         except KeyboardInterrupt:
             raise ImportedThenInterrupted from None
+    if ok and on_import is not None and ownership_out and ownership_out.get("result"):
+        on_import(ownership_out["result"])
     return "ok" if ok else kind
 
 

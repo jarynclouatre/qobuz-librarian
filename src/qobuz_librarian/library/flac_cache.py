@@ -32,12 +32,15 @@ _db = CacheDB(
 
 # Buffered-write state.
 _PENDING_LOCK = threading.Lock()
+_WRITE_LOCK = threading.Lock()
 _PENDING_ROWS: dict[str, tuple] = {}  # path → (mtime_ns, size, payload_json)
 _PENDING_LIMIT = 500
 # Counts committed changes to the table. Anything holding a memoized view of
 # these rows (the Library page's census) reads it to tell whether its numbers
 # still describe what is stored.
 _writes = 0
+# A tag read that overlaps Undo must recheck its original file signature.
+removal_generation = 0
 
 
 def signature(path):
@@ -94,7 +97,7 @@ def get(path, sig=None) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def put(path, payload, sig=None) -> None:
+def put(path, payload, sig=None, *, read_generation=None) -> None:
     """Store parsed tags for ``path``."""
     if not isinstance(payload, dict) or not _db.ensure():
         return
@@ -108,6 +111,9 @@ def put(path, payload, sig=None) -> None:
     except (TypeError, ValueError):
         return
     with _PENDING_LOCK:
+        if (read_generation is not None and read_generation != removal_generation
+                and signature(path) != sig):
+            return
         _PENDING_ROWS[str(path)] = (mtime_ns, size, data)
         full = len(_PENDING_ROWS) >= _PENDING_LIMIT
     if full:
@@ -123,6 +129,11 @@ def flush_pending() -> None:
     the next scan re-parses them. Idempotent; a no-op when the buffer is
     empty.
     """
+    with _WRITE_LOCK:
+        _flush_pending()
+
+
+def _flush_pending():
     with _PENDING_LOCK:
         if not _PENDING_ROWS:
             return
@@ -166,6 +177,30 @@ def _gone(path) -> bool:
     except OSError:
         return False
     return False
+
+
+def forget_missing(path: Path) -> None:
+    """Drop one removed track from the census, including a buffered tag read."""
+    global removal_generation, _writes
+    if not path.is_relative_to(cfg.MUSIC_ROOT) or not _db.ensure():
+        return
+    key = str(path)
+    with _WRITE_LOCK:
+        with _PENDING_LOCK:
+            if not _gone(path):
+                return
+            removal_generation += 1
+            buffered = _PENDING_ROWS.pop(key, None)
+        try:
+            conn = _db.conn()
+            deleted = conn.execute("DELETE FROM files WHERE path = ?", (key,))
+            conn.commit()
+        except sqlite3.Error as e:
+            vlog(f"flac cache removal failed: {e}")
+            _db.handle_db_error(e)
+            return
+        if buffered or deleted.rowcount:
+            _writes += 1
 
 
 def _gone_from(listing, path) -> bool:

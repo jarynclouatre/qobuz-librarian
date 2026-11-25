@@ -181,6 +181,12 @@
   {%- endif -%}
 {%- endmacro %}
 
+{% macro done_chip(job, id='', warning=false) -%}
+  {% set removed = not warning and job.single and job.single.removed
+                   and not (job.single.catalog_cleanup and job.single.catalog_cleanup.pending) %}
+  <span{% if id %} id="{{ id }}"{% endif %} class="ql-status-chip {% if warning %}is-warning{% elif removed %}is-neutral{% else %}is-success{% endif %}">{{ 'Removed' if removed else 'Done' }}</span>
+{%- endmacro %}
+
 {% macro status_chip_label(job) -%}
   {%- if job.interrupted_by_restart -%}Interrupted
   {%- elif job.tracks_missing -%}Imported, {{ job.tracks_missing }} track{{ 's' if job.tracks_missing != 1 }} missing

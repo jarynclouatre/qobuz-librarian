@@ -305,9 +305,6 @@ def _make_download_run(
                 args=args,
                 claims_album=True,
             )
-            # A parked library review may still offer this album, so drop it
-            # there so the stale review can't download it a second time.
-            flows.prune_library_review_candidates(album)
             retryable, _ = download_result.incomplete_track_counts(r)
             _, _, lossy_only, _ = download_result.track_shortfall(r)
             # Nothing missing but tracks Qobuz does not stream is what search
@@ -318,6 +315,8 @@ def _make_download_run(
                 flows._fold_partial_gap_fill(
                     album, (album.get("artist") or {}).get("name") or "",
                     retryable, album_dir=r.get("dir"))
+            else:
+                flows.prune_library_review_candidates(album)
         if durable_completion_settled or (
                 durable_item is None and r.get("imported")):
             # Exact completion, external acknowledgement, carrier retirement,

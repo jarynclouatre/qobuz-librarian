@@ -2348,7 +2348,8 @@ def _cut_off_download(job, status, cut_off, unsettled, journaled):
         and job.album_id
         and journaled is not None
         and job.id not in journaled
-        and set(job.single or {}) <= {"album_id", "track_id"}
+        and (set(job.single or {}) <= {"album_id", "track_id"}
+             or job_persistence.has_single_import(job.single))
         and not (job.execute_args or {}).get("new_edition")
         and (job.finished_at is not None
              or not (job.execute_args or {}).get(job_persistence.SAVED_QUEUE))

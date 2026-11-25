@@ -824,7 +824,7 @@ def _queue_outcome_needs_attention(item):
 
 def _import_album_with_retry(
         album_dirs, *, ownership_out=None, source_receipts=None, album_dir=None,
-        places=None, folder=None, failure_out=None):
+        places=None, folder=None, failure_out=None, on_import=None):
     """Run beets import on ``album_dirs`` with up to ``BEETS_MAX_ATTEMPTS``
     attempts, retrying only on idle-timeout (other failures aren't transient).
     Returns True on import success, False on permanent failure, and raises
@@ -846,6 +846,8 @@ def _import_album_with_retry(
             pin["folder"] = folder
         if failure_out is not None:
             pin["failure_out"] = failure_out
+        if on_import is not None:
+            pin["on_import"] = on_import
         if ownership_out is None:
             kind = beets_import_albums(album_dirs, **pin)
             attempt_capture = None
@@ -3276,6 +3278,8 @@ class _QueueFlush:
                 self.item_imported = _import_album_with_retry(
                     self.album_dirs, failure_out=failure, **pin)
             else:
+                if self.item.get("_on_import") is not None:
+                    pin["on_import"] = self.item["_on_import"]
                 self.item_imported = _import_album_with_retry(
                     self.album_dirs,
                     ownership_out=self.ownership_capture,

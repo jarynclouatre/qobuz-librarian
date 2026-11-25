@@ -26,6 +26,7 @@ from qobuz_librarian.library import (
     backup,
     candidate_premise,
     collection_snapshot,
+    flac_cache,
     generation_state,
     library_scan_state,
     missing_types,
@@ -1762,9 +1763,9 @@ class _UndoRun:
 
     def _reverse(self):
         if self.cleanup_retry:
-            catalog_result = beets_mod.forget_beets_entries(
-                [Path(self.catalog_cleanup["path"])]
-            )
+            track = Path(self.catalog_cleanup["path"])
+            flac_cache.forget_missing(track)
+            catalog_result = beets_mod.forget_beets_entries([track])
             self.undo_outcome["single_mark_complete"] = (
                 self._clear_deliberate_single_mark()
             )
@@ -1789,6 +1790,7 @@ class _UndoRun:
         )
         catalog_result = None
         if removed is not None:
+            flac_cache.forget_missing(removed)
             _clear_after_earlier_grabs(
                 removed.parent,
                 job_persistence.other_album_grabs(self.info.get("album_id"), self.job.id))
@@ -1796,6 +1798,10 @@ class _UndoRun:
             self.undo_outcome["single_mark_complete"] = (
                 self._clear_deliberate_single_mark()
             )
+        elif self.undo_outcome.get("files_complete"):
+            owned = self.info.get("owned_path") or {}
+            if owned.get("relative"):
+                flac_cache.forget_missing(d / owned["relative"])
         return removed, catalog_result
 
     def _refuse_gate(self, state):
@@ -1871,9 +1877,19 @@ class _UndoRun:
             "single_mark_complete", True
         )
         if removed is not None or self.cleanup_retry:
-            # The track is off the disk again, so search must stop calling it
-            # yours.
             self.job.landed_complete = False
+            folder, _ = storage._resolve_host_path(self.info["dir"])
+            for job in job_mgr.registry.all():
+                if not job.landed_complete:
+                    continue
+                if job.single:
+                    same = (job.single.get("album_id") == self.info.get("album_id")
+                            and job.single.get("track_id") == self.info.get("track_id"))
+                else:
+                    same = (job.album_id == self.info.get("album_id")
+                            or job.execute_args.get("folder") == folder)
+                if same:
+                    job.landed_complete = False
         self.refresh_needed = False
         if self.cleanup_retry:
             self._settle_cleanup_retry(catalog_complete, single_mark_complete)

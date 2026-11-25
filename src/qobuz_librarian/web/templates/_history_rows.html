@@ -5,7 +5,7 @@
       {% if job.tracks_missing %}
         <span class="ql-status-chip is-warning">Imported, {{ job.tracks_missing }} track{{ 's' if job.tracks_missing != 1 }} missing</span>
       {% elif job.status == 'done' %}
-        <span class="ql-status-chip is-success">Done</span>
+        {{ labels.done_chip(job) }}
       {% elif job.interrupted_by_restart %}
         <span class="ql-status-chip is-neutral">Interrupted</span>
       {% elif job.status == 'canceled' %}

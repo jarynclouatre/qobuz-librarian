@@ -1476,6 +1476,7 @@ def _fold_partial_gap_fill(full_album, artist_name, n_missing, *,
     if folded is False:
         return False
     if folded is None and not park_when_absent:
+        prune_library_review_candidates(full_album)
         return True
     # Fold before taking the album's other rows off, so that can't empty and
     # close the review, and settle the record the download left for the next
@@ -1609,9 +1610,15 @@ def apply_pending_review_removals(state=None):
     pending = generation_state.pending_review_removals(state)
     if not pending:
         return 0
+    # A running Search download updates the review itself, including the
+    # tracks still missing after a partial import.
+    downloading = {j.album_id for j in job_mgr.registry.pending_and_running()
+                   if j.kind == "download" and j.status == job_mgr.JobStatus.RUNNING}
     dropped = 0
     settled = []
     for album_id in pending:
+        if album_id in downloading:
+            continue
         dropped += prune_library_review_candidates({"id": album_id})
         if not _library_review_lists(album_id):
             settled.append(album_id)

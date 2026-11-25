@@ -49,16 +49,18 @@
   {% if s != 'awaiting_review' and (not embedded_surface|default(false) or job.finished_at) %}
   <p class="ql-job-when">
     {% if not embedded_surface|default(false) %}
+    {% if s == 'done' and not job.tracks_missing %}
+    {{ labels.done_chip(job, 'job-status-badge', _attention == 'cancel_late') }}
+    {% else %}
     <span id="job-status-badge" class="ql-status-chip
-      {%- if job.status.value == 'done' and _attention == 'cancel_late' %} is-warning
-      {%- elif job.tracks_missing %} is-warning
-      {%- elif job.status.value == 'done' %} is-success
+      {%- if job.tracks_missing %} is-warning
       {%- elif job.interrupted_by_restart %} is-neutral
       {%- elif job.status.value == 'failed' and job.execute_args.get('partly_done') %} is-warning
       {%- elif job.status.value == 'failed' %} is-error
       {%- elif job.status.value == 'canceled' %} is-neutral
       {%- elif job.status.value in ('running', 'scanning') %} is-active
       {%- else %} is-neutral{% endif %}">{{ labels.status_chip_label(job) }}</span>
+    {% endif %}
     {% endif %}
     {% if s in ('scanning', 'running') %}
     <span id="scan-elapsed" class="ql-job-elapsed" title="Elapsed" data-start="{{ job.started_at or job.created_at }}" data-now="{{ now_ts() }}"></span>

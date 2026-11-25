@@ -317,6 +317,10 @@ def _make_single_track_run(album, track, token):
     queue path (the same isolation repair uses, never a whole-album rip)."""
     expected_generation = api_auth.token_credential_generation(token)
 
+    artist = (album.get("artist") or {}).get("name") or "?"
+    title = album.get("title") or "?"
+    t_title = track.get("title") or "?"
+
     def run(j):
         storage._require_music_write_target_for_job()
         active = None
@@ -327,16 +331,33 @@ def _make_single_track_run(album, track, token):
             )
             active_token = active.token
         args = flows.build_args()
-        artist = (album.get("artist") or {}).get("name") or "?"
-        title = album.get("title") or "?"
-        t_title = track.get("title") or "?"
         existing, album_dir, missing, present = catalog.find_edition_tracks(
             album, track_id=track.get("id"))
         missing_ids = {str(t.get("id")) for t in missing}
-        # Already own this exact track? Don't re-rip it; that just lands a beets
-        # ".1.flac" duplicate beside the copy you have, and don't mark anything.
-        if str(track.get("id")) not in missing_ids:
-            j.summary = f"You already have “{t_title}”. Nothing downloaded."
+        track_present = str(track.get("id")) not in missing_ids
+        saved = j.single or {}
+        if job_persistence.has_single_import(saved):
+            root = Path(os.path.abspath(os.fspath(cfg.MUSIC_ROOT)))
+            owned = saved["owned_path"]
+            if (track_present and saved.get("album_id") == str(album.get("id"))
+                    and saved.get("track_id") == str(track.get("id"))
+                    and saved.get("owned_root") == str(root)
+                    and album_dir and str(album_dir) == saved.get("dir")):
+                leaf = owned_paths._owned_leaf(root, owned)
+                if leaf and leaf[0] and _album_dir_for_owned_file(leaf[0], album_dir):
+                    others = [t for t in present if str(t.get("id")) != str(track.get("id"))]
+                    finish(j, [*missing, track], others, album_dir, owned, active_token, args)
+                    return
+            j.single = {"album_id": str(album.get("id")), "track_id": str(track.get("id"))}
+            j.status = job_mgr.JobStatus.FAILED
+            j.error = "The imported file changed or is missing. Check the album before retrying."
+            return
+        if track_present:
+            if (j.execute_args or {}).get("restart_requeues"):
+                j.summary = (f"“{t_title}” is in your library. Undo isn't available "
+                             "because the interrupted download couldn't be verified.")
+            else:
+                j.summary = f"You already have “{t_title}”. Nothing downloaded."
             return
         if album_dir is None:
             existing, album_dir = catalog.find_album_folder(album)
@@ -350,9 +371,24 @@ def _make_single_track_run(album, track, token):
             force_track_by_track=True,
             exact_edition=True,
         )
+
+        def save_undo(item, directory, *, verified_only=False):
+            single, directory, owned = _single_download_undo_snapshot(
+                item, directory, album=album, track=track, artist=artist,
+                title=title, track_title=t_title)
+            if owned is not None or not verified_only:
+                j.single = single
+                _persist_single_download_undo(j, ownership_valid=owned is not None)
+            return directory, owned
+
+        def record_import(receipt):
+            item = {"_import_ownership": receipt}
+            directory = queue_executor._verified_import_album_dir(item)
+            save_undo(item, directory, verified_only=True)
+
         qi["_capture_import_ownership"] = True
+        qi["_on_import"] = record_import
         flows._note_staging_wait(j, "Downloading", 0, 1)
-        owned_path = None
         with job_mgr.staging_lock_unless_cancelled(j):
             storage._refuse_behind_full_music_disk(j)
             with qobuz_access._CREDENTIAL_LOCK:
@@ -370,19 +406,12 @@ def _make_single_track_run(album, track, token):
                 and qi.get("n_fail", 0) == 0
             )
             if download_succeeded:
-                single, landed_dir, owned_path = _single_download_undo_snapshot(
-                    qi,
-                    landed_dir,
-                    album=album,
-                    track=track,
-                    artist=artist,
-                    title=title,
-                    track_title=t_title,
-                )
-                j.single = single
-                _persist_single_download_undo(
-                    j, ownership_valid=owned_path is not None)
+                landed_dir, owned_path = save_undo(qi, landed_dir)
         if not download_succeeded:
+            if qi.get("result") == "cancelled":
+                j.status = job_mgr.JobStatus.CANCELED
+                j.summary = download_outcomes._summarize_download_result(qi)
+                return
             j.status = job_mgr.JobStatus.FAILED
             if qi.get("result") == "disk_full":
                 storage.note_music_disk_full()
@@ -412,6 +441,9 @@ def _make_single_track_run(album, track, token):
                     else "The track was not retrieved. The Activity log says why."
                 )
             return
+        finish(j, missing, present, landed_dir, owned_path, active_token, args)
+
+    def finish(j, missing, present, landed_dir, owned_path, active_token, args):
         j.landed_complete = True
         folder = _folder_label(landed_dir)
         got = f"“{t_title}” downloaded" + (f" to {folder}." if folder else ".")
@@ -482,4 +514,5 @@ def _make_single_track_run(album, track, token):
                     _SCANS_OFFER_REST,
                     "The rest of the album is under Gap Fill in Library.")
         flows._close_completed_job(j)
+
     return run

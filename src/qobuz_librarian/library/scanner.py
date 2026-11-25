@@ -101,7 +101,7 @@ def _lossy_format(info):
     return _LOSSY_INFO.get(name, "")
 
 
-def read_audio_meta(path: Path, *, sig=None):
+def read_audio_meta(path: Path, *, sig=None, read_generation=None):
     """Read tags and audio info via mutagen. Returns dict or None.
 
     Works for any format mutagen understands (FLAC, MP3, M4A, …) through its
@@ -114,6 +114,8 @@ def read_audio_meta(path: Path, *, sig=None):
         return None
     # Capture the file signature before parsing so a file edited mid-scan isn't
     # cached with its new mtime but these now-stale tags.
+    if read_generation is None:
+        read_generation = flac_cache.removal_generation
     if sig is None:
         sig = flac_cache.signature(path)
     cached = flac_cache.get(path, sig)
@@ -132,10 +134,10 @@ def read_audio_meta(path: Path, *, sig=None):
         # untagged.
         raise
     except Exception:
-        flac_cache.put(path, _NEG_META, sig=sig)
+        flac_cache.put(path, _NEG_META, sig=sig, read_generation=read_generation)
         return None
     if f is None:
-        flac_cache.put(path, _NEG_META, sig=sig)
+        flac_cache.put(path, _NEG_META, sig=sig, read_generation=read_generation)
         return None
 
     tags = f.tags
@@ -148,7 +150,7 @@ def read_audio_meta(path: Path, *, sig=None):
 
     title = first("title")
     if not title:
-        flac_cache.put(path, _NEG_META, sig=sig)
+        flac_cache.put(path, _NEG_META, sig=sig, read_generation=read_generation)
         return None
 
     info = f.info
@@ -172,7 +174,7 @@ def read_audio_meta(path: Path, *, sig=None):
         # adds up on a NAS-backed library).
         "size":        sig[1] if sig else 0,
     }
-    flac_cache.put(path, meta, sig=sig)
+    flac_cache.put(path, meta, sig=sig, read_generation=read_generation)
     return meta
 
 
@@ -276,6 +278,7 @@ def read_album_dir(album_dir: Path, walk_errors=None):
 
     audio_files = []
     # The tag cache checks each file against the stat taken here.
+    read_generation = flac_cache.removal_generation
     signatures = {}
     _exts = set(config.AUDIO_EXTS)
     try:
@@ -305,7 +308,8 @@ def read_album_dir(album_dir: Path, walk_errors=None):
     tracks = []
     for f in audio_files:
         try:
-            tags = read_audio_meta(f, sig=signatures.get(f))
+            tags = read_audio_meta(f, sig=signatures.get(f),
+                                   read_generation=read_generation)
         except OSError as e:
             # The file is listed but can't be read: drop it AND mark the walk
             # degraded.

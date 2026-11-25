@@ -2366,6 +2366,11 @@ def has_active_single_undo(single) -> bool:
     )
 
 
+def has_single_import(single) -> bool:
+    return (has_active_single_undo(single) and bool(single.get("owned_root"))
+            and not single.get("removed") and "deletion" not in single["owned_path"])
+
+
 def other_album_grabs(album_id, job_id) -> list[dict]:
     """The saved Undo records of the album's other track grabs."""
     if not album_id:
