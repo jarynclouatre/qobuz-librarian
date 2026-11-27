@@ -6514,7 +6514,8 @@ class _MigrationRun:
             owners = migrate_engine._companion_owners(self.entries)
             for entry in self.left_behind:
                 if entry.dest_rel and entry.source.is_relative_to(root):
-                    owners.add(entry.source.relative_to(root), entry.dest_rel)
+                    owners.add(entry.source.relative_to(root), entry.dest_rel,
+                               source_folder=entry.source.parent)
             self.plan.companion_receipts = migrate_engine.album_companion_receipts(
                 self.plan, self.entries, owners)
 

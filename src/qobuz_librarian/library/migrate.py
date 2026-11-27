@@ -240,10 +240,21 @@ def _is_compilation(tags: Mapping, albumartist: str) -> bool:
 _DISC_FOLDER_RE = re.compile(r"(?:disc|cd)\s*0*(\d+)", re.IGNORECASE)
 
 
-def _folder_disc(name: str) -> int:
-    """The disc a "Disc 2" / "CD2" folder name stands for, 0 for any other."""
-    m = _DISC_FOLDER_RE.match(name or "")
-    return int(m.group(1)) if m else 0
+def _album_name_key(name):
+    return _fold_name(_without_year_bracket(name))
+
+
+def _folder_disc(folder, album="") -> int:
+    """A disc number from the enclosing folder, unless it is the album itself."""
+    folder = Path(folder or "")
+    match = _DISC_FOLDER_RE.match(folder.name)
+    if not match:
+        return 0
+    title = _album_name_key(album)
+    if (title == _album_name_key(folder.name)
+            and title != _album_name_key(folder.parent.name)):
+        return 0
+    return int(match.group(1))
 
 
 def _nfc(value: str) -> str:
@@ -256,7 +267,7 @@ def _fold_name(name: str) -> str:
     return _nfc(name).casefold()
 
 
-def normalize_tags(tags: Mapping, stem: str, ext: str, folder: str = "") -> dict:
+def normalize_tags(tags: Mapping, stem: str, ext: str, folder: str | Path = "") -> dict:
     """Map a raw tag mapping to the fields placement needs.
 
     Pure: takes an already-read mapping (so it's testable without a real audio
@@ -267,14 +278,15 @@ def normalize_tags(tags: Mapping, stem: str, ext: str, folder: str = "") -> dict
     the same.
     """
     albumartist = _nfc(_first(tags, "albumartist", "album artist", "artist"))
+    album = _nfc(_first(tags, "album"))
     track, _ = _num_and_total(_first(tags, "tracknumber", "track"))
     disc, disc_total_inline = _num_and_total(_first(tags, "discnumber", "disc"))
     if not disc:
-        disc = _folder_disc(folder)
+        disc = _folder_disc(folder, album)
     disc_total, _ = _num_and_total(_first(tags, "disctotal", "totaldiscs"))
     return {
         "albumartist": albumartist,
-        "album": _nfc(_first(tags, "album")),
+        "album": album,
         "title": _nfc(_first(tags, "title") or stem),
         "track": track,
         "disc": disc or 1,
@@ -307,7 +319,7 @@ def extract_metadata(path: Path, *, descriptor=None) -> Optional[dict]:
     except Exception:
         return None
     tags = dict(f.tags) if (f is not None and f.tags) else {}
-    return normalize_tags(tags, path.stem, path.suffix, path.parent.name)
+    return normalize_tags(tags, path.stem, path.suffix, path.parent)
 
 
 def is_placeable(meta: Optional[dict]) -> bool:
@@ -378,10 +390,10 @@ def track_filename(meta: dict) -> str:
     return _truncate_component(beets_sanitize(name), ext=meta.get("ext", ""))
 
 
-def _album_source_dir(source) -> Path:
+def _album_source_dir(source, album) -> Path:
     """The folder an album came from, above any "Disc N" folder of its own."""
     parent = Path(source).parent
-    return parent.parent if _folder_disc(parent.name) else parent
+    return parent.parent if _folder_disc(parent, album) else parent
 
 
 def _source_folder_label(folder: Path, source_root) -> str:
@@ -418,11 +430,12 @@ def _existing_spellings(folder) -> dict:
     return spellings
 
 
-def companion_folders(folder) -> tuple:
+def companion_folders(folder, dest_rel=None, *, source_folder=None) -> tuple:
     """The source folders whose cover art and sidecars go with a track in
     ``folder``: its own, and the album folder above a "Disc N" folder."""
     folder = tuple(folder)
-    if folder and _folder_disc(folder[-1]):
+    album = _companion_destinations(dest_rel)[1].name if dest_rel else ""
+    if folder and _folder_disc(source_folder or Path(*folder), album):
         return folder, folder[:-1]
     return (folder,)
 
@@ -432,6 +445,11 @@ def _companion_destinations(dest_rel) -> tuple:
     placed at ``dest_rel``: its own folder, then its album folder."""
     dest_rel = Path(dest_rel)
     return dest_rel.parent, Path(*dest_rel.parts[:2])
+
+
+def _entry_companion_folders(entry):
+    folder = (entry.source_receipt or {}).get("relative", ())[:-1]
+    return companion_folders(folder, entry.dest_rel, source_folder=entry.source.parent)
 
 
 def _audio_already_in(dest_root, folder, semantics, own) -> tuple:
@@ -1505,8 +1523,7 @@ def _capture_companion_receipts(binding, entries) -> list:
         folder
         for entry in entries
         if entry.dest_rel is not None and entry.source_receipt is not None
-        for folder in companion_folders(
-            entry.source_receipt.get("relative", ())[:-1])
+        for folder in _entry_companion_folders(entry)
     }
     receipts = []
     seen = set()
@@ -1645,8 +1662,8 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
         artist_folder, album_folder = album_components({**meta, "year": 0})
         albums.setdefault(
             (_fold_name(artist_folder),
-             _fold_name(_without_year_bracket(album_folder)),
-             _album_source_dir(source)), []
+             _album_name_key(album_folder),
+             _album_source_dir(source, album_folder)), []
         ).append(row)
 
     # Names that differ only by case or Unicode form are one name: every
@@ -1799,8 +1816,7 @@ def build_plan(items, dest_root: Path) -> MigrationPlan:
         folder
         for entry in entries
         if entry.dest_rel is not None and isinstance(entry.source_receipt, dict)
-        for folder in companion_folders(
-            entry.source_receipt.get("relative", ())[:-1])
+        for folder in _entry_companion_folders(entry)
     }
     companion_receipts = [
         receipt for receipt in companion_receipts
@@ -2453,17 +2469,22 @@ class _CompanionOwners(dict):
     def __init__(self, entries):
         super().__init__()
         self.stems = {}
+        self.disc_folders = set()
         for entry in entries:
             if entry.source_receipt is not None:
-                self.add(Path(*entry.source_receipt["relative"]), entry.dest_rel)
+                self.add(Path(*entry.source_receipt["relative"]), entry.dest_rel,
+                         source_folder=entry.source.parent)
 
-    def add(self, relative, dest_rel):
+    def add(self, relative, dest_rel, *, source_folder=None):
         key = _folded_stem(relative.with_suffix(""))
         self.stems.setdefault(key, {}).setdefault(relative.stem, set()).add(
             Path(dest_rel).with_suffix("") if dest_rel is not None else None)
         if dest_rel is not None:
-            for source, dest in zip(companion_folders(relative.parts[:-1]),
-                                    _companion_destinations(dest_rel)):
+            sources = companion_folders(relative.parts[:-1], dest_rel, source_folder=source_folder)
+            destinations = _companion_destinations(dest_rel)
+            if len(sources) == 2:
+                self.disc_folders.add((sources[0], destinations[1]))
+            for source, dest in zip(sources, destinations):
                 self.setdefault(source, {}).setdefault(dest, set()).add(relative.stem)
 
     def lyric_stem(self, receipt):
@@ -2494,7 +2515,7 @@ def _sidecar_destination(receipt, folder, owners):
             and stem not in (_fold_name(album.name), _fold_name(strip_year_decoration(album.name)))
             and not any(stem == _fold_name(name) for name in destinations.get(folder, ()))):
         return None
-    if folder != album and not _folder_disc(relative.parent.name):
+    if folder != album and (relative.parts[:-1], album) not in owners.disc_folders:
         return album / relative.name
     return folder / relative.name
 
@@ -2511,7 +2532,7 @@ def album_companion_receipts(plan, entries, owners) -> list:
         if entry.source_receipt is None or entry.dest_rel is None:
             continue
         relative = entry.source_receipt["relative"]
-        folders.update(companion_folders(relative[:-1]))
+        folders.update(_entry_companion_folders(entry))
         destinations.update(_companion_destinations(entry.dest_rel))
         tracks.add(Path(*relative).with_suffix(""))
     folded_tracks = {_folded_stem(stem) for stem in tracks}
@@ -2586,7 +2607,7 @@ def _carry_companion_files(plan: "MigrationPlan", result: "ExecResult", *,
         ):
             return False
         for source_folder, destination in zip(
-                companion_folders(entry.source_receipt["relative"][:-1]),
+                _entry_companion_folders(entry),
                 _companion_destinations(entry.dest_rel)):
             folder_map.setdefault(source_folder, set()).add(destination)
         landed.append(entry)
@@ -3884,8 +3905,7 @@ def _validate_plan(plan, resume_entries) -> tuple:
             ):
                 raise OSError("migration destination path is malformed")
             if entry.source_receipt is not None:
-                mapped_folders.update(companion_folders(
-                    entry.source_receipt["relative"][:-1]))
+                mapped_folders.update(_entry_companion_folders(entry))
         entry_key = _plan_entry_key(entry.source, entry.dest_rel)
         if entry_key in entry_map:
             raise OSError("migration plan contains a duplicate mapping")
@@ -4125,7 +4145,7 @@ class _PlanRun:
                 tuple(receipt["relative"][:-1]), []).append(receipt)
         self.waiting.update(
             each for entry in self.placed
-            for each in companion_folders(self.source_folder(entry)))
+            for each in _entry_companion_folders(entry))
         self.retired_by_folder: dict = {}
         self.copied_companions = {}
         self.lyric_conflicts = _ambiguous_lyric_targets(
@@ -4272,7 +4292,7 @@ class _PlanRun:
     def _copy_track_companions(self, entry):
         # A new preview cannot associate a sidecar with a track that has
         # already left the source.
-        for folder, destination in zip(companion_folders(self.source_folder(entry)),
+        for folder, destination in zip(_entry_companion_folders(entry),
                                        _companion_destinations(entry.dest_rel)):
             companions = self.companions_by_folder.get(folder)
             if companions and not _copy_companions(
@@ -4289,7 +4309,7 @@ class _PlanRun:
 
     def _settle_source_folder(self, entry):
         folder = self.source_folder(entry)
-        folders = companion_folders(folder)
+        folders = _entry_companion_folders(entry)
         self.waiting.subtract(folders)
         if self.moved:
             self.retired_by_folder.setdefault(folder, []).append(

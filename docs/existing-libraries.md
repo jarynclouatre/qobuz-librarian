@@ -37,6 +37,8 @@ If your library is not already organised as artist folders with album folders in
 
 It places each file by its tags (album artist, album, title, track, disc). For files whose tags are not enough to place them, an optional AcoustID fingerprint pass identifies them by sound (slower, needs network, off by default; no API key required).
 
+When a folder such as `Disc 2 Sessions` matches the tagged album title, Migration keeps the tracks and cover together at the album level. If an older preview included a picture from the artist folder for that album, run the preview again.
+
 Fingerprinting reads local FLAC, M4A, MP3, AAC, Ogg, Opus and WAV audio. Source installs need FFmpeg with Chromaprint support, ffprobe, and `pyacoustid` in the app's Python environment; Docker includes these.
 
 Library migration copies by default. Optional move mode relocates the originals after preview and removes source folders that become empty. If a track's artwork or sidecar cannot be copied or verified at the destination, the track stays at the source for retry. Cover art and sidecars next to the audio, or in an album folder above its `CD1/` and `CD2/` folders (images, `.cue`, `.log`, `.lrc`, `.pdf`, `.nfo`, playlists), are copied in both modes. When one folder holds several albums, each album gets only the files named after one of its tracks or after the album. Subfolders such as `Scans/` and any other files are not carried, so after a move the summary lists, folder by folder, what is still in the source, and the results CSV names each file or folder.

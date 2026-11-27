@@ -576,7 +576,9 @@ def find_album_dir_by_track_signatures(signatures, *, expected_dir=None):
             if sig not in wanted:
                 continue
             album_dir = fp.parent
-            if _DISC_FOLDER_RE.match(album_dir.name):
+            at_album = (album_dir == expected_dir if expected_dir is not None
+                        else album_dir.parent == artist_dir)
+            if not at_album and _DISC_FOLDER_RE.match(album_dir.name):
                 album_dir = album_dir.parent
             matches.setdefault(album_dir, set()).add(sig)
 
