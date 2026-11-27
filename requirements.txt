@@ -8,6 +8,7 @@ annotated-types==0.8.0
     # via pydantic
 anyio==4.16.0
     # via
+    #   fastapi
     #   starlette
     #   watchfiles
 certifi==2026.11.20
@@ -16,7 +17,7 @@ charset-normalizer==3.5.3
     # via requests
 click==8.5.1
     # via uvicorn
-fastapi==0.141.1
+fastapi==0.165.0
     # via qobuz-librarian (pyproject.toml)
 h11==0.16.0
     # via uvicorn
@@ -32,6 +33,8 @@ markupsafe==3.0.4
     # via jinja2
 mutagen==1.48.1
     # via qobuz-librarian (pyproject.toml)
+opentelemetry-api==1.45.2
+    # via fastapi
 pydantic==2.14.4
     # via fastapi
 pydantic-core==2.50.5
@@ -52,6 +55,7 @@ typing-extensions==4.16.0
     # via
     #   anyio
     #   fastapi
+    #   opentelemetry-api
     #   pydantic
     #   pydantic-core
     #   typing-inspection

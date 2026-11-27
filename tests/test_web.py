@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from qobuz_librarian import post_job_hook
@@ -418,7 +418,7 @@ def test_system_files_in_staging_do_not_hold_downloads_back(
 
 
 class _SameThreadASGIClient:
-    """Small sync wrapper around HTTPX's ASGI transport.
+    """Small sync wrapper around HTTPX2's ASGI transport.
 
     Starlette's TestClient uses a cross-thread AnyIO portal. That portal can
     hang in some local Python environments before the app sees a request, so
@@ -428,8 +428,8 @@ class _SameThreadASGIClient:
     def __init__(self, app):
         self.app = app
         self.base_url = "http://testserver"
-        self.cookies = httpx.Cookies()
-        self.headers = httpx.Headers()
+        self.cookies = httpx2.Cookies()
+        self.headers = httpx2.Headers()
 
     def __enter__(self):
         return self
@@ -439,14 +439,14 @@ class _SameThreadASGIClient:
 
     def request(self, method, url, **kwargs):
         extra_headers = kwargs.pop("headers", None)
-        headers = httpx.Headers(self.headers)
+        headers = httpx2.Headers(self.headers)
         if extra_headers:
             headers.update(extra_headers)
         follow_redirects = kwargs.pop("follow_redirects", True)
 
         async def _send():
-            transport = httpx.ASGITransport(app=self.app)
-            async with httpx.AsyncClient(
+            transport = httpx2.ASGITransport(app=self.app)
+            async with httpx2.AsyncClient(
                 transport=transport,
                 base_url=self.base_url,
                 cookies=self.cookies,

@@ -48,9 +48,9 @@ Repository    = "https://github.com/jarynclouatre/qobuz-librarian"
 [project.optional-dependencies]
 # Available when installed in dev environment with extras
 lyrics = ["syncedlyrics>=1.0"]
-# Test-only deps (httpx powers FastAPI's TestClient, ruff for the lint
+# Test-only deps (httpx2 powers FastAPI's TestClient, ruff for the lint
 # step). Not shipped in the image.
-test = ["pytest>=7", "httpx>=0.27", "ruff>=0.5"]
+test = ["pytest>=7", "httpx2>=2.0", "ruff>=0.5"]
 
 [project.scripts]
 qobuz-librarian = "qobuz_librarian.cli:_entry"
