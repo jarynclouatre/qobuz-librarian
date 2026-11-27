@@ -1594,11 +1594,17 @@ async def job_retry(request: Request, job_id: str):
         return _land(error=message)
 
 
+def _undo_file_summary(single):
+    if single.get("already_gone"):
+        return f"“{single.get('title')}” was already gone"
+    return f"Removed “{single.get('title')}”"
+
+
 def _undone_summary(single, outcome):
     if outcome.get("single_kept"):
-        return (f"Removed “{single.get('title')}”. Other tracks you took "
+        return (f"{_undo_file_summary(single)}. Other tracks you took "
                 "from this album stay.")
-    return f"Removed “{single.get('title')}”."
+    return _undo_file_summary(single) + "."
 
 
 def _undo_root(single):
@@ -1790,10 +1796,14 @@ class _UndoRun:
         )
         catalog_result = None
         if removed is not None:
-            flac_cache.forget_missing(removed)
             _clear_after_earlier_grabs(
                 removed.parent,
                 job_persistence.other_album_grabs(self.info.get("album_id"), self.job.id))
+        elif self.undo_outcome.get("already_gone"):
+            self.info["already_gone"] = True
+            removed = d / self.info["owned_path"]["relative"]
+        if removed is not None:
+            flac_cache.forget_missing(removed)
             catalog_result = beets_mod.forget_beets_entries([removed])
             self.undo_outcome["single_mark_complete"] = (
                 self._clear_deliberate_single_mark()
@@ -1912,13 +1922,13 @@ class _UndoRun:
             if self.job.attention == "catalog":
                 self.job.attention = ""
             self.job.summary = (
-                f"Removed “{self.info.get('title')}”, but couldn't save the "
+                f"{_undo_file_summary(self.info)}, but couldn't save the "
                 "single mark cleanup. Retry Undo."
             )
         else:
             self.job.attention = "catalog"
             self.job.summary = (
-                f"Removed “{self.info.get('title')}”, but Beets still lists it. "
+                f"{_undo_file_summary(self.info)}, but Beets still lists it. "
                 "Retry Beets cleanup."
             )
 
@@ -1930,7 +1940,7 @@ class _UndoRun:
         elif catalog_complete:
             self.job.single = {**self.info, "removed": False}
             self.job.summary = (
-                f"Removed “{self.info.get('title')}”, but couldn't save the "
+                f"{_undo_file_summary(self.info)}, but couldn't save the "
                 "single mark cleanup. Retry Undo."
             )
         else:
@@ -1944,7 +1954,7 @@ class _UndoRun:
             }
             self.job.attention = "catalog"
             self.job.summary = (
-                f"Removed “{self.info.get('title')}”, but Beets still lists it. "
+                f"{_undo_file_summary(self.info)}, but Beets still lists it. "
                 "Retry Beets cleanup."
             )
 

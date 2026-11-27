@@ -310,7 +310,7 @@ def _owned_chain(root, owned):
     return anchor, folders, parent_count, records, folders[-1] / rel.parts[-1]
 
 
-def _owned_leaf(root, entry):
+def _owned_leaf(root, entry, *, missing_out=None):
     """Find what is left of one entry's file, checked against its record.
 
     Every folder above it must still be a real folder, and from the root
@@ -332,7 +332,11 @@ def _owned_leaf(root, entry):
         leaf.parent / deletion["quarantine"] if deletion is not None else None)
     try:
         for index, path in enumerate([anchor, *folders]):
-            current = os.lstat(path)
+            current = _lstat_or_none(path)
+            if current is None:
+                if missing_out is not None and index > parent_count + 1:
+                    missing_out["already_gone"] = True
+                return None
             if not stat.S_ISDIR(current.st_mode) or (
                 index > parent_count
                 and _file_identity(current)
@@ -361,6 +365,8 @@ def _owned_leaf(root, entry):
             return None
         return quarantine / "held", held, quarantine
     if deletion is None:
+        if missing_out is not None:
+            missing_out["already_gone"] = True
         return None
     return None, None, quarantine
 
@@ -561,8 +567,10 @@ def _unlink_owned_path(root, owned, *, progress=None, outcome_out=None):
         != "removed"
     ]
     # Nothing is deleted unless every file left still matches its record.
-    if any(_owned_leaf(root, entry) is None for entry in pending):
-        return None
+    for entry in reversed(pending):
+        missing = outcome_out if entry is owned and not any(deletion_records) else None
+        if _owned_leaf(root, entry, missing_out=missing) is None:
+            return None
     for entry in pending:
         if not _remove_owned_leaf(root, entry, progress):
             _update_outcome()
