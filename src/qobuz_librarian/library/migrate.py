@@ -896,6 +896,7 @@ class _RootBinding:
         self.receipt = receipt
         self.descriptors = descriptors
         self.names = names
+        self.try_unnamed_copies = True
         self.bound_identities = [
             _directory_identity(descriptor) for descriptor in descriptors
         ]
@@ -3307,6 +3308,63 @@ def _apply_file_metadata(destination_fd, source_receipt) -> None:
         raise OSError("migration destination metadata verification failed")
 
 
+def _fill_migration_copy(source, source_receipt, temporary_fd):
+    source_digest = source_receipt["file"]["sha256"]
+    offset = 0
+    while True:
+        chunk = os.pread(source.descriptor, 1 << 20, offset)
+        if not chunk:
+            break
+        written = 0
+        while written < len(chunk):
+            count = os.write(temporary_fd, chunk[written:])
+            if count <= 0:
+                raise OSError("migration copy made no write progress")
+            written += count
+        offset += len(chunk)
+    if (
+        _digest_fd(temporary_fd) != source_digest
+    ):
+        raise OSError("migration destination bytes failed verification")
+    _apply_file_metadata(temporary_fd, source_receipt)
+    os.fsync(temporary_fd)
+
+
+def _unnamed_migration_copy(source, source_receipt, destination, parent_fd):
+    """A verified copy that gets a name only after its bytes are complete."""
+    if not destination.try_unnamed_copies:
+        return None
+    unsupported = (errno.EINVAL, errno.EISDIR, errno.EOPNOTSUPP, errno.ENOSYS,
+                   errno.EPERM, errno.EACCES, errno.ENOENT, errno.EXDEV)
+    try:
+        descriptor = os.open(".", os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC,
+                             0o600, dir_fd=parent_fd)
+    except AttributeError:
+        destination.try_unnamed_copies = False
+        return None
+    except OSError as exc:
+        if exc.errno in unsupported:
+            destination.try_unnamed_copies = False
+            return None
+        raise
+    try:
+        _fill_migration_copy(source, source_receipt, descriptor)
+        name = f".qobuz-migrate-copy-{secrets.token_hex(16)}"
+        try:
+            os.link(f"/proc/self/fd/{descriptor}", name,
+                    dst_dir_fd=parent_fd, follow_symlinks=True)
+        except OSError as exc:
+            if exc.errno in unsupported or exc.errno == errno.EEXIST:
+                destination.try_unnamed_copies = False
+                os.close(descriptor)
+                return None
+            raise
+        return name, descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _stream_copy_noreplace(source: _OpenedFile, source_receipt,
                            destination: _RootBinding, dest_rel: Path,
                            destination_path_receipt=None):
@@ -3320,26 +3378,12 @@ def _stream_copy_noreplace(source: _OpenedFile, source_receipt,
         if not _named_entry_missing(parent_fd, destination_name):
             raise FileExistsError(
                 errno.EEXIST, os.strerror(errno.EEXIST), destination_name)
-        temporary_name, temporary_fd = _reserve_temporary_file(parent_fd)
-        source_digest = source_receipt["file"]["sha256"]
-        offset = 0
-        while True:
-            chunk = os.pread(source.descriptor, 1 << 20, offset)
-            if not chunk:
-                break
-            written = 0
-            while written < len(chunk):
-                count = os.write(temporary_fd, chunk[written:])
-                if count <= 0:
-                    raise OSError("migration copy made no write progress")
-                written += count
-            offset += len(chunk)
-        if (
-            _digest_fd(temporary_fd) != source_digest
-        ):
-            raise OSError("migration destination bytes failed verification")
-        _apply_file_metadata(temporary_fd, source_receipt)
-        os.fsync(temporary_fd)
+        prepared = _unnamed_migration_copy(source, source_receipt, destination, parent_fd)
+        if prepared is None:
+            temporary_name, temporary_fd = _reserve_temporary_file(parent_fd)
+            _fill_migration_copy(source, source_receipt, temporary_fd)
+        else:
+            temporary_name, temporary_fd = prepared
         if (
             not source.still_exact(source_receipt)
             or not _destination_chain_matches(

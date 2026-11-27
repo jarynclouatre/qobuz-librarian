@@ -69,6 +69,8 @@ Then either:
 - **Web:** open **Library migration** from **Settings**, optionally tick *Fingerprint unclear files*, click **Preview migration**, review the per-artist list, then **Copy N selected** (reads **Move N selected** in move mode).
 - **CLI:** switch to terminal mode from **Settings → Mode** ([the run lock](cli.md#the-run-lock)), then `docker compose run --rm qobuz-librarian cli --migrate`. Add `--acoustid` for fingerprinting, `--in-place` to move instead of copy, or `--dry-run` to preview. Source and destination come from the env vars above or `--migrate-src` / `--migrate-dest`.
 
+After an interrupted migration, run another preview to list any hidden files it left in the source or destination. These can include an unfinished copy on a disk where Migration needs a temporary filename.
+
 After migration finishes, point `QL_MUSIC_DIR` at the new destination and run a Library scan.
 
 Review AcoustID matches before using the migrated library; fingerprint matches are probabilistic. A compilation with no signal at all (no compilation flag, no "Various Artists" album artist) cannot be recognised as one, so each track lands under its own track artist. In the tags-only pass, the folder year is the one most of an album's tracks carry, so an album mostly tagged without one, or with a placeholder year such as 1900, lands in `Artist/Album/` rather than `Artist/Album (Year)/`.
