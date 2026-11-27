@@ -82,7 +82,7 @@ def _run_lyric_hook(album_dir):
     from qobuz_librarian.integrations.beets import _under_retry_dir
 
     try:
-        flacs = sorted(p for p in album_dir.rglob("*.flac") if not _under_retry_dir(p))
+        flacs = sorted(p for p in album_dir.rglob("*.flac", case_sensitive=False) if not _under_retry_dir(p))
     except OSError as e:
         log.info(fmt(C.YELLOW, f"  ⚠  Lyric hook: couldn't list {album_dir}: {e}."))
         return

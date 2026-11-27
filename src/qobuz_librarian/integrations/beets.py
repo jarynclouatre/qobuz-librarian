@@ -557,7 +557,7 @@ def _prepare_staging_tags(
     try:
         flacs = []
         for r in scan_roots:
-            flacs.extend(r.rglob("*.flac"))
+            flacs.extend(r.rglob("*.flac", case_sensitive=False))
         # Parked albums waiting on a manual retry shouldn't be re-quarantined
         # or re-tag-cleaned on every batch.
         flacs = [f for f in flacs if not _under_retry_dir(f)]
@@ -4433,7 +4433,7 @@ def _prepare_for_beets_run(
                     compilation=_staged_compilation(
                         path
                         for root in roots
-                        for path in Path(root).rglob("*.flac")
+                        for path in Path(root).rglob("*.flac", case_sensitive=False)
                         if not _under_retry_dir(path)
                     ),
                 )

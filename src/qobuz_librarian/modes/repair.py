@@ -241,7 +241,7 @@ def _retag_refills_in_staging(staged_dirs, source_by_isrc):
     failed = set()
     remaining = {isrc: list(paths) for isrc, paths in source_by_isrc.items()}
     for d in staged_dirs:
-        for fp in sorted(Path(d).rglob("*.flac")):
+        for fp in sorted(Path(d).rglob("*.flac", case_sensitive=False)):
             try:
                 isrc = _norm_isrc((_FLAC(fp).get("isrc") or [""])[0])
             except Exception:

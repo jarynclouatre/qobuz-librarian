@@ -513,7 +513,7 @@ def track_signatures_for_album_dirs(album_dirs):
             continue
         root = Path(album_dir)
         try:
-            flacs = sorted(p for p in root.rglob("*.flac") if p.is_file())
+            flacs = sorted(p for p in root.rglob("*.flac", case_sensitive=False) if p.is_file())
         except OSError:
             continue
         for fp in flacs:
@@ -568,7 +568,7 @@ def find_album_dir_by_track_signatures(signatures, *, expected_dir=None):
     roots = [expected_dir] if expected_dir is not None else _artist_dirs_for_track_signatures(wanted)
     for artist_dir in roots:
         try:
-            flacs = sorted(p for p in artist_dir.rglob("*.flac") if p.is_file())
+            flacs = sorted(p for p in artist_dir.rglob("*.flac", case_sensitive=False) if p.is_file())
         except OSError:
             continue
         for fp in flacs:
