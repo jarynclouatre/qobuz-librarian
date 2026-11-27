@@ -17,7 +17,6 @@ import functools
 import hashlib
 import os
 import re
-import shutil
 import stat
 import threading
 import time
@@ -121,24 +120,6 @@ def warn_if_download_truncated(album_dir, token, label, tracks=None):
 # header survives tail damage and lies about how much audio is actually
 # present.
 _BYTE_SIZE_TRUNCATED_RATIO = 0.15
-
-# Verifying every FLAC frame's CRC costs a full read per file. Worth it for an
-# explicit repair scan: the cheap size+duration gates can't see small tail-
-# truncations (10 kB on a 100 MB file) or middle-zero damage, which is exactly
-# the failure mode interrupted-copy corruption produces.
-
-
-def _flac_decode_ok(path, *, descriptor=None):
-    """End-to-end FLAC integrity probe via ``flac -t`` (frame-CRC + decode).
-    Returns False only on a real decode error (CRC mismatch, broken header,
-    premature EOF). A missing file or a missing flac tool returns True so the
-    scanner doesn't fabricate verified_truncated entries it can't stand behind.
-    """
-    if descriptor is None and (not path or not os.path.exists(path)):
-        return True
-    ok = flac_audio_ok(Path(path), descriptor=descriptor)
-    return True if ok is None else ok
-
 
 _MISMATCHED_DAMAGE_DIAGNOSTIC = (
     "damaged, but the recording or edition could not be confirmed for a "
@@ -480,9 +461,6 @@ def _scan_held_repair_source(
     et = _read_held_audio_meta(source)
     path = str(source.path)
 
-    def decodes():
-        return not decode or _flac_decode_ok(path, descriptor=source.descriptor)
-
     title = et.get("title") or source.path.stem
     isrc_raw = et.get("isrc") or ""
     isrc = isrc_raw.replace("-", "").upper().strip()
@@ -504,6 +482,11 @@ def _scan_held_repair_source(
         report["no_isrc_tag"].append(entry)
         return
 
+    if only_isrcs is not None and isrc not in only_isrcs:
+        _append_verified_ok(report, source, isrc, record_isrc=False)
+        return
+    decoded = flac_audio_ok(source.path, descriptor=source.descriptor) if decode else True
+
     sample_rate = int(et.get("sample_rate") or 0)
     bits = int(et.get("bits") or 0)
     channels = int(et.get("channels") or 2)
@@ -518,17 +501,12 @@ def _scan_held_repair_source(
         and audio_size < flen * sample_rate * channels * (bits / 8)
         * _BYTE_SIZE_TRUNCATED_RATIO)
     if not deep and not looks_byte_short:
-        dec = flac_audio_ok(Path(path), descriptor=source.descriptor)
-        if dec is True:
-            _append_verified_ok(report, source, isrc)
+        if decoded is True:
+            _append_verified_ok(report, source, isrc, record_isrc=False)
             return
-        if dec is None:
+        if decoded is None:
             report["unverified"] += 1
             return
-
-    if only_isrcs is not None and isrc not in only_isrcs:
-        _append_verified_ok(report, source, isrc, record_isrc=False)
-        return
 
     hits = _qobuz_tracks_by_isrc(isrc, token)
     if not source.intact():
@@ -539,7 +517,10 @@ def _scan_held_repair_source(
         # one belongs in the same bucket carrying a diagnostic, not under
         # "no ISRC tag", which is where the report files them by name.
         entry = {"path": path, "title": title, "isrc": isrc}
-        if not decodes():
+        if decoded is None:
+            report["unverified"] += 1
+            return
+        if not decoded:
             entry["diagnostic"] = (
                 "won't decode (frame-CRC or mid-file damage); "
                 "re-download or replace from another source")
@@ -585,18 +566,10 @@ def _scan_held_repair_source(
         else:
             report["unverified"] += 1
 
-    if qdur <= 0:
-        if not decodes():
-            damaged("decode_failed")
-        else:
-            _append_verified_ok(report, source, isrc)
-        return
-
     if sample_rate > 0 and bits > 0 and audio_size > 0:
         expected_uncompressed = qdur * sample_rate * channels * (bits / 8)
         if (audio_size < expected_uncompressed * _BYTE_SIZE_TRUNCATED_RATIO
-                and shutil.which("flac") is not None
-                and not decodes()):
+                and decoded is False):
             damaged("byte_size_short", actual_size=actual_size)
             return
 
@@ -612,7 +585,10 @@ def _scan_held_repair_source(
     # distance between two different recordings, so it proves nothing here, but
     # the file still gets its decode check below: real damage counts however
     # badly the tag is written.
-    if not decodes():
+    if decoded is None:
+        report["unverified"] += 1
+        return
+    if not decoded:
         damaged("decode_failed", actual_size=actual_size)
         return
 
@@ -623,7 +599,8 @@ def _scan_held_repair_source(
             report["unverified"] += 1
         return
 
-    _append_verified_ok(report, source, isrc)
+    _append_verified_ok(report, source, isrc,
+                        record_isrc=same_recording and flen > 0 and qdur > 0)
 
 
 def scan_dir_for_isrc_repairs(album_dir, token,
