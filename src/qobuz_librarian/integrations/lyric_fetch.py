@@ -39,6 +39,7 @@ from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -1968,10 +1969,17 @@ def _retry_after(response) -> Optional[float]:
     busy."""
     if response.status_code not in (429, 503):
         return None
+    value = response.headers.get("Retry-After", "")
     try:
-        wait = float(response.headers.get("Retry-After", ""))
+        wait = float(value)
     except (TypeError, ValueError):
-        return LRCLIB_RETRY_WAIT
+        try:
+            deadline = parsedate_to_datetime(value)
+            if deadline.tzinfo is None:
+                return LRCLIB_RETRY_WAIT
+            wait = max(0.0, deadline.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError, OSError):
+            return LRCLIB_RETRY_WAIT
     return wait if 0 <= wait < math.inf else LRCLIB_RETRY_WAIT
 
 
