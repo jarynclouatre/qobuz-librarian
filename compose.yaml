@@ -139,7 +139,7 @@ services:
       WEB_ALLOWED_HOSTS: "${WEB_ALLOWED_HOSTS:-}"
       # Pause downloads and scans while /music or /staging isn't writable by
       # the container user (typical on a NAS with the wrong PUID/PGID).
-      # A read-only (:ro) /music share is fine: scans run, downloads are off.
+      # A read-only /music share is fine: scans run, downloads are off.
       QL_CHECK_VOLUMES: ${QL_CHECK_VOLUMES:-1}
       # Terminal-first mode: set QL_CLI_ONLY=1 in .env to start in terminal
       # mode (web UI serves but its downloads stay paused). Empty = web app.
@@ -255,7 +255,11 @@ services:
     volumes:
       # Host paths come from .env; relative defaults work from a fresh clone.
       # Music library (read-write so beets can move files in)
-      - ${QL_MUSIC_DIR:-./music}:/music
+      - type: bind
+        source: ${QL_MUSIC_DIR:-./music}
+        target: /music
+        bind:
+          create_host_path: false
       # Staging area for streamrip downloads
       - ${QL_STAGING_DIR:-./staging}:/staging
       # Persistent config: beets db, streamrip config, app state

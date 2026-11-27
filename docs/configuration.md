@@ -178,9 +178,9 @@ The app tries the disk under the music, staging and upgrade backup folders once,
 
 Local Linux disks such as ext4, Btrfs and XFS can do all of this. NFS and rclone mounts can't rename safely, and rclone and many other FUSE mounts don't record when folders were created. SMB/CIFS shares and exFAT disks can rename without replacing but can't swap files. Keep staging on a local disk. A music folder on a share still works for scans, and for what the list above allows.
 
-For a read-only music share, append `:ro` to the `/music` bind: scans run, downloads are off, and the tools skip files they can't change. A music or staging folder the container user can't write to pauses downloads and scans until it is fixed. Fixing the mount or its ownership takes effect without a restart.
+For a read-only music share, add `read_only: true` to the `/music` bind in `compose.yaml`: scans run, downloads are off, and the tools skip files they can't change. A music or staging folder the container user can't write to pauses downloads and scans until it is fixed. Fixing the mount or its ownership takes effect without a restart.
 
-If the music folder was auto-created as root on a first `up`, chown it; the container fixes its own volumes on the next start:
+If the music folder is owned by root, chown it; the container fixes its own volumes on the next start:
 
 ```bash
 sudo chown -R 1000:1000 ./music

@@ -5,10 +5,11 @@
 | Symptom | Likely cause / next step |
 |---|---|
 | `The web app is using the library` | The web app holds the run lock. For a CLI run, switch to terminal mode from **Settings → Mode** (then **Resume web app** after); stopping the container with `docker compose stop qobuz-librarian` is the manual alternative. |
+| Compose reports `bind source path does not exist` for the music folder | Check `QL_MUSIC_DIR` in `.env`. For an empty library, create the folder before starting the container. |
 | `Music library unavailable` | Music bind mount unset or wrong. Check `QL_MUSIC_DIR` in `.env` and that the host path exists. |
 | Container exits immediately on `up` | Usually a non-numeric `PUID`/`PGID`: a typo makes the entrypoint refuse to start. `docker compose logs qobuz-librarian` shows the reason. |
 | The password from `.env` is refused at sign-in, or start-up stops with "WEB_AUTH_PASSWORD was rejected" | Compose reads a `$` in `.env` as the start of a variable and cuts the password there; `docker compose up` warns that a variable "is not set". Put the password in single quotes and run `docker compose up -d` again. |
-| Downloads are off: "your music folder is mounted read-only" | `/music` is bound with `:ro`. Scans still run. Remove `:ro` from the bind in `compose.yaml` to download. |
+| Downloads are off: "your music folder is mounted read-only" | `/music` is mounted read-only. Scans still run. Remove `read_only: true` (or `:ro`) from the `/music` bind in `compose.yaml` to download. |
 | A volume shows **!** with "not writable by the container user" on **Settings → Diagnostics** | `PUID`/`PGID` do not match the host owner. Set them in `.env`, or chown the folder the row names, for example `chown -R $(id -u):$(id -g) ./music`. |
 | Library scan says "Nothing to scan: no artist folders were found" | No folder directly under `/music` holds audio, for example the tracks sit loose at the top, or `/music` is empty and read-only. `QL_MUSIC_DIR` must point at the folder that contains the artist folders. |
 | Token rejected (Save & connect) | Expired or copied with quotes. Get a fresh token from play.qobuz.com (dev tools → Local Storage → `localuser` → `token`) and paste it cleanly. |
