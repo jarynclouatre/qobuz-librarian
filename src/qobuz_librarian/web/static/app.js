@@ -44,6 +44,42 @@
     history.pushState({ htmx: true }, "", url);
   }
 
+  // On Android the Back gesture that closes the keyboard can also go back a
+  // page, so that step is undone while you are typing.
+  (function () {
+    var view = window.visualViewport;
+    if (!view || !/Android/i.test(navigator.userAgent)) return;
+    var width = view.width;
+    var tallest = view.height;
+    var keyboardUntil = 0;
+    var returning = false;
+    function keyboardOpen() { return view.height < tallest - 120; }
+    view.addEventListener("resize", function () {
+      if (view.width !== width) {
+        width = view.width;
+        tallest = view.height;
+      }
+      if (keyboardOpen()) keyboardUntil = Infinity;
+      else if (keyboardUntil === Infinity) keyboardUntil = Date.now() + 600;
+      tallest = Math.max(tallest, view.height);
+    });
+    window.addEventListener("popstate", function (evt) {
+      if (returning) {
+        returning = false;
+        evt.stopImmediatePropagation();
+        return;
+      }
+      var field = document.activeElement;
+      if (!field || !field.matches("textarea, input:not([type]), input[type=text], input[type=search]")) return;
+      if (!keyboardOpen() && Date.now() >= keyboardUntil) return;
+      evt.stopImmediatePropagation();
+      keyboardUntil = 0;
+      field.blur();
+      returning = true;
+      history.forward();
+    }, true);
+  })();
+
   function searchStateFromUrl() {
     if (location.pathname !== "/") return "";
     try {

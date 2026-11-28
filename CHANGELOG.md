@@ -10,6 +10,7 @@ Repair keeps its backup until a refill is confirmed, Migration keeps disc-named 
 - **Migration** keeps an album whose title starts like a disc folder, such as `Disc 2 Sessions`, in one album folder with its own cover. On disks that allow it, each copy gets its name only once its bytes are verified, and a preview after an interrupted migration lists any hidden files it left.
 - Import, lyrics and Repair handle FLAC files with an upper-case extension such as `.FLAC`.
 - If a single-track download's file is already gone, **Undo** clears its single mark and beets entry and says the track was already gone.
+- On Android, the Back gesture that closes the keyboard leaves the page and its search in place.
 - **Lyrics** waits until the time LRCLIB gives when it asks for a pause, as a date or in seconds.
 - A download stopped during its import says that beets may not list the tracks it had already moved.
 - Compose stops before starting when `QL_MUSIC_DIR` points at a missing folder. For a read-only share, the `/music` bind takes `read_only: true`.
