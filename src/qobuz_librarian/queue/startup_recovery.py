@@ -1707,7 +1707,7 @@ def _set_partial_import_aside(authority, journal, item, reference, launched):
     reason = (
         f"The download was cleared. Beets had moved {plural(moved, 'track')} "
         f"into your library, and {'it stays' if moved == 1 else 'they stay'} "
-        "there."
+        f"there, though Beets may not list {'it' if moved == 1 else 'them'}."
         if moved else
         "The download was cleared. Beets had not filed any of its tracks."
     )
