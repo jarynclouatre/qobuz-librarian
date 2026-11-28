@@ -49,7 +49,7 @@ requests==2.34.2
     # via qobuz-librarian (pyproject.toml)
 starlette==1.10.0
     # via fastapi
-tomlkit==0.15.2
+tomlkit==0.15.3
     # via qobuz-librarian (pyproject.toml)
 typing-extensions==4.16.0
     # via

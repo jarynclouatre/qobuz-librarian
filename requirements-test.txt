@@ -45,7 +45,7 @@ mutagen==1.48.1
     # via qobuz-librarian (pyproject.toml)
 opentelemetry-api==1.45.2
     # via fastapi
-packaging==26.3
+packaging==26.4
     # via pytest
 pluggy==1.7.0
     # via pytest
@@ -69,7 +69,7 @@ ruff==0.17.6
     # via qobuz-librarian (pyproject.toml)
 starlette==1.10.0
     # via fastapi
-tomlkit==0.15.2
+tomlkit==0.15.3
     # via qobuz-librarian (pyproject.toml)
 truststore==0.10.5
     # via
