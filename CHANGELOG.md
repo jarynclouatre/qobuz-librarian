@@ -2,6 +2,19 @@
 
 All notable changes to Qobuz Librarian are recorded here, newest first. The project follows [semantic versioning](https://semver.org/).
 
+## [1.6.3] - 2026-11-27
+
+Repair keeps its backup until a refill is confirmed, Migration keeps disc-named albums together, and Compose checks that the music folder exists.
+
+- **Repair** keeps the backup of a replaced track until the refill decodes and its length matches the same Qobuz recording.
+- **Migration** keeps an album whose title starts like a disc folder, such as `Disc 2 Sessions`, in one album folder with its own cover. On disks that allow it, each copy gets its name only once its bytes are verified, and a preview after an interrupted migration lists any hidden files it left.
+- Import, lyrics and Repair handle FLAC files with an upper-case extension such as `.FLAC`.
+- If a single-track download's file is already gone, **Undo** clears its single mark and beets entry and says the track was already gone.
+- **Lyrics** waits until the time LRCLIB gives when it asks for a pause, as a date or in seconds.
+- A download stopped during its import says that beets may not list the tracks it had already moved.
+- Compose stops before starting when `QL_MUSIC_DIR` points at a missing folder. For a read-only share, the `/music` bind takes `read_only: true`.
+- The Docker image takes FastAPI 0.165.0.
+
 ## [1.6.2] - 2026-11-25
 
 In the Search grid, tap an album cover to select it. Tracks and other versions open over the results. Press Back or tap outside to return to the album.
